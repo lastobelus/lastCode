@@ -8,7 +8,12 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import {
+  ARCHIVE_TYPED_IN_LABEL,
+  buildLinkedArchiveRecovery,
   buildThreadArchiveConfirmation,
+  LINKED_ARCHIVE_NO_ACTIVITY,
+  LINKED_ARCHIVE_RETRY_ARCHIVE,
+  LINKED_ARCHIVE_RETRY_RESTORE,
   threadArchiveConsultationUnavailableReason,
 } from "@t3tools/client-runtime/state/thread-archive";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
@@ -39,6 +44,7 @@ type Request = {
   ) => Promise<string | null>;
   readonly review?: (ref: ScopedThreadRef) => Promise<unknown>;
   readonly reviewFamilies?: readonly { readonly ref: ScopedThreadRef; readonly title: string }[];
+  readonly recovery?: ReturnType<typeof buildLinkedArchiveRecovery>;
   readonly consultation?: {
     readonly targets: readonly ThreadArchiveConsultationTarget[];
     readonly ask: (ownerThreadId: ThreadId) => Promise<string | null>;
@@ -121,6 +127,17 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
     submitting.current = false;
   };
   const confirmation = buildThreadArchiveConfirmation(request.family, messages, includeTypedIn);
+  const isRecovery = request.recovery !== undefined;
+  const hasReview = confirmation.linkedMachines.length > 0;
+  const canSubmit = !confirmation.blocked && (!isRecovery || request.recovery?.canRetry === true);
+  const confirmLabel =
+    !isRecovery || confirmation.active
+      ? confirmation.confirmLabel
+      : messages(
+          request.recovery?.operation === "restore"
+            ? LINKED_ARCHIVE_RETRY_RESTORE
+            : LINKED_ARCHIVE_RETRY_ARCHIVE,
+        );
   const submit = async (next: ArchiveChildDisposition) => {
     if (submitting.current) return;
     submitting.current = true;
@@ -148,46 +165,57 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
       <AlertDialogPopup initialFocus={cancelRef}>
         <AlertDialogHeader>
           <AlertDialogTitle>{request.title}</AlertDialogTitle>
-          <AlertDialogDescription>{confirmation.description}</AlertDialogDescription>
-          <ul
-            aria-label={
-              request.family.archivePreview || request.family.bulkPreviews
-                ? gt("Threads to archive or keep open")
-                : gt("Threads needing attention")
-            }
-            className="max-h-64 space-y-1 overflow-y-auto text-sm"
-          >
-            {confirmation.threads.map(({ thread, label, showLocation }) => (
-              <li
-                key={`${thread.environmentId}:${thread.id}`}
-                className="flex justify-between gap-3"
-              >
-                <span className="min-w-0 break-words">
-                  {thread.title || gt("Untitled thread")}
-                  {showLocation && (
-                    <span className="block text-xs text-muted-foreground">
-                      {readProject(scopeProjectRef(thread.environmentId, thread.projectId))
-                        ?.title ?? thread.projectId}
-                    </span>
-                  )}
-                </span>
-                <span className="shrink-0 text-muted-foreground">{label}</span>
-                {request.review && !request.reviewFamilies ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() =>
-                      void review({ environmentId: thread.environmentId, threadId: thread.id })
-                    }
-                  >
-                    {gt("Review", { $context: "verb, inspect a thread before archiving" })}
-                  </Button>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-          <LastCodeLinkedArchivePreview machines={confirmation.linkedMachines} />
+          <AlertDialogDescription>
+            {request.recovery === null
+              ? messages(LINKED_ARCHIVE_NO_ACTIVITY)
+              : !isRecovery || hasReview
+                ? confirmation.description
+                : null}
+          </AlertDialogDescription>
+          {!isRecovery && (
+            <ul
+              aria-label={
+                request.family.archivePreview || request.family.bulkPreviews
+                  ? gt("Threads to archive or keep open")
+                  : gt("Threads needing attention")
+              }
+              className="max-h-64 space-y-1 overflow-y-auto text-sm"
+            >
+              {confirmation.threads.map(({ thread, label, showLocation }) => (
+                <li
+                  key={`${thread.environmentId}:${thread.id}`}
+                  className="flex justify-between gap-3"
+                >
+                  <span className="min-w-0 break-words">
+                    {thread.title || gt("Untitled thread")}
+                    {showLocation && (
+                      <span className="block text-xs text-muted-foreground">
+                        {readProject(scopeProjectRef(thread.environmentId, thread.projectId))
+                          ?.title ?? thread.projectId}
+                      </span>
+                    )}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">{label}</span>
+                  {request.review && !request.reviewFamilies ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() =>
+                        void review({ environmentId: thread.environmentId, threadId: thread.id })
+                      }
+                    >
+                      {gt("Review", { $context: "verb, inspect a thread before archiving" })}
+                    </Button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+          <LastCodeLinkedArchivePreview
+            machines={confirmation.linkedMachines}
+            statuses={request.recovery?.machines}
+          />
           {confirmation.canIncludeTypedIn && (
             <label className="flex items-center gap-2 text-sm">
               <Checkbox
@@ -195,7 +223,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
                 disabled={busy}
                 onCheckedChange={(checked) => setIncludeTypedIn(checked === true)}
               />
-              <T>Also archive threads you’ve written in, and the threads under them</T>
+              {messages(ARCHIVE_TYPED_IN_LABEL)}
             </label>
           )}
           <LastCodeArchiveTemporaryProjects {...confirmation} />
@@ -286,17 +314,17 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <Button ref={cancelRef} variant="outline" disabled={busy} onClick={() => finish(null)}>
-            {confirmation.blocked
-              ? gt("Close", { $context: "verb, dismiss a dialog" })
-              : gt("Cancel")}
+            {!canSubmit ? gt("Close", { $context: "verb, dismiss a dialog" }) : gt("Cancel")}
           </Button>
-          {!confirmation.blocked ? (
+          {canSubmit ? (
             <Button
               variant={confirmation.active ? "destructive" : "default"}
               disabled={busy}
               onClick={() => void submit(confirmation.disposition)}
             >
-              {choice !== null ? gt("Archiving…") : confirmation.confirmLabel}
+              {choice !== null && request.recovery?.operation !== "restore"
+                ? gt("Archiving…")
+                : confirmLabel}
             </Button>
           ) : null}
         </AlertDialogFooter>

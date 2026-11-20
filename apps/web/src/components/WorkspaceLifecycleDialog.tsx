@@ -1,5 +1,6 @@
 import { T, useGT, useMessages } from "gt-react";
 import {
+  ARCHIVE_TYPED_IN_LABEL,
   buildThreadArchiveConfirmation,
   type ThreadArchiveFamily,
 } from "@t3tools/client-runtime/state/thread-archive";
@@ -72,6 +73,9 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
   const archiveFamily = request.archiveFamily
     ? buildThreadArchiveConfirmation(request.archiveFamily, messages, includeTypedIn)
     : undefined;
+  const stopsLinkedWork = archiveFamily?.linkedMachines.some(
+    ({ activeThreadIds, requiresStop }) => requiresStop || activeThreadIds.length > 0,
+  );
   const cancelRef = useRef<HTMLButtonElement>(null);
   const [discard, setDiscard] = useState(true);
   const { snapshots, retainedSnapshots } =
@@ -115,7 +119,7 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
                 checked={includeTypedIn}
                 onCheckedChange={(checked) => setIncludeTypedIn(checked === true)}
               />
-              <T>Also archive threads you’ve written in, and the threads under them</T>
+              {messages(ARCHIVE_TYPED_IN_LABEL)}
             </label>
           )}
           {archiveFamily && <LastCodeArchiveTemporaryProjects {...archiveFamily} />}
@@ -215,7 +219,11 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
               })
             }
           >
-            {discard ? gt("Confirm and discard saved data") : gt("Confirm and keep for recovery")}
+            {archiveFamily && stopsLinkedWork
+              ? archiveFamily.confirmLabel
+              : discard
+                ? gt("Confirm and discard saved data")
+                : gt("Confirm and keep for recovery")}
           </Button>
         </AlertDialogFooter>
       </AlertDialogPopup>

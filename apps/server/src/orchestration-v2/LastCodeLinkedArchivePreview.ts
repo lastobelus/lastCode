@@ -18,9 +18,10 @@ import {
   LastCodePeerArchiveTransport,
   PEER_ARCHIVE_PREVIEW_TIMEOUT_MS,
   PeerArchiveHandler,
-} from "../peer/LastCodePeerArchiveTransport.ts";
+} from "../peer/LastCodePeerArchiveServices.ts";
 import { PeerLinks } from "../peer/PeerLinks.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
+import { captureLinkedArchiveOperations } from "./LastCodeLinkedArchiveOperations.ts";
 import {
   readPeerArchiveInventory,
   readPeerArchiveOwnerScope,
@@ -98,6 +99,7 @@ export const layer = Layer.effect(
     const links = yield* PeerLinks;
     const store = yield* ProjectionStoreV2;
     const transport = yield* LastCodePeerArchiveTransport;
+    const operations = yield* captureLinkedArchiveOperations;
     const load = Effect.fn("LastCodeLinkedArchivePreview.load")(
       function* (
         threadId: ThreadId,
@@ -105,9 +107,12 @@ export const layer = Layer.effect(
         limits?: ClientModes,
       ) {
         if (!family.threads.some((thread) => thread.id === threadId)) return family;
+        const linkedArchiveOperation = yield* operations.status(threadId);
+        const preview =
+          linkedArchiveOperation === undefined ? family : { ...family, linkedArchiveOperation };
         const deadline = (yield* Clock.currentTimeMillis) + PEER_ARCHIVE_PREVIEW_TIMEOUT_MS;
         const peers = yield* links.listStored ?? Effect.succeed([]);
-        if (peers.length === 0 || !(yield* links.enabled)) return family;
+        if (peers.length === 0 || !(yield* links.enabled)) return preview;
         const beforeDeadline = <A, E>(request: Effect.Effect<A, E>) =>
           Clock.currentTimeMillis.pipe(
             Effect.flatMap((now) =>
@@ -117,7 +122,18 @@ export const layer = Layer.effect(
             ),
           );
         const input = yield* beforeDeadline(
-          readPeerArchiveOwnerScope(environmentId, threadId, store),
+          Effect.gen(function* () {
+            if (linkedArchiveOperation?.operation === "archive") {
+              const ownerThreadIds = yield* operations.selectedOwnerThreadIds(threadId);
+              if (ownerThreadIds !== undefined)
+                return {
+                  ownerEnvironmentId: environmentId,
+                  ownerThreadIds,
+                  keptOwnerThreadIds: [],
+                };
+            }
+            return yield* readPeerArchiveOwnerScope(environmentId, threadId, store);
+          }),
         );
         const linkedArchivePreview = yield* Effect.forEach(
           peers,
@@ -127,9 +143,13 @@ export const layer = Layer.effect(
             return beforeDeadline(transport.inventory(environmentId, input.value, limits)).pipe(
               Effect.match({
                 onSuccess: (inventory): LinkedArchivePreview =>
-                  Option.isSome(inventory)
-                    ? { environmentId, label, status: "ready", inventory: inventory.value }
-                    : pending,
+                  Option.match(inventory, {
+                    onNone: () => pending,
+                    onSome: (value) =>
+                      value.archiveChoices === undefined
+                        ? { environmentId, label, status: "blocked", reason: "unsupported" }
+                        : { environmentId, label, status: "ready", inventory: value },
+                  }),
                 onFailure: (unavailable): LinkedArchivePreview => ({
                   environmentId,
                   label,
@@ -140,7 +160,27 @@ export const layer = Layer.effect(
           },
           { concurrency: "unbounded" },
         );
-        return { ...family, linkedArchivePreview };
+        if (linkedArchiveOperation?.operation !== "archive")
+          return { ...preview, linkedArchivePreview };
+        const availability = new Map(
+          linkedArchivePreview.map((peer) => [peer.environmentId, peer]),
+        );
+        return {
+          ...preview,
+          linkedArchivePreview,
+          linkedArchiveOperation: {
+            ...linkedArchiveOperation,
+            machines: linkedArchiveOperation.machines.map((machine) => {
+              if (machine.requiresReview !== true) return machine;
+              const peer = availability.get(machine.environmentId);
+              return peer?.status === "ready"
+                ? { ...machine, status: "review" as const, reason: undefined }
+                : peer === undefined
+                  ? { ...machine, status: "blocked" as const, reason: "unlinked" as const }
+                  : { ...machine, status: peer.status, reason: peer.reason };
+            }),
+          },
+        };
       },
       (effect, threadId) =>
         Effect.mapError(effect, (cause) => new OrchestratorProjectionError({ threadId, cause })),
@@ -168,9 +208,9 @@ export const withLinkedArchivePreview = Effect.fn("LastCodeLinkedArchivePreview.
     threadId: ThreadId,
     family: OrchestrationV2ThreadArchiveFamily,
     caller: Pick<Caller, "scope" | "caller">,
+    preview: typeof localArchivePreview,
   ) {
     if (fencingLinkOrigin(caller) !== undefined) return family;
-    const preview = yield* captureLinkedArchivePreview;
     const limits = yield* DispatchModeLimit;
     return yield* preview(threadId, family, limits);
   },

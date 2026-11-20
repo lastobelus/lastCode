@@ -2,7 +2,7 @@ import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m as resolveMessage } from "~/i18n/messages";
 import { settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 import { Spinner } from "~/components/ui/spinner";
-import { ArchiveIcon, ArchiveX, Trash2Icon } from "lucide-react";
+import { ArchiveIcon, ArchiveX, NetworkIcon, Trash2Icon } from "lucide-react";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { presentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
@@ -13,6 +13,11 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { useThreadActions } from "../../hooks/useThreadActions";
+import {
+  linkedArchiveStatusMenuItem,
+  LINKED_ARCHIVE_STATUS_ACTION,
+  useLastCodeLinkedArchiveRecovery,
+} from "../../hooks/useLastCodeLinkedArchiveRecovery";
 import { readLocalApi } from "../../localApi";
 import { derivePhysicalProjectKey } from "@t3tools/client-runtime/state/project-grouping";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
@@ -59,6 +64,7 @@ export function ArchivedThreadsPanel() {
     .filter((environment) => environment.connection.phase === "connected")
     .map((environment) => environment.environmentId);
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
+  const showLinkedArchiveStatus = useLastCodeLinkedArchiveRecovery();
   const pendingActionsRef = useRef(new Set<string>());
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(() => new Set());
   const {
@@ -233,18 +239,26 @@ export function ArchivedThreadsPanel() {
       return;
     const result = await settlePromise(async () => {
       const clicked = await readLocalApi()?.contextMenu.show(
-        ARCHIVE_ACTIONS.map(({ action, label }) => ({
-          id: action,
-          label:
-            action === "unarchive" && restoreThreadId(thread) !== thread.id
-              ? gt("Restore family")
-              : m(label),
-          destructive: action === "delete",
-        })),
+        [
+          ...ARCHIVE_ACTIONS.map(({ action, label }) => ({
+            id: action,
+            label:
+              action === "unarchive" && restoreThreadId(thread) !== thread.id
+                ? gt("Restore family")
+                : m(label),
+            destructive: action === "delete",
+          })),
+          ...linkedArchiveStatusMenuItem(thread.environmentId),
+        ],
         position,
       );
       if (clicked === "unarchive" || clicked === "delete")
         await handleThreadAction(clicked, thread);
+      if (clicked === LINKED_ARCHIVE_STATUS_ACTION) {
+        await showLinkedArchiveStatus(
+          scopeThreadRef(thread.environmentId, restoreThreadId(thread)),
+        );
+      }
     });
     reportFailure(result, gt("Archived thread action failed"));
   };
@@ -296,6 +310,10 @@ export function ArchivedThreadsPanel() {
               const restoreKey = scopedThreadKey(
                 scopeThreadRef(thread.environmentId, restoreThreadId(thread)),
               );
+              const linkedArchiveStatus =
+                restoreThreadId(thread) === thread.id
+                  ? linkedArchiveStatusMenuItem(thread.environmentId)[0]
+                  : undefined;
               return (
                 <div
                   key={`${thread.environmentId}:${thread.id}`}
@@ -326,6 +344,29 @@ export function ArchivedThreadsPanel() {
                     }
                     control={
                       <div className="flex shrink-0 items-center gap-2">
+                        {linkedArchiveStatus && (
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon-sm"
+                                  aria-label={linkedArchiveStatus.label}
+                                  disabled={pendingKeys.has(threadKey)}
+                                  onClick={() =>
+                                    void showLinkedArchiveStatus(
+                                      scopeThreadRef(thread.environmentId, thread.id),
+                                    )
+                                  }
+                                />
+                              }
+                            >
+                              <NetworkIcon className="size-3.5" />
+                            </TooltipTrigger>
+                            <TooltipPopup>{linkedArchiveStatus.label}</TooltipPopup>
+                          </Tooltip>
+                        )}
                         {ARCHIVE_ACTIONS.map(({ action, label, threadLabel, Icon }) => (
                           <Tooltip key={action}>
                             <TooltipTrigger

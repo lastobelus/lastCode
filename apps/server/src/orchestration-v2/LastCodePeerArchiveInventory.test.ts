@@ -1,12 +1,14 @@
 import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  CommandId,
   EventId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadArchiveFamily,
   type ThreadOwner,
 } from "@t3tools/contracts";
@@ -15,11 +17,17 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
-import { LastCodePeerArchiveTransport } from "../peer/LastCodePeerArchiveTransport.ts";
+import {
+  LastCodePeerArchiveTransport,
+  PeerArchiveWriteTransport,
+} from "../peer/LastCodePeerArchiveServices.ts";
 import { PeerLinks } from "../peer/PeerLinks.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
+import { EventSinkV2 } from "./EventSink.ts";
+import * as LinkedOperations from "./LastCodeLinkedArchiveOperations.ts";
 import * as LinkedPreview from "./LastCodeLinkedArchivePreview.ts";
 import {
   readPeerArchiveInventory,
@@ -122,7 +130,113 @@ const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
   }
 });
 
-const environmentLayer = ProjectionStore.layer.pipe(Layer.provide(Sqlite.layerMemory), Layer.fresh);
+const environmentLayer = ProjectionStore.layer.pipe(
+  Layer.provideMerge(Sqlite.layerMemory),
+  Layer.fresh,
+);
+
+it.effect("returns after the local archive and retries its recorded selection independently", () =>
+  Effect.gen(function* () {
+    yield* saveThread(orchestrator);
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const thread = yield* store.getThread(orchestrator);
+    const archiveId = CommandId.make("local-archive");
+    const now = yield* DateTime.now;
+    const archived: OrchestrationV2StoredEvent = {
+      sequence: 4,
+      commandId: archiveId,
+      event: {
+        id: EventId.make("local-archive-commit"),
+        type: "thread.archived",
+        threadId: orchestrator,
+        occurredAt: now,
+        payload: { ...thread, archivedAt: now },
+      },
+    };
+    const outcomes = [yield* Deferred.make<CommandId>(), yield* Deferred.make<CommandId>()];
+    let committed = false;
+    let calls = 0;
+    const local = store.apply(archived.event).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          committed = true;
+        }),
+      ),
+      Effect.as({ sequence: 4, storedEvents: [archived] }),
+    );
+    yield* Effect.gen(function* () {
+      const operations = yield* LinkedOperations.captureLinkedArchiveOperations;
+      const result = yield* operations.dispatch(
+        {
+          type: "thread.archive",
+          threadId: orchestrator,
+          commandId: archiveId,
+          linkedArchiveSelection: [
+            {
+              label: "Build machine",
+              environmentId: destination,
+              status: "ready",
+              cohorts: [
+                {
+                  anchorThreadId: direct,
+                  selectedThreadIds: [direct],
+                  typedIn: [],
+                  childDisposition: "archive_if_idle",
+                },
+              ],
+            },
+          ],
+        },
+        local,
+      );
+      assert.equal(result.sequence, 4);
+      assert.equal(yield* Deferred.await(outcomes[0]!), archiveId);
+      // The source journal still identifies the generation after event retention prunes it.
+      committed = false;
+      assert.equal((yield* operations.status(orchestrator))?.machines[0]?.status, "pending");
+      const retry = yield* operations.dispatch(
+        {
+          type: "thread.archive",
+          threadId: orchestrator,
+          commandId: CommandId.make("explicit-retry"),
+          linkedArchiveSelection: [],
+          expectedLinkedArchiveCommandId: archiveId,
+        },
+        Effect.die("A linked retry must not archive the local thread again"),
+      );
+      assert.equal(retry.sequence, 4);
+      assert.equal(yield* Deferred.await(outcomes[1]!), archiveId);
+    }).pipe(
+      Effect.provide(
+        LinkedOperations.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(ServerEnvironment)({ getEnvironmentId: Effect.succeed(origin) }),
+              Layer.mock(EventSinkV2)({
+                readByCommandId: ({ commandId }) =>
+                  Stream.suspend(() =>
+                    committed && commandId === archiveId ? Stream.succeed(archived) : Stream.empty,
+                  ),
+              }),
+              Layer.mock(PeerArchiveWriteTransport)({
+                apply: (id, request) =>
+                  Effect.gen(function* () {
+                    assert.equal(id, destination);
+                    assert.deepEqual(request.cohorts[0]?.selectedThreadIds, [direct]);
+                    const signal = outcomes[calls++];
+                    if (signal === undefined)
+                      return yield* Effect.die("Unexpected linked archive attempt");
+                    yield* Deferred.succeed(signal, request.sourceArchiveCommandId);
+                    return yield* Effect.never;
+                  }),
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(environmentLayer)),
+);
 
 it.effect("shares the linked preview deadline between owner lookup and peer inventory", () =>
   Effect.gen(function* () {
@@ -171,6 +285,14 @@ it.effect("shares the linked preview deadline between owner lookup and peer inve
                 enabled: Effect.succeed(true),
                 listStored: Effect.succeed(peers),
               }),
+              Layer.mock(LinkedOperations.LastCodeLinkedArchiveOperations)({
+                status: () =>
+                  Effect.succeed({
+                    sourceArchiveCommandId: CommandId.make("prior-archive"),
+                    operation: "restore",
+                    machines: [],
+                  }),
+              }),
               Layer.succeed(ProjectionStore.ProjectionStoreV2, {
                 ...store,
                 getArchiveFamilyThreadIds: (id) =>
@@ -191,6 +313,7 @@ it.effect("shares the linked preview deadline between owner lookup and peer inve
                         unreadThreadIds: [],
                         protectedThreadIds: [],
                         keptThreadIds: [],
+                        archiveChoices: { defaultCohorts: [], includingTypedInCohorts: [] },
                       }),
               }),
             ),
@@ -206,6 +329,7 @@ it.effect("shares the linked preview deadline between owner lookup and peer inve
     yield* TestClock.adjust("400 millis");
     assert.isDefined(preview.pollUnsafe());
     const result = yield* Fiber.join(preview);
+    assert.equal(result.linkedArchiveOperation?.operation, "restore");
     assert.deepEqual(
       result.linkedArchivePreview?.map(({ label, status }) => ({ label, status })),
       [
@@ -282,6 +406,18 @@ it.effect("reads only recorded ownership across two separate environment databas
       assert.sameMembers([...inventory.keptThreadIds], [nested, remotelyKept]);
       assert.deepEqual(inventory.protectedThreadIds, [nested]);
       assert.deepEqual(inventory.unreadThreadIds, [direct]);
+      assert.sameMembers(
+        inventory.archiveChoices?.defaultCohorts.flatMap(
+          ({ selectedThreadIds }) => selectedThreadIds,
+        ) ?? [],
+        [direct, remoteChild, belowDeletedPeerOwner],
+      );
+      assert.sameMembers(
+        inventory.archiveChoices?.includingTypedInCohorts.flatMap(
+          ({ selectedThreadIds }) => selectedThreadIds,
+        ) ?? [],
+        [direct, remoteChild, belowDeletedPeerOwner, remotelyKept],
+      );
 
       const refusal = yield* readPeerArchiveInventory(destination, request, {
         store: {

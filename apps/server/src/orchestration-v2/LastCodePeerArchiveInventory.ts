@@ -4,9 +4,11 @@ import {
   type OrchestrationV2ThreadShell,
   type PeerArchiveInventory,
   type PeerArchiveInventoryInput,
+  type PeerArchiveCohort,
   type ThreadId,
 } from "@t3tools/contracts";
 import { getThreadOwner } from "@t3tools/shared/threadOwnership";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import type { ProjectionStoreV2Shape, ProjectionStoreV2Error } from "./ProjectionStore.ts";
 import { hasUnreadArchiveResponse, hasUnfinishedArchiveWork } from "./ThreadArchivePolicy.ts";
@@ -79,6 +81,63 @@ const archiveCandidates = Effect.fn("LastCodePeerArchive.candidates")(function* 
   return candidates.filter((candidate) => candidate !== null);
 });
 
+function archiveCohorts(
+  environmentId: EnvironmentId,
+  candidates: readonly ArchiveCandidate[],
+  selected: ReadonlySet<ThreadId>,
+  active: ReadonlySet<ThreadId>,
+  unread: ReadonlySet<ThreadId>,
+): PeerArchiveCohort[] {
+  const byId = new Map(candidates.map((candidate) => [candidate.record.id, candidate]));
+  const byAnchor = new Map<
+    ThreadId,
+    { selectedThreadIds: ThreadId[]; typedIn: Map<ThreadId, PeerArchiveCohort["typedIn"][number]> }
+  >();
+  for (const id of selected) {
+    let anchor = id;
+    let cursor = byId.get(id);
+    const path = new Set<ThreadId>();
+    const evidence = new Map<ThreadId, PeerArchiveCohort["typedIn"][number]>();
+    let supported = true;
+    while (cursor !== undefined && !path.has(cursor.record.id)) {
+      const { record, shell } = cursor;
+      path.add(record.id);
+      if (record.lineage.sideChat === true) {
+        supported = false;
+        break;
+      }
+      if (selected.has(record.id)) anchor = record.id;
+      if (shell?.latestUserAuthoredMessageAt != null) {
+        evidence.set(record.id, {
+          threadId: record.id,
+          latestHumanMessageAt: DateTime.formatIso(shell.latestUserAuthoredMessageAt),
+        });
+      }
+      const owner = getThreadOwner(record, environmentId);
+      if (owner?.environmentId !== environmentId) break;
+      cursor = byId.get(owner.threadId);
+    }
+    if (!supported) continue;
+    const cohort = byAnchor.get(anchor) ?? {
+      selectedThreadIds: new Array<ThreadId>(),
+      typedIn: new Map<ThreadId, PeerArchiveCohort["typedIn"][number]>(),
+    };
+    cohort.selectedThreadIds.push(id);
+    for (const [threadId, proof] of evidence) cohort.typedIn.set(threadId, proof);
+    byAnchor.set(anchor, cohort);
+  }
+  return [...byAnchor].map(([anchorThreadId, { selectedThreadIds, typedIn }]) => ({
+    anchorThreadId,
+    selectedThreadIds,
+    typedIn: [...typedIn.values()],
+    childDisposition: selectedThreadIds.some((id) => active.has(id))
+      ? "stop_and_archive"
+      : selectedThreadIds.some((id) => unread.has(id))
+        ? "archive_after_review"
+        : "archive_if_idle",
+  }));
+}
+
 export const readPeerArchiveOwnerScope = Effect.fn("LastCodePeerArchive.readOwnerScope")(function* (
   environmentId: EnvironmentId,
   rootId: ThreadId,
@@ -147,6 +206,11 @@ export const readPeerArchiveInventory = Effect.fn("LastCodePeerArchive.readInven
     if (shell.persistent === true) protectedThreadIds.push(shell.id);
     if (kept) keptThreadIds.push(shell.id);
   }
+  const active = new Set(activeThreadIds);
+  const unread = new Set(unreadThreadIds);
+  const protectedIds = new Set(protectedThreadIds);
+  const kept = new Set(keptThreadIds);
+  const eligible = threads.map(({ threadId }) => threadId).filter((id) => !protectedIds.has(id));
   return {
     environmentId,
     threads,
@@ -155,5 +219,21 @@ export const readPeerArchiveInventory = Effect.fn("LastCodePeerArchive.readInven
     unreadThreadIds,
     protectedThreadIds,
     keptThreadIds,
+    archiveChoices: {
+      defaultCohorts: archiveCohorts(
+        environmentId,
+        candidates,
+        new Set(eligible.filter((id) => !kept.has(id))),
+        active,
+        unread,
+      ),
+      includingTypedInCohorts: archiveCohorts(
+        environmentId,
+        candidates,
+        new Set(eligible),
+        active,
+        unread,
+      ),
+    },
   };
 });

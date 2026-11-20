@@ -51,6 +51,11 @@ it.layer(Sqlite.layerMemory)("archive journal", (it) => {
   it.effect("reserves a missing generation and replaces it only at the current revision", () =>
     Effect.gen(function* () {
       const journal = makeLastCodeArchiveJournal(yield* SqlClient.SqlClient);
+      const destinationKey = {
+        ...sourceKey,
+        role: "destination" as const,
+        sourceArchiveCommandId: CommandId.make("archive-reservation"),
+      };
       const reserved = '{"session":"session-1","fenced":true}';
       const receipt = '{"session":"session-1","cohort":["thread-2","thread-1"]}';
 

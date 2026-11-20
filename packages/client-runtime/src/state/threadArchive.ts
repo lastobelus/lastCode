@@ -3,6 +3,7 @@ import {
   CommandId,
   MessageId,
   type LinkedArchivePreview,
+  type LinkedArchiveSelection,
   type ScopedThreadRef,
   type ThreadArchiveConsultationTarget,
   type ThreadArchiveTemporaryProjectSelection,
@@ -14,6 +15,21 @@ import { scopedProjectKey } from "../environment/scoped.ts";
 import type { StartThreadTurnInput } from "../operations/commands.ts";
 import type { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 import type { EnvironmentThreadShell } from "./models.ts";
+import {
+  linkedArchiveSelection,
+  linkedArchiveRetryMessage,
+  linkedArchiveWarning,
+  canIncludeLinkedTypedIn,
+} from "./lastCodeLinkedArchive.ts";
+
+export {
+  ARCHIVE_TYPED_IN_LABEL,
+  LINKED_ARCHIVE_NO_ACTIVITY,
+  LINKED_ARCHIVE_RETRY_ARCHIVE,
+  LINKED_ARCHIVE_RETRY_RESTORE,
+  LINKED_ARCHIVE_STATUS_LABEL,
+  buildLinkedArchiveRecovery,
+} from "./lastCodeLinkedArchive.ts";
 
 export const THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE = msg(
   "Update this environment's server before archiving thread families safely.",
@@ -33,17 +49,28 @@ function selectedTemporaryProjects(
 }
 
 export function archivePreviewSelection(
-  family: Pick<ThreadArchiveFamily, "archivePreview" | "keptThreadIds">,
+  family: Pick<ThreadArchiveFamily, "archivePreview" | "keptThreadIds" | "linkedArchivePreview">,
   includeTypedIn = false,
 ): {
   readonly expectedArchiveThreadIds?: readonly ThreadId[];
   readonly includeTypedInThreadIds?: readonly ThreadId[];
   readonly expectedTemporaryProjects?: readonly ThreadArchiveTemporaryProjectSelection[];
+  readonly linkedArchiveSelection?: readonly LinkedArchiveSelection[];
 } {
-  if (family.archivePreview === undefined) return {};
+  const linked =
+    family.linkedArchivePreview === undefined
+      ? {}
+      : {
+          linkedArchiveSelection: linkedArchiveSelection(
+            family.linkedArchivePreview,
+            includeTypedIn,
+          ),
+        };
+  if (family.archivePreview === undefined) return linked;
   const keptIds = new Set(keptArchivePreviewThreadIds(family, includeTypedIn));
   const projects = selectedTemporaryProjects(family.archivePreview, includeTypedIn);
   return {
+    ...linked,
     expectedArchiveThreadIds: family.archivePreview.threads
       .map(({ threadId }) => threadId)
       .filter((id) => !keptIds.has(id)),
@@ -67,7 +94,11 @@ export function requiresThreadArchiveConfirmation(
   return (
     family.requiresConfirmation ||
     family.linkedArchivePreview?.some(
-      (peer) => peer.status !== "ready" || peer.inventory.threads.length > 0,
+      (peer) =>
+        peer.status !== "ready" ||
+        peer.inventory.threads.length > 0 ||
+        (peer.inventory.archiveChoices?.defaultCohorts.length ?? 0) > 0 ||
+        (peer.inventory.archiveChoices?.includingTypedInCohorts.length ?? 0) > 0,
     ) === true
   );
 }
@@ -86,16 +117,10 @@ function keptArchivePreviewThreadIds(
   family: Pick<ArchivePreviewFamily, "archivePreview" | "keptThreadIds">,
   includeTypedIn: boolean,
 ) {
-  return includeTypedIn ? family.archivePreview?.keptWithTypedInThreadIds : family.keptThreadIds;
+  return includeTypedIn && (family.archivePreview?.typedInThreadIds.length ?? 0) > 0
+    ? family.archivePreview?.keptWithTypedInThreadIds
+    : family.keptThreadIds;
 }
-
-const linkedArchiveReasons = {
-  offline: msg("Offline", { $context: "connection status" }),
-  denied: msg("Access denied"),
-  unsupported: msg("Update this machine to review its threads"),
-  unlinked: msg("Machine is no longer linked"),
-  changed: msg("A different machine answered"),
-};
 
 function archivePreviewThreadKey(
   environmentId: EnvironmentThreadShell["environmentId"] | undefined,
@@ -107,6 +132,7 @@ function archivePreviewThreadKey(
 function buildLinkedArchiveSections(
   families: readonly ArchivePreviewFamily[],
   selectedKeys: ReadonlySet<string>,
+  includeTypedIn: boolean,
   resolve: MFunctionType,
 ) {
   const machines = new Map<LinkedArchivePreview["environmentId"], LinkedArchivePreview[]>();
@@ -118,6 +144,11 @@ function buildLinkedArchiveSections(
     }
   }
   return [...machines].map(([environmentId, peers]) => {
+    const selections = linkedArchiveSelection(peers, includeTypedIn);
+    const cohorts = selections.flatMap((selection) =>
+      selection.status === "ready" ? selection.cohorts : [],
+    );
+    const selectedIds = new Set(cohorts.flatMap(({ selectedThreadIds }) => selectedThreadIds));
     const inventories = peers.flatMap((peer) => (peer.status === "ready" ? [peer.inventory] : []));
     const activeIds = new Set(inventories.flatMap(({ activeThreadIds }) => activeThreadIds));
     const unreadIds = new Set(inventories.flatMap(({ unreadThreadIds }) => unreadThreadIds));
@@ -129,34 +160,25 @@ function buildLinkedArchiveSections(
       inventories.flatMap(({ threads }) => threads.map((thread) => [thread.threadId, thread])),
     );
     const warnings = new Set(
-      peers.flatMap((peer) =>
-        peer.status === "ready"
-          ? []
-          : [
-              [
-                resolve(
-                  peer.status === "pending"
-                    ? msg("Pending", { $context: "linked archive status" })
-                    : msg("Blocked", { $context: "linked archive status" }),
-                ),
-                resolve(linkedArchiveReasons[peer.reason]),
-              ].join(" · "),
-            ],
+      selections.flatMap((peer) =>
+        peer.status === "ready" ? [] : [linkedArchiveWarning(peer, resolve)],
       ),
     );
+    const isSelected = (id: ThreadId) =>
+      selectedIds.has(id) || selectedKeys.has(archivePreviewThreadKey(environmentId, id));
     return {
       environmentId,
       label: peers[0]?.label || environmentId,
       warnings: [...warnings],
+      activeThreadIds: [...activeIds].filter(isSelected),
+      unreadThreadIds: [...unreadIds].filter(isSelected),
+      requiresStop: cohorts.some(({ childDisposition }) => childDisposition === "stop_and_archive"),
+      hasSelectedThreads: [...threads.keys()].some(isSelected),
       threads: [...threads.values()].map((thread) => ({
         ...thread,
         title: thread.title || resolve(msg("Untitled thread")),
         label: [
-          resolve(
-            selectedKeys.has(archivePreviewThreadKey(environmentId, thread.threadId))
-              ? msg("Archive")
-              : msg("Keep open"),
-          ),
+          resolve(isSelected(thread.threadId) ? msg("Archive") : msg("Keep open")),
           activeIds.has(thread.threadId)
             ? resolve(msg("Working", { $context: "thread status" }))
             : null,
@@ -208,28 +230,42 @@ export function buildThreadArchiveConfirmation<
     return preview.threads.filter(({ id }) => !kept.has(id));
   });
   const selectedKeys = new Set(selectedThreads.map(keyOf));
-  const linkedMachines = buildLinkedArchiveSections(previews, selectedKeys, resolve);
+  const linkedMachines = buildLinkedArchiveSections(
+    previews,
+    selectedKeys,
+    includeTypedIn,
+    resolve,
+  );
   const showBulkSelection = family.bulkPreviews !== undefined && linkedMachines.length > 0;
   const previewKeys = new Set(
     hasPreview || showBulkSelection ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
   );
-  const archivesOnLinkedMachine = linkedMachines.some(({ environmentId }) =>
-    selectedThreads.some((thread) => thread.environmentId === environmentId),
+  const archivesOnLinkedMachine = linkedMachines.some(
+    ({ hasSelectedThreads }) => hasSelectedThreads,
   );
   const keep = (thread: T) => previewKeys.has(keyOf(thread)) && !selectedKeys.has(keyOf(thread));
   const inScope = (thread: T) => !hasPreview || previewKeys.has(keyOf(thread));
   const participants = family.threads.filter((thread) => inScope(thread) && !keep(thread));
   const activeIds = new Set(family.activeThreadIds);
   const unreadIds = new Set(family.unreadThreadIds);
-  const activeCount = participants.filter(({ id }) => activeIds.has(id)).length;
-  const unreadCount = participants.filter(({ id }) => unreadIds.has(id)).length;
-  const active = activeCount > 0;
+  const affectedCount = (ids: ReadonlySet<string>, field: "activeThreadIds" | "unreadThreadIds") =>
+    new Set([
+      ...participants.filter(({ id }) => ids.has(id)).map(keyOf),
+      ...linkedMachines.flatMap(({ environmentId, [field]: threadIds }) =>
+        threadIds.map((id) => archivePreviewThreadKey(environmentId, id)),
+      ),
+    ]).size;
+  const activeCount = affectedCount(activeIds, "activeThreadIds");
+  const unreadCount = affectedCount(unreadIds, "unreadThreadIds");
+  const active = activeCount > 0 || linkedMachines.some(({ requiresStop }) => requiresStop);
   const unread = unreadCount > 0;
   const onlyLinkedReview = linkedMachines.length > 0 && !hasPreview && !active && !unread;
   const protectedThreads = participants.filter((thread) => thread.persistent);
   const blocked = !family.canStopAndArchive || protectedThreads.length > 0;
   const canIncludeTypedIn = typedInChoice.some(
-    ({ archivePreview }) => (archivePreview?.typedInThreadIds.length ?? 0) > 0,
+    ({ archivePreview, linkedArchivePreview }) =>
+      (archivePreview?.typedInThreadIds.length ?? 0) > 0 ||
+      canIncludeLinkedTypedIn(linkedArchivePreview),
   );
   const temporaryProjects = [
     ...new Map(
@@ -266,7 +302,7 @@ export function buildThreadArchiveConfirmation<
             { count: protectedThreads.length },
           ),
         )
-    : hasPreview
+    : hasPreview || archivesOnLinkedMachine
       ? resolve(
           msg(
             "Threads marked Archive will be archived. Any still working will stop, and their pending approvals and queued messages will be canceled.",
@@ -296,6 +332,9 @@ export function buildThreadArchiveConfirmation<
     linkedMachines.length > 0 && !archivesOnLinkedMachine
       ? resolve(msg("Threads on linked machines will stay open."))
       : null,
+    archivesOnLinkedMachine || linkedMachines.some(({ warnings }) => warnings.length > 0)
+      ? resolve(linkedArchiveRetryMessage)
+      : null,
     preservesAllHistory
       ? resolve(msg("Unarchiving reopens history. Stopped work won't restart."))
       : null,
@@ -313,7 +352,7 @@ export function buildThreadArchiveConfirmation<
     linkedMachines,
     confirmLabel: active
       ? resolve(msg("Stop active threads & archive"))
-      : hasPreview || onlyLinkedReview
+      : hasPreview || onlyLinkedReview || (archivesOnLinkedMachine && !unread)
         ? resolve(msg("Archive threads"))
         : resolve(msg("Archive unread threads")),
     disposition: active
@@ -446,8 +485,9 @@ export function resolveThreadArchiveFamily(
   projectName: (thread: Pick<EnvironmentThreadShell, "environmentId" | "projectId">) => string = ({
     projectId,
   }) => projectId,
+  includeTypedIn = false,
 ) {
-  const confirmation = buildThreadArchiveConfirmation(family, resolve);
+  const confirmation = buildThreadArchiveConfirmation(family, resolve, includeTypedIn);
   const details = confirmation.threads.map(({ thread, label, showLocation }) =>
     [
       thread.title || resolve(msg("Untitled thread")),
@@ -474,6 +514,7 @@ export function resolveThreadArchiveFamily(
     confirmLabel: confirmation.confirmLabel,
     disposition: confirmation.disposition,
     blocked: confirmation.blocked,
+    canIncludeTypedIn: confirmation.canIncludeTypedIn,
     message: [
       confirmation.description,
       details.join("\n"),

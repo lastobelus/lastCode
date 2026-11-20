@@ -263,6 +263,21 @@ describe("V2 environment commands", () => {
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
       const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const linkedArchiveSelection = [
+        {
+          environmentId: EnvironmentId.make("peer"),
+          label: "Build machine",
+          status: "ready" as const,
+          cohorts: [
+            {
+              anchorThreadId: ThreadId.make("remote-child"),
+              selectedThreadIds: [ThreadId.make("remote-child")],
+              typedIn: [],
+              childDisposition: "archive_after_review" as const,
+            },
+          ],
+        },
+      ];
       yield* archiveThread({
         commandId: CommandId.make("archive-family"),
         threadId: ThreadId.make("parent"),
@@ -272,6 +287,7 @@ describe("V2 environment commands", () => {
           { projectId: ProjectId.make("scratch"), threadIds: [ThreadId.make("child")] },
         ],
         expectedArchiveCommandId: CommandId.make("failed-attempt"),
+        linkedArchiveSelection,
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
       expect(commands).toEqual([
         {
@@ -282,6 +298,7 @@ describe("V2 environment commands", () => {
           expectedChildThreadIds: ["child"],
           expectedTemporaryProjects: [{ projectId: "scratch", threadIds: ["child"] }],
           expectedArchiveCommandId: "failed-attempt",
+          linkedArchiveSelection,
         },
       ]);
     }).pipe(Effect.provide(layerTestRandom)),

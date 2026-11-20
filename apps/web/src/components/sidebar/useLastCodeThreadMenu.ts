@@ -2,6 +2,11 @@ import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 import { mergeWorktreeSuspensionMenuItems } from "../worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "../../hooks/threadReadActions";
+import {
+  linkedArchiveStatusMenuItem,
+  LINKED_ARCHIVE_STATUS_ACTION,
+  useLastCodeLinkedArchiveRecovery,
+} from "../../hooks/useLastCodeLinkedArchiveRecovery";
 import type { ScopedThreadRef, ThreadOwnershipAction } from "@t3tools/contracts";
 import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
 import { threadOwnershipChangeFailed } from "./lastcodeThreadPromotionCopy";
@@ -62,6 +67,7 @@ export function useLastCodeThreadMenu(
     markThreadUnread,
     markThreadRead,
   } = useLastCodeThreadActions();
+  const showLinkedArchiveStatus = useLastCodeLinkedArchiveRecovery();
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -128,11 +134,18 @@ export function useLastCodeThreadMenu(
     );
     const clicked = await api.contextMenu.show(
       withThreadReadPermissions(
-        mergeWorktreeSuspensionMenuItems(target.items, workspaceActions.menuItems(thread)),
+        [
+          ...mergeWorktreeSuspensionMenuItems(target.items, workspaceActions.menuItems(thread)),
+          ...linkedArchiveStatusMenuItem(ref.environmentId),
+        ],
         [ref],
       ),
       position,
     );
+    if (clicked === LINKED_ARCHIVE_STATUS_ACTION) {
+      await showLinkedArchiveStatus(ref);
+      return;
+    }
     if (await workspaceActions.run(clicked, ref)) return;
     const handoff = parseLastCodeHandoffAction(clicked);
     if (handoff) {

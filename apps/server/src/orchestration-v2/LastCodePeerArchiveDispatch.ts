@@ -4,6 +4,7 @@ import {
   linkOriginIsFenced,
   type CommandId,
   type EnvironmentId,
+  EventId,
   type IsoDateTime,
   type OrchestrationV2AppThread,
   type OrchestrationV2ServerCommand,
@@ -19,7 +20,12 @@ import * as Effect from "effect/Effect";
 import { clientModeCeiling, type McpClientCaller } from "../mcp/McpInvocationContext.ts";
 import { DispatchModeLimit, type DispatchModes } from "./DispatchModeLimit.ts";
 import type { OrchestratorDispatchError, OrchestratorV2Error } from "./Orchestrator.ts";
-import type { ProjectionStoreV2Error, ProjectionStoreV2Shape } from "./ProjectionStore.ts";
+import {
+  emptyProjection,
+  threadShellFromProjection,
+  type ProjectionStoreV2Error,
+  type ProjectionStoreV2Shape,
+} from "./ProjectionStore.ts";
 
 type OwnerScope = Pick<ThreadArchivePeerGuard, "ownerEnvironmentId" | "ownerThreadIds">;
 
@@ -116,8 +122,7 @@ function reachableOwnerPath(
   let id = target;
   while (!path.has(id)) {
     const thread = rows.get(id);
-    if (thread == null || thread.deletedAt !== null || thread.lineage.sideChat === true)
-      return null;
+    if (thread == null || thread.lineage.sideChat === true) return null;
     path.set(id, thread);
     const owner = getThreadOwner(thread, destination);
     if (owner === null) return null;
@@ -205,6 +210,7 @@ const validatePeerArchive = Effect.fnUntraced(function* <E>(input: {
     if (
       path === null ||
       thread === undefined ||
+      thread.deletedAt !== null ||
       thread.archivedAt !== null ||
       thread.persistent === true ||
       (expectedRequest === undefined
@@ -322,7 +328,27 @@ export function makePeerArchiveDispatch(ports: {
     readPeerArchiveRows(
       ports.destination,
       [command.threadId, ...ids],
-      (id) => ports.store.getThreadShell(id).pipe(ports.mapDispatchError(command)),
+      (id) =>
+        Effect.gen(function* () {
+          const shell = yield* ports.store.getThreadShell(id);
+          if (shell !== null) return shell;
+          const record = yield* ports.store
+            .getThread(id)
+            .pipe(
+              Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(null)),
+            );
+          return record?.deletedAt == null
+            ? null
+            : threadShellFromProjection(
+                emptyProjection({
+                  id: EventId.make(`peer-archive-owner:${id}`),
+                  type: "thread.created",
+                  threadId: id,
+                  occurredAt: record.updatedAt,
+                  payload: record,
+                }),
+              );
+        }).pipe(ports.mapDispatchError(command)),
       follow,
     );
 

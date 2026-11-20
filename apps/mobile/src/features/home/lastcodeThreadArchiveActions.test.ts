@@ -7,6 +7,14 @@ import { makeThreadShellFixture } from "../../test-fixtures";
 const state = vi.hoisted(() => ({
   shells: [] as ReturnType<typeof makeThreadShellFixture>[],
   alerts: [] as { message: string; buttons: { text: string; onPress?: () => void }[] }[],
+  sheets: [] as {
+    confirm: (includeTypedIn: boolean) => {
+      message: string;
+      confirmLabel: string;
+      blocked: boolean;
+    };
+    accept: (choice: { includeTypedIn: boolean }) => void;
+  }[],
 }));
 vi.mock("../../state/threads", () => ({ environmentThreadShells: { threadShellsAtom: "shells" } }));
 vi.mock("../../state/projects", () => ({ environmentProjects: { projectAtom: () => "project" } }));
@@ -27,6 +35,10 @@ vi.mock("../../state/atom-registry", () => ({
 vi.mock("../../components/ui/Dialog", () => ({
   alert: (_title: string, message: string, buttons = []) => state.alerts.push({ message, buttons }),
 }));
+vi.mock("../archive/lastCodeMobileArchiveDialogState", () => ({
+  requestLastCodeMobileArchiveDialog: ({ confirm }: (typeof state.sheets)[number]) =>
+    new Promise((accept) => state.sheets.push({ confirm, accept })),
+}));
 vi.mock("../../lib/uuid", () => ({ uuidv4: () => "fresh-action-id" }));
 import { prepareLastCodeMobileThreadArchive } from "./lastcodeThreadArchiveActions";
 
@@ -42,6 +54,7 @@ function setup() {
   });
   state.shells = [owner, child];
   state.alerts = [];
+  state.sheets = [];
   const family: ThreadArchiveFamily = {
     threads: [owner, child],
     children: [child],
@@ -123,7 +136,7 @@ it("keeps newly busy-owner feedback visible without sending or granting archive 
   expect(test.review).not.toHaveBeenCalled();
 });
 
-it("keeps local and linked typed-in branches open and confirms only default projects", async () => {
+it("uses the checkbox to opt into the displayed local and linked archive choices", async () => {
   const test = setup();
   const scratch = ProjectId.make("scratch");
   const environmentId = EnvironmentId.make("linked-machine");
@@ -132,6 +145,12 @@ it("keeps local and linked typed-in branches open and confirms only default proj
     projectId: ProjectId.make("remote-project"),
     title: "Linked work",
   };
+  const linkedCohort = {
+    anchorThreadId: linkedThread.threadId,
+    selectedThreadIds: [linkedThread.threadId],
+    typedIn: [],
+    childDisposition: "stop_and_archive",
+  } as const;
   test.loadArchiveFamily.mockResolvedValue(
     AsyncResult.success({
       ...test.family,
@@ -167,25 +186,24 @@ it("keeps local and linked typed-in branches open and confirms only default proj
             unreadThreadIds: [],
             protectedThreadIds: [],
             keptThreadIds: [linkedThread.threadId],
+            archiveChoices: { defaultCohorts: [], includingTypedInCohorts: [linkedCohort] },
           },
         },
       ],
     }),
   );
   const pending = prepareLastCodeMobileThreadArchive(test.owner, test);
-  await vi.waitFor(() => expect(state.alerts).toHaveLength(1));
-  expect(state.alerts[0]?.message).toContain("Keep open");
-  expect(state.alerts[0]?.message).toContain("Unarchiving won't restore them.\n\nScratch");
-  expect(state.alerts[0]?.message).not.toContain("Opt-in project");
-  expect(state.alerts[0]?.message).toContain(
+  await vi.waitFor(() => expect(state.sheets).toHaveLength(1));
+  const sheet = state.sheets[0]!;
+  const defaultPreview = sheet.confirm(false);
+  expect(defaultPreview.message).toContain("Keep open");
+  expect(defaultPreview.message).toContain("Unarchiving won't restore them.\n\nScratch");
+  expect(defaultPreview.message).not.toContain("Opt-in project");
+  expect(defaultPreview.message).toContain(
     `Build machine\nLinked work · ${linkedThread.projectId} · Keep open · Working · You wrote in this thread`,
   );
-  expect(state.alerts[0]?.buttons.map(({ text }) => text)).toEqual([
-    "Cancel",
-    "Review",
-    "Archive threads",
-  ]);
-  test.click("Archive threads");
+  expect(defaultPreview.confirmLabel).toBe("Archive threads");
+  sheet.accept({ includeTypedIn: false });
   expect(await pending).toMatchObject({
     participantIds: [test.owner.id],
     input: {
@@ -193,6 +211,29 @@ it("keeps local and linked typed-in branches open and confirms only default proj
       expectedChildThreadIds: [test.child.id],
       expectedTemporaryProjects: [{ projectId: scratch, threadIds: [] }],
       childDisposition: "archive_after_review",
+      linkedArchiveSelection: [
+        { environmentId, label: "Build machine", status: "ready", cohorts: [] },
+      ],
+    },
+  });
+  const optedIn = prepareLastCodeMobileThreadArchive(test.owner, test);
+  await vi.waitFor(() => expect(state.sheets).toHaveLength(2));
+  const optInSheet = state.sheets[1]!;
+  const optInPreview = optInSheet.confirm(true);
+  expect(optInPreview.message).toContain(
+    `Build machine\nLinked work · ${linkedThread.projectId} · Archive · Working · You wrote in this thread`,
+  );
+  expect(optInPreview.message).toContain("Opt-in project");
+  expect(optInPreview.confirmLabel).toBe("Stop active threads & archive");
+  optInSheet.accept({ includeTypedIn: true });
+  expect(await optedIn).toMatchObject({
+    participantIds: [test.owner.id, test.child.id],
+    input: {
+      includeTypedInThreadIds: [test.child.id],
+      childDisposition: "stop_and_archive",
+      linkedArchiveSelection: [
+        { environmentId, label: "Build machine", status: "ready", cohorts: [linkedCohort] },
+      ],
     },
   });
 });

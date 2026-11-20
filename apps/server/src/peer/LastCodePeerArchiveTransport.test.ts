@@ -20,6 +20,7 @@ import { McpClientAuthenticator } from "../mcp/McpHttpServer.ts";
 import { type McpClientCaller, type McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as ArchiveTransport from "./LastCodePeerArchiveTransport.ts";
+import * as ArchiveServices from "./LastCodePeerArchiveServices.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 
 const url = "https://peer.example";
@@ -48,14 +49,14 @@ const peerClient: McpClientCaller = {
 const changed = { status: "blocked", reason: "changed" } satisfies PeerArchiveUnavailable;
 
 const makeRoutes = (
-  inventory: ArchiveTransport.PeerArchiveHandler["Service"]["inventory"],
+  inventory: ArchiveServices.PeerArchiveHandler["Service"]["inventory"],
   enabled = true,
 ) =>
   HttpRouter.toWebHandler(
     ArchiveTransport.routeLayer.pipe(
       Layer.provide(
         Layer.mergeAll(
-          Layer.succeed(ArchiveTransport.PeerArchiveHandler, { inventory }),
+          Layer.succeed(ArchiveServices.PeerArchiveHandler, { inventory }),
           ServerSettingsService.layerTest(
             { linkedEnvironmentsEnabled: enabled },
             {
@@ -135,7 +136,7 @@ it.effect("round trips inventory, enforces the mode ceiling, and preserves typed
       ),
       (web) => Effect.promise(web.dispose),
     );
-    const transport = yield* ArchiveTransport.LastCodePeerArchiveTransport;
+    const transport = yield* ArchiveServices.LastCodePeerArchiveTransport;
     const fetch: typeof globalThis.fetch = (url, init) => web.handler(new Request(url, init));
     expect(
       yield* transport
@@ -212,7 +213,7 @@ it.effect("authenticates and checks access before decoding the inventory request
 
 it.effect("classifies HTTP refusals and keeps the link credential on the resolved origin", () =>
   Effect.gen(function* () {
-    const transport = yield* ArchiveTransport.LastCodePeerArchiveTransport;
+    const transport = yield* ArchiveServices.LastCodePeerArchiveTransport;
     for (const [response, expected] of [
       [new Response(null, { status: 404 }), { status: "blocked", reason: "unsupported" }],
       [new Response(null, { status: 405 }), { status: "blocked", reason: "unsupported" }],
@@ -257,7 +258,7 @@ it.effect("keeps disabled and unlinked requests off the network", () =>
       HttpClient.HttpClient,
       HttpClient.make(() => Effect.die("unexpected POST")),
     );
-    const call = ArchiveTransport.LastCodePeerArchiveTransport.pipe(
+    const call = ArchiveServices.LastCodePeerArchiveTransport.pipe(
       Effect.flatMap((transport) => transport.inventory(environmentId, input)),
       Effect.flip,
     );
@@ -291,7 +292,7 @@ it.effect("times out a silent peer and aborts the request", () =>
     const http = HttpClient.make((_request, _url, signal) =>
       Deferred.succeed(started, signal).pipe(Effect.andThen(Effect.never)),
     );
-    const pending = yield* ArchiveTransport.LastCodePeerArchiveTransport.pipe(
+    const pending = yield* ArchiveServices.LastCodePeerArchiveTransport.pipe(
       Effect.flatMap((transport) => transport.inventory(environmentId, input)),
       Effect.provide(
         transportLayer().pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, http))),
@@ -310,7 +311,7 @@ it.effect("uses the same deadline while resolving a linked peer", () =>
   Effect.gen(function* () {
     const started = yield* Deferred.make<void>();
     const http = HttpClient.make(() => Effect.die("Resolved peer should not reach HTTP"));
-    const pending = yield* ArchiveTransport.LastCodePeerArchiveTransport.pipe(
+    const pending = yield* ArchiveServices.LastCodePeerArchiveTransport.pipe(
       Effect.flatMap((transport) => transport.inventory(environmentId, input)),
       Effect.provide(
         transportLayer((_id, options) => {

@@ -1,5 +1,7 @@
 import { NativeScrollView } from "../../native/NativeScrollViewMarker";
 import { Button } from "../../components/ui/Button";
+import { IconButton } from "../../components/ui/IconButton";
+import { LINKED_ARCHIVE_STATUS_LABEL } from "@t3tools/client-runtime/state/thread-archive";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
@@ -15,7 +17,7 @@ import { useNavigation } from "@react-navigation/native";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { AppBar } from "../../components/ui/AppBar";
 import { SymbolView } from "../../components/ui/AppSymbol";
-import { T, useGT } from "gt-react-native";
+import { T, useGT, useMessages } from "gt-react-native";
 import { useMemo, useRef, type ComponentProps } from "react";
 import { useWindowDimensions, View } from "react-native";
 import { RefreshControl } from "../../components/ui/RefreshControl";
@@ -34,6 +36,7 @@ import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { threadUnarchiveTargetId } from "../home/threadArchive";
 import type { ArchivedThreadGroup, ArchivedThreadSortOrder } from "./archivedThreadList";
 import { SettingsScreenContent } from "../settings/components/SettingsScreen";
+import { showLastCodeLinkedArchiveStatus } from "./lastCodeLinkedArchiveRecovery";
 
 export interface ArchivedThreadsHeaderEnvironment {
   readonly environmentId: EnvironmentId;
@@ -185,10 +188,12 @@ function ArchivedThreadRow(props: {
   readonly simultaneousSwipeGesture?: ComponentProps<typeof ThreadSwipeable>["simultaneousWith"];
   readonly onUnarchive: () => void;
   readonly restoresFamily: boolean;
+  readonly canShowLinkedArchive: boolean;
   readonly thread: EnvironmentThreadShell;
 }) {
   const { width: windowWidth } = useWindowDimensions();
   const gt = useGT();
+  const messages = useMessages();
   const cardColor = useUniwindTheme()["--color-grouped-card"];
   const canOperateThread = useEnvironmentScope(
     props.thread.environmentId,
@@ -239,6 +244,18 @@ function ArchivedThreadRow(props: {
           </View>
         ) : null}
       </View>
+      {canOperateThread && props.canShowLinkedArchive && !props.restoresFamily && (
+        <IconButton
+          accessibilityLabel={messages(LINKED_ARCHIVE_STATUS_LABEL)}
+          icon="point.3.connected.trianglepath.dotted"
+          onPress={() =>
+            void showLastCodeLinkedArchiveStatus({
+              environmentId: props.thread.environmentId,
+              threadId: props.thread.id,
+            })
+          }
+        />
+      )}
     </View>
   );
   const containerStyle = {
@@ -376,6 +393,10 @@ export function ArchivedThreadsScreen(props: {
 
     return (
       <ArchivedThreadRow
+        canShowLinkedArchive={
+          serverConfigs.get(item.thread.environmentId)?.environment.capabilities
+            .threadArchiveFamiliesV2 === true
+        }
         environmentLabel={item.environmentLabel}
         isFirst={item.isFirst}
         isLast={item.isLast}

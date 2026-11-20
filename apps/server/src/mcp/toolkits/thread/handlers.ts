@@ -1,4 +1,9 @@
-import { withLinkedArchivePreview } from "../../../orchestration-v2/LastCodeLinkedArchivePreview.ts";
+import {
+  captureLinkedArchivePreview,
+  withLinkedArchivePreview,
+} from "../../../orchestration-v2/LastCodeLinkedArchivePreview.ts";
+import { captureLinkedArchiveOperations } from "../../../orchestration-v2/LastCodeLinkedArchiveOperations.ts";
+import { fencingLinkOrigin } from "../../linkOrigin.ts";
 import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
@@ -127,7 +132,14 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
-export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+const archiveTools = Effect.all({
+  preview: captureLinkedArchivePreview,
+  operations: captureLinkedArchiveOperations,
+});
+type ArchiveTools = Effect.Success<typeof archiveTools>;
+type ThreadHandlers = McpToolAccess.Handlers<typeof ThreadToolkit.tools>;
+
+const handlers = (archive: ArchiveTools): ThreadHandlers => ({
   t3_thread_group: McpToolAccess.writesThreads(
     (input) =>
       input.items.flatMap((item) => [
@@ -319,7 +331,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         } = yield* readThread(input.threadId);
         const type = modelSelectionCommandType(thread.providerInstanceId, modelSelection);
         const result = yield* threads
-          .dispatch({ type, threadId: thread.id, commandId: yield* newCommandId(), modelSelection })
+          .dispatch({
+            type,
+            threadId: thread.id,
+            commandId: yield* newCommandId(),
+            modelSelection,
+          })
           .pipe(Effect.mapError(dispatchFailure));
         return { sequence: result.sequence };
       }),
@@ -368,7 +385,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const context = yield* readArchiveThread(input.threadId);
       const { threads, projection } = context;
       const family = yield* threads.getThreadArchiveFamily(projection.thread.id).pipe(
-        Effect.flatMap((family) => withLinkedArchivePreview(projection.thread.id, family, context)),
+        Effect.flatMap((family) =>
+          withLinkedArchivePreview(projection.thread.id, family, context, archive.preview),
+        ),
         Effect.mapError(unavailable),
       );
       return Struct.omit(family, ["threads", "canPromote", "promotableChildThreadIds"]);
@@ -483,9 +502,19 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         };
       }
       let command: OrchestrationV2Command;
+      const canUseLinkedArchive = fencingLinkOrigin({ caller, scope }) === undefined;
       switch (input.action) {
         case "archive":
           if (input.expectedTemporaryProjects?.length) yield* McpToolAccess.checkEnvironmentWrite();
+          if (
+            !canUseLinkedArchive &&
+            (input.linkedArchiveSelection !== undefined ||
+              input.expectedLinkedArchiveCommandId !== undefined)
+          )
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "This linked caller cannot archive work on another environment.",
+            });
           command = {
             ...common,
             type: "thread.archive",
@@ -501,6 +530,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.expectedTemporaryProjects === undefined
               ? {}
               : { expectedTemporaryProjects: input.expectedTemporaryProjects }),
+            ...(input.linkedArchiveSelection === undefined
+              ? {}
+              : { linkedArchiveSelection: input.linkedArchiveSelection }),
+            ...(input.expectedLinkedArchiveCommandId === undefined
+              ? {}
+              : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
             ...(input.includeTypedInThreadIds === undefined
               ? {}
               : { includeTypedInThreadIds: input.includeTypedInThreadIds }),
@@ -508,9 +543,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           };
           break;
         case "unarchive":
+          if (!canUseLinkedArchive && input.expectedLinkedArchiveCommandId !== undefined)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "This linked caller cannot restore work on another environment.",
+            });
           command = {
             ...common,
             type: "thread.unarchive",
+            ...(input.expectedLinkedArchiveCommandId === undefined
+              ? {}
+              : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
             ...(input.expectedArchiveCommandId === undefined
               ? {}
               : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
@@ -543,8 +586,23 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         default:
           command = { ...common, type: `thread.${input.action}` };
       }
-      const result = yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
+      const local = threads.dispatch(command);
+      const result = yield* (
+        canUseLinkedArchive ? archive.operations.dispatch(command, local) : local
+      ).pipe(Effect.mapError(dispatchFailure));
+      const linkedArchiveOperation =
+        canUseLinkedArchive &&
+        (command.type === "thread.archive" || command.type === "thread.unarchive")
+          ? yield* archive.operations
+              .status(command.threadId)
+              .pipe(Effect.orElseSucceed(() => undefined))
+          : undefined;
+      return {
+        sequence: result.sequence,
+        ...(linkedArchiveOperation === undefined ? {} : { linkedArchiveOperation }),
+      };
     }),
   ),
 });
+
+export const layer = McpToolAccess.toLayer(ThreadToolkit, Effect.map(archiveTools, handlers));

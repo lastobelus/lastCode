@@ -1,6 +1,11 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { mergeWorktreeSuspensionMenuItems } from "../components/worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "./threadReadActions";
+import {
+  linkedArchiveStatusMenuItem,
+  LINKED_ARCHIVE_STATUS_ACTION,
+  useLastCodeLinkedArchiveRecovery,
+} from "./useLastCodeLinkedArchiveRecovery";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import { openGuestShareDialog } from "../components/chat/guestShareDialogState";
@@ -87,6 +92,7 @@ export function useThreadActionMenu(input: {
 }) {
   const { threadRef, projectCwd, onStartRename, onFind, canShareWithGuest } = input;
   const router = useRouter();
+  const showLinkedArchiveStatus = useLastCodeLinkedArchiveRecovery();
   const workspaceActions = useWorktreeSuspensionActions();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -200,9 +206,19 @@ export function useThreadActionMenu(input: {
         workspaceActions.menuItems(thread),
       );
       const clicked = await settlePromise(() =>
-        api.contextMenu.show(withThreadReadPermissions(items, [threadRef]), position),
+        api.contextMenu.show(
+          withThreadReadPermissions(
+            [...items, ...linkedArchiveStatusMenuItem(threadRef.environmentId)],
+            [threadRef],
+          ),
+          position,
+        ),
       );
       if (clicked._tag === "Failure" || clicked.value === null) return;
+      if (clicked.value === LINKED_ARCHIVE_STATUS_ACTION) {
+        await showLinkedArchiveStatus(threadRef);
+        return;
+      }
       if (await workspaceActions.run(clicked.value, threadRef)) return;
       const action: ThreadActionMenuId = clicked.value;
       if (action === "handoff-show-all") {

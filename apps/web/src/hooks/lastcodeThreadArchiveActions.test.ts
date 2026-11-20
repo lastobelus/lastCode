@@ -16,6 +16,7 @@ import {
   THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
 } from "@t3tools/client-runtime/state/thread-archive";
 import { useThreadActions } from "./useThreadActions";
+import { useLastCodeLinkedArchiveRecovery } from "./useLastCodeLinkedArchiveRecovery";
 import { threadEnvironment } from "../state/threads";
 import { toastManager } from "../components/ui/toast";
 import { useThreadUndoNotice } from "./showThreadUndoNotice";
@@ -32,6 +33,7 @@ const familyState = vi.hoisted(() => ({
 const newThread = vi.hoisted(() => vi.fn());
 const archiveDialog = vi.hoisted(() => vi.fn());
 const archiveFamilyLoad = vi.hoisted(() => vi.fn());
+const workspaceConfirm = vi.hoisted(() => vi.fn());
 vi.mock("../components/ThreadArchiveDialog", () => ({ requestThreadArchiveDialog: archiveDialog }));
 
 const commands = vi.hoisted(() => ({
@@ -76,9 +78,7 @@ vi.mock("./useWorkspaceLifecycleConfirmation", async (original) => ({
   ...(await original<typeof import("./useWorkspaceLifecycleConfirmation")>()),
   useWorkspaceLifecycleConfirmation: () => ({
     supported: () => false,
-    confirm: () => {
-      throw new Error("These Undo fixtures do not support saved workspaces.");
-    },
+    confirm: workspaceConfirm,
   }),
 }));
 vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
@@ -235,6 +235,7 @@ beforeEach(() => {
     router.state.location.href = "/draft/project";
   });
   archiveDialog.mockReset();
+  workspaceConfirm.mockReset().mockRejectedValue(new Error("Unexpected saved workspace review."));
   archiveFamilyLoad.mockReset().mockImplementation(async ({ environmentId, input }) => ({
     _tag: "Success",
     value: [
@@ -665,12 +666,23 @@ describe("archive family confirmation", () => {
     },
   );
 
-  it.each([false, true])(
-    "shows the linked inventory and sends only the idle local archive (bulk=%s)",
-    async (bulk) => {
+  it.each([
+    { bulk: false, includeTypedIn: false },
+    { bulk: true, includeTypedIn: false },
+    { bulk: false, includeTypedIn: true },
+    { bulk: true, includeTypedIn: true },
+  ])(
+    "sends the shown linked selections (bulk=$bulk, includeTypedIn=$includeTypedIn)",
+    async ({ bulk, includeTypedIn }) => {
       const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
       const environmentId = EnvironmentId.make("linked-machine");
       const threadId = ThreadId.make("typed-in-remote");
+      const cohort = {
+        anchorThreadId: threadId,
+        selectedThreadIds: [threadId],
+        childDisposition: "stop_and_archive",
+        typedIn: [],
+      } as const;
       archiveFamilyLoad.mockResolvedValue({
         _tag: "Success",
         value: {
@@ -686,22 +698,29 @@ describe("archive family confirmation", () => {
                 threads: [{ threadId, projectId: owner.projectId, title: "Remote work" }],
                 keptThreadIds: [threadId],
                 typedInThreadIds: [threadId],
-                activeThreadIds: [],
+                activeThreadIds: [threadId],
                 unreadThreadIds: [],
                 protectedThreadIds: [],
+                ...(includeTypedIn
+                  ? { archiveChoices: { defaultCohorts: [], includingTypedInCohorts: [cohort] } }
+                  : {}),
               },
             },
           ],
         },
       });
       archiveDialog.mockImplementation(async (request) => {
-        const confirmation = buildThreadArchiveConfirmation(request.family);
-        expect(confirmation.canIncludeTypedIn).toBe(false);
+        const confirmation = buildThreadArchiveConfirmation(
+          request.family,
+          undefined,
+          includeTypedIn,
+        );
+        expect(confirmation.canIncludeTypedIn).toBe(includeTypedIn);
         expect(confirmation.linkedMachines[0]?.threads[0]?.label).toBe(
-          "Keep open · You wrote in this thread",
+          `${includeTypedIn ? "Archive" : "Keep open"} · Working · You wrote in this thread`,
         );
         expect(commands.archive).not.toHaveBeenCalled();
-        expect(await request.submit(confirmation.disposition)).toBeNull();
+        expect(await request.submit(confirmation.disposition, includeTypedIn)).toBeNull();
         return confirmation.disposition;
       });
       await archive(bulk);
@@ -710,10 +729,105 @@ describe("archive family confirmation", () => {
         environmentId: owner.environmentId,
         input: {
           threadId: owner.id,
-          childDisposition: "archive_if_idle",
+          childDisposition: includeTypedIn ? "stop_and_archive" : "archive_if_idle",
           expectedChildThreadIds: [],
+          linkedArchiveSelection: [
+            includeTypedIn
+              ? { environmentId, label: "Build machine", status: "ready", cohorts: [cohort] }
+              : { environmentId, label: "Build machine", status: "blocked", reason: "unsupported" },
+          ],
         },
       });
+    },
+  );
+
+  it("ships the linked choice from saved-workspace confirmation", async () => {
+    const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
+    const linkedArchivePreview = [
+      {
+        environmentId: EnvironmentId.make("offline-machine"),
+        label: "Offline machine",
+        status: "pending",
+        reason: "offline",
+      },
+    ] as const;
+    const family = {
+      ...archiveDecisionFixture([owner], { ...target, input: { threadId: owner.id } }),
+      linkedArchivePreview,
+    };
+    archiveFamilyLoad.mockResolvedValue({ _tag: "Success", value: family });
+    workspaceConfirm.mockResolvedValue({
+      dispositions: [{ mode: "discard", previewToken: "workspace-preview" }],
+      childDisposition: "archive_if_idle",
+    });
+    await useThreadActions().archiveThread(target, { discardSavedWorkspace: true });
+    expect(workspaceConfirm).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        archiveFamily: family,
+      }),
+    );
+    expect(archiveDialog).not.toHaveBeenCalled();
+    expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+      environmentId: target.environmentId,
+      input: {
+        threadId: target.threadId,
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: [],
+        linkedArchiveSelection: linkedArchivePreview,
+        savedWorkspace: { mode: "discard", previewToken: "workspace-preview" },
+      },
+    });
+  });
+
+  it.each(["archive", "restore"] as const)(
+    "retries pending linked %s without replacing reviewed cohorts",
+    async (operation) => {
+      const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
+      archiveFamilyLoad.mockResolvedValue({
+        _tag: "Success",
+        value: {
+          ...archiveDecisionFixture([owner], { ...target, input: { threadId: owner.id } }),
+          linkedArchiveOperation: {
+            operation,
+            sourceArchiveCommandId: CommandId.make("stable-plan"),
+            machines: [
+              {
+                environmentId: EnvironmentId.make("peer"),
+                label: "Build machine",
+                status: "pending",
+                reason: "offline",
+              },
+            ],
+          },
+        },
+      });
+      archiveDialog.mockImplementation(async (request) => {
+        expect(request.recovery.machines[0]).toMatchObject({
+          label: "Build machine",
+          status: "Pending · Offline",
+        });
+        expect(await request.submit("archive_if_idle")).toBeNull();
+        return "archive_if_idle";
+      });
+      await useLastCodeLinkedArchiveRecovery()(target);
+      const input = {
+        threadId: target.threadId,
+        expectedLinkedArchiveCommandId: CommandId.make("stable-plan"),
+      };
+      if (operation === "archive") {
+        expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+          environmentId: target.environmentId,
+          input: { ...input, childDisposition: "archive_if_idle", linkedArchiveSelection: [] },
+        });
+        expect(commands.unarchive).not.toHaveBeenCalled();
+      } else {
+        expect(commands.unarchive).toHaveBeenCalledExactlyOnceWith({
+          environmentId: target.environmentId,
+          input,
+        });
+        expect(commands.archive).not.toHaveBeenCalled();
+      }
     },
   );
 
