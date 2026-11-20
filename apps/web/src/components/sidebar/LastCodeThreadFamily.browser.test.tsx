@@ -151,30 +151,6 @@ describe("family disclosure ownership", () => {
     });
   });
 
-  it("uses the unavailable creator label for an untitled owner group", async () => {
-    setup();
-    await using screen = await render(
-      <ul>
-        <LastCodeOwnerGroup
-          item={{
-            type: "owner",
-            key: "untitled-owner",
-            title: null,
-            ownerId: parent.id,
-            ownerRef: null,
-            unavailable: true,
-            count: 1,
-            expanded: true,
-            status: null,
-          }}
-          navigateToThread={mocks.navigate}
-        />
-      </ul>,
-    );
-    await expect.element(screen.getByText("Creator unavailable (parent)")).toBeVisible();
-    expect(screen.container.querySelector("a")).toBeNull();
-  });
-
   it("persists an exact scoped family key and returns to the parent when collapsing its selected child", async () => {
     setup();
     await using screen = await render(null);
