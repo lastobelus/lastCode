@@ -4,6 +4,7 @@ import type {
   LinkedArchiveSelection,
   PeerArchiveUnavailable,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 
@@ -106,7 +107,7 @@ function buildRecovery(
             ? LINKED_ARCHIVE_RETRY_RESTORE
             : statuses.restored,
       ),
-      new Date(operation.archivedAt).toLocaleString(undefined, {
+      DateTime.formatLocal(DateTime.makeUnsafe(operation.archivedAt), {
         dateStyle: "medium",
         timeStyle: "medium",
       }),
