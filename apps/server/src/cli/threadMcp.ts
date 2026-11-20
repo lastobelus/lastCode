@@ -1017,7 +1017,6 @@ export const threadCapacityCommand = Command.make("capacity", {
             Effect.gen(function* () {
               const capacity = result.capacity ?? {
                 ...unknownCapacitySnapshot(yield* Clock.currentTimeMillis),
-                mode: "unknown",
                 linkedObservation: "unknown",
                 linked: [],
               };

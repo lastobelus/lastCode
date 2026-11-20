@@ -26,7 +26,7 @@ export const layer = Layer.unwrap(
     return Capacity.layer({
       mode: settings.getSettings.pipe(
         Effect.map((current) => current.capacityMode),
-        Effect.orElseSucceed(() => "observe" as const),
+        Effect.orElseSucceed(() => "unknown"),
       ),
       ownerPower: power.snapshot,
       worktreesDir: settings.getSettings.pipe(

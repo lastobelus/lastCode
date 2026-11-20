@@ -1,7 +1,6 @@
 import type {
   CapacityActivity,
   CapacityMeasurements,
-  CapacityMode,
   CapacityReason,
   CapacitySnapshot,
   CapacityVerdict,
@@ -256,7 +255,7 @@ export function evaluateCapacity(
 
 export function unknownCapacitySnapshot(
   now: number,
-  mode: CapacityMode = "observe",
+  mode: CapacitySnapshot["mode"] = "unknown",
 ): CapacitySnapshot {
   return evaluateCapacity(initialCapacityState(), now, mode).snapshot;
 }

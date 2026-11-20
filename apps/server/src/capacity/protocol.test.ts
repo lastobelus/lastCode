@@ -289,15 +289,24 @@ it.effect("keeps a forwarded launch result with newer or malformed capacity", ()
   }),
 );
 
+const linkedGood = { environmentId: "linked-good", label: "Good", capacity: futureCapacity };
+const linkedBad = { environmentId: "linked-bad", label: "Bad" };
+const futureLinkedCapacity = {
+  ...futureEnvironmentCapacity,
+  linkedObservation: "partial",
+  linked: [linkedGood, { ...linkedBad, capacity: { mode: "enforce" } }],
+};
+
 it.effect("keeps a forwarded environment read with newer capacity and preferences", () =>
   Effect.gen(function* () {
     const forwarding = yield* PeerForwarding.PeerForwarding;
     expect(
       yield* forwarding.call(scope, EnvironmentToolkit.tools.t3_environment_read, target, {}),
-    ).toEqual({ ...environmentResult, capacity: futureEnvironmentCapacity });
-  }).pipe(
-    Effect.provide(forwardingWith({ ...environmentResult, capacity: futureEnvironmentCapacity })),
-  ),
+    ).toEqual({
+      ...environmentResult,
+      capacity: { ...futureLinkedCapacity, linked: [linkedGood, linkedBad] },
+    });
+  }).pipe(Effect.provide(forwardingWith({ ...environmentResult, capacity: futureLinkedCapacity }))),
 );
 
 it.effect("prints thread launch and capacity CLI results from a newer server", () =>

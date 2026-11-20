@@ -39,6 +39,13 @@ const power: HostPowerSnapshot = {
 };
 
 describe("Capacity service", () => {
+  it.effect("reports an unknown mode when no sampler is wired", () =>
+    Effect.gen(function* () {
+      const capacity = yield* Capacity.Capacity;
+      expect((yield* capacity.read).mode).toBe("unknown");
+    }),
+  );
+
   it.effect("samples healthy measurements without reads or activity-induced recovery", () => {
     const logs: Array<unknown> = [];
     const logger = Logger.make(({ message }) => logs.push(message));
