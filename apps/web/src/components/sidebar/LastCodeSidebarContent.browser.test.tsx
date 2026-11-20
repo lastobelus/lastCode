@@ -78,6 +78,7 @@ vi.mock("./LastCodeSidebarProject", () => ({
       props.activeThreadKey,
       true,
       props.listExpanded,
+      props.threadIndex,
     );
     return (
       <section data-project={props.project.projectKey}>

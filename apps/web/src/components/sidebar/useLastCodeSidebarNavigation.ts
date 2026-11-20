@@ -17,6 +17,7 @@ export function useLastCodeSidebarNavigation(
     index.byProjectKey,
     route.routeThreadKey,
     expandedLists,
+    index,
   );
   const shortcuts = useLastCodeSidebarShortcuts(keys, index.byThreadKey, route);
   const prewarmKeys = getSidebarThreadIdsToPrewarm(keys);

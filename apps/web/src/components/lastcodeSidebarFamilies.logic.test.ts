@@ -978,3 +978,166 @@ describe("legacy sidebar creator grouping", () => {
     expect(result.orderedThreadKeys).toEqual([lastcodeSidebarThreadKey(parent)]);
   });
 });
+
+describe("sidebar ownership", () => {
+  const ref = (value: ReturnType<typeof thread>) => scopeThreadRef(value.environmentId, value.id);
+  const owner = thread("orchestrator");
+  const owned = (id: string, overrides: ThreadFixtureOverrides = {}) =>
+    thread(id, undefined, {
+      creatorOrigin: {
+        kind: "thread_launch",
+        environmentId: owner.environmentId,
+        threadId: owner.id,
+        owned: true,
+      },
+      ...overrides,
+    });
+  const ownership = {
+    projectKey: "logical-project",
+    byThreadKey: new Map([[lastcodeSidebarThreadKey(owner), owner]]),
+  };
+
+  it("nests local launches and remote tasks under the environment-qualified owner in a logical project", () => {
+    const remoteId = EnvironmentId.make("remote");
+    const local = owned("local");
+    const remote = thread("remote", undefined, {
+      environmentId: remoteId,
+      projectId: ProjectId.make("remote-project"),
+      delegatedFrom: { environmentId: owner.environmentId, threadId: owner.id, title: owner.title },
+    });
+    const unrelated = { ...owner, environmentId: remoteId };
+    const result = project([local, unrelated, remote, owner], { ownership });
+    expect(result.allRows.map((row) => [row.key, row.parentKey])).toEqual([
+      [lastcodeSidebarThreadKey(unrelated), null],
+      [lastcodeSidebarThreadKey(owner), null],
+      [lastcodeSidebarThreadKey(local), lastcodeSidebarThreadKey(owner)],
+      [lastcodeSidebarThreadKey(remote), lastcodeSidebarThreadKey(owner)],
+    ]);
+  });
+
+  it("groups cross-project launches once per owner and keeps the selected thread and its attention reachable", () => {
+    const first = owned("first", { hasPendingApprovals: true });
+    const second = owned("second");
+    const result = project([first, second], { ownership });
+    expect(result.renderedRows).toEqual([]);
+    expect(result.renderedItems).toEqual([
+      expect.objectContaining({
+        type: "owner",
+        title: owner.title,
+        ownerRef: ref(owner),
+        expanded: false,
+        count: 2,
+        status: expect.objectContaining({ label: "Pending Approval" }),
+      }),
+    ]);
+    expect(
+      keys(
+        project([first, second], {
+          ownership,
+          activeThreadKey: lastcodeSidebarThreadKey(second),
+          projectExpanded: false,
+        }),
+      ),
+    ).toEqual(["second"]);
+  });
+
+  it("shows a failed subagent on the collapsed owner group", () => {
+    const failed = thread("failed", owner.id, {
+      latestRun: {
+        runId: RunId.make("failed-run"),
+        status: "failed",
+        requestedAt: null,
+        startedAt: null,
+        completedAt: "2026-01-01T00:01:00Z",
+        assistantMessageId: null,
+      },
+    });
+    expect(project([failed], { ownership }).renderedItems).toMatchObject([
+      { type: "owner", expanded: false, status: { label: "Failed" } },
+    ]);
+  });
+
+  it("keeps a missing owner interpretable and reattaches when its shell appears", () => {
+    const child = owned("child");
+    const missing = project([child], {
+      ownership: { ...ownership, byThreadKey: new Map() },
+    });
+    expect(keys(missing)).toEqual(["child"]);
+    expect(missing.renderedItems[0]).toMatchObject({
+      type: "owner",
+      title: null,
+      ownerId: owner.id,
+      ownerRef: null,
+    });
+    const delegated = thread("delegated", undefined, {
+      environmentId: EnvironmentId.make("remote"),
+      delegatedFrom: { ...ref(owner), title: "Stored orchestrator title" },
+    });
+    const named = project([child, delegated], {
+      ownership: { ...ownership, byThreadKey: new Map() },
+    });
+    expect(named.renderedItems[0]).toMatchObject({
+      type: "owner",
+      title: "Stored orchestrator title",
+      count: 2,
+    });
+    expect(missing.renderedRows[0]?.depth).toBe(1);
+    expect(project([child, owner], { ownership }).allRows[1]?.parentKey).toBe(
+      lastcodeSidebarThreadKey(owner),
+    );
+  });
+
+  it("keeps a visible child in its group when the owner's tag is filtered", () => {
+    const child = owned("child");
+    const filtered = project([child], {
+      ownership: { ...ownership, hiddenThreadKeys: new Set([lastcodeSidebarThreadKey(owner)]) },
+    });
+    expect(keys(filtered)).toEqual(["child"]);
+    expect(filtered.renderedItems[0]).toMatchObject({
+      type: "owner",
+      title: owner.title,
+      ownerRef: null,
+      expanded: true,
+    });
+  });
+
+  it("breaks ownership cycles across environments without making either thread a root", () => {
+    const remoteEnv = EnvironmentId.make("remote");
+    const remote = thread("remote", undefined, {
+      environmentId: remoteEnv,
+      delegatedFrom: { ...ref(owner), title: owner.title },
+    });
+    const local = { ...owner, delegatedFrom: { ...ref(remote), title: remote.title } };
+    const result = project([local, remote], { ownership });
+    expect(result.renderedItems.map((item) => item.type)).toEqual([
+      "owner",
+      "thread",
+      "owner",
+      "thread",
+    ]);
+    expect(result.allRows.map((row) => row.depth)).toEqual([1, 1]);
+    expect(result.renderedRows[0]?.unavailableParentLabel).toContain("invalid lineage");
+  });
+
+  it("keeps explicit placements and historical roots, and names historical creators", () => {
+    const target = thread("group", undefined, { groupThread: true });
+    const placed = owned("placed", { groupedUnderThreadId: target.id });
+    const historical = thread("historical", undefined, {
+      creatorOrigin: { kind: "thread_launch", ...ref(owner) },
+    });
+    expect(
+      project([owner, placed, target, historical], { ownership }).allRows.map((row) => [
+        row.thread.id,
+        row.parentKey,
+      ]),
+    ).toEqual([
+      [owner.id, null],
+      [target.id, null],
+      [placed.id, lastcodeSidebarThreadKey(target)],
+      [historical.id, null],
+    ]);
+    expect(lastcodeSidebarCreatorDetails(historical, owner).description).toBe(
+      "Creator: orchestrator",
+    );
+  });
+});

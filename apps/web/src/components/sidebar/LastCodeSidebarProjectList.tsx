@@ -40,6 +40,7 @@ function SortableProjectItem({
 }
 interface Props {
   projects: readonly SidebarProjectSnapshot[];
+  threadIndex?: ComponentProps<typeof LastCodeSidebarProject>["threadIndex"];
   orderedProjectKeys: readonly string[];
   activeRoute: { projectKey: string | null; threadKey: string | null };
   expandedLists: ReadonlySet<string>;
@@ -67,6 +68,7 @@ export function LastCodeSidebarProjectList(props: Props) {
   ) => (
     <LastCodeSidebarProject
       project={project}
+      threadIndex={props.threadIndex}
       dragHandle={dragHandle}
       gestures={gestures}
       activeThreadKey={activeRoute.projectKey === project.projectKey ? activeRoute.threadKey : null}

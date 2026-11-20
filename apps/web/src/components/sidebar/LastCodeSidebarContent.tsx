@@ -87,6 +87,7 @@ export function LastCodeSidebarContent() {
             <LastCodeSidebarProjectToolbar />
             <LastCodeSidebarProjectList
               projects={sortedProjects}
+              threadIndex={index}
               orderedProjectKeys={orderedProjectKeys}
               activeRoute={activeRoute}
               expandedLists={expandedLists}

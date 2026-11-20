@@ -18,9 +18,11 @@ import { useLastCodeThreadNavigation } from "./useLastCodeThreadNavigation";
 import { useLastCodeProjectMenus } from "./useLastCodeProjectMenus";
 import { createLastCodeThreadRowRenderer } from "./LastCodeThreadRow";
 import { LastCodeProjectNewThread } from "./LastCodeProjectNewThread";
+import type { indexLastCodeSidebarThreads } from "./lastcodeSidebarProjects";
 import { LastCodeThreadList } from "./LastCodeThreadList";
 interface Props {
   project: SidebarProjectSnapshot;
+  threadIndex?: ReturnType<typeof indexLastCodeSidebarThreads> | undefined;
   activeThreadKey: string | null;
   listExpanded: boolean;
   onListExpandedChange: (projectKey: string, expanded: boolean) => void;
@@ -45,7 +47,13 @@ export function LastCodeSidebarProject(props: Props) {
     familyProjection,
     olderSettled,
     latestThreadTimestamp,
-  } = useLastCodeProjectThreads(project, activeThreadKey, expanded, listExpanded);
+  } = useLastCodeProjectThreads(
+    project,
+    activeThreadKey,
+    expanded,
+    listExpanded,
+    props.threadIndex,
+  );
   const editing = useLastCodeThreadEditing();
   const annotations = useLastCodeThreadAnnotations();
   const navigation = useLastCodeThreadNavigation(familyProjection.orderedThreadKeys);

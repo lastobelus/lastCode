@@ -65,7 +65,7 @@ export function parseLastCodeHandoffAction(action: string | null) {
 interface ThreadMenuInput {
   thread: Pick<SidebarThreadSummary, "branch" | "persistent" | "archivePending">;
   parentThreadId: ThreadId | null;
-  creator: { groupingEligible: boolean; canOpen: boolean };
+  creator: { groupingEligible: boolean; canOpen: boolean; description?: string | null };
   ownership?: ThreadOwnershipAvailability;
   canAnnotate: boolean;
   hasActiveAnnotation: boolean;
@@ -126,8 +126,12 @@ function metadataItems(input: ThreadMenuInput): ContextMenuItem<string>[] {
       label: grouped ? m(msg("Move to top level")) : m(msg("Group with creator thread")),
     });
   }
-  if (input.creator.canOpen)
-    items.push({ id: "open-creator", label: m(msg("Open creator thread")) });
+  if (input.creator.canOpen || input.creator.description)
+    items.push({
+      id: "open-creator",
+      label: input.creator.description ?? m(msg("Open creator thread")),
+      disabled: !input.creator.canOpen,
+    });
   return items;
 }
 

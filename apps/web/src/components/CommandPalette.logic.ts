@@ -450,6 +450,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
     environmentLabelOf?: (thread: TThread) => string | null;
     /** Tasks linked environments run for a listed thread; they open from under that thread. */
     delegatedUnderParent?: ReadonlySet<string>;
+    isThreadListed?: (thread: TThread) => boolean;
   },
   resolve: MessageResolver = m,
 ): CommandPaletteActionItem[] {
@@ -458,11 +459,12 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   const visibleThreads = input.threads.filter(
     (thread) =>
       thread.archivedAt === null &&
-      !isShownUnderParent(
-        { environmentId: thread.environmentId, threadId: thread.id },
-        thread.lineage,
-        delegatedUnderParent,
-      ),
+      (input.isThreadListed?.(thread) ??
+        !isShownUnderParent(
+          { environmentId: thread.environmentId, threadId: thread.id },
+          thread.lineage,
+          delegatedUnderParent,
+        )),
   );
 
   return visibleThreads.map((thread) => {

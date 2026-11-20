@@ -10,7 +10,15 @@ import {
   projectLastCodeSidebarFamilies,
 } from "../lastcodeSidebarFamilies.logic";
 import { useLastCodeSidebarFamiliesStore } from "../lastcodeSidebarFamilies.store";
-import { LastCodeThreadFamilyDisclosure, LastCodeSubagentGroup } from "./LastCodeThreadFamily";
+import {
+  LastCodeOwnerGroup,
+  LastCodeThreadFamilyDisclosure,
+  LastCodeSubagentGroup,
+} from "./LastCodeThreadFamily";
+import { useRouter } from "@tanstack/react-router";
+import { useThreadSelectionStore } from "../../threadSelectionStore";
+import { SidebarProvider } from "../ui/sidebar";
+import { useLastCodeNavigateToThread } from "./useLastCodeThreadNavigation";
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(async () => {}),
   row: vi.fn(),
@@ -97,7 +105,52 @@ async function disclosure(
   );
   return screen.container.querySelector("button")!;
 }
+function OwnerGroupNavigationFixture() {
+  const navigateToThread = useLastCodeNavigateToThread(useRouter());
+  return (
+    <ul>
+      <LastCodeOwnerGroup
+        item={{
+          type: "owner",
+          key: "owner-group",
+          title: parent.title,
+          ownerId: parent.id,
+          ownerRef: scopeThreadRef(parent.environmentId, parent.id),
+          unavailable: false,
+          count: 1,
+          expanded: false,
+          status: null,
+        }}
+        navigateToThread={navigateToThread}
+      />
+    </ul>
+  );
+}
+
 describe("family disclosure ownership", () => {
+  it("clears the previous selection and anchors it on the owner when opening the group's link", async () => {
+    setup();
+    const selection = useThreadSelectionStore.getState();
+    using _restoreSelection = {
+      [Symbol.dispose]() {
+        useThreadSelectionStore.setState(selection);
+      },
+    };
+    selection.toggleThread(lastcodeSidebarThreadKey(child));
+    await using screen = await render(
+      <SidebarProvider>
+        <OwnerGroupNavigationFixture />
+      </SidebarProvider>,
+    );
+    const link = screen.container.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe("/first/parent");
+    await act(() => link.click());
+    expect(useThreadSelectionStore.getState()).toMatchObject({
+      selectedThreadKeys: new Set(),
+      anchorThreadKey: lastcodeSidebarThreadKey(parent),
+    });
+  });
+
   it("persists an exact scoped family key and returns to the parent when collapsing its selected child", async () => {
     setup();
     await using screen = await render(null);
