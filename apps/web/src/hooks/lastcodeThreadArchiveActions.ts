@@ -23,6 +23,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
+import { matchesTemporaryProjectSelection } from "@t3tools/contracts";
 import type {
   CommandId,
   EnvironmentAuthorizationError,
@@ -594,13 +595,15 @@ export function createLastCodeThreadArchiveActions(ports: {
               ...family.childThreadIds,
             ];
             const confirmedTypedIn = new Set(selection.includeTypedInThreadIds);
-            const confirmedProjects = new Set(selection.expectedTemporaryProjectIds);
             if (
               !freshOwner ||
               freshIds.length !== remaining.size ||
               freshIds.some((id) => !remaining.has(id)) ||
               freshSelection.includeTypedInThreadIds?.some((id) => !confirmedTypedIn.has(id)) ||
-              freshSelection.expectedTemporaryProjectIds?.some((id) => !confirmedProjects.has(id))
+              !matchesTemporaryProjectSelection(
+                freshSelection.expectedTemporaryProjects ?? [],
+                selection.expectedTemporaryProjects ?? [],
+              )
             ) {
               return AsyncResult.failure(
                 Cause.fail(
@@ -617,8 +620,8 @@ export function createLastCodeThreadArchiveActions(ports: {
               ...(selection.expectedArchiveThreadIds !== undefined
                 ? { expectedArchiveThreadIds: [...remaining] }
                 : {}),
-              ...(selection.expectedTemporaryProjectIds !== undefined
-                ? { expectedTemporaryProjectIds: freshSelection.expectedTemporaryProjectIds ?? [] }
+              ...(selection.expectedTemporaryProjects !== undefined
+                ? { expectedTemporaryProjects: freshSelection.expectedTemporaryProjects ?? [] }
                 : {}),
             };
           }

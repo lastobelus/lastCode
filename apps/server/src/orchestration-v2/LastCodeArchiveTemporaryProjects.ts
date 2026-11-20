@@ -1,6 +1,7 @@
 import {
   ProjectId,
   type OrchestrationV2ThreadShell,
+  type CommandId,
   type ThreadId,
   type ThreadOwner,
 } from "@t3tools/contracts";
@@ -14,7 +15,7 @@ import type { ProjectionStoreV2Shape } from "./ProjectionStore.ts";
 
 export class ArchiveTemporaryProjects extends Context.Service<
   ArchiveTemporaryProjects,
-  Pick<ProjectService["Service"], "listTemporaryOwnedBy" | "delete">
+  Pick<ProjectService["Service"], "listTemporaryOwnedBy" | "delete" | "getById">
 >()("t3/orchestration-v2/LastCodeArchiveTemporaryProjects/ArchiveTemporaryProjects") {}
 
 export class WrappedProjectChanged extends Schema.TaggedError<WrappedProjectChanged>()(
@@ -28,6 +29,7 @@ export class WrappedProjectChanged extends Schema.TaggedError<WrappedProjectChan
 
 export interface WrappedProjectDeletion {
   readonly owner: ThreadOwner;
+  readonly requestId: CommandId;
   readonly expectedArchivedThreadIds: readonly ThreadId[];
   readonly allowedOwnerThreadIds: readonly ThreadId[];
 }
@@ -112,13 +114,18 @@ export function selectTemporaryProjects(
 }
 
 /** Recheck under the existing project and thread persistence locks before force-deleting history. */
-export function canRemoveWrappedProject(
+export const guardWrappedProjectRemoval = Effect.fnUntraced(function* (
+  projections: Pick<ProjectionStoreV2Shape, "getThreadShell">,
+  projectId: ProjectId,
   threads: readonly OrchestrationV2ThreadShell[],
-  { owner, expectedArchivedThreadIds, allowedOwnerThreadIds }: WrappedProjectDeletion,
+  { owner, requestId, expectedArchivedThreadIds, allowedOwnerThreadIds }: WrappedProjectDeletion,
 ) {
+  const root = yield* projections.getThreadShell(owner.threadId);
+  if (root === null || root.archivedAt === null || root.archivedWith?.commandId !== requestId)
+    return yield* new WrappedProjectChanged({ projectId });
   const confirmed = new Set(expectedArchivedThreadIds);
   const allowed = new Set(allowedOwnerThreadIds);
-  return threads.every(
+  const eligible = threads.every(
     (thread) =>
       thread.archivedAt !== null &&
       confirmed.has(thread.id) &&
@@ -126,4 +133,5 @@ export function canRemoveWrappedProject(
       thread.persistent !== true &&
       thread.archivePending == null,
   );
-}
+  if (!eligible) return yield* new WrappedProjectChanged({ projectId });
+});

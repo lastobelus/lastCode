@@ -100,8 +100,18 @@ it("shows temporary projects that match the current archive choice before submit
           typedInThreadIds: [child.id],
           threads: [{ threadId: child.id, title: child.title, projectId: child.projectId }],
           temporaryProjects: [
-            { projectId: ProjectId.make("scratch"), title: "Scratch", requiresTypedIn: false },
-            { projectId: ProjectId.make("opt-in"), title: "Opt-in project", requiresTypedIn: true },
+            {
+              projectId: ProjectId.make("scratch"),
+              title: "Scratch",
+              threadIds: [],
+              requiresTypedIn: false,
+            },
+            {
+              projectId: ProjectId.make("opt-in"),
+              title: "Opt-in project",
+              threadIds: [],
+              requiresTypedIn: true,
+            },
           ],
         },
       },

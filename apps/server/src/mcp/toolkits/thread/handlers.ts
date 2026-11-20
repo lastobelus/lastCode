@@ -494,9 +494,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.expectedArchiveThreadIds === undefined
               ? {}
               : { expectedArchiveThreadIds: input.expectedArchiveThreadIds }),
-            ...(input.expectedTemporaryProjectIds === undefined
+            ...(input.expectedTemporaryProjects === undefined
               ? {}
-              : { expectedTemporaryProjectIds: input.expectedTemporaryProjectIds }),
+              : { expectedTemporaryProjects: input.expectedTemporaryProjects }),
             ...(input.includeTypedInThreadIds === undefined
               ? {}
               : { includeTypedInThreadIds: input.includeTypedInThreadIds }),

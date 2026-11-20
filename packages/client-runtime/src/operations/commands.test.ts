@@ -268,7 +268,9 @@ describe("V2 environment commands", () => {
         threadId: ThreadId.make("parent"),
         childDisposition: "archive_after_review",
         expectedChildThreadIds: [ThreadId.make("child")],
-        expectedTemporaryProjectIds: [ProjectId.make("scratch")],
+        expectedTemporaryProjects: [
+          { projectId: ProjectId.make("scratch"), threadIds: [ThreadId.make("child")] },
+        ],
         expectedArchiveCommandId: CommandId.make("failed-attempt"),
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
       expect(commands).toEqual([
@@ -278,7 +280,7 @@ describe("V2 environment commands", () => {
           threadId: "parent",
           childDisposition: "archive_after_review",
           expectedChildThreadIds: ["child"],
-          expectedTemporaryProjectIds: ["scratch"],
+          expectedTemporaryProjects: [{ projectId: "scratch", threadIds: ["child"] }],
           expectedArchiveCommandId: "failed-attempt",
         },
       ]);

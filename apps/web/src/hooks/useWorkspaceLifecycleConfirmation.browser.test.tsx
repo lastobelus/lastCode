@@ -206,10 +206,16 @@ it.each([false, true])(
               })),
               typedInThreadIds: [child.id],
               temporaryProjects: [
-                { projectId: ProjectId.make("scratch"), title: "Scratch", requiresTypedIn: false },
+                {
+                  projectId: ProjectId.make("scratch"),
+                  title: "Scratch",
+                  threadIds: [],
+                  requiresTypedIn: false,
+                },
                 {
                   projectId: ProjectId.make("opt-in"),
                   title: "Opt-in project",
+                  threadIds: [],
                   requiresTypedIn: true,
                 },
               ],

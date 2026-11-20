@@ -49,7 +49,7 @@ import {
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import {
-  canRemoveWrappedProject,
+  guardWrappedProjectRemoval,
   WrappedProjectChanged,
   type WrappedProjectDeletion,
 } from "../orchestration-v2/LastCodeArchiveTemporaryProjects.ts";
@@ -787,11 +787,19 @@ export const make = Effect.gen(function* () {
     const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads].sort(
       (a, b) => DateTime.toEpochMillis(b.createdAt) - DateTime.toEpochMillis(a.createdAt),
     );
-    if (
-      input.wrappedProject !== undefined &&
-      !canRemoveWrappedProject(projectThreads, input.wrappedProject)
-    )
-      return yield* new WrappedProjectChanged({ projectId });
+    if (input.wrappedProject !== undefined)
+      yield* guardWrappedProjectRemoval(
+        threadProjections,
+        projectId,
+        projectThreads,
+        input.wrappedProject,
+      ).pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "WrappedProjectChanged"
+            ? cause
+            : new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+        ),
+      );
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }

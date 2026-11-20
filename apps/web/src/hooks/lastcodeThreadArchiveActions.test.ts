@@ -1125,6 +1125,7 @@ describe("bulk archive progress", () => {
     const scratch = {
       projectId: ProjectId.make("scratch"),
       title: "Scratch",
+      threadIds: [child.id],
       requiresTypedIn: false,
     };
     const keptScratch = { ...scratch, projectId: ProjectId.make("another-scratch") };
@@ -1206,8 +1207,10 @@ describe("bulk archive progress", () => {
         owner.id,
       ]);
     if (projectChange === "fewer" || projectChange === "gone")
-      expect(commands.archive.mock.lastCall?.[0].input.expectedTemporaryProjectIds).toEqual(
-        projectChange === "fewer" ? [keptScratch.projectId] : [],
+      expect(commands.archive.mock.lastCall?.[0].input.expectedTemporaryProjects).toEqual(
+        projectChange === "fewer"
+          ? [{ projectId: keptScratch.projectId, threadIds: keptScratch.threadIds }]
+          : [],
       );
     expect(archived.has(newMember.id)).toBe(false);
   });

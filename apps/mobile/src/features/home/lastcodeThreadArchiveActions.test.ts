@@ -134,8 +134,13 @@ it("keeps typed-in branches open and confirms only default projects", async () =
         environmentId: test.owner.environmentId,
         typedInThreadIds: [test.child.id],
         temporaryProjects: [
-          { projectId: scratch, title: "Scratch", requiresTypedIn: false },
-          { projectId: ProjectId.make("opt-in"), title: "Opt-in project", requiresTypedIn: true },
+          { projectId: scratch, title: "Scratch", threadIds: [], requiresTypedIn: false },
+          {
+            projectId: ProjectId.make("opt-in"),
+            title: "Opt-in project",
+            threadIds: [],
+            requiresTypedIn: true,
+          },
         ],
         threads: [test.owner, test.child].map(({ id, projectId, title }) => ({
           threadId: id,
@@ -161,7 +166,7 @@ it("keeps typed-in branches open and confirms only default projects", async () =
     input: {
       expectedArchiveThreadIds: [test.owner.id],
       expectedChildThreadIds: [test.child.id],
-      expectedTemporaryProjectIds: [scratch],
+      expectedTemporaryProjects: [{ projectId: scratch, threadIds: [] }],
       childDisposition: "archive_after_review",
     },
   });

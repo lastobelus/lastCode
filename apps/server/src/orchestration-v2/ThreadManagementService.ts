@@ -898,7 +898,6 @@ const make = Effect.gen(function* () {
     yield* assertDispatchTargetEnabled(command);
     const result = yield* orchestrator.dispatch(command, options);
     if (command.type !== "thread.archive") return result;
-    yield* archiveRunner.awaitTemporaryProjectRemoval(command);
     const pending = result.storedEvents.some(
       (stored) =>
         stored.event.threadId === command.threadId &&
@@ -951,7 +950,7 @@ const make = Effect.gen(function* () {
     };
   });
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = Effect.fn(
+  const dispatchWithWorkspaceLifecycle: ThreadManagementServiceShape["dispatch"] = Effect.fn(
     "ThreadManagementService.workspaceLifecycle",
   )(function* (command, options) {
     if (command.type !== "thread.archive" && command.type !== "thread.delete") {
@@ -996,6 +995,15 @@ const make = Effect.gen(function* () {
         ),
       );
   });
+
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command, options) =>
+    dispatchWithWorkspaceLifecycle(command, options).pipe(
+      Effect.tap(() =>
+        command.type === "thread.archive"
+          ? archiveRunner.awaitTemporaryProjectRemoval(command)
+          : Effect.void,
+      ),
+    );
 
   const deleteMany: ThreadManagementServiceShape["deleteMany"] = Effect.fn(
     "ThreadManagementService.deleteMany",

@@ -7,6 +7,7 @@ import {
   isOwnedSubagentThread,
   type EnvironmentId,
   type ProjectId,
+  matchesTemporaryProjectSelection,
   type ThreadArchiveTemporaryProjectPlan,
   type OrchestrationV2AppThread,
   type OrchestrationV2Command,
@@ -407,9 +408,10 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         previewProjects(family.keptThreadIds).map(({ projectId }) => projectId),
       );
       const temporaryProjects = previewProjects(family.keptWithTypedInThreadIds).map(
-        ({ projectId, title }) => ({
+        ({ projectId, title, threadIds }) => ({
           projectId,
           title,
+          threadIds,
           requiresTypedIn: !defaultProjects.has(projectId),
         }),
       );
@@ -866,46 +868,38 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       return yield* reject(
         "Review the archive preview again. Pass expectedArchiveThreadIds excluding keptThreadIds. To include threads the user wrote in, confirm typedInThreadIds and exclude keptWithTypedInThreadIds instead.",
       );
+    const expectedProjects = command.expectedTemporaryProjects ?? [];
     const projectOwner = archivedRepair ? undefined : temporaryProjectOwner(root.id);
-    const projectThreads =
-      projectOwner === undefined
-        ? []
-        : yield* readTemporaryProjects(root.id).pipe(mapDispatchError(command));
-    const projectArchiveOwners =
-      projectOwner === undefined || projectThreads.length === 0
-        ? new Set<ThreadId>()
-        : temporaryProjectArchiveOwners(shells, projectOwner, archiveIdSet);
-    const temporaryProjects = selectTemporaryProjects(
-      projectThreads,
-      projectOwner,
-      archiveIdSet,
-      projectArchiveOwners,
-    );
-    const expectedProjects = command.expectedTemporaryProjectIds;
-    if (
-      (expectedProjects !== undefined || temporaryProjects.length > 0) &&
-      (!sameThreadIds(
-        expectedProjects ?? [],
-        temporaryProjects.map(({ projectId }) => projectId),
-      ) ||
-        (temporaryProjects.length > 0 && expected === undefined))
-    )
-      return yield* reject(
-        "Review the archive preview again. Pass the confirmed temporary project IDs as expectedTemporaryProjectIds.",
-      );
     const modeLimit = yield* DispatchModeLimit;
-    const temporaryProjectPlan: ThreadArchiveTemporaryProjectPlan | undefined =
-      projectOwner === undefined || temporaryProjects.length === 0
-        ? undefined
-        : {
-            owner: projectOwner,
-            allowedOwnerThreadIds: [...projectArchiveOwners],
-            projects: temporaryProjects.map(({ projectId, threadIds }) => ({
-              projectId,
-              threadIds,
-            })),
-            modeLimit,
-          };
+    let temporaryProjectPlan: ThreadArchiveTemporaryProjectPlan | undefined;
+    if (expectedProjects.length > 0) {
+      if (projectOwner === undefined || expected === undefined)
+        return yield* reject(
+          "Review the archive preview before confirming temporary project removal.",
+        );
+      const projectThreads = yield* readTemporaryProjects(root.id).pipe(mapDispatchError(command));
+      const projectArchiveOwners = temporaryProjectArchiveOwners(
+        shells,
+        projectOwner,
+        archiveIdSet,
+      );
+      const eligible = selectTemporaryProjects(
+        projectThreads,
+        projectOwner,
+        archiveIdSet,
+        projectArchiveOwners,
+      );
+      if (!matchesTemporaryProjectSelection(expectedProjects, eligible))
+        return yield* reject(
+          "The temporary projects or their thread history changed. Review the archive preview again.",
+        );
+      temporaryProjectPlan = {
+        owner: projectOwner,
+        allowedOwnerThreadIds: [...projectArchiveOwners],
+        projects: expectedProjects,
+        modeLimit,
+      };
+    }
     if (
       family.children.length > 0 &&
       (command.childDisposition === undefined || command.expectedChildThreadIds === undefined)

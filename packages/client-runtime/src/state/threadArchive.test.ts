@@ -66,11 +66,13 @@ describe("archive confirmation", () => {
     const scratch = {
       projectId: ProjectId.make("scratch"),
       title: "Scratch",
+      threadIds: [base.id],
       requiresTypedIn: false,
     };
     const typedIn = {
       projectId: ProjectId.make("typed-in"),
       title: "Typed in",
+      threadIds: [child.id],
       requiresTypedIn: true,
     };
     const archivePreview = {
@@ -93,12 +95,12 @@ describe("archive confirmation", () => {
       })),
     };
     const selection = { archivePreview, keptThreadIds: [child.id] };
-    expect(archivePreviewSelection(selection).expectedTemporaryProjectIds).toEqual([
-      scratch.projectId,
+    expect(archivePreviewSelection(selection).expectedTemporaryProjects).toEqual([
+      { projectId: scratch.projectId, threadIds: scratch.threadIds },
     ]);
-    expect(archivePreviewSelection(selection, true).expectedTemporaryProjectIds).toEqual([
-      scratch.projectId,
-      typedIn.projectId,
+    expect(archivePreviewSelection(selection, true).expectedTemporaryProjects).toEqual([
+      { projectId: scratch.projectId, threadIds: scratch.threadIds },
+      { projectId: typedIn.projectId, threadIds: typedIn.threadIds },
     ]);
     const defaultConfirmation = buildThreadArchiveConfirmation(bulk);
     expect(defaultConfirmation.description).not.toContain(

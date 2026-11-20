@@ -54,10 +54,34 @@ export const ThreadArchivePending = Schema.Union([
   ThreadArchiveParticipant,
 ]);
 
+export const ThreadArchiveTemporaryProjectSelection = Schema.Struct({
+  projectId: ProjectId,
+  threadIds: Schema.Array(ThreadId),
+});
+export type ThreadArchiveTemporaryProjectSelection =
+  typeof ThreadArchiveTemporaryProjectSelection.Type;
+
+export function matchesTemporaryProjectSelection(
+  confirmed: readonly ThreadArchiveTemporaryProjectSelection[],
+  eligible: readonly ThreadArchiveTemporaryProjectSelection[],
+) {
+  const byId = new Map(eligible.map((project) => [project.projectId, new Set(project.threadIds)]));
+  return (
+    new Set(confirmed.map(({ projectId }) => projectId)).size === confirmed.length &&
+    confirmed.every(({ projectId, threadIds }) => {
+      const expected = byId.get(projectId);
+      const actual = new Set(threadIds);
+      return (
+        expected?.size === threadIds.length &&
+        actual.size === threadIds.length &&
+        threadIds.every((id) => expected.has(id))
+      );
+    })
+  );
+}
+
 export const ThreadArchiveTemporaryProjectPlan = Schema.Struct({
-  projects: Schema.Array(
-    Schema.Struct({ projectId: ProjectId, threadIds: Schema.Array(ThreadId) }),
-  ),
+  projects: Schema.Array(ThreadArchiveTemporaryProjectSelection),
   owner: Schema.Struct({ threadId: ThreadId, environmentId: EnvironmentId }),
   allowedOwnerThreadIds: Schema.Array(ThreadId),
   modeLimit: ThreadArchiveOperation.fields.modeLimit,
@@ -71,7 +95,7 @@ export const ThreadArchivePreview = Schema.Struct({
   temporaryProjects: Schema.optional(
     Schema.Array(
       Schema.Struct({
-        projectId: ProjectId,
+        ...ThreadArchiveTemporaryProjectSelection.fields,
         title: Schema.String,
         requiresTypedIn: Schema.Boolean,
       }),

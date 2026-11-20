@@ -74,13 +74,16 @@ export const layer = Layer.effect(
               force: true,
               wrappedProject: {
                 owner: plan.owner,
+                requestId: input.requestId,
                 allowedOwnerThreadIds: plan.allowedOwnerThreadIds,
                 expectedArchivedThreadIds: threadIds,
               },
             })
             .pipe(
               Effect.provideService(DispatchModeLimit, plan.modeLimit),
-              Effect.catchTag("WrappedProjectChanged", (cause) => Effect.logInfo(cause.message)),
+              Effect.catchTags({
+                WrappedProjectChanged: (cause) => Effect.logInfo(cause.message),
+              }),
               Effect.mapError(dispatchError),
             ),
         { discard: true },
@@ -89,7 +92,7 @@ export const layer = Layer.effect(
     return LastCodeArchiveRunner.of({
       awaitTemporaryProjectRemoval: Effect.fn("LastCodeArchiveRunner.awaitTemporaryProjectRemoval")(
         function* (command) {
-          if (!command.expectedTemporaryProjectIds?.length) return;
+          if (!command.expectedTemporaryProjects?.length) return;
           const fail = (cause: unknown) =>
             new Orchestrator.OrchestratorDispatchError({
               commandId: command.commandId,
@@ -100,10 +103,23 @@ export const layer = Layer.effect(
             return yield* fail("Temporary project removal could not be observed.");
           const effectId = `effect:${command.commandId}:thread.archive`;
           yield* outbox.value.awaitSettled(effectId).pipe(Effect.mapError(fail));
+          if (Option.isNone(projects))
+            return yield* fail("Temporary project removal could not be observed.");
+          const remainingProjects = yield* Effect.forEach(
+            command.expectedTemporaryProjects,
+            ({ projectId }) => projects.value.getById(projectId).pipe(Effect.mapError(fail)),
+          );
+          const kept = remainingProjects.flatMap((project) =>
+            Option.isSome(project) ? [project.value.title] : [],
+          );
+          if (kept.length > 0)
+            return yield* fail(
+              `Archive finished without removing these temporary projects: ${kept.join(", ")}.`,
+            );
           const effect = yield* outbox.value.get(effectId).pipe(Effect.mapError(fail));
           if (Option.isSome(effect) && effect.value.status === "failed")
             return yield* fail(
-              "Threads were archived, but some temporary projects could not be removed. Check the projects before deleting them.",
+              "The temporary projects were removed, but deletion cleanup did not finish.",
             );
         },
       ),
