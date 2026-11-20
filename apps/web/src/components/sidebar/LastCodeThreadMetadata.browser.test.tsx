@@ -1,7 +1,7 @@
-import { act, render } from "../../../test/render";
+import { act, fakeTimers, render } from "../../../test/render";
 
 import { describe, expect, it, vi } from "vite-plus/test";
-import { MessageId } from "@t3tools/contracts";
+import { MessageId, RunId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture } from "../../test-fixtures";
 import { LastCodeThreadMetadata } from "./LastCodeThreadMetadata";
@@ -152,4 +152,44 @@ describe("metadata annotation controls", () => {
       ).toBe(text);
     },
   );
+});
+
+describe("metadata activity time", () => {
+  it.each([
+    ["in the same minute as the prompt", "2026-09-03T00:09:00.000Z"],
+    ["later than the prompt", "2026-09-03T00:01:00.000Z"],
+  ])("ages a run that finished %s", async (_label, promptAt) => {
+    const completedAt = "2026-09-03T00:09:00.000Z";
+    const completedThread = makeThreadFixture({
+      latestUserMessageAt: promptAt,
+      latestRun: {
+        runId: RunId.make("completed-run"),
+        status: "completed",
+        requestedAt: promptAt,
+        startedAt: promptAt,
+        completedAt,
+        assistantMessageId: null,
+      },
+    });
+    await using screen = await render(null);
+    using _timers = fakeTimers({ now: Date.parse("2026-09-03T00:10:00.000Z") });
+    await screen.rerender(
+      <LastCodeThreadMetadata
+        thread={completedThread}
+        jumpLabel={null}
+        highlighted={false}
+        confirming={false}
+        canArchive={false}
+        annotationHandle={createPopoverHandle()}
+        environmentIcon={null}
+      >
+        {null}
+      </LastCodeThreadMetadata>,
+    );
+
+    const row = screen.getByTestId(`thread-metadata-grid-${completedThread.id}`);
+    await expect.element(row.getByText("1m ago", { exact: true })).toBeVisible();
+    await act(() => vi.advanceTimersByTime(60_000));
+    await expect.element(row.getByText("2m ago", { exact: true })).toBeVisible();
+  });
 });
