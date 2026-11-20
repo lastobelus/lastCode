@@ -1,4 +1,8 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 import {
   freeBytesOnSameVolume,
@@ -8,6 +12,7 @@ import {
   parseLinuxSwapUsed,
   parseLinuxTopology,
   parsePhysicalCores,
+  nativeSource,
 } from "./source.ts";
 
 describe("capacity native parsing", () => {
@@ -71,4 +76,24 @@ describe("capacity native parsing", () => {
     expect(freeBytesOnSameVolume(1, { freeBytes: null, device: null })).toBeNull();
     expect(freeBytesOnSameVolume(null, { freeBytes: 40, device: 2 })).toBe(40);
   });
+
+  it.effect("restarts free space when another volume appears under the same path", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "capacity-volume-" });
+      const link = path.join(root, "worktrees");
+      // `/dev` is its own filesystem on macOS and Linux, unlike the temporary directory.
+      yield* fs.symlink("/dev", link);
+      const source = yield* nativeSource(link);
+      const before = yield* source.read;
+      yield* fs.remove(link);
+      yield* fs.symlink(root, link);
+      const swapped = yield* source.read;
+      const after = yield* source.read;
+      expect(before.worktreesFreeBytes).not.toBeNull();
+      expect(swapped.worktreesFreeBytes).toBeNull();
+      expect(after.worktreesFreeBytes).not.toBeNull();
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });
