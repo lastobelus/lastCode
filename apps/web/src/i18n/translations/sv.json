@@ -13283,5 +13283,12 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "4e34aa6fcebd836d": "Befordra",
+  "2f51bba9a3626b55": "Återför till ägaren",
+  "0b4d06773f0cfd2c": "Ägaren finns på en annan dator. Ägarens status där har inte kontrollerats.",
+  "af190199950e20f4": "Det går inte att byta ägare till den här tråden.",
+  "5256993b35562b07": "Kan inte återföra: ägartråden saknas, är arkiverad eller håller på att arkiveras.",
+  "606f561d56d94e2f": "Uppgiften pågår fortfarande för tråden som begärde den. Vänta tills den är klar eller avbryt den och befordra sedan tråden.",
+  "16a49bb79c3f2cdd": "Det gick inte att byta ägare till tråden"
 }

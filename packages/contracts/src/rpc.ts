@@ -2435,6 +2435,15 @@ const WsOrchestrationV2GetThreadArchiveFamilyRpc = Rpc.make(
   },
 );
 
+const WsOrchestrationV2GetThreadOwnershipAvailabilityRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.getThreadOwnershipAvailability,
+  {
+    payload: OrchestrationV2RpcSchemas.getThreadOwnershipAvailability.input,
+    success: OrchestrationV2RpcSchemas.getThreadOwnershipAvailability.output,
+    error: Schema.Union([OrchestrationV2GetThreadProjectionError, EnvironmentAuthorizationError]),
+  },
+);
+
 const WsOrchestrationV2GetWorkflowScriptRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getWorkflowScript,
   {
@@ -2925,6 +2934,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetOlderSettledThreadsRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2GetThreadArchiveFamilyRpc,
+  WsOrchestrationV2GetThreadOwnershipAvailabilityRpc,
   WsOrchestrationV2LaunchThreadRpc,
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,

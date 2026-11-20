@@ -13276,5 +13276,12 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "4e34aa6fcebd836d": "Hochstufen",
+  "2f51bba9a3626b55": "An Besitzer zurückgeben",
+  "0b4d06773f0cfd2c": "Der Besitzer befindet sich auf einem anderen Rechner. Sein Status dort wurde nicht geprüft.",
+  "af190199950e20f4": "Der Besitzer dieses Threads kann nicht geändert werden.",
+  "5256993b35562b07": "Rückgabe nicht möglich: Der Besitzer-Thread fehlt, ist archiviert oder wird gerade archiviert.",
+  "606f561d56d94e2f": "Die Aufgabe läuft noch für den Thread, der sie angefordert hat. Warte, bis sie fertig ist, oder brich sie ab. Stufe den Thread dann hoch.",
+  "16a49bb79c3f2cdd": "Thread-Besitzer konnte nicht geändert werden"
 }

@@ -13271,5 +13271,12 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "4e34aa6fcebd836d": "Promover",
+  "2f51bba9a3626b55": "Devolver al propietario",
+  "0b4d06773f0cfd2c": "El propietario está en otro equipo. No se comprobó su estado allí.",
+  "af190199950e20f4": "No se puede cambiar el propietario de este hilo.",
+  "5256993b35562b07": "No se puede devolver: el hilo propietario no existe, está archivado o se está archivando.",
+  "606f561d56d94e2f": "La tarea sigue trabajando para el hilo que la solicitó. Espera a que termine o cancélala y luego promueve el hilo.",
+  "16a49bb79c3f2cdd": "No se pudo cambiar el propietario del hilo"
 }

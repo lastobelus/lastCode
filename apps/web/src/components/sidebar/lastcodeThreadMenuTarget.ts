@@ -1,4 +1,7 @@
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  type ThreadOwnershipAvailability,
+} from "@t3tools/contracts";
 import {
   scopedProjectKey,
   scopeProjectRef,
@@ -58,6 +61,7 @@ export function readLastCodeThreadMenuTarget(
   projectTarget: ReturnType<typeof readLastCodeThreadMenuProject>,
   handoffsLimit: number,
   hasStoppableProcesses: boolean,
+  ownership: ThreadOwnershipAvailability = null,
 ) {
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const { projectSettingsKey, workspacePath } = projectTarget;
@@ -78,6 +82,7 @@ export function readLastCodeThreadMenuTarget(
     thread,
     parentThreadId,
     creator,
+    ownership,
     canAnnotate:
       readEnvironmentSupportsThreadAnnotations(thread.environmentId) &&
       thread.latestUserMessageAt !== null,

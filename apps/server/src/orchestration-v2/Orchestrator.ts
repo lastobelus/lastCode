@@ -1,4 +1,5 @@
 import { makeLastCodeArchivePlanner } from "./LastCodeArchivePlanner.ts";
+import { makeLastCodeThreadPromotion } from "./LastCodeThreadPromotion.ts";
 import { planGroupThreadUse } from "./planGroupThreadUse.ts";
 import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import {
@@ -626,6 +627,9 @@ export interface OrchestratorV2Shape {
   readonly getThreadProjection: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadProjection, OrchestratorV2Error>;
+  readonly getThreadOwnershipAvailability: (
+    threadId: ThreadId,
+  ) => Effect.Effect<import("@t3tools/contracts").ThreadOwnershipAvailability, OrchestratorV2Error>;
   readonly getCheckpointContext: (
     threadId: ThreadId,
   ) => Effect.Effect<ProjectionCheckpointContext, OrchestratorV2Error>;
@@ -889,6 +893,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.preparation.finish":
     case "thread.worktree-suspension.transition":
     case "thread.metadata.update":
+    case "thread.ownership.change":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
@@ -1881,6 +1886,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const actionEnvironmentIdentity = yield* Effect.serviceOption(
     ServerEnvironment.ServerEnvironmentIdentity,
+  );
+  const promotion = makeLastCodeThreadPromotion(
+    projectionStore,
+    Option.match(actionEnvironmentIdentity, {
+      onNone: () => Effect.fail("Environment identity is unavailable."),
+      onSome: (identity) => identity.getEnvironmentId,
+    }),
   );
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -18709,6 +18721,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
         break;
       }
+      case "thread.ownership.change": {
+        const event = yield* promotion
+          .plan(command.threadId, command.action)
+          .pipe(mapDispatchError(command));
+        yield* emit(events, command)(event);
+        break;
+      }
       case "thread.pull-request-watch.checks-reopen":
         yield* dispatchThreadMutation(command, events, effects);
         break;
@@ -20575,6 +20594,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return yield* archivePlanner.dispatchFamily(command, (sideChatIds) =>
           dispatchAccepted(undefined, sideChatIds),
         );
+      if (command.type === "thread.ownership.change")
+        return yield* promotion.participants(command.threadId).pipe(
+          mapDispatchError(command),
+          Effect.flatMap((ids) => withThreadDispatchLocks(ids, dispatchAccepted())),
+        );
       if (
         (command.type === "thread.create" &&
           (command.creatorThreadId !== undefined || command.groupedUnderThreadId != null)) ||
@@ -21896,6 +21920,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .getThreadRecords(threadId, fields, filter)
           .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       },
+    ),
+    getThreadOwnershipAvailability: Effect.fn("OrchestratorV2.getThreadOwnershipAvailability")(
+      (threadId) =>
+        promotion.read(threadId).pipe(
+          Effect.map(({ availability }) => availability),
+          Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+        ),
     ),
     listAppOwnedChildThreadIds: Effect.fn("OrchestratorV2.listAppOwnedChildThreadIds")(
       function (threadId) {

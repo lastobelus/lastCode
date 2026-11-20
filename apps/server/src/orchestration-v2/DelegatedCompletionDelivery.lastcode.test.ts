@@ -503,6 +503,84 @@ const layerFollowups = Layer.merge(layerTest, ProviderContinuationRequests.layer
 );
 
 it.layer(layerFollowups)("delegated background wakes", (it) => {
+  it.effect(
+    "promotes a local delegate after its requester observes the result and can return it",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        const parentThreadId = ThreadId.make("thread:promotion-parent");
+        const projectId = ProjectId.make("project:promotion");
+        const parentRunId = RunId.make("run:promotion-parent");
+        const rootNodeId = NodeId.make("node:promotion-parent");
+        yield* seedParentWithTerminalTask({
+          threadId: parentThreadId,
+          projectId,
+          runId: parentRunId,
+          rootNodeId,
+          taskId: NodeId.make("node:promotion-seed"),
+          deliveryState: "acknowledged",
+          now,
+        });
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId,
+          projectId,
+          parentRunId,
+          rootNodeId,
+          name: "promotion-child",
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: "completed",
+          now,
+        });
+        const command = {
+          type: "thread.ownership.change" as const,
+          commandId: CommandId.make("command:promote-child"),
+          threadId: child.childThreadId,
+          action: "promote" as const,
+        };
+        const before = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
+        yield* orchestrator.recoverDelegatedTasks;
+        const availability = yield* orchestrator.getThreadOwnershipAvailability(
+          child.childThreadId,
+        );
+        assert.strictEqual(availability?.refusal, "in_flight");
+        const refusal = yield* Effect.flip(
+          orchestrator.dispatch({
+            ...command,
+            commandId: CommandId.make("command:promote-child-before-ack"),
+          }),
+        );
+        assert.include(JSON.stringify(refusal), "task_cancel");
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(child.childThreadId)).thread,
+          before,
+        );
+
+        yield* orchestrator.dispatch({
+          type: "delegated_task.completion-delivery.acknowledge",
+          commandId: CommandId.make("command:ack-promoted-child"),
+          parentThreadId,
+          taskId: child.taskId,
+          observedByRunId: parentRunId,
+        });
+        const result = yield* orchestrator.dispatch(command);
+        const promoted = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
+        assert.deepEqual(promoted.lineage, { ...before.lineage, independent: true });
+        assert.isNull(promoted.groupedUnderThreadId);
+        assert.deepEqual(promoted.forkedFrom, before.forkedFrom);
+        assert.strictEqual((yield* orchestrator.dispatch(command)).sequence, result.sequence);
+
+        yield* orchestrator.dispatch({
+          ...command,
+          action: "return_to_owner",
+          commandId: CommandId.make("command:return-child"),
+        });
+        const returned = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
+        assert.deepEqual(returned.lineage, before.lineage);
+        assert.isUndefined(returned.groupedUnderThreadId);
+      }),
+  );
   it.effect.each(["active", "paused", "released", "independent"] as const)(
     "handles a background command's wake after the original result while %s",
     (state) =>

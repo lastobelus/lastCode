@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Struct from "effect/Struct";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
+import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -449,19 +450,34 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection, caller, observedArchiveCommandId } = yield* input.action ===
-        "archive" ||
-      (input.action === "unarchive" && input.expectedArchiveCommandId !== undefined)
-        ? readArchiveThread(input.threadId)
-        : readThread(input.threadId).pipe(
-            Effect.map((context) => ({ ...context, observedArchiveCommandId: undefined })),
-          );
+      const { threads, projection, caller, scope, observedArchiveCommandId } =
+        yield* input.action === "archive" ||
+        (input.action === "unarchive" && input.expectedArchiveCommandId !== undefined)
+          ? readArchiveThread(input.threadId)
+          : readThread(input.threadId).pipe(
+              Effect.map((context) => ({ ...context, observedArchiveCommandId: undefined })),
+            );
       const expectedArchiveCommandId = input.expectedArchiveCommandId ?? observedArchiveCommandId;
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       if (input.action === "settle") {
         return yield* threads
           .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
           .pipe(Effect.mapError(dispatchFailure));
+      }
+      if (input.action === "promote" || input.action === "return_to_owner") {
+        const result = yield* threads
+          .dispatch({ ...common, type: "thread.ownership.change", action: input.action })
+          .pipe(Effect.mapError(dispatchFailure));
+        return {
+          sequence: result.sequence,
+          ...(input.action === "return_to_owner"
+            ? {
+                ownerStateChecked:
+                  getRecordedThreadOwner(projection.thread, scope.environmentId)?.environmentId ===
+                  scope.environmentId,
+              }
+            : {}),
+        };
       }
       let command: OrchestrationV2Command;
       switch (input.action) {

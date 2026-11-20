@@ -12,6 +12,7 @@ export {
   ThreadArchivePending,
 } from "./threadArchive.ts";
 import { ActionResumeState, ActionResumeOwner, ActionResumeObligation } from "./actionResume.ts";
+import { ThreadOwnershipAvailability, ThreadOwnershipChange } from "./lastCodeThreadOwnership.ts";
 import {
   WorktreeSuspensionSummary,
   WorktreeSuspensionTransitionInput,
@@ -3429,6 +3430,7 @@ export const OrchestrationV2ThreadPlacementResult = Schema.Struct({
 export type OrchestrationV2ThreadPlacementResult = typeof OrchestrationV2ThreadPlacementResult.Type;
 
 export const OrchestrationV2Command = Schema.Union([
+  ThreadOwnershipChange,
   Schema.Struct({
     type: Schema.Literal("thread.stop"),
     commandId: CommandId,
@@ -4460,6 +4462,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getWorktreeThreadIds: "orchestration.getWorktreeThreadIds",
   getOlderSettledThreads: "orchestration.getOlderSettledThreads",
   getThreadArchiveFamily: "orchestration.getThreadArchiveFamily",
+  getThreadOwnershipAvailability: "orchestration.getThreadOwnershipAvailability",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getNativeChildWork: "orchestration.getNativeChildWork",
@@ -5221,6 +5224,10 @@ export const OrchestrationV2RpcSchemas = {
   getThreadArchiveFamily: {
     input: Schema.Struct({ threadId: ThreadId }),
     output: OrchestrationV2ThreadArchiveFamily,
+  },
+  getThreadOwnershipAvailability: {
+    input: Schema.Struct({ threadId: ThreadId }),
+    output: ThreadOwnershipAvailability,
   },
   getThreadProjection: {
     input: OrchestrationV2GetThreadProjectionInput,

@@ -1,4 +1,4 @@
-import { CommandId, ThreadId } from "@t3tools/contracts";
+import { CommandId, ThreadId, type ThreadOwnershipAvailability } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   buildLastCodeThreadMenu,
@@ -73,11 +73,36 @@ describe("LastCode thread context menu", () => {
     const grouping = permissions.flatMap((permission) =>
       [true, false].map((grouped) => ({ ...permission, grouped })),
     );
+    const ownershipStates: ThreadOwnershipAvailability[] = [
+      null,
+      { action: "promote", ownerHere: true, refusal: "in_flight" },
+      { action: "return_to_owner", ownerHere: false, refusal: null },
+    ];
     const cases = grouping.flatMap((group) =>
-      [true, false].map((optional) => ({ ...group, optional })),
+      [true, false].flatMap((optional) =>
+        ownershipStates.map((ownership) => ({ ...group, optional, ownership })),
+      ),
     );
-    for (const { canOperate, persistent, grouped, optional } of cases) {
-      const menu = buildLastCodeThreadMenu(menuInput(canOperate, persistent, grouped, optional));
+    for (const { canOperate, persistent, grouped, optional, ownership } of cases) {
+      const menu = buildLastCodeThreadMenu({
+        ...menuInput(canOperate, persistent, grouped, optional),
+        ownership,
+      });
+      if (ownership?.action === "promote") {
+        expect(menu.find((item) => item.id === "promote")).toMatchObject({
+          disabled: true,
+          detail: expect.any(String),
+        });
+        expect(
+          menu.some((item) => item.id === "creator-independent" || item.id === "creator-grouped"),
+        ).toBe(false);
+      }
+      if (ownership?.action === "return_to_owner") {
+        expect(menu.find((item) => item.id === "return-to-owner")).toMatchObject({
+          disabled: !canOperate,
+          detail: expect.any(String),
+        });
+      }
       for (const item of menu) {
         if (item.id.startsWith("handoff:")) continue;
         expect(isLastCodeThreadActionId(item.id), item.id).toBe(true);

@@ -13285,5 +13285,12 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "4e34aa6fcebd836d": "Promote",
+  "2f51bba9a3626b55": "Return to owner",
+  "0b4d06773f0cfd2c": "Owner is on another machine. Its state there wasn't checked.",
+  "af190199950e20f4": "This thread's owner can't be changed.",
+  "5256993b35562b07": "Can't return: the owner thread is missing, archived, or being archived.",
+  "606f561d56d94e2f": "Still working for the thread that asked for it. Wait for it to finish or cancel it, then promote.",
+  "16a49bb79c3f2cdd": "Couldn't change thread owner"
 }

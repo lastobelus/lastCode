@@ -1,4 +1,9 @@
-import { CommandId, type ModelSelection, type ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type ModelSelection,
+  type ThreadId,
+  type ThreadOwnershipAction,
+} from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -589,6 +594,28 @@ export function createThreadEnvironmentAtoms<R, E>(
     },
   };
   return {
+    loadOwnershipAvailability: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:ownership-availability",
+      tag: ORCHESTRATION_V2_WS_METHODS.getThreadOwnershipAvailability,
+      scheduler,
+      concurrency,
+    }),
+    changeOwnership: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:ownership-change",
+      execute: Effect.fnUntraced(function* (input: {
+        threadId: ThreadId;
+        action: ThreadOwnershipAction;
+      }) {
+        const random = yield* SecureRandom.SecureRandom;
+        return yield* request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
+          ...input,
+          type: "thread.ownership.change",
+          commandId: CommandId.make(yield* random.uuidV4()),
+        });
+      }),
+      scheduler,
+      concurrency,
+    }),
     loadArchiveFamily: {
       ...archiveFamily,
       run: async (...[registry, target]: Parameters<typeof archiveFamily.run>) =>

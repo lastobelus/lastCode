@@ -467,6 +467,12 @@ fill the screen; close the full-screen view to return to the parent and inspecto
 Stop on a thread also stops the subagents it delegated to.
 Before archiving the parent, wait for its delegated tasks to finish or cancel them.
 
+To keep an owned thread as a top-level conversation, choose **Promote** from its
+sidebar menu. A launched child can be promoted while it runs. For a delegated
+task, wait for it to finish or cancel it first. Choose **Return to owner** to
+restore its original owner and default placement. If the owner is on another
+machine, the menu tells you its state there wasn't checked.
+
 Archiving a thread also archives its grouped children. Restoring the parent restores
 children archived with it, without restarting stopped work. Deleting the parent
 deletes its subagents too. Restore the parent before restoring children archived with it. Independent
