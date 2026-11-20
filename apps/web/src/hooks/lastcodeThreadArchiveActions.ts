@@ -595,15 +595,15 @@ export function createLastCodeThreadArchiveActions(ports: {
               ...family.childThreadIds,
             ];
             const confirmedTypedIn = new Set(selection.includeTypedInThreadIds);
+            const confirmedProjects = selection.expectedTemporaryProjects ?? [];
+            const freshProjects = freshSelection.expectedTemporaryProjects ?? [];
             if (
               !freshOwner ||
               freshIds.length !== remaining.size ||
               freshIds.some((id) => !remaining.has(id)) ||
               freshSelection.includeTypedInThreadIds?.some((id) => !confirmedTypedIn.has(id)) ||
-              !matchesTemporaryProjectSelection(
-                freshSelection.expectedTemporaryProjects ?? [],
-                selection.expectedTemporaryProjects ?? [],
-              )
+              freshProjects.length !== confirmedProjects.length ||
+              !matchesTemporaryProjectSelection(freshProjects, confirmedProjects)
             ) {
               return AsyncResult.failure(
                 Cause.fail(
@@ -619,9 +619,6 @@ export function createLastCodeThreadArchiveActions(ports: {
               // Keep the exact consent even if removing the overlap returns a legacy family.
               ...(selection.expectedArchiveThreadIds !== undefined
                 ? { expectedArchiveThreadIds: [...remaining] }
-                : {}),
-              ...(selection.expectedTemporaryProjects !== undefined
-                ? { expectedTemporaryProjects: freshSelection.expectedTemporaryProjects ?? [] }
                 : {}),
             };
           }

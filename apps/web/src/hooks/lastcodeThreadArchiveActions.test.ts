@@ -1104,7 +1104,9 @@ describe("bulk archive progress", () => {
     ["owner first", false, "none"],
     ["group first", false, "none"],
     ["owner first", true, "none"],
+    ["group first", false, "same"],
     ["group first", false, "new"],
+    ["group first", false, "history"],
     ["group first", false, "fewer"],
     ["group first", false, "gone"],
   ] as const)("refreshes after %s (%s, %s)", async (order, added, projectChange) => {
@@ -1131,6 +1133,8 @@ describe("bulk archive progress", () => {
     const keptScratch = { ...scratch, projectId: ProjectId.make("another-scratch") };
     const projectPreviews = {
       none: [[], []],
+      same: [[scratch], [scratch]],
+      history: [[scratch], [{ ...scratch, threadIds: [child.id, newMember.id] }]],
       new: [[], [scratch]],
       fewer: [[scratch, keptScratch], [keptScratch]],
       gone: [[scratch], []],
@@ -1195,7 +1199,7 @@ describe("bulk archive progress", () => {
       threadRef: { threadId: id, environmentId },
     }));
     const outcome = await useThreadActions().archiveThreads(entries);
-    const rejected = added || projectChange === "new";
+    const rejected = added || (projectChange !== "none" && projectChange !== "same");
     expect(outcome?.archivedThreadKeys).toEqual(
       (rejected ? entries.slice(0, 1) : entries).map(({ threadKey }) => threadKey),
     );
@@ -1206,12 +1210,10 @@ describe("bulk archive progress", () => {
       expect(commands.archive.mock.lastCall?.[0].input.expectedArchiveThreadIds).toEqual([
         owner.id,
       ]);
-    if (projectChange === "fewer" || projectChange === "gone")
-      expect(commands.archive.mock.lastCall?.[0].input.expectedTemporaryProjects).toEqual(
-        projectChange === "fewer"
-          ? [{ projectId: keptScratch.projectId, threadIds: keptScratch.threadIds }]
-          : [],
-      );
+    if (projectChange === "same")
+      expect(commands.archive.mock.lastCall?.[0].input.expectedTemporaryProjects).toEqual([
+        { projectId: scratch.projectId, threadIds: scratch.threadIds },
+      ]);
     expect(archived.has(newMember.id)).toBe(false);
   });
 
