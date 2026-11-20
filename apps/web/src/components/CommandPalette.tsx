@@ -1,4 +1,7 @@
-import { contextualProjectPin, contextualProjectSettings } from "../projectSettingsNavigation";
+import {
+  contextualProjectActionTarget,
+  contextualProjectSettings,
+} from "../projectSettingsNavigation";
 import { useProject } from "../state/entities";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { decodeMsg, msg, T, useGT, useMessages, Var } from "gt-react";
@@ -138,7 +141,6 @@ import { useScratchProject } from "../hooks/useScratchProject";
 import { useStartTriage } from "../hooks/useStartTriage";
 import { pickTriageEnvironment } from "../lib/triageTarget";
 import { TemporaryProjectsToggle } from "./TemporaryProjectsToggle";
-import { useSettingsProjectGroups } from "./settings/useSettingsProjectGroups";
 import { useNewProject } from "../hooks/useNewProject";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { reportProjectFailure, useProjectPin } from "../hooks/useProjectGroupUpdate";
@@ -285,8 +287,6 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import {
-  deriveLogicalProjectKeyFromSettings,
-  derivePhysicalProjectKey,
   pickableProjectGroups,
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
@@ -601,14 +601,6 @@ function OpenCommandPaletteDialog(props: {
   });
   const contextualProject = useProject(contextualProjectRef);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const projectSettingsKey = contextualProject
-    ? deriveLogicalProjectKeyFromSettings(contextualProject, projectGroupingSettings)
-    : undefined;
-  const contextualGroups = useSettingsProjectGroups(
-    contextualProject
-      ? { project: projectSettingsKey, checkout: derivePhysicalProjectKey(contextualProject) }
-      : {},
-  );
   const projectPickerEntries = buildSidebarProjectPickerEntries({
     groups: pickableProjectGroups(projectGroups),
     preferredProjectRef: contextualProjectRef,
@@ -1898,7 +1890,7 @@ function OpenCommandPaletteDialog(props: {
   // Every group, so an archived project's thread still opens its own settings.
   const currentProjectGroup =
     (contextualProjectRef
-      ? contextualGroups.find((group) =>
+      ? projectGroups.find((group) =>
           group.memberProjectRefs.some(
             (ref) =>
               ref.environmentId === contextualProjectRef.environmentId &&
@@ -1906,39 +1898,42 @@ function OpenCommandPaletteDialog(props: {
           ),
         )
       : null) ?? null;
-  const pinTarget =
-    currentProjectGroup && contextualProjectPin(currentProjectGroup, contextualProject);
-  if (currentProjectGroup && pinTarget && canPinProjectGroup(pinTarget)) {
+  if (currentProjectGroup && canPinProjectGroup(currentProjectGroup)) {
     actionItems.push({
       kind: "action",
       value: "action:project-pin",
       searchTerms: ["pin", "unpin", "project", "favorite"],
-      title: pinTarget.pinned ? gt("Unpin project") : gt("Pin project"),
+      title: currentProjectGroup.pinned ? gt("Unpin project") : gt("Pin project"),
       description: currentProjectGroup.displayName,
-      icon: pinTarget.pinned ? (
+      icon: currentProjectGroup.pinned ? (
         <PinOffIcon className={ITEM_ICON_CLASS} />
       ) : (
         <PinIcon className={ITEM_ICON_CLASS} />
       ),
-      run: async () => toggleProjectGroupPin(pinTarget),
+      run: async () => toggleProjectGroupPin(currentProjectGroup),
     });
   }
   const contextualProjectGroup = currentProjectGroup ?? projectGroups[0] ?? null;
-  if (contextualProjectGroup) {
+  const actionTarget = contextualProjectActionTarget(
+    contextualProjectGroup,
+    contextualProject,
+    projectGroupingSettings,
+  );
+  if (actionTarget !== null) {
     actionItems.push({
       kind: "action",
       value: "action:project-dashboard",
       searchTerms: ["dashboard", "project", "attention", "questions", "reviews", "qa", "progress"],
       title: gt("Open project dashboard"),
-      description: contextualProjectGroup.displayName,
+      description: actionTarget.label,
       icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         await navigate({
           to: "/dashboard",
           search: {
             environmentId:
-              contextualProjectRef?.environmentId ?? contextualProjectGroup.environmentId,
-            projectId: contextualProjectRef?.projectId ?? contextualProjectGroup.id,
+              contextualProjectRef?.environmentId ?? actionTarget.project.environmentId,
+            projectId: contextualProjectRef?.projectId ?? actionTarget.project.id,
           },
         });
       },
@@ -1960,12 +1955,10 @@ function OpenCommandPaletteDialog(props: {
         "t3.json",
       ],
       title: gt("Project settings"),
-      description: contextualProjectGroup.displayName,
+      description: actionTarget.label,
       icon: <FolderIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
-        await navigate(
-          contextualProjectSettings(contextualProjectGroup.projectKey, contextualProject),
-        );
+        await navigate(contextualProjectSettings(actionTarget.key, contextualProject));
       },
     });
   }

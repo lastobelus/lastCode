@@ -26,7 +26,10 @@ import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 
 import { useDiscoverableProjects } from "../../state/temporary-projects";
-import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
+import {
+  isTemporaryProject,
+  withContextualProject,
+} from "@t3tools/client-runtime/state/temporary-projects";
 import { useProjects, useServerConfigs, useThreadShells } from "../../state/entities";
 import type { TurnCommandMetadata } from "../../lib/commandMetadata";
 import type { DraftComposerAttachment } from "../../lib/composerImages";
@@ -92,8 +95,7 @@ import {
   resolveNewTaskBranchWorktreePath,
   resolveNewTaskLocalWorkspaceSelection,
 } from "./new-task-context-presentation";
-import { isSameRepository } from "./new-task-project-selection";
-import { useTemporaryDraftProject } from "./useTemporaryDraftProject";
+import { isSameRepository, resolveEnvironmentProjectMatch } from "./new-task-project-selection";
 import { useNewTaskProjectDefaults } from "./use-new-task-project-defaults";
 import { resolveNewThreadRuntimeMode } from "./thread-settings-options";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
@@ -348,7 +350,10 @@ export function NewTaskFlowProvider(
         projectsForEnvironment.find((project) => !isTemporaryProject(project)) ??
         null);
 
-  const draftProjects = useTemporaryDraftProject(flowKey, projects, discoverable, selectedProject);
+  const environmentProjects = withContextualProject(
+    discoverable,
+    selectedProject?.temporary === true ? selectedProject : undefined,
+  );
 
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const modelSelectionNow = useNowMinuteMs();
@@ -579,7 +584,6 @@ export function NewTaskFlowProvider(
   };
 
   const setProject = (project: EnvironmentProject) => {
-    draftProjects.clearOrigin();
     updateFlow({
       draftKey: carryDraftContentTo(project),
       environmentId: project.environmentId,
@@ -588,7 +592,10 @@ export function NewTaskFlowProvider(
   };
 
   const selectEnvironment = (environmentId: EnvironmentId) => {
-    const match = draftProjects.selectEnvironment(environmentId);
+    const match = resolveEnvironmentProjectMatch(
+      environmentProjects.filter((project) => project.environmentId === environmentId),
+      selectedProject,
+    );
     updateFlow({
       // A name or title match may be another repository, which must not receive the PR checkout.
       draftKey: match
@@ -831,7 +838,7 @@ export function NewTaskFlowProvider(
         (selectedProjectTitle !== null && project.title === selectedProjectTitle)
       );
     };
-    for (const project of draftProjects.environmentProjects) {
+    for (const project of environmentProjects) {
       if (!hostsSelectedRepository(project)) {
         continue;
       }

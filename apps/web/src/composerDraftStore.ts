@@ -410,7 +410,6 @@ const PersistedDraftThreadState = Schema.Struct({
   logicalProjectKey: Schema.optionalKey(Schema.String),
   environmentSelection: Schema.optionalKey(Schema.Literals(["auto", "manual"])),
   loadBalancedEnvironmentId: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  temporaryProjectOriginKey: Schema.optionalKey(Schema.String),
   createdAt: Schema.String,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -510,7 +509,6 @@ export interface DraftSessionState {
   logicalProjectKey: string;
   environmentSelection?: "auto" | "manual";
   loadBalancedEnvironmentId?: EnvironmentId | null;
-  temporaryProjectOriginKey?: string;
   createdAt: string;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
@@ -626,7 +624,6 @@ interface ComposerDraftStoreState {
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
       checkoutPullRequest?: DraftCheckoutPullRequest | null;
-      temporaryProjectOriginKey?: string;
     },
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
@@ -1765,9 +1762,6 @@ function createDraftThreadState(
               : existingThread.loadBalancedEnvironmentId,
           }
         : {}),
-    ...(!projectChanged && existingThread?.temporaryProjectOriginKey !== undefined
-      ? { temporaryProjectOriginKey: existingThread.temporaryProjectOriginKey }
-      : {}),
     createdAt: options?.createdAt ?? existingThread?.createdAt ?? new Date().toISOString(),
     runtimeMode: options?.runtimeMode ?? existingThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
     interactionMode:
@@ -1822,7 +1816,6 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.logicalProjectKey === right.logicalProjectKey &&
     left.environmentSelection === right.environmentSelection &&
     left.loadBalancedEnvironmentId === right.loadBalancedEnvironmentId &&
-    left.temporaryProjectOriginKey === right.temporaryProjectOriginKey &&
     left.createdAt === right.createdAt &&
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&
@@ -2003,9 +1996,6 @@ function normalizePersistedDraftThreads(
           : candidateDraftThread.loadBalancedEnvironmentId === null
             ? { loadBalancedEnvironmentId: null }
             : {}),
-        ...(typeof candidateDraftThread.temporaryProjectOriginKey === "string"
-          ? { temporaryProjectOriginKey: candidateDraftThread.temporaryProjectOriginKey }
-          : {}),
         ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
         promotedTo,
       };
@@ -2784,9 +2774,6 @@ function toHydratedDraftThreadState(
             persistedDraftThread.loadBalancedEnvironmentId as EnvironmentId | null,
         }
       : {}),
-    ...(persistedDraftThread.temporaryProjectOriginKey !== undefined
-      ? { temporaryProjectOriginKey: persistedDraftThread.temporaryProjectOriginKey }
-      : {}),
     ...(persistedDraftThread.checkoutPullRequest
       ? { checkoutPullRequest: persistedDraftThread.checkoutPullRequest }
       : {}),
@@ -3054,9 +3041,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               options.checkoutPullRequest,
               projectChanged,
             );
-            const temporaryProjectOriginKey =
-              options.temporaryProjectOriginKey ??
-              (projectChanged ? undefined : existing.temporaryProjectOriginKey);
             const nextDraftThread: DraftThreadState = {
               threadId: existing.threadId,
               environmentId: nextProjectRef.environmentId,
@@ -3069,7 +3053,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                     ? null
                     : (existing.loadBalancedEnvironmentId ?? null)
                   : options.loadBalancedEnvironmentId,
-              ...(temporaryProjectOriginKey === undefined ? {} : { temporaryProjectOriginKey }),
               createdAt:
                 options.createdAt === undefined
                   ? existing.createdAt
@@ -3090,7 +3073,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.logicalProjectKey === existing.logicalProjectKey &&
               nextDraftThread.environmentSelection === existing.environmentSelection &&
               nextDraftThread.loadBalancedEnvironmentId === existing.loadBalancedEnvironmentId &&
-              nextDraftThread.temporaryProjectOriginKey === existing.temporaryProjectOriginKey &&
               nextDraftThread.createdAt === existing.createdAt &&
               nextDraftThread.runtimeMode === existing.runtimeMode &&
               nextDraftThread.interactionMode === existing.interactionMode &&

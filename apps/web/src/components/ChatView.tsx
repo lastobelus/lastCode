@@ -1,5 +1,4 @@
 import { contextualProjectSettings } from "../projectSettingsNavigation";
-import { temporaryDraftProjectRef } from "../draftTemporaryProject";
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { useGT, useMessages } from "gt-react";
@@ -1273,13 +1272,9 @@ export default function ChatView(props: ChatViewProps) {
       activeProject,
       environmentById.get(activeProject.environmentId)?.serverConfig?.scratchWorkspaceRoot ?? null,
     );
-  const temporaryDraftOrigin = useProject(
-    temporaryDraftProjectRef(draftId === null ? undefined : draftThread?.temporaryProjectOriginKey),
-  );
   const logicalProjectEnvironments = useLogicalProjectEnvironments(
     activeProject,
     activeProjectIsScratch && draftId !== null,
-    temporaryDraftOrigin,
   );
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
   const canAutoBalanceEnvironments = hasMultipleEnvironments && !activeProjectIsScratch;

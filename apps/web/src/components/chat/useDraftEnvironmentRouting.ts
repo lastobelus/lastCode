@@ -1,4 +1,3 @@
-import { draftOriginForEnvironmentChange } from "../../draftTemporaryProject";
 import { msg, useGT } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
@@ -243,15 +242,14 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       const projectRef = scopeProjectRef(target.environmentId, target.projectId);
       if (originalDraft) carryFanoutSelections(originalDraft, target.environmentId);
       // The send must read the target project's composer and provider context after retargeting.
-      flushSync(() => {
+      flushSync(() =>
         setDraftThreadContext(draftId, {
           projectRef,
-          ...draftOriginForEnvironmentChange(originalDraft, allProjects),
           environmentSelection: "auto",
           loadBalancedEnvironmentId: target.environmentId,
           branch: originalDraft?.branch ?? null,
-        });
-      });
+        }),
+      );
       return true;
     });
   };
@@ -296,10 +294,8 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     if (!target?.projectId) return;
     const draft = getDraftSession(draftId);
     if (draft) carryFanoutSelections(draft, target.environmentId);
-    const projectRef = scopeProjectRef(target.environmentId, target.projectId);
     setDraftThreadContext(draftId, {
-      projectRef,
-      ...draftOriginForEnvironmentChange(draft, allProjects),
+      projectRef: scopeProjectRef(target.environmentId, target.projectId),
       environmentSelection: "auto",
       loadBalancedEnvironmentId: target.environmentId,
     });
@@ -314,7 +310,6 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     selectedProvider,
     draftId,
     logicalProjectEnvironments,
-    allProjects,
     sendInFlightRef,
     getDraftSession,
     setDraftThreadContext,
@@ -435,7 +430,6 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       } else {
         setDraftThreadContext(draftId, {
           projectRef,
-          ...draftOriginForEnvironmentChange(currentDraft, allProjects),
           environmentSelection: "manual",
           loadBalancedEnvironmentId: null,
         });
