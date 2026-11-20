@@ -15,6 +15,7 @@ import { FetchHttpClient } from "effect/http";
 import { vi } from "vite-plus/test";
 
 import { cli } from "../binCli.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -42,7 +43,11 @@ vi.mock("../claudeHistoryWorker.ts", async () => {
   return { runClaudeHistoryWorker: hooks.runClaudeHistoryWorker };
 });
 
-const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
+const layerCliRuntime = Layer.mergeAll(
+  NodeServices.layer,
+  NetService.layer,
+  ManagedPolicy.layerTest(),
+);
 const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
 
@@ -86,6 +91,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI deferred imp
             config: { host: "127.0.0.1", devUrl: undefined },
             port: 3_773,
           })),
+          pid: 2_147_483_647,
           ownerId: "dead-server",
         },
       });
