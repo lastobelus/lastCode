@@ -1471,24 +1471,41 @@ it.each([
   "ignored-parent",
   "ignored-parent-tracked",
   "case-variant",
+  "normalization-variant",
 ] as const)("excludes only ignored untracked generated directories (%s)", async (kind) => {
   await using test = await fixture();
   const protectedParent = kind.startsWith("ignored-parent");
   const caseVariant = kind === "case-variant";
-  const retainedDirectory = protectedParent || caseVariant;
+  const normalizationVariant = kind === "normalization-variant";
+  const trackedVariant = caseVariant || normalizationVariant;
+  const retainedDirectory = protectedParent || trackedVariant;
   const relative = protectedParent
     ? "tmp/node_modules"
     : caseVariant
       ? "build"
-      : "apps/web/node_modules";
+      : normalizationVariant
+        ? "cafe\u0301/build"
+        : "apps/web/node_modules";
   const directory = NodePath.join(test.workspace, relative);
-  if (caseVariant) {
-    const original = NodePath.join(test.workspace, "Build");
-    await NodeFSP.mkdir(original);
+  if (trackedVariant) {
+    const originalRelative = caseVariant ? "Build" : "caf\u00e9/build";
+    const original = NodePath.join(test.workspace, originalRelative);
+    await NodeFSP.mkdir(original, { recursive: true });
     await NodeFSP.writeFile(NodePath.join(original, "payload"), "committed\n");
-    await git(test.workspace, "add", "--force", "Build/payload");
-    await git(test.workspace, "commit", "--only", "-m", "tracked directory", "--", "Build/payload");
-    await NodeFSP.rename(original, directory);
+    await git(test.workspace, "add", "--force", `${originalRelative}/payload`);
+    await git(
+      test.workspace,
+      "commit",
+      "--only",
+      "-m",
+      "tracked directory",
+      "--",
+      `${originalRelative}/payload`,
+    );
+    await NodeFSP.rename(
+      NodePath.join(test.workspace, caseVariant ? "Build" : "caf\u00e9"),
+      NodePath.join(test.workspace, caseVariant ? "build" : "cafe\u0301"),
+    );
   } else await NodeFSP.mkdir(directory, { recursive: true });
   const file = NodePath.join(directory, "payload");
   await NodeFSP.writeFile(file, "x".repeat(8192));
@@ -1503,7 +1520,7 @@ it.each([
   if (kind !== "unignored")
     await NodeFSP.appendFile(
       NodePath.join(test.workspace, ".gitignore"),
-      protectedParent ? "tmp/\n" : caseVariant ? "build/\n" : "node_modules/\n",
+      protectedParent ? "tmp/\n" : trackedVariant ? "build/\n" : "node_modules/\n",
     );
   if (kind === "tracked" || kind === "removed-from-index")
     await git(test.workspace, "add", "--force", `${relative}/payload`);

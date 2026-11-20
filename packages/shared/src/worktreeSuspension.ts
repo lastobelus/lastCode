@@ -922,17 +922,17 @@ const inventory = async (
             );
         }
       }
-      // Conservatively protect case variants, including case-only Finder renames.
+      // Conservatively protect case and Unicode spelling variants on macOS volumes.
       for (const name of trackedText.split("\0").filter(Boolean)) {
-        trackedDirectories.add(name.toLowerCase());
+        trackedDirectories.add(name.normalize("NFC").toLowerCase());
         let parent = NodePath.posix.dirname(name);
         while (parent !== ".") {
-          trackedDirectories.add(parent.toLowerCase());
+          trackedDirectories.add(parent.normalize("NFC").toLowerCase());
           parent = NodePath.posix.dirname(parent);
         }
       }
     }
-    if (trackedDirectories.has(relative.toLowerCase())) return false;
+    if (trackedDirectories.has(relative.normalize("NFC").toLowerCase())) return false;
     // A Git query failure preserves the directory, just like a nonignored path.
     try {
       const parent = NodePath.posix.dirname(relative);
