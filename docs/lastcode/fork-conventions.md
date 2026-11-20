@@ -56,8 +56,15 @@ other file is fork-owned.
 
 In LastCode delivery:
 
-- Put new behavior in fork-owned files where practical, new or existing, and
-  connect it with call-site edits in upstream-owned files.
+- Put new behavior, with its logic and branching, in a fork-owned module, new
+  or existing. In each upstream-owned file, connect it through a few small
+  seams: an import plus a one-line call, hook, Layer entry or `case` that hands
+  off to that module. Prefer seams upstream already has, such as its Effect
+  services and Layers, registries and context providers, over a new hook cut
+  into an upstream function. Add lines and leave upstream's existing lines
+  untouched, because wrapping, re-indenting or reformatting them gives later
+  upstream edits more places to conflict. Never copy an upstream module to
+  fork it: the copy drifts from upstream with no conflict to show it.
 - Fix existing behavior where it lives, even in an upstream-owned file. A fix
   in an upstream-owned module places its test as the `AGENTS.md` test rules say.
 - Put tests for a fork-owned module in a fork-owned test file, including a
