@@ -31,6 +31,7 @@ import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { IssueTrackerSection } from "./components/IssueTrackerSection";
 import { SourceControlProvidersSection } from "./components/SourceControlProvidersSection";
+import { LocalCiSettingsSection } from "./components/LocalCiSettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import { useSettingsWriter } from "./useSettingsWriter";
@@ -324,6 +325,11 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     targets.map((target) => target.environment.serverConfig.managedPolicy),
     m,
   );
+  const supportsLocalCi =
+    hasConnectedSelection &&
+    targets.every(
+      (target) => target.environment.serverConfig.environment.capabilities.lastcodeLocalCi === true,
+    );
   const disabledFor = (key: string) =>
     disabled ||
     managed(key) !== undefined ||

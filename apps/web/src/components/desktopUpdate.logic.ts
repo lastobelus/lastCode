@@ -1,4 +1,8 @@
-import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopLocalBuildFailure,
+  DesktopUpdateActionResult,
+  DesktopUpdateState,
+} from "@t3tools/contracts";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { msg } from "gt-react";
 
@@ -24,6 +28,83 @@ function desktopReleaseRepositoryUrl(repository: string | undefined): string {
       ? configuredRepository
       : DEFAULT_DESKTOP_RELEASE_REPOSITORY;
   return `https://github.com/${releaseRepository}/releases`;
+}
+
+export const MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH = 40_000;
+
+function stripTerminalEscapeSequences(value: string): string {
+  let plain = "";
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 27) {
+      plain += value[index];
+      continue;
+    }
+
+    const introducer = value[index + 1];
+    index += 1;
+    if (introducer === "[") {
+      while (index + 1 < value.length) {
+        index += 1;
+        const code = value.charCodeAt(index);
+        if (code >= 64 && code <= 126) break;
+      }
+    } else if (introducer === "]") {
+      while (index + 1 < value.length) {
+        index += 1;
+        if (value.charCodeAt(index) === 7) break;
+        if (value.charCodeAt(index) === 27 && value[index + 1] === "\\") {
+          index += 1;
+          break;
+        }
+      }
+    }
+  }
+  return plain;
+}
+
+function sanitizeLocalBuildDiagnosticValue(
+  value: string,
+  maxLength: number,
+  preserveLines = false,
+): string {
+  const withoutAnsi = stripTerminalEscapeSequences(value);
+  let sanitized = "";
+  for (const character of withoutAnsi) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 32 || (codePoint >= 127 && codePoint <= 159)) {
+      if (preserveLines && (character === "\n" || character === "\t")) sanitized += character;
+      continue;
+    }
+    sanitized += character;
+    if (sanitized.length >= maxLength) break;
+  }
+  return sanitized.trim();
+}
+
+export function formatLocalBuildFailureError(error: string): string {
+  return sanitizeLocalBuildDiagnosticValue(error, 32_000, true);
+}
+
+export function formatLocalBuildFailureDetails(failure: DesktopLocalBuildFailure): string {
+  const context = failure.errorKind === "packaging" ? "Packaging" : "Build";
+  return [
+    "[lastcode:local-update] Local LastCode build failed",
+    `Installed version: ${sanitizeLocalBuildDiagnosticValue(failure.currentVersion, 200)}`,
+    `Target version: ${sanitizeLocalBuildDiagnosticValue(failure.targetVersion, 200)}`,
+    `Checkpoint: ${sanitizeLocalBuildDiagnosticValue(failure.checkpointTag, 500)}`,
+    `Last phase: ${sanitizeLocalBuildDiagnosticValue(failure.phase, 100)} · ${failure.percent}% est.`,
+    `Failure context: ${context}`,
+    `Error: ${formatLocalBuildFailureError(failure.error)}`,
+    `Build log: ${sanitizeLocalBuildDiagnosticValue(failure.logPath, 4_096)}`,
+  ]
+    .join("\n")
+    .slice(0, MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH);
+}
+
+export function getDesktopUpdateProgressPercent(state: DesktopUpdateState): number | null {
+  return state.source === "lastcode-local"
+    ? (state.localBuildProgress?.percent ?? null)
+    : state.downloadPercent;
 }
 
 /** The download RPC can beat the updater's downloadedVersion event; fall back to the requested version. */
@@ -119,29 +200,52 @@ export function getDesktopUpdateButtonTooltip(
       msg("Update {version} did not apply. Click to retry.", { version: state.notAppliedVersion }),
     );
   }
+  const isLocal = state.source === "lastcode-local";
   if (
     (state.status === "available" || state.status === "error") &&
     state.errorContext === "download" &&
     state.availableVersion
   ) {
     return resolve(
-      msg("Download failed for {version}. Click to retry.", { version: state.availableVersion }),
+      isLocal
+        ? msg("Local build failed for {version}. Click to retry.", {
+            version: state.availableVersion,
+          })
+        : msg("Download failed for {version}. Click to retry.", { version: state.availableVersion }),
     );
   }
   if (state.status === "available") {
+    if (isLocal) {
+      return state.availableVersion === null
+        ? resolve(msg("LastCode update ready to build"))
+        : resolve(msg("LastCode {version} ready to build", { version: state.availableVersion }));
+    }
     return state.availableVersion === null
       ? resolve(msg("Update available ready to download"))
       : resolve(msg("Update {version} ready to download", { version: state.availableVersion }));
   }
   if (state.status === "downloading") {
-    return typeof state.downloadPercent === "number"
-      ? resolve(
-          msg("Downloading update ({percent}%)", { percent: Math.floor(state.downloadPercent) }),
-        )
-      : resolve(msg("Downloading update"));
+    if (isLocal && state.localBuildProgress) {
+      const { phase, percent } = state.localBuildProgress;
+      return resolve(msg("{phase} · {percent}% est.", { phase, percent }));
+    }
+    if (typeof state.downloadPercent !== "number") {
+      return resolve(isLocal ? msg("Building local nightly") : msg("Downloading update"));
+    }
+    const percent = Math.floor(state.downloadPercent);
+    return resolve(
+      isLocal
+        ? msg("Building local nightly ({percent}%)", { percent })
+        : msg("Downloading update ({percent}%)", { percent }),
+    );
   }
   if (state.status === "downloaded") {
     const version = state.downloadedVersion ?? state.availableVersion;
+    if (isLocal) {
+      return version === null
+        ? resolve(msg("LastCode nightly built. Click to restart and install."))
+        : resolve(msg("LastCode {version} built. Click to restart and install.", { version }));
+    }
     return version === null
       ? resolve(msg("Update ready downloaded. Click to restart and install."))
       : resolve(msg("Update {version} downloaded. Click to restart and install.", { version }));
@@ -174,7 +278,7 @@ export function getDesktopUpdateButtonTooltip(
       ),
     );
   }
-  if (state.source === "lastcode-local" && state.status === "idle" && state.message) {
+  if (isLocal && state.status === "idle" && state.message) {
     const checkpointRequested = msg(
       "Checkpoint requested. Check again later to pick up the result.",
     );
@@ -184,10 +288,25 @@ export function getDesktopUpdateButtonTooltip(
 }
 
 export function getDesktopUpdateInstallConfirmationMessage(
-  state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
+  state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion"> &
+    Partial<Pick<DesktopUpdateState, "source">>,
   resolve: MessageResolver = m,
 ): string {
   const version = state.downloadedVersion ?? state.availableVersion;
+  if (state.source === "lastcode-local") {
+    return version
+      ? resolve(
+          msg(
+            "Install update {version} and restart LastCode?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+            { version },
+          ),
+        )
+      : resolve(
+          msg(
+            "Install update and restart LastCode?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+          ),
+        );
+  }
   return version
     ? resolve(
         msg(
@@ -206,11 +325,19 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
   if (!result.accepted || result.completed) return null;
   if (typeof result.state.message !== "string") return null;
   const message = result.state.message.trim();
-  return message.length > 0 ? message : null;
+  if (message.length === 0) return null;
+  return result.state.source === "lastcode-local" && result.state.localBuildFailure
+    ? formatLocalBuildFailureError(message)
+    : message;
 }
 
 export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateActionResult): boolean {
   return getDesktopUpdateActionError(result) !== null;
+}
+
+export function shouldHighlightDesktopUpdateError(state: DesktopUpdateState | null): boolean {
+  if (!state || state.status !== "error") return false;
+  return state.errorContext === "download" || state.errorContext === "install";
 }
 
 export function canCheckForUpdate(state: DesktopUpdateState | null): boolean {

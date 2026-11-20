@@ -1708,7 +1708,7 @@ const canBind = (port) =>
         yield* fs.makeDirectory(runtimeDir, { recursive: true });
         yield* fs.writeFileString(
           `${runtimeDir}/t3`,
-          `#!/bin/sh\nexec node '${fakeT3}' '${version}' "$@"\n`,
+          `#!/bin/sh\nexec '${process.execPath}' '${fakeT3}' '${version}' "$@"\n`,
         );
         yield* fs.chmod(`${runtimeDir}/t3`, 0o755);
         yield* fs.writeFileString(`${runtimeDir}/.install-complete`, `${version}\n`);
