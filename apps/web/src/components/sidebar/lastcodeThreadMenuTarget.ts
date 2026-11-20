@@ -28,6 +28,7 @@ import { readThreadHandoffs } from "../../handoffs/handoffsStore";
 import { describeHandoff } from "../../handoffs/handoffMenu";
 import {
   lastcodeSidebarCreatorDetails,
+  lastcodeSidebarCreatorRef,
   lastcodeSidebarThreadParentId,
 } from "../lastcodeSidebarFamilies.logic";
 import { buildLastCodeThreadMenu } from "./lastcodeThreadMenu";
@@ -65,13 +66,18 @@ export function readLastCodeThreadMenuTarget(
 ) {
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const { projectSettingsKey, workspacePath } = projectTarget;
-  const creatorRef = thread.creatorThreadId
+  const creatorRef = lastcodeSidebarCreatorRef(thread);
+  const groupingRef = thread.creatorThreadId
     ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
     : null;
-  const creator = lastcodeSidebarCreatorDetails(
-    thread,
-    creatorRef ? readThreadShell(creatorRef) : null,
-  );
+  const creatorShell = creatorRef ? readThreadShell(creatorRef) : null;
+  const groupingCreator =
+    groupingRef &&
+    (groupingRef.environmentId !== creatorRef?.environmentId ||
+      groupingRef.threadId !== creatorRef.threadId)
+      ? readThreadShell(groupingRef)
+      : creatorShell;
+  const creator = lastcodeSidebarCreatorDetails(thread, creatorShell, undefined, groupingCreator);
   const handoffs = readThreadHandoffs(threadRef);
   const descriptors = handoffs.slice(0, handoffsLimit).map(describeHandoff);
   const parentThreadId =
@@ -102,7 +108,7 @@ export function readLastCodeThreadMenuTarget(
     parentThreadId,
     projectSettingsKey,
     workspacePath,
-    creator: { ...creator, ref: creatorRef },
+    creator: { ...creator, ref: creatorRef, groupingRef },
     handoffs,
     items,
   };

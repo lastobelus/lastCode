@@ -4,6 +4,7 @@ import { useClientSetting } from "../../hooks/useSettings";
 import { resolveProjectExpanded, useUiStateStore } from "../../uiStateStore";
 import { useLastCodeSidebarFamiliesStore } from "../lastcodeSidebarFamilies.store";
 import { lastCodeProjectExpansionPreferenceKeys } from "./useLastCodeProjectHeaderGestures";
+import type { indexLastCodeSidebarThreads } from "./lastcodeSidebarProjects";
 import { projectLastCodeProjectThreads } from "./lastcodeProjectThreads";
 /** Root navigation uses the same pure projection inputs as project-local rendering. */
 export function useLastCodeSidebarOrder(
@@ -11,6 +12,7 @@ export function useLastCodeSidebarOrder(
   threadsByProjectKey: ReadonlyMap<string, readonly SidebarThreadSummary[]>,
   routeThreadKey: string | null,
   expandedThreadListsByProject: ReadonlySet<string>,
+  threadIndex?: ReturnType<typeof indexLastCodeSidebarThreads>,
 ) {
   const collapsedFamiliesByKey = useLastCodeSidebarFamiliesStore((state) => state.collapsedByKey);
   const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
@@ -25,6 +27,13 @@ export function useLastCodeSidebarOrder(
       lastCodeProjectExpansionPreferenceKeys(project),
     );
     return projectLastCodeProjectThreads(projectThreads, sidebarThreadSortOrder, {
+      ownership: threadIndex
+        ? {
+            projectKey: project.projectKey,
+            byThreadKey: threadIndex.byThreadKey,
+            hiddenThreadKeys: threadIndex.hiddenThreadKeys,
+          }
+        : undefined,
       collapsedByKey: collapsedFamiliesByKey,
       activeThreadKey: routeThreadKey,
       projectExpanded,

@@ -1,3 +1,4 @@
+import { useLastCodeCommandPaletteThreadListing } from "./sidebar/useLastCodeCommandPaletteThreadListing";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { findForMessageMatch, openThreadFindOnQuery } from "./chat/threadFindStore";
 import {
@@ -24,7 +25,6 @@ import {
   deriveProviderInstanceEntries,
   type ProviderInstanceEntry,
 } from "../providerInstances";
-import { useDelegatedUnderParent, useVisibleThreadShells } from "../state/entities";
 import {
   useEnvironmentProviders,
   useEnvironments,
@@ -102,8 +102,7 @@ export function useCommandPaletteThreadItems(input: {
   const messages = useMessages();
   const gt = useGT();
   const navigate = useNavigate();
-  const threads = useVisibleThreadShells();
-  const delegatedUnderParent = useDelegatedUnderParent();
+  const { threads, ...listing } = useLastCodeCommandPaletteThreadListing();
   const { projectEnvironmentLocationById } = useEnvironmentLookups();
   const providerEntryByEnvironmentAndInstanceId = useProviderEntryByEnvironmentAndInstanceId();
   const messageSearch = useConnectedThreadSearch(threadSearchQuery);
@@ -116,7 +115,7 @@ export function useCommandPaletteThreadItems(input: {
   const threadItems = buildThreadActionItems(
     {
       threads,
-      delegatedUnderParent,
+      ...listing,
       ...(environments.length > 1
         ? {
             environmentLabelOf: (thread: (typeof threads)[number]) =>

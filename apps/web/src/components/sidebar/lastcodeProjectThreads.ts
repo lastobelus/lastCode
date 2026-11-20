@@ -10,6 +10,7 @@ import {
 } from "../Sidebar.logic";
 import {
   lastcodeSidebarInheritedStatus,
+  lastcodeSidebarThreadKey,
   projectLastCodeSidebarFamilies,
 } from "../lastcodeSidebarFamilies.logic";
 import { getThreadSortTimestamp } from "@t3tools/client-runtime/state/thread-sort";
@@ -19,7 +20,16 @@ export function projectLastCodeProjectThreads(
   sortOrder: SidebarThreadSortOrder,
   options: Omit<Parameters<typeof projectLastCodeSidebarFamilies>[0], "threads">,
 ) {
-  const visibleThreads = sortThreads(threads.filter(threadShellIsVisible), sortOrder);
+  const hidden = options.ownership?.hiddenThreadKeys;
+  const visibleThreads = sortThreads(
+    threads.filter((thread) => {
+      if (!threadShellIsVisible(thread)) return false;
+      if (!hidden?.size) return true;
+      const key = lastcodeSidebarThreadKey(thread);
+      return key === options.activeThreadKey || !hidden.has(key);
+    }),
+    sortOrder,
+  );
   const familyProjection = projectLastCodeSidebarFamilies({
     ...options,
     threads: visibleThreads,

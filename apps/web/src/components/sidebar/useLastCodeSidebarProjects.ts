@@ -8,6 +8,7 @@ import {
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
+import { useLastCodeHiddenThreadKeys } from "./useLastCodeHiddenThreadKeys";
 import { orderItemsByPreferredIds } from "../Sidebar.logic";
 import {
   createLastCodeSidebarProjectLookup,
@@ -56,7 +57,8 @@ export function useLastCodeSidebarProjects(environments: ProjectEnvironments) {
     isWslEnvironment: (id) => wslEnvironmentIds.has(id),
   });
   const resolveProjectKey = createLastCodeSidebarProjectLookup(orderedProjects, groups);
-  const index = indexLastCodeSidebarThreads(threads, resolveProjectKey);
+  const hiddenThreadKeys = useLastCodeHiddenThreadKeys(threads);
+  const index = indexLastCodeSidebarThreads(threads, resolveProjectKey, hiddenThreadKeys);
   const sortedProjects = sortLastCodeSidebarProjects(groups, threads, resolveProjectKey, sortOrder);
   const orderedProjectKeys = orderedProjects.map(getProjectOrderKey);
   return { sortedProjects, orderedProjectKeys, resolveProjectKey, index };

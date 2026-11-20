@@ -8,7 +8,11 @@ import type { useLastCodeProjectThreads } from "./useLastCodeProjectThreads";
 import { lastcodeSidebarScaleStyle } from "../../lastcodeSidebarScale";
 import { SidebarMenuSubItem, SidebarMenuSubButton } from "../ui/sidebar";
 import { LastCodeThreadStatusLabel } from "./LastCodeThreadStatusLabel";
-import { LastCodeSubagentGroup, LastCodeThreadGroupHeading } from "./LastCodeThreadFamily";
+import {
+  LastCodeOwnerGroup,
+  LastCodeSubagentGroup,
+  LastCodeThreadGroupHeading,
+} from "./LastCodeThreadFamily";
 
 interface Props {
   scale: LegacySidebarScale;
@@ -116,6 +120,8 @@ export function LastCodeThreadList({
         renderedItems.map((item) =>
           item.type === "subagents" ? (
             <LastCodeSubagentGroup key={item.key} item={item} navigateToThread={navigateToThread} />
+          ) : item.type === "owner" ? (
+            <LastCodeOwnerGroup key={item.key} item={item} />
           ) : (
             <Fragment key={item.row.key}>
               <LastCodeThreadGroupHeading family={item.row} />

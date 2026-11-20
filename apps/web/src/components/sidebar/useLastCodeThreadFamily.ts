@@ -1,9 +1,9 @@
 import { useGT, useMessages } from "gt-react";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useThreadShell } from "../../state/entities";
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import {
   lastcodeSidebarCreatorDetails,
+  lastcodeSidebarCreatorRef,
   lastcodeSidebarIsAgentCreated,
   lastcodeSidebarSubagentStatusLabel,
   type LastCodeSidebarFamilyRow,
@@ -16,11 +16,8 @@ export function useLastCodeThreadFamily(
   const gt = useGT();
   const messages = useMessages();
   const thread = family.thread;
+  const creatorRef = lastcodeSidebarCreatorRef(thread);
   const isAgentCreated = lastcodeSidebarIsAgentCreated(thread);
-  const creatorRef =
-    isAgentCreated && thread.creatorThreadId
-      ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
-      : null;
   const creator = useThreadShell(creatorRef);
   const creatorDetails = lastcodeSidebarCreatorDetails(thread, creator, messages);
   const creatorDescription = creatorDetails.description;

@@ -1,6 +1,8 @@
 import { T, useGT, useMessages } from "gt-react";
-import { BotIcon, ChevronRightIcon, TriangleAlertIcon } from "lucide-react";
+import { ArrowUpRightIcon, BotIcon, ChevronRightIcon, TriangleAlertIcon } from "lucide-react";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { Link } from "@tanstack/react-router";
+import { buildThreadRouteParams } from "../../threadRoutes";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { cn } from "../../lib/utils";
 import { useClientSetting } from "~/hooks/useSettings";
@@ -12,10 +14,14 @@ import {
   lastcodeSidebarFamilySummary,
   type LastCodeSidebarFamilyRow,
   type LastCodeSidebarFamilyItem,
+  type LastCodeSidebarOwnerGroup,
 } from "../lastcodeSidebarFamilies.logic";
 import type { LastCodeThreadFamilyPresentation } from "./useLastCodeThreadFamily";
 type Navigate = (ref: ScopedThreadRef) => Promise<void>;
-function useFamilyToggle(item: LastCodeSidebarFamilyItem, navigate: Navigate) {
+function useFamilyToggle(
+  item: Exclude<LastCodeSidebarFamilyItem, LastCodeSidebarOwnerGroup>,
+  navigate: Navigate,
+) {
   const setCollapsed = useLastCodeSidebarFamiliesStore((state) => state.setCollapsed);
   return () => {
     const family = item.type === "thread" ? item.row : item;
@@ -176,6 +182,50 @@ export function LastCodeSubagentGroup({
           <LastCodeThreadStatusLabel status={item.status} compact={compactStatusIndicators} />
         ) : null}
       </button>
+    </SidebarMenuSubItem>
+  );
+}
+export function LastCodeOwnerGroup({ item }: { item: LastCodeSidebarOwnerGroup }) {
+  const gt = useGT();
+  const setCollapsed = useLastCodeSidebarFamiliesStore((state) => state.setCollapsed);
+  const compact = useClientSetting("compactLegacySidebarStatuses");
+  const { title } = item;
+  return (
+    <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
+      <div className="flex items-center gap-1 pr-2">
+        <button
+          type="button"
+          aria-label={
+            item.expanded
+              ? gt("Collapse children of {title}", { title })
+              : gt("Expand children of {title}", { title })
+          }
+          aria-expanded={item.expanded}
+          className="flex h-8 min-w-0 flex-1 items-center gap-1 rounded-md pl-3 pr-1 text-xs text-sidebar-muted-foreground hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          onClick={() => setCollapsed(item.key, item.expanded)}
+        >
+          <ChevronRightIcon
+            aria-hidden
+            className={cn("size-3 shrink-0", item.expanded && "rotate-90")}
+          />
+          <BotIcon aria-hidden className="size-3 shrink-0" />
+          <span className="truncate italic">{title}</span>
+          <span className="text-secondary-label">{item.count}</span>
+          {!item.expanded && item.status && (
+            <LastCodeThreadStatusLabel status={item.status} compact={compact} />
+          )}
+        </button>
+        {item.ownerRef && (
+          <Link
+            to="/$environmentId/$threadId"
+            params={buildThreadRouteParams(item.ownerRef)}
+            aria-label={gt("Open creator thread")}
+            className="shrink-0 rounded-md p-1 text-sidebar-muted-foreground hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          >
+            <ArrowUpRightIcon aria-hidden className="size-3" />
+          </Link>
+        )}
+      </div>
     </SidebarMenuSubItem>
   );
 }

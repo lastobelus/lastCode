@@ -35,6 +35,7 @@ export function createLastCodeSidebarProjectLookup(
 export function indexLastCodeSidebarThreads(
   threads: readonly SidebarThreadSummary[],
   projectKey: ReturnType<typeof createLastCodeSidebarProjectLookup>,
+  hiddenThreadKeys: ReadonlySet<string> = new Set(),
 ) {
   const byThreadKey = new Map<string, SidebarThreadSummary>();
   const byProjectKey = new Map<string, SidebarThreadSummary[]>();
@@ -45,7 +46,7 @@ export function indexLastCodeSidebarThreads(
     if (members) members.push(thread);
     else byProjectKey.set(key, [thread]);
   }
-  return { byThreadKey, byProjectKey };
+  return { byThreadKey, byProjectKey, hiddenThreadKeys };
 }
 export function sortLastCodeSidebarProjects(
   groups: readonly SidebarProjectSnapshot[],
