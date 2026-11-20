@@ -37,7 +37,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { expect } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
@@ -63,6 +63,11 @@ import * as Consumers from "./WorktreeConsumers.ts";
 import * as Mounts from "./DependencyMounts.ts";
 import { withWorkspaceLease, resolveWorkspaceLeaseRoot } from "./workspaceLease.ts";
 import { withProjectRootLease } from "./projectRootLease.ts";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const fs = await importOriginal<typeof NodeFSP>();
+  return { ...fs, lstat: vi.fn(fs.lstat) };
+});
 
 const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 const git = async (cwd: string, ...args: readonly string[]) =>
@@ -1798,15 +1803,33 @@ it.live("cancels every exact deletion intent if preparation fails before dispatc
   ),
 );
 
-it.live.each([false, true])(
-  "retains an interrupted owned trial without trapping a verified original (failed: %s)",
-  (failed) =>
+it.live.each([
+  "interrupted",
+  "failed",
+  "renumbered-device",
+  "separate-device-trial",
+  "separate-device-repository",
+  "missing-ref",
+  "different-inode",
+  "mixed-device",
+  "different-trial",
+  "after-journal-write",
+] as const)(
+  "retains an interrupted owned trial without trapping a verified original (%s)",
+  (outcome) =>
     realGit((f) =>
       Effect.gen(function* () {
+        const failed = outcome !== "interrupted";
+        const remounted = failed && outcome !== "failed";
         const h = yield* harness(f);
         yield* h.service.previewSuspend({ threadId: firstId });
         const original = (yield* h.registry.list)[0]!;
+        const separateTrial = outcome === "separate-device-trial";
+        const separateRepository = outcome === "separate-device-repository";
+        const separateDevice = original.nativeIdentity!.sourceIdentity.dev + 10;
         const id = "interrupted-trial";
+        const snapshotDir = NodePath.join(h.registry.root, "snapshots", id);
+        const manifestFile = NodePath.join(snapshotDir, "manifest.json");
         const summary = {
           ...original.summary,
           generation: 1,
@@ -1854,7 +1877,101 @@ it.live.each([false, true])(
           );
           return trial;
         });
+        if (remounted) {
+          // The fixture runs on one mounted volume. Record the device the previous
+          // process would have seen in all three durable records.
+          const expected = original.nativeIdentity!;
+          if ("kind" in expected) throw new Error("expected a Git worktree");
+          const oldDevice = expected.sourceIdentity.dev + 1;
+          const previous = (identity: { dev: number; ino: number }) => ({
+            ...identity,
+            dev: oldDevice,
+          });
+          const nativeIdentity = {
+            ...expected,
+            sourceIdentity: previous(expected.sourceIdentity),
+            gitDirectoryIdentity: separateRepository
+              ? { ...expected.gitDirectoryIdentity }
+              : previous(expected.gitDirectoryIdentity),
+            commonIdentity: separateRepository
+              ? { ...expected.commonIdentity }
+              : previous(expected.commonIdentity),
+          };
+          if (outcome === "different-inode") nativeIdentity.sourceIdentity.ino += 1;
+          if (outcome === "mixed-device") nativeIdentity.gitDirectoryIdentity.dev += 1;
+          yield* h.registry.put({ ...capturing, nativeIdentity }, capturing);
+          yield* Effect.promise(async () => {
+            const journal = await interrupted.readJournal(id);
+            const manifest = await interrupted.read(id);
+            const trialIdentity = separateTrial
+              ? { ...journal.trialIdentity!, dev: separateDevice }
+              : separateRepository
+                ? { ...journal.trialIdentity! }
+                : previous(journal.trialIdentity!);
+            if (outcome === "different-trial") trialIdentity.ino += 1;
+            await NodeFSP.writeFile(
+              manifestFile,
+              JSON.stringify({ ...manifest, ...nativeIdentity }),
+            );
+            await NodeFSP.writeFile(
+              NodePath.join(snapshotDir, "journal.json"),
+              JSON.stringify({
+                ...journal,
+                phase: outcome === "after-journal-write" ? "active" : journal.phase,
+                sourceIdentity: nativeIdentity.sourceIdentity,
+                captureRefs: {
+                  ...journal.captureRefs,
+                  commonIdentity: nativeIdentity.commonIdentity,
+                },
+                trialIdentity,
+              }),
+            );
+            if (manifest.version === 4) throw new Error("expected a Git snapshot");
+            if (outcome === "missing-ref")
+              await git(f.repository, "update-ref", "-d", manifest.headRef);
+            await NodeFSP.writeFile(
+              NodePath.join(f.workspace, "tracked"),
+              "edited after capture\n",
+            );
+          });
+        }
+        const { lstat } = yield* Effect.promise(() =>
+          vi.importActual<typeof NodeFSP>("node:fs/promises"),
+        );
+        const separateMount = separateTrial ? trial : f.workspace;
+        using _separateMount =
+          separateTrial || separateRepository
+            ? vi.spyOn(NodeFSP, "lstat").mockImplementation(async (...args) => {
+                const stat = await lstat(...args);
+                return args[0] === separateMount
+                  ? Object.assign(stat, { dev: separateDevice })
+                  : stat;
+              })
+            : undefined;
+        const manifestBefore = yield* Effect.promise(() => NodeFSP.readFile(manifestFile, "utf8"));
         yield* h.service.sweep;
+        if (
+          outcome === "missing-ref" ||
+          outcome === "different-inode" ||
+          outcome === "mixed-device" ||
+          outcome === "different-trial"
+        ) {
+          const blocked = (yield* h.registry.list)[0]!;
+          expect(blocked.summary.state).toBe("capturing");
+          expect(blocked.operation?.id).toBe(id);
+          expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe("verifying");
+          expect(
+            yield* Effect.promise(() =>
+              NodeFSP.readFile(NodePath.join(trial, ".DS_Store"), "utf8"),
+            ),
+          ).toBe("keep trial addition\n");
+          expect(
+            yield* Effect.promise(() =>
+              NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+            ),
+          ).toBe("edited after capture\n");
+          return;
+        }
         if (failed) {
           const active = (yield* h.registry.list)[0]!;
           expect(active.summary.state).toBe("active");
@@ -1894,6 +2011,30 @@ it.live.each([false, true])(
               id,
             ]);
           });
+          if (remounted) {
+            expect(active.nativeIdentity).toEqual({
+              ...original.nativeIdentity,
+              sourceIdentity: {
+                ...original.nativeIdentity!.sourceIdentity,
+                dev: separateRepository
+                  ? separateDevice
+                  : original.nativeIdentity!.sourceIdentity.dev,
+              },
+            });
+            expect(active.summary.keepWorkspace).toBe(true);
+            expect(
+              yield* Effect.promise(() =>
+                NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+              ),
+            ).toBe("edited after capture\n");
+            expect(yield* Effect.promise(() => NodeFSP.readFile(manifestFile, "utf8"))).toBe(
+              manifestBefore,
+            );
+            expect(yield* Effect.promise(() => git(trial, "rev-parse", "--verify", "HEAD"))).toBe(
+              (yield* Effect.promise(() => h.store.read(id))).head,
+            );
+            return;
+          }
           const saved = yield* restarted.suspend;
           expect(saved.summary.state).toBe("suspended");
           expect(saved.summary.snapshotId).not.toBe(id);

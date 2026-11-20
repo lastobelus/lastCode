@@ -154,6 +154,10 @@ type SnapshotRefs = Pick<
   GitWorktreeSuspensionSnapshot,
   "commonDirectory" | "commonIdentity" | "headRef" | "head" | "indexRef" | "indexTree" | "gitRefs"
 >;
+type GitWorktreeIdentity = Pick<
+  GitWorktreeSuspensionSnapshot,
+  "sourceIdentity" | "gitDirectory" | "gitDirectoryIdentity" | "commonDirectory" | "commonIdentity"
+>;
 
 interface CaptureInput {
   readonly sourcePath: string;
@@ -2984,6 +2988,104 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("the isolated recovery path is still occupied");
     return transition(journal, "active");
   };
+  const keepOriginalAfterDeviceChange = async (
+    id: string,
+    input: {
+      readonly operationId: string;
+      readonly ownerBinding: string;
+      readonly sourcePath: string;
+      readonly expected: GitWorktreeIdentity;
+    },
+  ) => {
+    const journal = await readJournal(id);
+    const snapshot = await read(id);
+    const { expected } = input;
+    const { trialPath, trialIdentity } = journal;
+    const recordedDevice = expected.sourceIdentity.dev;
+    if (
+      snapshot.version === 4 ||
+      (journal.phase !== "verifying" && journal.phase !== "active") ||
+      journal.isolatedPath !== undefined ||
+      journal.restorePath !== undefined ||
+      journal.destinationPath !== undefined ||
+      journal.operationId !== input.operationId ||
+      snapshot.ownerBinding !== input.ownerBinding ||
+      snapshot.sourcePath !== input.sourcePath ||
+      journal.sourcePath !== input.sourcePath ||
+      journal.sourceIdentity === undefined ||
+      !sameIdentity(journal.sourceIdentity, expected.sourceIdentity) ||
+      !sameIdentity(snapshot.sourceIdentity, expected.sourceIdentity) ||
+      snapshot.gitDirectory !== expected.gitDirectory ||
+      !sameIdentity(snapshot.gitDirectoryIdentity, expected.gitDirectoryIdentity) ||
+      snapshot.commonDirectory !== expected.commonDirectory ||
+      !sameIdentity(snapshot.commonIdentity, expected.commonIdentity) ||
+      trialPath === undefined ||
+      trialIdentity === undefined ||
+      NodePath.dirname(trialPath) !== snapshotDirectory(id) ||
+      !/^trial-[a-f0-9-]{36}$/u.test(NodePath.basename(trialPath))
+    )
+      return refuse("the failed save does not identify the original and its retained trial");
+
+    const current = await gitIdentity(input.sourcePath);
+    const trial = await gitIdentity(trialPath);
+    const source = await NodeFSP.lstat(input.sourcePath);
+    // Only the original workspace's volume can have a new device number.
+    const matchesDeviceChange = (actual: FileIdentity, previous: FileIdentity) =>
+      actual.ino === previous.ino &&
+      (previous.dev === recordedDevice
+        ? actual.dev === source.dev
+        : actual.dev === previous.dev && actual.dev !== source.dev);
+    if (
+      source.dev === recordedDevice ||
+      current.gitDirectory !== expected.gitDirectory ||
+      current.commonDirectory !== expected.commonDirectory ||
+      current.head !== snapshot.head ||
+      current.branch !== snapshot.branch ||
+      trial.gitDirectory !== journal.trialGitDirectory ||
+      trial.gitDirectory === current.gitDirectory ||
+      trial.commonDirectory !== current.commonDirectory ||
+      !sameIdentity(trial.commonIdentity, current.commonIdentity) ||
+      trial.head !== snapshot.head ||
+      trial.branch !== null ||
+      !matchesDeviceChange(identity(await NodeFSP.lstat(trialPath)), trialIdentity)
+    )
+      refuse("the original or retained trial identity changed");
+
+    const capturedAt = Date.parse(snapshot.createdAt);
+    for (const [name, previous, inspected] of [
+      [input.sourcePath, expected.sourceIdentity, identity(source)],
+      [current.gitDirectory, expected.gitDirectoryIdentity, current.gitDirectoryIdentity],
+      [current.commonDirectory, expected.commonIdentity, current.commonIdentity],
+    ] as const) {
+      const stat = await NodeFSP.lstat(name);
+      if (
+        !stat.isDirectory() ||
+        !sameIdentity(identity(stat), inspected) ||
+        !matchesDeviceChange(inspected, previous) ||
+        !(stat.birthtimeMs > 0 && Math.floor(stat.birthtimeMs) <= capturedAt)
+      )
+        refuse("the original workspace directories could not be verified");
+    }
+    // The per-save refs tie these matching directory inodes to this capture across a device change.
+    // Use the new device only for this check. The manifest and the trial retain their original identities.
+    await validateRepository({
+      ...snapshot,
+      commonIdentity: current.commonIdentity,
+    });
+    if (JSON.stringify(await readJournal(id)) !== JSON.stringify(journal))
+      refuse("the failed save journal changed");
+    if (journal.phase === "verifying") await transition(journal, "active");
+    return {
+      snapshot,
+      nativeIdentity: {
+        sourceIdentity: identity(source),
+        gitDirectory: current.gitDirectory,
+        gitDirectoryIdentity: current.gitDirectoryIdentity,
+        commonDirectory: current.commonDirectory,
+        commonIdentity: current.commonIdentity,
+      } satisfies GitWorktreeIdentity,
+    };
+  };
   const suspend = async (
     id: string,
     input: {
@@ -3994,6 +4096,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     rollbackIsolation,
     reconcileRemoval,
     keepOriginal,
+    keepOriginalAfterDeviceChange,
     suspend,
     restore,
     stageRestore,
