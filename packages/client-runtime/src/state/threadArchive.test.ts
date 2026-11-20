@@ -20,6 +20,7 @@ import {
   getArchiveRecoveryRows,
   presentThreadArchive,
   buildThreadArchiveConfirmation,
+  requiresThreadArchiveConfirmation,
 } from "./threadArchive.ts";
 import { presentThreadShell } from "./models.ts";
 import { v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
@@ -163,6 +164,27 @@ describe("archive confirmation", () => {
       },
     ];
     const linked = { ...family, unreadThreadIds: [], linkedArchivePreview };
+    const ready = linkedArchivePreview[0];
+    if (ready?.status !== "ready") throw new Error("Expected a ready fixture");
+    const empty = { ...ready, inventory: { ...ready.inventory, threads: [] } };
+    expect(
+      requiresThreadArchiveConfirmation({
+        requiresConfirmation: false,
+        linkedArchivePreview: [empty],
+      }),
+    ).toBe(false);
+    expect(
+      requiresThreadArchiveConfirmation({
+        requiresConfirmation: false,
+        linkedArchivePreview: [empty, ...linkedArchivePreview.slice(1)],
+      }),
+    ).toBe(true);
+    expect(
+      requiresThreadArchiveConfirmation({
+        requiresConfirmation: false,
+        linkedArchivePreview: [ready],
+      }),
+    ).toBe(true);
     const bulk = { ...linked, bulkPreviews: [linked, linked] };
     const defaultConfirmation = buildThreadArchiveConfirmation(bulk);
     expect(defaultConfirmation.canIncludeTypedIn).toBe(false);

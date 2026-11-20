@@ -30,6 +30,8 @@ const nested = ThreadId.make("thread:nested");
 const direct = ThreadId.make("thread:direct");
 const typedLocal = ThreadId.make("thread:typed-local");
 const remotelyKept = ThreadId.make("thread:remotely-kept");
+const deletedPeerOwner = ThreadId.make("thread:deleted-peer-owner");
+const belowDeletedPeerOwner = ThreadId.make("thread:below-deleted-peer-owner");
 
 const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
   id: ThreadId,
@@ -37,6 +39,7 @@ const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
   options?: {
     readonly typed?: boolean;
     readonly archived?: boolean;
+    readonly deleted?: boolean;
     readonly persistent?: boolean;
     readonly unread?: boolean;
   },
@@ -100,6 +103,15 @@ const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
       },
     });
   }
+  if (options?.deleted) {
+    yield* store.apply({
+      id: EventId.make(`delete:${id}`),
+      type: "thread.deleted",
+      threadId: id,
+      occurredAt: now,
+      payload: { ...thread, deletedAt: now },
+    });
+  }
 });
 
 const environmentLayer = ProjectionStore.layer.pipe(Layer.provide(Sqlite.layerMemory), Layer.fresh);
@@ -108,7 +120,11 @@ it.effect("reads only recorded ownership across two separate environment databas
   Effect.gen(function* () {
     const request = yield* Effect.gen(function* () {
       yield* saveThread(orchestrator);
-      yield* saveThread(localChild, { environmentId: origin, threadId: orchestrator });
+      yield* saveThread(
+        localChild,
+        { environmentId: origin, threadId: orchestrator },
+        { typed: true, deleted: true },
+      );
       yield* saveThread(
         typedLocal,
         { environmentId: origin, threadId: localChild },
@@ -128,6 +144,15 @@ it.effect("reads only recorded ownership across two separate environment databas
         { unread: true },
       );
       yield* saveThread(remoteChild, { environmentId: origin, threadId: localChild });
+      yield* saveThread(
+        deletedPeerOwner,
+        { environmentId: destination, threadId: remoteChild },
+        { typed: true, deleted: true },
+      );
+      yield* saveThread(belowDeletedPeerOwner, {
+        environmentId: destination,
+        threadId: deletedPeerOwner,
+      });
       yield* saveThread(
         typedBranch,
         { environmentId: destination, threadId: remoteChild },
@@ -152,7 +177,7 @@ it.effect("reads only recorded ownership across two separate environment databas
       assert.equal(inventory.environmentId, destination);
       assert.sameMembers(
         inventory.threads.map(({ threadId }) => threadId),
-        [direct, remoteChild, nested, remotelyKept],
+        [direct, remoteChild, nested, remotelyKept, belowDeletedPeerOwner],
       );
       assert.sameMembers([...inventory.keptThreadIds], [nested, remotelyKept]);
       assert.deepEqual(inventory.protectedThreadIds, [nested]);

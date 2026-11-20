@@ -104,7 +104,7 @@ export const layer = Layer.effect(
       ) {
         if (!family.threads.some((thread) => thread.id === threadId)) return family;
         const peers = yield* links.listStored ?? Effect.succeed([]);
-        if (peers.length === 0) return family;
+        if (peers.length === 0 || !(yield* links.enabled)) return family;
         const input = yield* readPeerArchiveOwnerScope(environmentId, threadId, store);
         const linkedArchivePreview = yield* Effect.forEach(
           peers,
@@ -126,7 +126,7 @@ export const layer = Layer.effect(
             ),
           { concurrency: "unbounded" },
         );
-        return { ...family, linkedArchivePreview, requiresConfirmation: true };
+        return { ...family, linkedArchivePreview };
       },
       (effect, threadId) =>
         Effect.mapError(effect, (cause) => new OrchestratorProjectionError({ threadId, cause })),

@@ -64,7 +64,12 @@ export function archivePreviewSelection(
 export function requiresThreadArchiveConfirmation(
   family: Pick<ThreadArchiveFamily, "requiresConfirmation" | "linkedArchivePreview">,
 ) {
-  return family.requiresConfirmation || !!family.linkedArchivePreview?.length;
+  return (
+    family.requiresConfirmation ||
+    family.linkedArchivePreview?.some(
+      (peer) => peer.status !== "ready" || peer.inventory.threads.length > 0,
+    ) === true
+  );
 }
 
 type ArchivePreviewFamily = {
