@@ -1,7 +1,11 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
-import { sortThreads } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  resolveThreadActivityTimestamp,
+  sortThreads,
+  toSortableTimestamp,
+} from "@t3tools/client-runtime/state/thread-sort";
 import type { SidebarThreadSummary } from "../../types";
 import {
   resolveProjectStatusIndicator,
@@ -13,7 +17,6 @@ import {
   lastcodeSidebarThreadKey,
   projectLastCodeSidebarFamilies,
 } from "../lastcodeSidebarFamilies.logic";
-import { getThreadSortTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 
 export function projectLastCodeProjectThreads(
   threads: readonly SidebarThreadSummary[],
@@ -38,7 +41,12 @@ export function projectLastCodeProjectThreads(
   const inheritedStatusForThread = (thread: SidebarThreadSummary) =>
     lastcodeSidebarInheritedStatus(thread, statusForThread(thread));
   const latestTimestamp = visibleThreads.reduce(
-    (latest, thread) => Math.max(latest, getThreadSortTimestamp(thread, "updated_at")),
+    (latest, thread) =>
+      Math.max(
+        latest,
+        toSortableTimestamp(resolveThreadActivityTimestamp(thread) ?? undefined) ??
+          Number.NEGATIVE_INFINITY,
+      ),
     Number.NEGATIVE_INFINITY,
   );
   return {
