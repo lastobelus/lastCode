@@ -1537,6 +1537,35 @@ it.each([
   expect(await NodeFSP.readFile(path, "utf8")).toBe("a".repeat(64));
 });
 
+it("reports an invalid tracked filename before pruning generated directories", async () => {
+  await using test = await fixture();
+  await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
+  await NodeFSP.mkdir(NodePath.join(test.workspace, "node_modules"));
+  const rawPath = Buffer.concat([Buffer.from("z/"), Buffer.from([255])]);
+  const blob = await git(test.workspace, "rev-parse", ":tracked.txt");
+  await new Promise<void>((resolve, reject) => {
+    const child = NodeChildProcess.execFile(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "update-index", "-z", "--index-info"],
+      { cwd: test.workspace },
+      (error) => (error ? reject(error) : resolve()),
+    );
+    child.stdin!.end(Buffer.concat([Buffer.from(`100644 ${blob}\t`), rawPath, Buffer.from([0])]));
+  });
+  await expect(
+    test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "tracked-name",
+      ownerBinding: "fixture-owner",
+    }),
+  ).rejects.toThrow(
+    `Workspace needs review: a tracked filename is not UTF-8 (name bytes: ${rawPath.toString("hex")}) (${JSON.stringify(NodePath.join(test.workspace, rawPath.toString("utf8")))})`,
+  );
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+    "unstaged\n",
+  );
+});
+
 it("reports the private index path and unsupported extension without removing source", async () => {
   await using test = await fixture();
   await git(test.workspace, "update-index", "--untracked-cache");

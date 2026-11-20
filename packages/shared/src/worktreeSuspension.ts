@@ -885,9 +885,21 @@ const inventory = async (
     if (trackedDirectories === undefined) {
       trackedDirectories = new Set();
       const tracked = await git(root, ["ls-files", "--cached", "--with-tree=HEAD", "-z"]);
-      if (!Buffer.from(tracked.toString("utf8")).equals(tracked))
-        refuse("a tracked filename is not UTF-8", NodePath.join(root, ".git"));
-      for (const name of tracked.toString("utf8").split("\0").filter(Boolean)) {
+      const trackedText = tracked.toString("utf8");
+      if (!Buffer.from(trackedText).equals(tracked)) {
+        let offset = 0;
+        for (const name of trackedText.split("\0")) {
+          const end = tracked.indexOf(0, offset);
+          const raw = tracked.subarray(offset, end < 0 ? tracked.length : end);
+          offset = end < 0 ? tracked.length : end + 1;
+          if (!Buffer.from(name).equals(raw))
+            refuse(
+              `a tracked filename is not UTF-8 (name bytes: ${raw.toString("hex")})`,
+              NodePath.join(root, name),
+            );
+        }
+      }
+      for (const name of trackedText.split("\0").filter(Boolean)) {
         trackedDirectories.add(name);
         let parent = NodePath.posix.dirname(name);
         while (parent !== ".") {
