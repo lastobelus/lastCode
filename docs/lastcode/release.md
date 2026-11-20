@@ -263,8 +263,14 @@ The derived files are `pnpm-lock.yaml`,
 `apps/server/src/provider/agentContextBudget.json`, and the instruction text in
 `apps/server/src/orchestration-v2/testkit/fixtures/*/muse_transcript.ndjson`.
 Regeneration rewrites only those fixtures' instruction fields from the tree's
-runtime instructions; their recorded behavior stays as it is.
-Resolve conflicts in recorded behavior normally; regeneration cannot repair those fields.
+runtime instructions. Resolve conflicts in their recorded behavior normally.
+
+Clean nightly carry checkpoints refresh the agent-context snapshot after replay.
+When replay needs a repair, the regeneration command below refreshes it.
+LastCode PR CI measures the proposed merge against its exact base and reports the
+byte change for each value. Growth in any value requires a maintainer to add
+`agent-context-increase` to the PR. Leave snapshot updates to checkpoint regeneration.
+
 The retained recovery worktree is the only checkout that receives committed
 repairs. Incorporate any downstream merges made since that attempt before
 selecting its exact head.

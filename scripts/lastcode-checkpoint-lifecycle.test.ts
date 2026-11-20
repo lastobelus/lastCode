@@ -694,6 +694,21 @@ function publishCarryLifecycleFixture() {
   const fixture = initFixture();
   try {
     const { repo } = fixture;
+    const budget = "apps/server/src/provider/agentContextBudget.json";
+    const originalBudget = {
+      claudeSystemAppendBytes: 10,
+      codexAdditionalContextBytes: 20,
+      mcpToolListJsonBytes: 30,
+    };
+    const refreshedBudget = { ...originalBudget, mcpToolListJsonBytes: 31 };
+    write(repo, budget, JSON.stringify(originalBudget) + "\n");
+    write(
+      repo,
+      "apps/server/scripts/generate-agent-context-budget.ts",
+      `import * as fs from "node:fs";
+fs.writeFileSync(new URL("../src/provider/agentContextBudget.json", import.meta.url), ${JSON.stringify(JSON.stringify(refreshedBudget) + "\n")});
+`,
+    );
     git(repo, ["add", "--force", "node_modules/.bin/vp"]);
     const baseA = commit(repo, "fixture upstream base");
     git(repo, ["tag", NIGHTLY_A, baseA]);
@@ -844,7 +859,10 @@ done
 `,
       { mode: 0o755 },
     );
-    const changedUpstream = checkpoint(fixture, ["--push-tags", "--promote"]);
+    const replayEvents = NodePath.join(fixture.root, "checkpoint-replay-events.txt");
+    const changedUpstream = checkpoint(fixture, ["--push-tags", "--promote"], {
+      FIXTURE_CI_EVENTS: replayEvents,
+    });
     assert.equal(changedUpstream.status, 0, changedUpstream.stderr || changedUpstream.stdout);
     assert.match(changedUpstream.stdout, /leaving promotion to a later admitted run/u);
     assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), concurrentMain);
@@ -853,6 +871,19 @@ done
     NodeFS.unlinkSync(raceHook);
     const compactC = remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_C}`);
     assert.equal(readCarryGroupChain(repo, compactC, upstreamC).length, 6);
+    assert.deepStrictEqual(
+      JSON.parse(git(repo, ["show", `${compactB}:${budget}`])),
+      originalBudget,
+    );
+    assert.deepStrictEqual(
+      JSON.parse(git(repo, ["show", `${compactC}:${budget}`])),
+      refreshedBudget,
+    );
+    assert.deepStrictEqual(
+      JSON.parse(git(repo, ["show", `${compactC}^:${budget}`])),
+      originalBudget,
+    );
+    assert.equal(NodeFS.readFileSync(replayEvents, "utf8").match(/^vp install /gmu)?.length, 1);
     quietProvenance(compactC, upstreamC);
     assert.equal(
       remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${skippedNightly}`),

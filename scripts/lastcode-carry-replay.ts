@@ -113,6 +113,7 @@ export interface ReplayCarrySetInput {
   readonly sourceBase: string;
   readonly compactHead: string;
   readonly onto: string;
+  readonly prepareResult?: (replayedHead: string) => void;
 }
 
 export interface ReplayUngroupedInput {
@@ -1357,6 +1358,7 @@ export function replayCarrySetOnto(input: ReplayCarrySetInput): CarryReplayResul
     }
     throw error;
   }
+  input.prepareResult?.(resolveCommit(input.worktree, "HEAD"));
   return completeCarryReplay(input.worktree);
 }
 

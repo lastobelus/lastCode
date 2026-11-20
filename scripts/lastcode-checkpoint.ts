@@ -1588,6 +1588,38 @@ function prepareCheckpointValidation(repoRoot: string, worktree: string): void {
   }
 }
 
+function refreshCheckpointAgentContextBudget(worktree: string): void {
+  const snapshot = "apps/server/src/provider/agentContextBudget.json";
+  run(
+    NodePath.join(worktree, "apps/server"),
+    process.execPath,
+    ["scripts/generate-agent-context-budget.ts"],
+    {
+      environment: checkpointSmokeEnvironment(worktree),
+      failureStep: "Regenerate agent context budget",
+    },
+  );
+  if (!git(worktree, ["status", "--porcelain", "--", snapshot])) return;
+  // The last carry group owns derived outputs. Keep the chain at six commits.
+  run(
+    worktree,
+    "git",
+    [
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "--amend",
+      "--no-edit",
+      "--only",
+      "--",
+      snapshot,
+    ],
+    { failureStep: "Commit refreshed agent context budget" },
+  );
+}
+
 function runFullCandidateValidation(
   repoRoot: string,
   worktree: string,
@@ -1632,7 +1664,6 @@ function runCandidateGate(
 }
 
 function runSmokeGate(repoRoot: string, worktree: string, candidate: CheckpointCiCandidate): void {
-  prepareCheckpointValidation(repoRoot, worktree);
   const vp = checkpointVpPaths(repoRoot, worktree);
   const environment = checkpointSmokeEnvironment(worktree);
   try {
@@ -3000,13 +3031,15 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     try {
       if (carryWorktreePrepared) {
         const worktree = automationWorktree();
-        if (options.smoke)
+        if (options.smoke) {
+          prepareCheckpointValidation(repoRoot, worktree);
           runSmokeGate(repoRoot, worktree, {
             checkpointTag: checkpointTagFromNightlyTag(plan.baseNightly.tag),
             commit: candidateCommit,
             upstreamCommit: plan.baseNightly.commit,
             sourceCommit,
           });
+        }
         assertPinnedNightly(repoRoot, plan.baseNightly.tag, plan.baseNightly.commit);
         if (
           git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
@@ -3363,6 +3396,38 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           sourceBase: baseCommit,
           compactHead: git(worktree, ["rev-parse", "HEAD"]),
           onto: nightly.commit,
+          prepareResult: (replayedHead) => {
+            const historicalInstallable = !previousCompact
+              ? installables.findLast(
+                  (installable) =>
+                    installable.nightly.tag === nightly.tag && installable.replayMode !== "carry",
+                )
+              : undefined;
+            if (historicalInstallable) {
+              if (!historicalInstallable.sourceCommit) {
+                throw new Error(
+                  `Historical installable ${historicalInstallable.tag} has no Source-Commit; refusing to replace its unverified integration resolutions.`,
+                );
+              }
+              const unexpected = unexpectedHistoricalCheckpointChanges({
+                repoRoot,
+                historicalCommit: historicalInstallable.commit,
+                candidateCommit: replayedHead,
+                representedSource: historicalInstallable.sourceCommit,
+                currentSource: sourceCommit,
+              });
+              if (unexpected.length > 0) {
+                throw new Error(
+                  `Carry replay would drop historical integration resolutions outside current source changes: ${unexpected.join(", ")}. Fold them into their owning carry groups before publication.`,
+                );
+              }
+            }
+            if (options.smoke) {
+              failurePhase = "smoke";
+              prepareCheckpointValidation(repoRoot, worktree);
+              refreshCheckpointAgentContextBudget(worktree);
+            }
+          },
         });
       } else if (historicalCompactFallback && previousCompact) {
         replayUngroupedOnto({
@@ -3379,39 +3444,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         rebaseOnto(worktree, nightly.commit, baseCommit);
       }
       candidateCommit = normalizeCheckpointCommits(worktree, nightly.commit);
-      const historicalInstallable = !previousCompact
-        ? installables.findLast(
-            (installable) =>
-              installable.nightly.tag === nightly.tag && installable.replayMode !== "carry",
-          )
-        : undefined;
-      if (replay.mode === "carry" && historicalInstallable) {
-        if (!historicalInstallable.sourceCommit) {
-          throw new Error(
-            `Historical installable ${historicalInstallable.tag} has no Source-Commit; refusing to replace its unverified integration resolutions.`,
-          );
-        }
-        const unexpected = unexpectedHistoricalCheckpointChanges({
-          repoRoot,
-          historicalCommit: historicalInstallable.commit,
-          candidateCommit,
-          representedSource: historicalInstallable.sourceCommit,
-          currentSource: sourceCommit,
-        });
-        if (unexpected.length > 0) {
-          throw new Error(
-            `Carry replay would drop historical integration resolutions outside current source changes: ${unexpected.join(", ")}. Fold them into their owning carry groups before publication.`,
-          );
-        }
-      }
       failurePhase = "smoke";
-      if (options.smoke)
+      if (options.smoke) {
+        if (replay.mode !== "carry") prepareCheckpointValidation(repoRoot, worktree);
         runSmokeGate(repoRoot, worktree, {
           checkpointTag: checkpointTagFromNightlyTag(nightly.tag),
           commit: candidateCommit,
           upstreamCommit: nightly.commit,
           sourceCommit,
         });
+      }
       assertPinnedNightly(repoRoot, nightly.tag, nightly.commit);
       if (
         git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
