@@ -13292,5 +13292,9 @@
   "af190199950e20f4": "This thread's owner can't be changed.",
   "5256993b35562b07": "Can't return: the owner thread is missing, archived, or being archived.",
   "606f561d56d94e2f": "Still working for the thread that asked for it. Wait for it to finish or cancel it, then promote.",
-  "16a49bb79c3f2cdd": "Couldn't change thread owner"
+  "16a49bb79c3f2cdd": "Couldn't change thread owner",
+  "0c5204be873f3a76": "Show temporary projects",
+  "66dc3acf46bef713": "Keep project",
+  "35fa9b4a4dc657c7": "Could not keep project",
+  "a7c92c59b409fa46": "Temporary project"
 }

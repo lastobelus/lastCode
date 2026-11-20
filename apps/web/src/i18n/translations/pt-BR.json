@@ -13282,5 +13282,9 @@
   "af190199950e20f4": "Não é possível alterar o proprietário desta conversa.",
   "5256993b35562b07": "Não é possível devolver: a conversa proprietária não existe, foi arquivada ou está sendo arquivada.",
   "606f561d56d94e2f": "A tarefa ainda está em andamento para a conversa que a solicitou. Aguarde a conclusão ou cancele a tarefa e então promova a conversa.",
-  "16a49bb79c3f2cdd": "Não foi possível alterar o proprietário da conversa"
+  "16a49bb79c3f2cdd": "Não foi possível alterar o proprietário da conversa",
+  "0c5204be873f3a76": "Mostrar projetos temporários",
+  "66dc3acf46bef713": "Manter projeto",
+  "35fa9b4a4dc657c7": "Não foi possível manter o projeto",
+  "a7c92c59b409fa46": "Projeto temporário"
 }

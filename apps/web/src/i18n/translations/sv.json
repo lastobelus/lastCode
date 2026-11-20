@@ -13290,5 +13290,9 @@
   "af190199950e20f4": "Det går inte att byta ägare till den här tråden.",
   "5256993b35562b07": "Kan inte återföra: ägartråden saknas, är arkiverad eller håller på att arkiveras.",
   "606f561d56d94e2f": "Uppgiften pågår fortfarande för tråden som begärde den. Vänta tills den är klar eller avbryt den och befordra sedan tråden.",
-  "16a49bb79c3f2cdd": "Det gick inte att byta ägare till tråden"
+  "16a49bb79c3f2cdd": "Det gick inte att byta ägare till tråden",
+  "0c5204be873f3a76": "Visa tillfälliga projekt",
+  "66dc3acf46bef713": "Behåll projektet",
+  "35fa9b4a4dc657c7": "Det gick inte att behålla projektet",
+  "a7c92c59b409fa46": "Tillfälligt projekt"
 }

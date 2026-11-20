@@ -13283,5 +13283,9 @@
   "af190199950e20f4": "Der Besitzer dieses Threads kann nicht geändert werden.",
   "5256993b35562b07": "Rückgabe nicht möglich: Der Besitzer-Thread fehlt, ist archiviert oder wird gerade archiviert.",
   "606f561d56d94e2f": "Die Aufgabe läuft noch für den Thread, der sie angefordert hat. Warte, bis sie fertig ist, oder brich sie ab. Stufe den Thread dann hoch.",
-  "16a49bb79c3f2cdd": "Thread-Besitzer konnte nicht geändert werden"
+  "16a49bb79c3f2cdd": "Thread-Besitzer konnte nicht geändert werden",
+  "0c5204be873f3a76": "Temporäre Projekte anzeigen",
+  "66dc3acf46bef713": "Projekt behalten",
+  "35fa9b4a4dc657c7": "Projekt konnte nicht beibehalten werden",
+  "a7c92c59b409fa46": "Temporäres Projekt"
 }

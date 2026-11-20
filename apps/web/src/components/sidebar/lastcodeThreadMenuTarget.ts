@@ -15,7 +15,11 @@ import {
   NO_PROJECT_GROUP_KEY,
   resolveSidebarProjectSettingsKey,
 } from "../../sidebarProjectGrouping";
-import type { ProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
+import {
+  deriveLogicalProjectKeyFromSettings,
+  type ProjectGroupingSettings,
+} from "@t3tools/client-runtime/state/project-grouping";
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import type { SidebarThreadSummary } from "../../types";
 import {
   readProject,
@@ -43,11 +47,13 @@ export function readLastCodeThreadMenuProject(
   const projectRef = scopeProjectRef(thread.environmentId, thread.projectId);
   const threadProject = readProject(projectRef) ?? members.get(scopedProjectKey(projectRef));
   const projectSettingsKey = threadProject
-    ? resolveSidebarProjectSettingsKey({
-        sidebarProjectKey: project.projectKey,
-        targetProject: threadProject,
-        settings,
-      })
+    ? isTemporaryProject(threadProject)
+      ? deriveLogicalProjectKeyFromSettings(threadProject, settings)
+      : resolveSidebarProjectSettingsKey({
+          sidebarProjectKey: project.projectKey,
+          targetProject: threadProject,
+          settings,
+        })
     : project.projectKey === NO_PROJECT_GROUP_KEY
       ? null
       : project.projectKey;

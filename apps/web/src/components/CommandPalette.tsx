@@ -135,6 +135,7 @@ import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { useStartTriage } from "../hooks/useStartTriage";
 import { pickTriageEnvironment } from "../lib/triageTarget";
+import { TemporaryProjectsToggle } from "./TemporaryProjectsToggle";
 import { useNewProject } from "../hooks/useNewProject";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { reportProjectFailure, useProjectPin } from "../hooks/useProjectGroupUpdate";
@@ -583,7 +584,7 @@ function OpenCommandPaletteDialog(props: {
   const [isRemoteProjectLookingUp, setIsRemoteProjectLookingUp] = useState(false);
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
   const { environmentLabelById, projectEnvironmentLocationById } = useEnvironmentLookups();
-  const projectGroups = useSortedProjectGroups(environmentLabelById);
+  const { projectGroups, pickerGroups } = useSortedProjectGroups(environmentLabelById);
   const contextualProjectRef = resolveThreadActionProjectRef({
     activeDraftThread,
     activeThread: activeThread ?? undefined,
@@ -591,7 +592,7 @@ function OpenCommandPaletteDialog(props: {
     handleNewThread,
   });
   const projectPickerEntries = buildSidebarProjectPickerEntries({
-    groups: pickableProjectGroups(projectGroups),
+    groups: pickableProjectGroups(pickerGroups),
     preferredProjectRef: contextualProjectRef,
   });
   const isEnvironmentReachable = (environmentId: EnvironmentId) =>
@@ -1902,7 +1903,7 @@ function OpenCommandPaletteDialog(props: {
       run: async () => toggleProjectGroupPin(currentProjectGroup),
     });
   }
-  const contextualProjectGroup = currentProjectGroup ?? projectGroups[0] ?? null;
+  const contextualProjectGroup = currentProjectGroup ?? pickerGroups[0] ?? null;
   if (contextualProjectGroup) {
     actionItems.push({
       kind: "action",
@@ -3182,7 +3183,14 @@ function OpenCommandPaletteDialog(props: {
       aria-label={gt("Command palette")}
       autoHighlight={autoHighlightsFirstRow ? "always" : false}
       footerActionLabel={footerActionLabel}
-      footerTrailing={footerTrailing}
+      footerTrailing={
+        (currentView === null && !isActionsOnly) ||
+        currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP ? (
+          <TemporaryProjectsToggle>{footerTrailing}</TemporaryProjectsToggle>
+        ) : (
+          footerTrailing
+        )
+      }
       inputAccessory={inputAccessory}
       inputProps={{
         className: hasHighlightedNewProjectItem

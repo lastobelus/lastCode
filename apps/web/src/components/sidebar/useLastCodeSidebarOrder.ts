@@ -13,6 +13,7 @@ export function useLastCodeSidebarOrder(
   routeThreadKey: string | null,
   expandedThreadListsByProject: ReadonlySet<string>,
   threadIndex?: ReturnType<typeof indexLastCodeSidebarThreads>,
+  threadOnlyProjects: readonly SidebarProjectSnapshot[] = [],
 ) {
   const collapsedFamiliesByKey = useLastCodeSidebarFamiliesStore((state) => state.collapsedByKey);
   const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
@@ -20,12 +21,8 @@ export function useLastCodeSidebarOrder(
   const groupingStyle = useClientSetting("legacySidebarThreadGroupingStyle");
   const showFamilyStatusSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
   const sidebarThreadPreviewCount = useClientSetting("sidebarThreadPreviewCount");
-  return sortedProjects.flatMap((project) => {
+  const orderProjectThreads = (project: SidebarProjectSnapshot, projectExpanded: boolean) => {
     const projectThreads = threadsByProjectKey.get(project.projectKey) ?? [];
-    const projectExpanded = resolveProjectExpanded(
-      projectExpandedById,
-      lastCodeProjectExpansionPreferenceKeys(project),
-    );
     return projectLastCodeProjectThreads(projectThreads, sidebarThreadSortOrder, {
       ownership: threadIndex
         ? {
@@ -42,5 +39,17 @@ export function useLastCodeSidebarOrder(
       groupingStyle,
       showFamilyStatusSubheaders,
     }).familyProjection.orderedThreadKeys;
-  });
+  };
+  return [
+    ...sortedProjects.flatMap((project) =>
+      orderProjectThreads(
+        project,
+        resolveProjectExpanded(
+          projectExpandedById,
+          lastCodeProjectExpansionPreferenceKeys(project),
+        ),
+      ),
+    ),
+    ...threadOnlyProjects.flatMap((project) => orderProjectThreads(project, true)),
+  ];
 }
