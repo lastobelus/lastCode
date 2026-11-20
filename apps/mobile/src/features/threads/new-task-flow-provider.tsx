@@ -25,11 +25,11 @@ import { isTriagePrompt, replaceTriagePlaybookLink } from "@t3tools/shared/triag
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 
-import { useDiscoverableProjects } from "../../state/temporary-projects";
 import {
-  isTemporaryProject,
-  withContextualProject,
-} from "@t3tools/client-runtime/state/temporary-projects";
+  useContextualDiscoverableProjects,
+  useDiscoverableProjects,
+} from "../../state/temporary-projects";
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import { useProjects, useServerConfigs, useThreadShells } from "../../state/entities";
 import type { TurnCommandMetadata } from "../../lib/commandMetadata";
 import type { DraftComposerAttachment } from "../../lib/composerImages";
@@ -350,10 +350,7 @@ export function NewTaskFlowProvider(
         projectsForEnvironment.find((project) => !isTemporaryProject(project)) ??
         null);
 
-  const environmentProjects = withContextualProject(
-    discoverable,
-    selectedProject?.temporary === true ? selectedProject : undefined,
-  );
+  const environmentProjects = useContextualDiscoverableProjects(discoverable, selectedProject);
 
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const modelSelectionNow = useNowMinuteMs();

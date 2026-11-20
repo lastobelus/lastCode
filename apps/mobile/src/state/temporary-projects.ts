@@ -4,6 +4,7 @@ import {
   discoverableProjects,
   isTemporaryProject,
   showTemporaryProjectsAtom,
+  withContextualProject,
 } from "@t3tools/client-runtime/state/temporary-projects";
 import { useGT } from "gt-react-native";
 import { useMemo } from "react";
@@ -12,6 +13,16 @@ import { useProjects } from "./entities";
 export function useDiscoverableProjects(projects: readonly EnvironmentProject[]) {
   const showTemporary = useAtomValue(showTemporaryProjectsAtom);
   return useMemo(() => discoverableProjects(projects, showTemporary), [projects, showTemporary]);
+}
+
+export function useContextualDiscoverableProjects(
+  projects: readonly EnvironmentProject[],
+  selectedProject: EnvironmentProject | null,
+) {
+  return useMemo(
+    () => withContextualProject(projects, selectedProject?.temporary ? selectedProject : undefined),
+    [projects, selectedProject],
+  );
 }
 
 export function useTemporaryProjectsMenuItem() {

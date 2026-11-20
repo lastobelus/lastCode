@@ -31,22 +31,18 @@ function KeepTemporaryProjectRow({
   const [keeping, setKeeping] = useState(false);
   const keep = async () => {
     setKeeping(true);
-    try {
-      const result = await updateProject({
-        environmentId: project.environmentId,
-        input: { projectId: project.id, keepTemporary: true },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        Dialog.alert(
-          gt("Could not keep project"),
-          error instanceof Error
-            ? (errorDisplayMessage(error, m) ?? error.message)
-            : gt("An error occurred."),
-        );
-      }
-    } finally {
-      setKeeping(false);
+    const result = await updateProject({
+      environmentId: project.environmentId,
+      input: { projectId: project.id, keepTemporary: true },
+    }).finally(() => setKeeping(false));
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      Dialog.alert(
+        gt("Could not keep project"),
+        error instanceof Error
+          ? (errorDisplayMessage(error, m) ?? error.message)
+          : gt("An error occurred."),
+      );
     }
   };
   return (
