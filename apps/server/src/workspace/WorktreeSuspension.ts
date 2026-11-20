@@ -1,7 +1,6 @@
 import {
   CommandId,
   ThreadId,
-  ProjectId,
   hasOpenActionableDashboardItems,
   WorkspaceLifecyclePreviewInput,
   type WorkspaceLifecycleRunInput,
