@@ -446,9 +446,9 @@ Stop on a thread also stops the subagents it delegated to.
 Before archiving the parent, wait for its delegated tasks to finish or cancel them.
 
 A thread an agent starts belongs to the thread that started it, unless you ask for
-a top-level thread. In the same project, owned threads appear under their owner,
-even across connected machines. In another project, they appear in a collapsed
-group named after their owner.
+a top-level thread. By default, owned threads appear under their owner in the same
+project, even across connected machines, or in a collapsed group named after their
+owner in another project.
 
 To keep an owned thread as a top-level conversation, choose **Promote** from its
 sidebar menu. A launched child can be promoted while it runs. If a delegated task
