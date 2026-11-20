@@ -1,7 +1,12 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { DEFAULT_SERVER_SETTINGS, EnvironmentId, ServerSettingsPatch } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ServerConfig,
+  ServerSettingsPatch,
+} from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as DateTime from "effect/DateTime";
@@ -52,6 +57,7 @@ vi.mock("../auth/EnvironmentAuth.ts", async (importOriginal) => {
 });
 
 const isSettingsPatch = Schema.is(ServerSettingsPatch);
+const decodeServerConfig = Schema.decodeUnknownSync(ServerConfig);
 const decodeLaunch = Schema.decodeSync(ProjectToolkit.tools.t3_thread_launch.successSchema);
 const decodeEnvironment = Schema.decodeSync(
   EnvironmentToolkit.tools.t3_environment_read.successSchema,
@@ -61,6 +67,50 @@ const decodeCreated = Schema.decodeSync(OrchestratorToolkit.tools.create_threads
 const decodeAction = Schema.decodeSync(
   ActionResumeToolkit.tools.run_project_action_and_resume.successSchema,
 );
+
+it("decodes a server config with a newer capacity mode", () => {
+  const config = decodeServerConfig({
+    environment: {
+      environmentId: "environment-example",
+      label: "Newer environment",
+      platform: { os: "linux", arch: "x64" },
+      serverVersion: "0.0.0",
+      capabilities: {},
+    },
+    auth: {
+      policy: "loopback-browser",
+      bootstrapMethods: [],
+      sessionMethods: [],
+      sessionCookieName: "test-cookie",
+    },
+    cwd: "/example",
+    keybindingsConfigPath: "/example/keybindings.json",
+    keybindings: [],
+    issues: [],
+    providers: [],
+    availableEditors: [],
+    observability: {
+      logsDirectoryPath: "/example/logs",
+      localTracingEnabled: false,
+      otlpTracesEnabled: false,
+      otlpMetricsEnabled: false,
+    },
+    settings: { capacityMode: "enforce", responseStreamingMode: "turn" },
+  });
+  expect(config.cwd).toBe("/example");
+  expect(config.settings).toMatchObject({ capacityMode: "enforce", responseStreamingMode: "turn" });
+  expect(preferences(config.settings).capacityMode).toBe("enforce");
+});
+
+it("only accepts known capacity modes in settings and environment preferences updates", () => {
+  const isPreferencesUpdate = Schema.is(
+    EnvironmentToolkit.tools.t3_environment_preferences_update.parametersSchema,
+  );
+  for (const mode of ["off", "observe", "enforce"]) {
+    expect(isSettingsPatch({ capacityMode: mode })).toBe(mode !== "enforce");
+    expect(isPreferencesUpdate({ capacityMode: mode })).toBe(mode !== "enforce");
+  }
+});
 
 it("accepts launch and environment responses from servers without capacity support", () => {
   const launch = decodeLaunch({
@@ -245,7 +295,6 @@ it.effect("keeps a forwarded environment read with newer capacity and preference
     expect(
       yield* forwarding.call(scope, EnvironmentToolkit.tools.t3_environment_read, target, {}),
     ).toEqual({ ...environmentResult, capacity: futureEnvironmentCapacity });
-    expect(isSettingsPatch({ capacityMode: "enforce" })).toBe(false);
   }).pipe(
     Effect.provide(forwardingWith({ ...environmentResult, capacity: futureEnvironmentCapacity })),
   ),

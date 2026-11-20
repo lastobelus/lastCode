@@ -115,3 +115,6 @@ function optionalObservation<S extends Schema.Constraint>(schema: S) {
 export const OptionalCapacitySnapshot = optionalObservation(CapacitySnapshot);
 export const OptionalEnvironmentCapacitySnapshot = optionalObservation(EnvironmentCapacitySnapshot);
 export const ReportedCapacityMode = optionalObservation(CapacitySnapshot.fields.mode);
+export const CapacityModeSetting = CapacitySnapshot.fields.mode.pipe(
+  Schema.withDecodingDefault(Effect.succeed("observe")),
+);

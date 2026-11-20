@@ -1,4 +1,4 @@
-import { CapacityMode } from "./capacity.ts";
+import { CapacityMode, CapacityModeSetting } from "./capacity.ts";
 import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
   DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES,
@@ -1701,7 +1701,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  capacityMode: CapacityMode.pipe(Schema.withDecodingDefault(Effect.succeed("observe"))),
+  capacityMode: CapacityModeSetting,
   backgroundActivity: BackgroundActivitySettings,
 
   automaticGitFetchInterval: Schema.DurationFromMillis.pipe(

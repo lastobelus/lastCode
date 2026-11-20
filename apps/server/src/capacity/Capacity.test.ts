@@ -126,7 +126,7 @@ describe("Capacity service", () => {
       });
       return Effect.gen(function* () {
         firstSample = yield* Deferred.make<void>();
-        const mode = yield* Ref.make<CapacityMode>("observe");
+        const mode = yield* Ref.make<string>("observe");
         const reads = yield* Ref.make(0);
         const directory = yield* Ref.make<string | null>("/unused");
         const service = yield* Capacity.make({
@@ -178,11 +178,13 @@ describe("Capacity service", () => {
         expect(cached.verdicts.agent.state).toBe("unknown");
         expect(cached.verdicts.owner.state).toBe("open");
 
-        yield* Ref.set(mode, "observe");
+        yield* Ref.set(mode, "enforce");
         yield* TestClock.adjust("5 seconds");
         expect(yield* Ref.get(reads)).toBe(3);
         expect(logs).toHaveLength(3);
+        expect(logs[2]).toMatchObject(["capacity.would-hold", { capacity: { mode: "enforce" } }]);
         const resumed = yield* service.read;
+        expect(resumed.mode).toBe("enforce");
         expect(resumed.sampledAt).toBe(70_000);
         expect(resumed.smoothed.sampleCount).toBe(1);
         expect(resumed.ownerIdleSeconds).toBeNull();
