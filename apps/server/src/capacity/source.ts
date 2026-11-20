@@ -56,15 +56,15 @@ export function parseDarwinSwapUsed(text: string): number | null {
   return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
 }
 
-// `sysctl -n kern.memorystatus_vm_pressure_level vm.swapusage` prints one value per line.
+// `sysctl -n` prints one line per readable name and skips a failed one, so match by content.
 export function parseDarwinLiveValues(text: string): {
   readonly memoryPressure: CapacityMemoryPressure;
   readonly swapUsedBytes: number | null;
 } {
-  const [pressure = "", swap = ""] = text.split("\n");
+  const lines = text.split("\n");
   return {
-    memoryPressure: parseDarwinMemoryPressure(pressure),
-    swapUsedBytes: parseDarwinSwapUsed(swap),
+    memoryPressure: parseDarwinMemoryPressure(lines.find((line) => /^\s*\d+\s*$/.test(line)) ?? ""),
+    swapUsedBytes: parseDarwinSwapUsed(lines.find((line) => /\bused\s*=/.test(line)) ?? ""),
   };
 }
 
@@ -175,9 +175,10 @@ export const nativeSource = Effect.fn("capacity.nativeSource")(function* (worktr
     return cores;
   });
   const unknownLive = { memoryPressure: "unknown", swapUsedBytes: null } as const;
+  // Build the command on each read: a spawned command's output is fixed once created.
   const live =
     platform === "darwin"
-      ? sysctl("kern.memorystatus_vm_pressure_level", "vm.swapusage").pipe(
+      ? Effect.suspend(() => sysctl("kern.memorystatus_vm_pressure_level", "vm.swapusage")).pipe(
           Effect.map(parseDarwinLiveValues),
           Effect.orElseSucceed(() => unknownLive),
         )

@@ -13,6 +13,10 @@ import * as Logger from "effect/Logger";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
+import * as Queue from "effect/Queue";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as Capacity from "./Capacity.ts";
 import { GB } from "./logic.ts";
@@ -103,12 +107,13 @@ describe("Capacity service", () => {
       const readsBeforeOff = yield* Ref.get(activityReads);
       yield* service.read;
       expect(yield* Ref.get(activityReads)).toBe(readsBeforeOff);
+      // A read that saw Off makes earlier readings and recovery stale until a fresh sample.
       yield* Ref.set(mode, "observe");
       const resumed = yield* service.read;
-      expect(resumed.verdicts.agent.state).toBe("open");
-      expect(resumed.verdicts.background.state).toBe("open");
+      expect(resumed).toMatchObject({ mode: "observe", sampledAt: null, measurements: null });
+      expect(resumed.verdicts.agent.state).toBe("unknown");
       yield* TestClock.adjust("5 seconds");
-      expect(logs).toHaveLength(0);
+      expect((yield* service.read).smoothed.sampleCount).toBe(1);
     }).pipe(
       Effect.scoped,
       Effect.provide(
@@ -305,6 +310,75 @@ describe("Capacity service", () => {
       ),
     ),
   );
+  it.effect("keeps one native source across samples and logs each change of held reasons", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "capacity-native-" });
+      const calls: Array<string> = [];
+      // Each sample reports a different pressure level, so each held verdict is logged.
+      const pressures = ["1", "2", "4"];
+      const logged = yield* Queue.unbounded<unknown>();
+      const logger = Logger.make(({ message }) => {
+        if (Array.isArray(message) && message[0] === "capacity.would-hold")
+          Queue.offerUnsafe(logged, message[1]);
+      });
+      const spawner = ChildProcessSpawner.make((command) => {
+        const args = command._tag === "StandardCommand" ? command.args.map(String) : [];
+        calls.push(args.join(" "));
+        const live = args.includes("vm.swapusage");
+        const pressure = live ? (pressures.shift() ?? "4") : "";
+        return Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(1),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+            isRunning: Effect.succeed(false),
+            kill: () => Effect.void,
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.encodeText(
+              Stream.make(
+                live ? `${pressure}\ntotal = 4.00M  used = 1.00M  free = 3.00M\n` : "8\n",
+              ),
+            ),
+            stderr: Stream.empty,
+            all: Stream.empty,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+          }),
+        );
+      });
+      const service = yield* Capacity.make({
+        mode: Effect.succeed("observe"),
+        worktreesDir: Effect.succeed(directory),
+        activity,
+        ownerPower: Effect.succeed(power),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Layer.succeed(HostProcess.Platform, "darwin"),
+            Logger.layer([logger], { mergeWithExisting: false }),
+          ),
+        ),
+      );
+      yield* Queue.take(logged);
+      yield* TestClock.adjust("5 seconds");
+      expect(yield* Queue.take(logged)).toMatchObject({
+        capacity: { measurements: { memoryPressure: "warning" } },
+      });
+      yield* TestClock.adjust("5 seconds");
+      expect(yield* Queue.take(logged)).toMatchObject({
+        capacity: { measurements: { memoryPressure: "critical" } },
+      });
+      expect(calls.filter((call) => call.includes("hw.physicalcpu"))).toHaveLength(1);
+      expect(calls.filter((call) => call.includes("vm.swapusage"))).toHaveLength(3);
+      expect((yield* service.read).measurements).toMatchObject({
+        physicalCores: 8,
+        swapUsedBytes: 1024 ** 2,
+      });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("does not wait for the first sample or read activity in the sampler", () =>
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();

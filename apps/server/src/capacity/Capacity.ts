@@ -56,6 +56,11 @@ const failedMeasurements = (sampledAt: number): CapacityMeasurements => ({
 export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs) {
   const state = yield* Ref.make(initialCapacityState());
   const sourceDirectory = yield* Ref.make<string | null>(null);
+  // Keep one native source per directory so it can reuse what never changes, such as cores.
+  const native = yield* Ref.make<{
+    readonly directory: string;
+    readonly source: CapacitySource;
+  } | null>(null);
   const readMeasurements = Effect.gen(function* () {
     const directory = yield* inputs.worktreesDir;
     const previous = yield* Ref.getAndSet(sourceDirectory, directory);
@@ -68,7 +73,11 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       }));
     }
     if (directory === null) return failedMeasurements(yield* Clock.currentTimeMillis);
-    const source = inputs.source ?? (yield* nativeSource(directory));
+    if (inputs.source) return yield* inputs.source.read;
+    const cached = yield* Ref.get(native);
+    if (cached?.directory === directory) return yield* cached.source.read;
+    const source = yield* nativeSource(directory);
+    yield* Ref.set(native, { directory, source });
     return yield* source.read;
   });
   const paused = yield* Ref.make(false);
@@ -122,7 +131,12 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
     const verdicts = [agent, background]
       .map(
         ({ state, reasons }) =>
-          `${state}(${reasons.map(({ signal, comparison }) => `${signal}:${comparison}`).join(",")})`,
+          `${state}(${reasons
+            .map(
+              ({ signal, comparison, value }) =>
+                `${signal}:${comparison}${typeof value === "string" ? `=${value}` : ""}`,
+            )
+            .join(",")})`,
       )
       .join(" ");
     const previous = yield* Ref.getAndSet(loggedVerdicts, verdicts);
@@ -134,17 +148,23 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
 
   const read = Effect.gen(function* () {
     const mode = yield* inputs.mode;
-    if (mode === "off") return offCapacitySnapshot(yield* Clock.currentTimeMillis);
+    if (mode === "off") {
+      // A read can see Off between sampler ticks; the next sample must still start afresh.
+      yield* Ref.set(paused, true);
+      yield* Ref.set(loggedVerdicts, "");
+      return offCapacitySnapshot(yield* Clock.currentTimeMillis);
+    }
     // Activity is informational: no rule reads it, so a failed read never gates a verdict.
     const activity = yield* inputs.activity.pipe(
       Effect.timeout("3 seconds"),
       Effect.orElseSucceed(() => null),
     );
     const now = yield* Clock.currentTimeMillis;
-    return {
-      ...evaluateCapacity(yield* Ref.get(state), now, mode).snapshot,
-      activity,
-    } satisfies CapacitySnapshot;
+    // Until the first sample after Off, earlier readings and recovery no longer apply.
+    const snapshot = (yield* Ref.get(paused))
+      ? unknownCapacitySnapshot(now, mode)
+      : evaluateCapacity(yield* Ref.get(state), now, mode).snapshot;
+    return { ...snapshot, activity } satisfies CapacitySnapshot;
   });
   return Capacity.of({ read });
 });
