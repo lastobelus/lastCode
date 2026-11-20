@@ -5589,5 +5589,14 @@
   "c9b2723ade9155f6": "Save dependency retention days",
   "f3287c4ed3bdb117": "Save",
   "45d8a48a56da69a3": "Filter settings environments",
-  "cb49755a81176f6c": "De här tillfälliga projekten och deras trådhistorik raderas. Mapparna och filerna finns kvar på disken. Avarkivering återställer dem inte."
+  "cb49755a81176f6c": "De här tillfälliga projekten och deras trådhistorik raderas. Mapparna och filerna finns kvar på disken. Avarkivering återställer dem inte.",
+  "5767b3de281f2914": "Åtkomst nekad",
+  "0153c5b9fed9bc9b": "Uppdatera den här datorn för att granska dess trådar",
+  "01305ebe0785aec6": "Datorn är inte längre länkad",
+  "8ddeafa5a89dfb71": "En annan dator svarade",
+  "efd21c99f6427833": "Väntar",
+  "f71b8e9f2c4a743e": "Blockerad",
+  "c679d979f46fb995": "Du har skrivit i den här tråden",
+  "a96e1f8d266f75fe": "Det finns inget att granska på den här datorn",
+  "06113789f35a4598": "Trådar på länkade datorer förblir öppna."
 }

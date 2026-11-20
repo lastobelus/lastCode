@@ -1,6 +1,7 @@
 import {
   CommandId,
   EnvironmentId,
+  type LinkedArchivePreview,
   OrchestrationV2ThreadShellJson,
   ProjectId,
   NodeId,
@@ -116,6 +117,74 @@ describe("archive confirmation", () => {
         ({ title }) => title,
       ),
     ).toEqual(["Scratch", "Typed in", "Remote scratch"]);
+  });
+
+  it("groups linked inventory by machine and keeps remote threads open", () => {
+    const environmentId = EnvironmentId.make("linked-machine");
+    const remoteWork = ThreadId.make("remote-work");
+    const writtenIn = ThreadId.make("remote-written-in");
+    const protectedId = ThreadId.make("remote-protected");
+    const linkedArchivePreview: readonly LinkedArchivePreview[] = [
+      {
+        environmentId,
+        label: "Build machine",
+        status: "ready",
+        inventory: {
+          environmentId,
+          threads: [remoteWork, writtenIn, protectedId].map((threadId) => ({
+            threadId,
+            title: threadId,
+            projectId: base.projectId,
+          })),
+          typedInThreadIds: [writtenIn],
+          activeThreadIds: [writtenIn],
+          unreadThreadIds: [remoteWork],
+          protectedThreadIds: [protectedId],
+          keptThreadIds: [writtenIn, protectedId],
+        },
+      },
+      {
+        environmentId: EnvironmentId.make("offline-machine"),
+        label: "Offline machine",
+        status: "pending",
+        reason: "offline",
+      },
+      {
+        environmentId: EnvironmentId.make("denied-machine"),
+        label: "Denied machine",
+        status: "blocked",
+        reason: "denied",
+      },
+      {
+        environmentId: EnvironmentId.make("old-machine"),
+        label: "Old machine",
+        status: "blocked",
+        reason: "unsupported",
+      },
+    ];
+    const linked = { ...family, unreadThreadIds: [], linkedArchivePreview };
+    const bulk = { ...linked, bulkPreviews: [linked, linked] };
+    const defaultConfirmation = buildThreadArchiveConfirmation(bulk);
+    expect(defaultConfirmation.canIncludeTypedIn).toBe(false);
+    expect(defaultConfirmation.confirmLabel).toBe("Archive threads");
+    expect(defaultConfirmation.disposition).toBe("archive_if_idle");
+    expect(defaultConfirmation.description).toContain("Threads on linked machines will stay open.");
+    expect(defaultConfirmation.linkedMachines.map(({ label }) => label)).toEqual([
+      "Build machine",
+      "Offline machine",
+      "Denied machine",
+      "Old machine",
+    ]);
+    expect(defaultConfirmation.linkedMachines[0]?.threads.map(({ label }) => label)).toEqual([
+      "Keep open · Unread",
+      "Keep open · Working · You wrote in this thread",
+      "Keep open · Persistent",
+    ]);
+    expect(defaultConfirmation.linkedMachines[1]?.warnings).toEqual(["Pending · Offline"]);
+    expect(defaultConfirmation.linkedMachines[2]?.warnings).toEqual(["Blocked · Access denied"]);
+    expect(defaultConfirmation.linkedMachines[3]?.warnings).toEqual([
+      "Blocked · Update this machine to review its threads",
+    ]);
   });
 });
 const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShellJson);

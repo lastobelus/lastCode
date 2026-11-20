@@ -102,6 +102,8 @@ export class PeerLinks extends Context.Service<
       input: PeerLinkPreflightInput,
     ) => Effect.Effect<PeerLinkPreflightResult, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
+    /** Stored links, including offline peers, with no network probes. */
+    readonly listStored?: Effect.Effect<ReadonlyArray<PeerLink>, PeerLinkError>;
     /** The stored link, without asking the peer whether it answers. */
     readonly get: (
       environmentId: EnvironmentId,
@@ -629,8 +631,10 @@ const make = Effect.gen(function* () {
     return { ...(yield* withLabel(link, answered.value.label)), status: "reachable" };
   });
 
+  const listStored = Effect.flatMap(readRows, (rows) => Effect.forEach(rows, toLink));
+
   const list: PeerLinks["Service"]["list"] = Effect.gen(function* () {
-    const links = yield* Effect.forEach(yield* readRows, toLink);
+    const links = yield* listStored;
     const now = yield* DateTime.now;
     return yield* Effect.forEach(links, (link) => statusOf(link, now), {
       concurrency: "unbounded",
@@ -744,6 +748,7 @@ const make = Effect.gen(function* () {
     preflight,
     link,
     list,
+    listStored,
     get,
     unlink,
     resolve,

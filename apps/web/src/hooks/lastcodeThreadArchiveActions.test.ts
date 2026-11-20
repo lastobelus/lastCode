@@ -665,6 +665,58 @@ describe("archive family confirmation", () => {
     },
   );
 
+  it.each([false, true])(
+    "shows the linked inventory and sends only the idle local archive (bulk=%s)",
+    async (bulk) => {
+      const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
+      const environmentId = EnvironmentId.make("linked-machine");
+      const threadId = ThreadId.make("typed-in-remote");
+      archiveFamilyLoad.mockResolvedValue({
+        _tag: "Success",
+        value: {
+          ...archiveDecisionFixture([owner], { ...target, input: { threadId: owner.id } }),
+          requiresConfirmation: false,
+          linkedArchivePreview: [
+            {
+              environmentId,
+              label: "Build machine",
+              status: "ready",
+              inventory: {
+                environmentId,
+                threads: [{ threadId, projectId: owner.projectId, title: "Remote work" }],
+                keptThreadIds: [threadId],
+                typedInThreadIds: [threadId],
+                activeThreadIds: [],
+                unreadThreadIds: [],
+                protectedThreadIds: [],
+              },
+            },
+          ],
+        },
+      });
+      archiveDialog.mockImplementation(async (request) => {
+        const confirmation = buildThreadArchiveConfirmation(request.family);
+        expect(confirmation.canIncludeTypedIn).toBe(false);
+        expect(confirmation.linkedMachines[0]?.threads[0]?.label).toBe(
+          "Keep open · You wrote in this thread",
+        );
+        expect(commands.archive).not.toHaveBeenCalled();
+        expect(await request.submit(confirmation.disposition)).toBeNull();
+        return confirmation.disposition;
+      });
+      await archive(bulk);
+      expect(archiveDialog).toHaveBeenCalledOnce();
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: owner.environmentId,
+        input: {
+          threadId: owner.id,
+          childDisposition: "archive_if_idle",
+          expectedChildThreadIds: [],
+        },
+      });
+    },
+  );
+
   it("uses authoritative activity and protection even when local shells are idle", async () => {
     const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
     const child = childOf(owner);

@@ -13,6 +13,7 @@ import {
   archiveRetryThreadId,
   archivePreviewSelection,
   consultThreadArchiveAgent,
+  requiresThreadArchiveConfirmation,
   THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
 } from "@t3tools/client-runtime/state/thread-archive";
 import {
@@ -236,6 +237,7 @@ export function createLastCodeThreadArchiveActions(ports: {
         ),
       );
     const family = familyResult === null ? (opts.familySnapshot ?? null) : familyResult.value;
+    const requiresConfirmation = family !== null && requiresThreadArchiveConfirmation(family);
     const preflightError = archiveThreadPreflightError(thread);
     if (preflightError) return AsyncResult.failure(Cause.fail(preflightError));
 
@@ -263,7 +265,7 @@ export function createLastCodeThreadArchiveActions(ports: {
                 "The conversation stays in Archived threads. Saved data can be permanently discarded without restoring it.",
               ),
             ),
-            ...(family?.requiresConfirmation ? { archiveFamily: family } : {}),
+            ...(requiresConfirmation ? { archiveFamily: family } : {}),
           },
         ),
       );
@@ -307,7 +309,7 @@ export function createLastCodeThreadArchiveActions(ports: {
     };
     let archiveResult: Awaited<ReturnType<typeof mutate>> | undefined;
     let consulted = false;
-    if (!opts.discardSavedWorkspace && !familyChoice && family?.requiresConfirmation) {
+    if (!opts.discardSavedWorkspace && !familyChoice && requiresConfirmation) {
       const choice = await requestThreadArchiveDialog({
         title: m(msg('Archive "{title}"?', { title: thread.title })),
         family,
@@ -650,7 +652,7 @@ export function createLastCodeThreadArchiveActions(ports: {
       const error = squashAtomCommandFailure(outcome.mutationFailure);
       return error instanceof Error ? error.message : m(msg("The archive did not complete."));
     };
-    if (entries.some(({ family }) => family.requiresConfirmation)) {
+    if (entries.some(({ family }) => requiresThreadArchiveConfirmation(family))) {
       const choice = await requestThreadArchiveDialog({
         title: m(msg("Archive {count} threads?", { count: entries.length })),
         review,
@@ -673,7 +675,10 @@ export function createLastCodeThreadArchiveActions(ports: {
           unreadThreadIds: entries.flatMap(({ family }) => family.unreadThreadIds),
           protectedChildThreadIds: entries.flatMap(({ family }) => family.protectedChildThreadIds),
           canStopAndArchive: entries.every(({ family }) => family.canStopAndArchive),
-          ...(entries.some(({ family }) => family.archivePreview !== undefined)
+          ...(entries.some(
+            ({ family }) =>
+              family.archivePreview !== undefined || family.linkedArchivePreview?.length,
+          )
             ? {
                 bulkPreviews: entries.map(({ family }) => family),
                 bulkPreviewsIncludingTypedIn: entriesIncludingTypedIn.map(({ family }) => family),

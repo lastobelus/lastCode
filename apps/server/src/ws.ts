@@ -1,3 +1,7 @@
+import {
+  captureLinkedArchivePreview,
+  localArchivePreview,
+} from "./orchestration-v2/LastCodeLinkedArchivePreview.ts";
 import { WorktreeSuspensionRequestError } from "@t3tools/contracts";
 import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
 import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
@@ -1502,6 +1506,7 @@ const layerCoreWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
+  linkedArchivePreview = localArchivePreview,
 ) =>
   Layer.unwrap(
     Effect.gen(function* () {
@@ -2275,6 +2280,7 @@ const layerCoreWsRpc = (
           ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily,
           (input) =>
             threadManagement.getThreadArchiveFamily(input.threadId).pipe(
+              Effect.flatMap((family) => linkedArchivePreview(input.threadId, family)),
               Effect.mapError(
                 (cause) =>
                   new OrchestrationV2GetThreadProjectionError({
@@ -4206,6 +4212,7 @@ const makeRoutes: Effect.Effect<
   const desktopBrowserChannel = yield* DesktopBrowserChannel.DesktopBrowserChannel;
   const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
   const threadReads = yield* OrchestratorMcpService.OrchestratorMcpService;
+  const linkedArchivePreview = yield* captureLinkedArchivePreview;
   const serverBrowser = yield* ServerBrowser.ServerBrowser;
   const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
   const npmRelease = yield* NpmRelease.NpmRelease;
@@ -4292,6 +4299,7 @@ const makeRoutes: Effect.Effect<
             serverBrowser,
             reportProfiles,
             readSettingsClient(url.value),
+            linkedArchivePreview,
           ).pipe(
             Layer.provideMerge(RpcSerialization.layerJson),
             // Handler-context reporters see only request defects, not server-wide defects.

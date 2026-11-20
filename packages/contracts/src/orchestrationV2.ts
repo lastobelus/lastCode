@@ -1,3 +1,4 @@
+import { LinkedArchivePreview } from "./lastCodePeerArchive.ts";
 import {
   ThreadArchiveChildDisposition,
   ThreadArchivedWith,
@@ -5154,6 +5155,7 @@ export class OrchestrationV2SearchThreadError extends Schema.TaggedError<Orchest
 export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   consultationTargets: Schema.optional(Schema.Array(ThreadArchiveConsultationTarget)),
   archivePreview: Schema.optional(Schema.UndefinedOr(ThreadArchivePreview)),
+  linkedArchivePreview: Schema.optional(Schema.Array(LinkedArchivePreview)),
   threads: Schema.Array(OrchestrationV2ThreadShell),
   childThreadIds: Schema.Array(ThreadId),
   activeChildThreadIds: Schema.Array(ThreadId),

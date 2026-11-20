@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import type {
   ScopedThreadRef,
+  ThreadArchiveChildDisposition,
   ThreadArchiveConsultationTarget,
   ThreadId,
 } from "@t3tools/contracts";
@@ -15,6 +16,7 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { readProject } from "../state/entities";
 import { m } from "../i18n/messages";
 import { LastCodeArchiveTemporaryProjects } from "./LastCodeArchiveTemporaryProjects";
+import { LastCodeLinkedArchivePreview } from "./LastCodeLinkedArchivePreview";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import {
@@ -26,7 +28,7 @@ import {
   AlertDialogTitle,
 } from "./ui/alert-dialog";
 
-export type ArchiveChildDisposition = "stop_and_archive" | "archive_after_review";
+type ArchiveChildDisposition = ThreadArchiveChildDisposition;
 type Request = {
   readonly title: string;
   readonly family: Parameters<typeof buildThreadArchiveConfirmation<EnvironmentThreadShell>>[0];
@@ -185,6 +187,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
               </li>
             ))}
           </ul>
+          <LastCodeLinkedArchivePreview machines={confirmation.linkedMachines} />
           {confirmation.canIncludeTypedIn && (
             <label className="flex items-center gap-2 text-sm">
               <Checkbox

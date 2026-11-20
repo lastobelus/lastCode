@@ -1,3 +1,4 @@
+import { withLinkedArchivePreview } from "../../../orchestration-v2/LastCodeLinkedArchivePreview.ts";
 import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
@@ -364,10 +365,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_archive_family: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection } = yield* readArchiveThread(input.threadId);
-      const family = yield* threads
-        .getThreadArchiveFamily(projection.thread.id)
-        .pipe(Effect.mapError(unavailable));
+      const context = yield* readArchiveThread(input.threadId);
+      const { threads, projection } = context;
+      const family = yield* threads.getThreadArchiveFamily(projection.thread.id).pipe(
+        Effect.flatMap((family) => withLinkedArchivePreview(projection.thread.id, family, context)),
+        Effect.mapError(unavailable),
+      );
       return Struct.omit(family, ["threads", "canPromote", "promotableChildThreadIds"]);
     }),
   ),
