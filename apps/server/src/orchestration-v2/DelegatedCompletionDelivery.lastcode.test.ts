@@ -503,6 +503,75 @@ const layerFollowups = Layer.merge(layerTest, ProviderContinuationRequests.layer
 );
 
 it.layer(layerFollowups)("delegated background wakes", (it) => {
+  it.effect("refuses return that would put a launched child under its own descendant", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projects = yield* ProjectService.ProjectService;
+      const projectId = ProjectId.make("project:return-cycle");
+      const ownerId = ThreadId.make("return-cycle-owner");
+      const childId = ThreadId.make("return-cycle-child");
+      yield* projects.create({
+        commandId: CommandId.make("project:return-cycle"),
+        projectId,
+        title: "Return cycle",
+        workspaceRoot: "/workspace/return-cycle",
+      });
+      const create = {
+        type: "thread.create" as const,
+        projectId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+      };
+      yield* orchestrator.dispatch({
+        ...create,
+        commandId: CommandId.make("cycle:owner"),
+        threadId: ownerId,
+        title: "Owner",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        ...create,
+        commandId: CommandId.make("cycle:child"),
+        threadId: childId,
+        title: "Child",
+        createdBy: "agent",
+        creationSource: "mcp",
+        creatorThreadId: ownerId,
+        creatorOrigin: {
+          kind: "thread_launch",
+          threadId: ownerId,
+          environmentId: EnvironmentId.make("local-test"),
+          owned: true,
+        },
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.ownership.change",
+        commandId: CommandId.make("cycle:promote"),
+        threadId: childId,
+        action: "promote",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("cycle:group"),
+        threadId: ownerId,
+        groupedUnderThreadId: childId,
+      });
+      const refusal = yield* Effect.flip(
+        orchestrator.dispatch({
+          type: "thread.ownership.change",
+          commandId: CommandId.make("cycle:return"),
+          threadId: childId,
+          action: "return_to_owner",
+        }),
+      );
+      assert.include(JSON.stringify(refusal), "descendants");
+      assert.isTrue((yield* orchestrator.getThreadProjection(childId)).thread.lineage.independent);
+    }),
+  );
   it.effect("refuses a new remote task association while the destination thread is promoted", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -670,7 +739,7 @@ it.layer(layerFollowups)("delegated background wakes", (it) => {
         });
         const returned = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
         assert.deepEqual(returned.lineage, before.lineage);
-        assert.isUndefined(returned.groupedUnderThreadId);
+        assert.isNull(returned.groupedUnderThreadId);
       }),
   );
   it.effect.each(["active", "paused", "released", "independent"] as const)(

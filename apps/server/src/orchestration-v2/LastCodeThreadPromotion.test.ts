@@ -3,6 +3,7 @@ import { describe } from "vite-plus/test";
 import {
   EnvironmentId,
   NodeId,
+  ProjectId,
   RunId,
   ThreadId,
   type OrchestrationV2Subagent,
@@ -98,7 +99,34 @@ it.effect(
       const returned = yield* plannerFor(promotion.payload, owner).plan(childId, "return_to_owner");
       expect(returned.payload.creatorOrigin).toEqual(launched.creatorOrigin);
       expect(returned.payload.lineage).toEqual(launched.lineage);
-      expect(returned.payload).not.toHaveProperty("groupedUnderThreadId");
+      expect(returned.payload.groupedUnderThreadId).toBe(ownerId);
+    }),
+);
+
+it.effect.each([
+  { ...owner, projectId: ProjectId.make("another-project") },
+  { ...owner, lineage: { ...owner.lineage, sideChat: true } },
+])(
+  "keeps a returned child at the project root when its owner cannot be its placement parent",
+  (localOwner) =>
+    Effect.gen(function* () {
+      const promoted = {
+        ...child,
+        createdBy: "agent" as const,
+        creatorThreadId: ownerId,
+        creatorGrouping: "grouped" as const,
+        groupedUnderThreadId: null,
+        lineage: { ...child.lineage, independent: true },
+        creatorOrigin: {
+          kind: "thread_launch" as const,
+          threadId: ownerId,
+          environmentId: here,
+          owned: true,
+        },
+      };
+      const result = yield* plannerFor(promoted, localOwner).plan(childId, "return_to_owner");
+      expect(result.payload.lineage).not.toHaveProperty("independent");
+      expect(result.payload.groupedUnderThreadId).toBeNull();
     }),
 );
 

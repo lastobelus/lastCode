@@ -1,5 +1,5 @@
 import { makeLastCodeArchivePlanner } from "./LastCodeArchivePlanner.ts";
-import { makeLastCodeThreadPromotion } from "./LastCodeThreadPromotion.ts";
+import { makeLastCodeThreadPromotion, threadPlacementParentId } from "./LastCodeThreadPromotion.ts";
 import { planGroupThreadUse } from "./planGroupThreadUse.ts";
 import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import {
@@ -4550,7 +4550,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const validateThreadPlacement = Effect.fn("Orchestrator.validateThreadPlacement")(function* (
     command: Extract<
       OrchestrationV2Command,
-      { readonly type: "thread.create" | "thread.metadata.update" }
+      { readonly type: "thread.create" | "thread.metadata.update" | "thread.ownership.change" }
     >,
     projectId: ProjectId,
     parentId: ThreadId | null,
@@ -4587,9 +4587,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           field: "groupedUnderThreadId",
         });
       if (next === parentId) yield* refuseAboveDispatchModeLimit(command, parent.id, parent);
-      const organizationalParent = getInteractiveThreadParentThreadId(parent);
-      // Execution lineage remains part of the tree for an owned delegated destination.
-      next = isOwnedSubagentThread(parent) ? parent.lineage.parentThreadId : organizationalParent;
+      next = threadPlacementParentId(parent);
     }
   });
 
@@ -18726,9 +18724,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       }
       case "thread.ownership.change": {
-        const event = yield* promotion
+        const { returnParentId, ...event } = yield* promotion
           .plan(command.threadId, command.action)
           .pipe(mapDispatchError(command));
+        yield* validateThreadPlacement(command, event.payload.projectId, returnParentId);
         yield* emit(events, command)(event);
         break;
       }
@@ -20599,9 +20598,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           dispatchAccepted(undefined, sideChatIds),
         );
       if (command.type === "thread.ownership.change")
-        return yield* promotion.participants(command.threadId).pipe(
-          mapDispatchError(command),
-          Effect.flatMap((ids) => withThreadDispatchLocks(ids, dispatchAccepted())),
+        return yield* promotion.withParticipantLocks(
+          command.threadId,
+          command.action,
+          withThreadDispatchLocks,
+          dispatchAccepted(),
+          (cause) =>
+            new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
         );
       if (
         (command.type === "thread.create" &&

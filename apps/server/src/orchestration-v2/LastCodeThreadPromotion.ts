@@ -1,17 +1,42 @@
 import {
   getInteractiveThreadParentThreadId,
+  isOwnedSubagentThread,
   isProviderNativeSubagentThread,
   type EnvironmentId,
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadShell,
   type ThreadId,
   type ThreadOwnershipAction,
 } from "@t3tools/contracts";
 import { subagentHoldsCompletion } from "@t3tools/provider-core/server/subagentProjection";
 import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
 import * as Effect from "effect/Effect";
-import type { ProjectionStoreV2 } from "./ProjectionStore.ts";
+import type { OrchestratorV2DispatchResult, OrchestratorV2Error } from "./Orchestrator.ts";
+import type { ProjectionStoreV2, ProjectionStoreV2Error } from "./ProjectionStore.ts";
+
+export function threadPlacementParentId(thread: OrchestrationV2ThreadShell): ThreadId | null {
+  return isOwnedSubagentThread(thread)
+    ? thread.lineage.parentThreadId
+    : getInteractiveThreadParentThreadId(thread);
+}
+
+function defaultReturnParentId(
+  thread: OrchestrationV2AppThread,
+  owner: OrchestrationV2ThreadShell,
+): ThreadId | null {
+  if (
+    thread.projectId !== owner.projectId ||
+    owner.lineage.sideChat === true ||
+    isProviderNativeSubagentThread(owner) ||
+    thread.delegatedFrom != null
+  )
+    return null;
+  return thread.creatorThreadId === owner.id || thread.lineage.relationshipToParent === "subagent"
+    ? owner.id
+    : null;
+}
 
 type Task = Pick<OrchestrationV2Subagent, "status" | "result" | "completionDelivery">;
 
@@ -73,19 +98,20 @@ export function makeLastCodeThreadPromotion<E>(
 
   const read = Effect.fn("LastCodeThreadPromotion.read")(function* (threadId: ThreadId) {
     const thread = yield* store.getThread(threadId);
+    const current = { thread, returnParentId: null };
     const { owner, environmentId } = yield* readOwner(thread);
     if (
       owner === null ||
       isProviderNativeSubagentThread(thread) ||
       thread.lineage.sideChat === true
     )
-      return { thread, availability: null } as const;
+      return { ...current, availability: null } as const;
     const action: ThreadOwnershipAction =
       thread.lineage.independent === true ? "return_to_owner" : "promote";
     const ownerHere = owner.environmentId === environmentId;
     const availability = { action, ownerHere };
     if (thread.archivedAt !== null || thread.deletedAt !== null || thread.archivePending != null)
-      return { thread, availability: { ...availability, refusal: "unavailable" } } as const;
+      return { ...current, availability: { ...availability, refusal: "unavailable" } } as const;
 
     if (action === "return_to_owner") {
       if (ownerHere) {
@@ -97,14 +123,19 @@ export function makeLastCodeThreadPromotion<E>(
           parent.archivePending?.status === "stopping"
         )
           return {
-            thread,
+            ...current,
             availability: { ...availability, refusal: "owner_unavailable" },
           } as const;
+        return {
+          thread,
+          returnParentId: defaultReturnParentId(thread, parent),
+          availability: { ...availability, refusal: null },
+        } as const;
       }
     } else if (thread.delegatedFrom != null || thread.lineage.relationshipToParent === "subagent") {
       const { runs } = yield* store.getThreadRecords(threadId, ["runs"]);
       if (hasOwnedContinuation(runs))
-        return { thread, availability: { ...availability, refusal: "in_flight" } } as const;
+        return { ...current, availability: { ...availability, refusal: "in_flight" } } as const;
       if (thread.delegatedFrom != null) {
         const associations = thread.remoteDelegations ?? [];
         if (
@@ -114,7 +145,7 @@ export function makeLastCodeThreadPromotion<E>(
               row.stage !== "disposed" && (row.stage !== "settled" || row.finalRun === undefined),
           )
         )
-          return { thread, availability: { ...availability, refusal: "in_flight" } } as const;
+          return { ...current, availability: { ...availability, refusal: "in_flight" } } as const;
       } else {
         const { subagents } = yield* store
           .getThreadRecords(owner.threadId, ["subagents"], {
@@ -127,30 +158,69 @@ export function makeLastCodeThreadPromotion<E>(
           );
         const tasks = subagents.filter((task) => task.origin === "app_owned");
         if (tasks.length === 0 || tasks.some((task) => !hasReleasedTaskResult(task)))
-          return { thread, availability: { ...availability, refusal: "in_flight" } } as const;
+          return { ...current, availability: { ...availability, refusal: "in_flight" } } as const;
       }
     }
-    return { thread, availability: { ...availability, refusal: null } } as const;
+    return { ...current, availability: { ...availability, refusal: null } } as const;
   });
 
   const participants = Effect.fn("LastCodeThreadPromotion.participants")(function* (
     threadId: ThreadId,
+    action: ThreadOwnershipAction,
   ) {
     const thread = yield* store.getThread(threadId);
     const { owner, environmentId } = yield* readOwner(thread);
-    return owner?.environmentId === environmentId ? [threadId, owner.threadId] : [threadId];
+    const ids = new Set([threadId]);
+    if (owner?.environmentId !== environmentId) return ids;
+    ids.add(owner.threadId);
+    if (action === "return_to_owner") {
+      const ownerShell = yield* store.getThreadShell(owner.threadId);
+      if (ownerShell === null || defaultReturnParentId(thread, ownerShell) === null) return ids;
+      let next = threadPlacementParentId(ownerShell);
+      while (next !== null && !ids.has(next)) {
+        ids.add(next);
+        const ancestor = yield* store.getThreadShell(next);
+        next = ancestor === null ? null : threadPlacementParentId(ancestor);
+      }
+    }
+    return ids;
+  });
+
+  const withParticipantLocks = Effect.fn("LastCodeThreadPromotion.withParticipantLocks")(function* (
+    threadId: ThreadId,
+    action: ThreadOwnershipAction,
+    withLocks: (
+      ids: Iterable<ThreadId>,
+      effect: Effect.Effect<OrchestratorV2DispatchResult | null, OrchestratorV2Error>,
+    ) => Effect.Effect<OrchestratorV2DispatchResult | null, OrchestratorV2Error>,
+    dispatch: Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>,
+    mapLookupError: (cause: E | ProjectionStoreV2Error) => OrchestratorV2Error,
+  ) {
+    const collect = participants(threadId, action).pipe(Effect.mapError(mapLookupError));
+    for (;;) {
+      const locked = yield* collect;
+      const result = yield* withLocks(
+        locked,
+        Effect.gen(function* () {
+          // An ancestor may have moved before its lock was acquired.
+          const current = yield* collect;
+          if ([...current].some((id) => !locked.has(id))) return null;
+          return yield* dispatch;
+        }),
+      );
+      if (result !== null) return result;
+    }
   });
 
   const plan = Effect.fn("LastCodeThreadPromotion.plan")(function* (
     threadId: ThreadId,
     action: ThreadOwnershipAction,
   ) {
-    const { thread, availability } = yield* read(threadId);
+    const { thread, availability, returnParentId } = yield* read(threadId);
     if (availability?.action !== action) return yield* Effect.fail(promotionRefusal.wrong_action);
     if (availability.refusal !== null)
       return yield* Effect.fail(promotionRefusal[availability.refusal]);
     const { independent: _independent, ...lineage } = thread.lineage;
-    const { groupedUnderThreadId: _placement, ...defaultPlacement } = thread;
     const payload =
       action === "promote"
         ? {
@@ -161,7 +231,12 @@ export function makeLastCodeThreadPromotion<E>(
             pinOrderKey: null,
             activeOrderKey: null,
           }
-        : { ...defaultPlacement, lineage };
+        : {
+            ...thread,
+            lineage,
+            groupedUnderThreadId:
+              lineage.relationshipToParent === "subagent" ? null : returnParentId,
+          };
     return {
       type: "thread.metadata-updated" as const,
       threadId,
@@ -169,8 +244,9 @@ export function makeLastCodeThreadPromotion<E>(
       occurredAt: thread.updatedAt,
       payload,
       previousGroupedUnderThreadId: getInteractiveThreadParentThreadId(thread),
+      returnParentId,
     };
   });
 
-  return { read, participants, plan };
+  return { read, withParticipantLocks, plan };
 }
