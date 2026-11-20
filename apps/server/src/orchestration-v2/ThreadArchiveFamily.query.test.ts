@@ -452,9 +452,16 @@ it.effect.each([
 
 const archiveEnvironment = EnvironmentId.make("archive-query:environment");
 
-it.effect.each([false, true])(
-  "archives the observed cross-project targets (include typed-in=%s)",
-  (includeTypedIn) =>
+const ownedArchiveCases = [
+  { includeTypedIn: false, groupIsOwned: false },
+  { includeTypedIn: false, groupIsOwned: true },
+  { includeTypedIn: true, groupIsOwned: true },
+  { includeTypedIn: true, groupIsOwned: true, groupIsUsed: true },
+];
+
+it.effect.each(ownedArchiveCases)(
+  "archives the observed cross-project targets (%j)",
+  ({ includeTypedIn, groupIsOwned, groupIsUsed }) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -466,6 +473,12 @@ it.effect.each([false, true])(
       const typedId = ThreadId.make("owned-archive:typed");
       const grandchildId = ThreadId.make("owned-archive:grandchild");
       const root = makeThread(rootId, now);
+      const legacyOwner = ThreadId.make("owned-archive:archived-intermediate");
+      const legacyChild = ThreadId.make("owned-archive:legacy-child");
+      const legacyCohort = {
+        threadId: legacyOwner,
+        commandId: CommandId.make("independent-archive"),
+      };
       const launch = (id: ThreadId, parent: ThreadId): OrchestrationV2AppThread => ({
         ...root,
         id,
@@ -486,13 +499,24 @@ it.effect.each([false, true])(
       for (const thread of [
         root,
         {
-          ...root,
-          id: groupId,
+          ...(groupIsOwned ? launch(groupId, rootId) : { ...root, id: groupId }),
           projectId: launch(childId, rootId).projectId,
           groupThread: true as const,
+          ...(groupIsUsed ? { workspaceUserAdopted: true } : {}),
         },
         { ...launch(childId, rootId), workspaceUserAdopted: true, groupedUnderThreadId: groupId },
-        launch(typedId, childId),
+        {
+          ...launch(typedId, childId),
+          ...(groupIsOwned ? { groupedUnderThreadId: groupId } : {}),
+        },
+        {
+          ...root,
+          id: legacyOwner,
+          groupedUnderThreadId: rootId,
+          archivedAt: now,
+          archivedWith: legacyCohort,
+        },
+        { ...root, id: legacyChild, groupedUnderThreadId: legacyOwner },
         launch(grandchildId, typedId),
         {
           ...historical,
@@ -547,11 +571,18 @@ it.effect.each([false, true])(
         });
       }
       const family = yield* service.getThreadArchiveFamily(rootId);
-      const allIds = [rootId, childId, groupId, typedId, grandchildId];
-      const selected = includeTypedIn ? allIds : [rootId, childId, groupId];
+      const allIds = [rootId, childId, groupId, typedId, grandchildId, legacyChild];
+      const kept = [typedId, grandchildId, ...(groupIsOwned ? [groupId] : [])];
+      const selected = includeTypedIn
+        ? allIds.filter((id) => !groupIsUsed || id !== groupId)
+        : allIds.filter((id) => !kept.includes(id));
       assert.sameMembers([...family.childThreadIds], allIds.slice(1));
-      assert.sameMembers([...family.keptThreadIds], [typedId, grandchildId]);
+      assert.sameMembers([...family.keptThreadIds], kept);
       assert.deepEqual(family.archivePreview?.typedInThreadIds, [typedId]);
+      assert.deepEqual(
+        family.archivePreview?.keptWithTypedInThreadIds,
+        groupIsUsed ? [groupId] : undefined,
+      );
       assert.isTrue(family.requiresConfirmation);
 
       const request = {
@@ -613,10 +644,10 @@ it.effect.each([false, true])(
         requestId: retryId,
       });
       for (const id of selected) {
-        assert.deepEqual((yield* store.getThread(id)).archivedWith, {
-          threadId: rootId,
-          commandId: retryId,
-        });
+        assert.deepEqual(
+          (yield* store.getThread(id)).archivedWith,
+          id === legacyChild ? legacyCohort : { threadId: rootId, commandId: retryId },
+        );
       }
       for (const id of [
         ...allIds.filter((id) => !selected.includes(id)),
@@ -641,7 +672,9 @@ it.effect.each([false, true])(
         commandId: CommandId.make("owned-archive:restore"),
         threadId: rootId,
       });
-      for (const id of selected) assert.isNull((yield* store.getThread(id)).archivedAt);
+      for (const id of selected.filter((id) => id !== legacyChild))
+        assert.isNull((yield* store.getThread(id)).archivedAt);
+      assert.isNotNull((yield* store.getThread(legacyChild)).archivedAt);
       assert.deepEqual(
         (yield* store.getThread(typedId)).creatorOrigin,
         launch(typedId, childId).creatorOrigin,

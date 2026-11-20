@@ -24,7 +24,7 @@ export function archivePreviewSelection(
   readonly includeTypedInThreadIds?: readonly ThreadId[];
 } {
   if (family.archivePreview === undefined) return {};
-  const keptIds = new Set(includeTypedIn ? [] : family.keptThreadIds);
+  const keptIds = new Set(keptArchivePreviewThreadIds(family, includeTypedIn));
   return {
     expectedArchiveThreadIds: family.archivePreview.threads
       .map(({ threadId }) => threadId)
@@ -33,6 +33,22 @@ export function archivePreviewSelection(
       ? { includeTypedInThreadIds: family.archivePreview.typedInThreadIds }
       : {}),
   };
+}
+
+type ArchivePreviewFamily = {
+  readonly archivePreview?: ThreadArchiveFamily["archivePreview"];
+  readonly keptThreadIds?: readonly ThreadId[];
+  readonly threads: ReadonlyArray<{
+    readonly id: ThreadId;
+    readonly environmentId?: EnvironmentThreadShell["environmentId"];
+  }>;
+};
+
+function keptArchivePreviewThreadIds(
+  family: Pick<ArchivePreviewFamily, "archivePreview" | "keptThreadIds">,
+  includeTypedIn: boolean,
+) {
+  return includeTypedIn ? family.archivePreview?.keptWithTypedInThreadIds : family.keptThreadIds;
 }
 
 /** One shared presentation for web and mobile; family membership and activity come from the server. */
@@ -49,33 +65,31 @@ export function buildThreadArchiveConfirmation<
     readonly canStopAndArchive: boolean;
     readonly archivePreview?: ThreadArchiveFamily["archivePreview"];
     readonly keptThreadIds?: readonly ThreadId[];
-    readonly bulkPreviews?: readonly Pick<
-      ThreadArchiveFamily,
-      "archivePreview" | "keptThreadIds"
-    >[];
+    readonly bulkPreviews?: readonly ArchivePreviewFamily[];
+    readonly bulkPreviewsIncludingTypedIn?: readonly ArchivePreviewFamily[];
   },
   resolve: MFunctionType = mFallback,
   includeTypedIn = false,
 ) {
-  const previews = family.bulkPreviews ?? [family];
-  const previewsWithDetails = previews.filter(({ archivePreview }) => archivePreview !== undefined);
+  const typedInChoice = family.bulkPreviews ?? [family];
+  const previews = includeTypedIn
+    ? (family.bulkPreviewsIncludingTypedIn ?? typedInChoice)
+    : typedInChoice;
+  const hasPreview = previews.some(({ archivePreview }) => archivePreview !== undefined);
+  const keyOf = (thread: T | ArchivePreviewFamily["threads"][number]) =>
+    `${thread.environmentId}:${thread.id}`;
   const previewKeys = new Set(
-    previewsWithDetails.flatMap(
-      ({ archivePreview }) =>
-        archivePreview?.threads.map(
-          ({ threadId }) => `${archivePreview.environmentId}:${threadId}`,
-        ) ?? [],
-    ),
+    hasPreview ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
   );
-  const keptKeys = new Set(
-    previewsWithDetails.flatMap(
-      ({ archivePreview, keptThreadIds }) =>
-        keptThreadIds?.map((id) => `${archivePreview?.environmentId}:${id}`) ?? [],
-    ),
+  const selectedKeys = new Set(
+    previews.flatMap((preview) => {
+      const kept = new Set(keptArchivePreviewThreadIds(preview, includeTypedIn));
+      return preview.threads.filter(({ id }) => !kept.has(id)).map(keyOf);
+    }),
   );
-  const keyOf = (thread: T) => `${thread.environmentId}:${thread.id}`;
-  const keep = (thread: T) => !includeTypedIn && keptKeys.has(keyOf(thread));
-  const participants = family.threads.filter((thread) => !keep(thread));
+  const keep = (thread: T) => previewKeys.has(keyOf(thread)) && !selectedKeys.has(keyOf(thread));
+  const inScope = (thread: T) => !hasPreview || previewKeys.has(keyOf(thread));
+  const participants = family.threads.filter((thread) => inScope(thread) && !keep(thread));
   const activeIds = new Set(family.activeThreadIds);
   const unreadIds = new Set(family.unreadThreadIds);
   const activeCount = participants.filter(({ id }) => activeIds.has(id)).length;
@@ -84,8 +98,7 @@ export function buildThreadArchiveConfirmation<
   const unread = unreadCount > 0;
   const protectedThreads = participants.filter((thread) => thread.persistent);
   const blocked = !family.canStopAndArchive || protectedThreads.length > 0;
-  const hasPreview = previewsWithDetails.length > 0;
-  const canIncludeTypedIn = previewsWithDetails.some(
+  const canIncludeTypedIn = typedInChoice.some(
     ({ archivePreview }) => (archivePreview?.typedInThreadIds.length ?? 0) > 0,
   );
   const protectedTitle = protectedThreads[0]?.title;
@@ -149,8 +162,9 @@ export function buildThreadArchiveConfirmation<
     threads: family.threads
       .filter(
         (thread) =>
-          previewKeys.has(keyOf(thread)) ||
-          (blocked ? thread.persistent : activeIds.has(thread.id) || unreadIds.has(thread.id)),
+          inScope(thread) &&
+          (previewKeys.has(keyOf(thread)) ||
+            (blocked ? thread.persistent : activeIds.has(thread.id) || unreadIds.has(thread.id))),
       )
       .map((thread) => ({
         thread,

@@ -233,54 +233,95 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         (thread) => recordedParentOf(thread) !== null && thread.latestUserAuthoredMessageAt != null,
       )
       .map((thread) => thread.id);
-    const keptThreadIds = new Set(
+    const typedInBranchIds = new Set(
       typedInThreadIds.flatMap((id) => [
         id,
         ...getOwnedThreadFamily(shells, id, recordedParentOf).children.map((thread) => thread.id),
       ]),
     );
-    keptThreadIds.delete(rootId);
+    typedInBranchIds.delete(rootId);
     const legacyIds = new Set(getOwnedThreadFamily(shells, rootId).children.map(({ id }) => id));
     const widened = family.children.filter(({ id }) => !legacyIds.has(id));
-    const selectedIds = new Set([
-      rootId,
-      ...family.children.filter(({ id }) => !keptThreadIds.has(id)).map(({ id }) => id),
-    ]);
-    const groupIds = new Set(
-      widened.filter(({ id }) => selectedIds.has(id)).map(getInteractiveThreadParentThreadId),
-    );
-    const emptyGroups = shells.filter(
+    const expanded = widened.length > 0;
+    if (!expanded && typedInThreadIds.length === 0)
+      return {
+        ...family,
+        typedInThreadIds,
+        keptThreadIds: typedInBranchIds,
+        keptWithTypedInThreadIds: new Set<ThreadId>(),
+        expanded,
+      };
+
+    const familyIds = new Set(family.children.map(({ id }) => id));
+    const groups = shells.filter(
       (group) =>
-        groupIds.has(group.id) &&
         group.id !== rootId &&
-        !selectedIds.has(group.id) &&
-        !keptThreadIds.has(group.id) &&
         group.groupThread === true &&
-        group.lineage.independent !== true &&
         group.archivedAt === null &&
         group.deletedAt === null &&
-        group.persistent !== true &&
-        group.workspaceUserAdopted !== true &&
-        group.actionResume?.outcome !== "running" &&
-        (group.archivePending?.status !== "failed" || group.archivePending.threadId === rootId) &&
-        group.latestRunId === null &&
-        group.latestUserMessageAt === null &&
-        group.latestVisibleMessage === null &&
-        shells.every(
-          (thread) =>
-            thread.archivedAt !== null ||
-            thread.deletedAt !== null ||
-            (getArchiveFamilyParentThreadId(thread, group) !== group.id &&
-              recordedParentOf(thread) !== group.id) ||
-            selectedIds.has(thread.id),
-        ),
+        (familyIds.has(group.id) ||
+          widened.some(
+            (child) =>
+              child.projectId === group.projectId &&
+              getInteractiveThreadParentThreadId(child) === group.id,
+          )),
     );
+    const groupIds = new Set(groups.map(({ id }) => id));
+    const emptyGroupCandidates = groups
+      .filter(
+        (group) =>
+          group.lineage.independent !== true &&
+          group.persistent !== true &&
+          group.workspaceUserAdopted !== true &&
+          group.actionResume?.outcome !== "running" &&
+          (group.archivePending?.status !== "failed" || group.archivePending.threadId === rootId) &&
+          group.latestRunId === null &&
+          group.latestUserMessageAt === null &&
+          group.latestVisibleMessage === null,
+      )
+      .map((group) => ({
+        id: group.id,
+        members: shells
+          .filter(
+            (thread) =>
+              thread.archivedAt === null &&
+              thread.deletedAt === null &&
+              (getArchiveFamilyParentThreadId(thread, group) === group.id ||
+                recordedParentOf(thread) === group.id),
+          )
+          .map(({ id }) => id),
+      }));
+    const selectedWith = (kept: ReadonlySet<ThreadId>) => {
+      const selected = new Set([
+        rootId,
+        ...family.children.flatMap(({ id }) => (!groupIds.has(id) && !kept.has(id) ? [id] : [])),
+      ]);
+      // A container may itself be the last live member of another container.
+      let previousSize: number;
+      do {
+        previousSize = selected.size;
+        for (const { id, members } of emptyGroupCandidates)
+          if (!kept.has(id) && members.every((member) => selected.has(member))) selected.add(id);
+      } while (selected.size !== previousSize);
+      return selected;
+    };
+    const selectedWithTypedIn = selectedWith(new Set());
+    const selectedByDefault = selectedWith(typedInBranchIds);
+    const children = [
+      ...family.children,
+      ...groups.filter(({ id }) => !familyIds.has(id) && selectedWithTypedIn.has(id)),
+    ];
     return {
       ...family,
-      children: [...family.children, ...emptyGroups],
+      children,
       typedInThreadIds,
-      keptThreadIds,
-      expanded: widened.length > 0,
+      keptThreadIds: new Set(
+        children.filter(({ id }) => !selectedByDefault.has(id)).map(({ id }) => id),
+      ),
+      keptWithTypedInThreadIds: new Set(
+        children.filter(({ id }) => !selectedWithTypedIn.has(id)).map(({ id }) => id),
+      ),
+      expanded,
     };
   };
 
@@ -328,6 +369,9 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
               archivePreview: {
                 environmentId: ports.environmentId,
                 typedInThreadIds: family.typedInThreadIds,
+                ...(family.keptWithTypedInThreadIds.size > 0
+                  ? { keptWithTypedInThreadIds: [...family.keptWithTypedInThreadIds] }
+                  : {}),
                 threads: threads.map(({ id, projectId, title }) => ({
                   threadId: id,
                   projectId,
@@ -510,13 +554,14 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     options?: { readonly includeTypedInThreadIds?: ReadonlyArray<ThreadId> | undefined },
   ) => {
     const legacy = getOwnedThreadFamily(threads, rootId);
-    const family = options === undefined ? legacy : selectArchiveFamily(threads, rootId);
+    const modern = options === undefined ? undefined : selectArchiveFamily(threads, rootId);
+    const family = modern ?? legacy;
     const retained =
       disposition === "promote"
         ? legacy.keptThreadIds
-        : options !== undefined && options.includeTypedInThreadIds === undefined
-          ? family.keptThreadIds
-          : new Set<ThreadId>();
+        : ((options?.includeTypedInThreadIds === undefined
+            ? modern?.keptThreadIds
+            : modern?.keptWithTypedInThreadIds) ?? new Set<ThreadId>());
     return {
       family,
       archiveIds: [
@@ -695,17 +740,18 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     );
     const allIds = [...familyIds, ...sideChats.map(({ id }) => id)];
     const defaultIds = allIds.filter((id) => !selection.keptThreadIds.has(id));
+    const withTypedInIds = allIds.filter((id) => !selection.keptWithTypedInThreadIds.has(id));
     const expected = command.expectedArchiveThreadIds;
     const includeTypedIn =
       selection.typedInThreadIds.length > 0 &&
       expected !== undefined &&
       command.includeTypedInThreadIds !== undefined &&
       sameThreadIds(command.includeTypedInThreadIds, selection.typedInThreadIds) &&
-      sameThreadIds(expected, allIds) &&
+      sameThreadIds(expected, withTypedInIds) &&
       (command.childDisposition === "archive_after_review" ||
         command.childDisposition === "stop_and_archive");
     const family = selection;
-    const archiveIds = includeTypedIn ? allIds : defaultIds;
+    const archiveIds = includeTypedIn ? withTypedInIds : defaultIds;
     const archiveIdSet = new Set(archiveIds);
     const reject = (cause: string) =>
       new OrchestratorDispatchError({
@@ -745,7 +791,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           (expected === undefined || !sameThreadIds(expected, defaultIds))))
     )
       return yield* reject(
-        "Review the archive preview again and pass expectedArchiveThreadIds for the threads to close. Leave keptThreadIds out unless the user confirms archiving them.",
+        "Review the archive preview again. Pass expectedArchiveThreadIds excluding keptThreadIds. To include threads the user wrote in, confirm typedInThreadIds and exclude keptWithTypedInThreadIds instead.",
       );
     if (
       family.children.length > 0 &&
@@ -962,8 +1008,12 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       (pending.familyVersion === undefined || pending.childDisposition === "promote")
         ? yield* projectionStore.getOwnedThreadIds(root.id).pipe(mapDispatchError(command))
         : null;
+    const legacyParticipants = new Set<ThreadId>();
     if (command.type === "thread.archive.complete") {
       const shells = yield* archiveFamilyShells(command);
+      if (pending.familyVersion === 2)
+        for (const { id } of getOwnedThreadFamily(shells, root.id).children)
+          legacyParticipants.add(id);
       const legacyOwnedIds = legacyOwnedThreadIds === null ? null : new Set(legacyOwnedThreadIds);
       if (
         pending.includeTypedInThreadIds !== undefined &&
@@ -1114,7 +1164,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       const current = (yield* getProjectionWithPendingEvents(id, events)).thread;
       const owner = root.archivedWith ?? { threadId: root.id, commandId: command.requestId };
       const archivedWith =
-        pending.familyVersion === 2
+        pending.familyVersion === 2 && !legacyParticipants.has(id)
           ? owner
           : yield* archiveOwnerFor(command, current, familyThreads, owner, events);
       yield* emit(

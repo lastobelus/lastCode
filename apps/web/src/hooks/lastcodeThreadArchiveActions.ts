@@ -506,15 +506,34 @@ export function createLastCodeThreadArchiveActions(ports: {
         owner,
       });
     }
-    // A selected descendant is handled by its selected ancestor's family operation.
-    const entries = families.filter(
-      (entry) =>
-        !families.some(
-          (other) =>
-            other.threadRef.environmentId === entry.threadRef.environmentId &&
-            other.family.childThreadIds.includes(entry.threadRef.threadId),
+    const contains = (owner: (typeof families)[number], child: (typeof families)[number]) =>
+      owner.threadRef.environmentId === child.threadRef.environmentId &&
+      owner.family.childThreadIds.includes(child.threadRef.threadId);
+    // Apply an ancestor first so a separate child archive cannot stale its preview.
+    const orderedFamilies = families
+      .map((entry) => ({ entry, depth: families.filter((other) => contains(other, entry)).length }))
+      .toSorted((left, right) => left.depth - right.depth)
+      .map(({ entry }) => entry);
+    const entriesFor = (includeTypedIn = false) => {
+      const selectedByFamily = orderedFamilies.map((entry) => ({
+        entry,
+        ids: new Set(
+          archivePreviewSelection(entry.family, includeTypedIn).expectedArchiveThreadIds ??
+            entry.family.childThreadIds,
         ),
-    );
+      }));
+      return orderedFamilies.filter(
+        (entry) =>
+          !selectedByFamily.some(
+            ({ entry: other, ids }) =>
+              other !== entry &&
+              other.threadRef.environmentId === entry.threadRef.environmentId &&
+              ids.has(entry.threadRef.threadId),
+          ),
+      );
+    };
+    const entries = entriesFor();
+    const entriesIncludingTypedIn = entriesFor(true);
     for (const { owner } of entries) {
       const error = archiveThreadPreflightError(owner);
       if (error)
@@ -546,7 +565,7 @@ export function createLastCodeThreadArchiveActions(ports: {
     const entriesByKey = new Map(entries.map((entry) => [entry.threadKey, entry]));
     const perform = async (choice: ThreadArchiveChildDisposition, includeTypedIn?: boolean) => {
       const attempt = await archiveSelectedThreadEntries({
-        entries,
+        entries: includeTypedIn ? entriesIncludingTypedIn : entries,
         archive: (entry, onArchived) => {
           const { threadRef, family, owner, expectedArchiveCommandId } = entry;
           return archiveThread(threadRef, {
@@ -555,10 +574,7 @@ export function createLastCodeThreadArchiveActions(ports: {
             familyChoice: {
               childDisposition: choice,
               expectedChildThreadIds: family.childThreadIds,
-              ...archivePreviewSelection(
-                family,
-                includeTypedIn && (family.archivePreview?.typedInThreadIds.length ?? 0) > 0,
-              ),
+              ...archivePreviewSelection(family, includeTypedIn),
             },
             familyOwner: owner,
             familySnapshot: family,
@@ -615,7 +631,10 @@ export function createLastCodeThreadArchiveActions(ports: {
           protectedChildThreadIds: entries.flatMap(({ family }) => family.protectedChildThreadIds),
           canStopAndArchive: entries.every(({ family }) => family.canStopAndArchive),
           ...(entries.some(({ family }) => family.archivePreview !== undefined)
-            ? { bulkPreviews: entries.map(({ family }) => family) }
+            ? {
+                bulkPreviews: entries.map(({ family }) => family),
+                bulkPreviewsIncludingTypedIn: entriesIncludingTypedIn.map(({ family }) => family),
+              }
             : {}),
         },
         submit: perform,

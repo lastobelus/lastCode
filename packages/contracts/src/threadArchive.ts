@@ -57,6 +57,7 @@ export const ThreadArchivePending = Schema.Union([
 export const ThreadArchivePreview = Schema.Struct({
   environmentId: EnvironmentId,
   typedInThreadIds: Schema.Array(ThreadId),
+  keptWithTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
   threads: Schema.Array(
     Schema.Struct({
       threadId: ThreadId,

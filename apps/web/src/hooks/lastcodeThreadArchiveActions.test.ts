@@ -10,7 +10,10 @@ import * as Cause from "effect/Cause";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
-import { THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE } from "@t3tools/client-runtime/state/thread-archive";
+import {
+  buildThreadArchiveConfirmation,
+  THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
+} from "@t3tools/client-runtime/state/thread-archive";
 import { useThreadActions } from "./useThreadActions";
 import { threadEnvironment } from "../state/threads";
 import { toastManager } from "../components/ui/toast";
@@ -1169,6 +1172,85 @@ describe("bulk archive progress", () => {
       second,
     };
   }
+
+  it.each([false, true])(
+    "archives an explicitly selected typed-in child (include all typed-in threads=%s)",
+    async (includeTypedIn) => {
+      const { selected: roots, children } = seedBulkFamilies();
+      const child = children[0]!;
+      const childRef = { environmentId: child.environmentId, threadId: child.id };
+      const childEntry = {
+        threadRef: childRef,
+        threadKey: `${childRef.environmentId}:${childRef.threadId}`,
+      };
+      const candidates = familyState.threads.filter(
+        (thread) => thread.id === target.threadId || thread.id === child.id,
+      );
+      const family = archiveDecisionFixture(candidates, {
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId },
+      });
+      archiveFamilyLoad.mockImplementation(async ({ input }) => ({
+        _tag: "Success",
+        value:
+          input.threadId === target.threadId
+            ? {
+                ...family,
+                keptThreadIds: [child.id],
+                requiresConfirmation: true,
+                archivePreview: {
+                  environmentId: target.environmentId,
+                  typedInThreadIds: [child.id],
+                  threads: candidates.map(({ id, projectId, title }) => ({
+                    threadId: id,
+                    projectId,
+                    title,
+                  })),
+                },
+              }
+            : archiveDecisionFixture([child], {
+                environmentId: child.environmentId,
+                input: { threadId: child.id },
+              }),
+      }));
+      commands.archive.mockResolvedValue({ _tag: "Success", value: undefined });
+      archiveDialog.mockImplementation(async (request) => {
+        const confirmation = buildThreadArchiveConfirmation(
+          request.family,
+          undefined,
+          includeTypedIn,
+        );
+        expect(confirmation.threads.find(({ thread }) => thread.id === child.id)?.label).toBe(
+          "Archive · Working",
+        );
+        expect(await request.submit("stop_and_archive", includeTypedIn)).toBeNull();
+        return "stop_and_archive";
+      });
+
+      const outcome = await useThreadActions().archiveThreads([childEntry, roots[0]!]);
+      expect(outcome?.archivedThreadKeys).toEqual([childEntry.threadKey, roots[0]!.threadKey]);
+      expect(commands.archive.mock.calls.map(([request]) => request.input)).toEqual([
+        {
+          threadId: target.threadId,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [child.id],
+          expectedArchiveThreadIds: includeTypedIn
+            ? [target.threadId, child.id]
+            : [target.threadId],
+          ...(includeTypedIn ? { includeTypedInThreadIds: [child.id] } : {}),
+        },
+        ...(includeTypedIn
+          ? []
+          : [
+              {
+                threadId: child.id,
+                childDisposition: "stop_and_archive",
+                expectedChildThreadIds: [],
+              },
+            ]),
+      ]);
+    },
+  );
 
   it("retains completed families after a failure and retries only the remaining fresh family", async () => {
     const { selected: roots, children, second } = seedBulkFamilies();
