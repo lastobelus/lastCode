@@ -2139,6 +2139,135 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect.each([
+    { runtimeMode: "full-access", turnIdKind: "present" },
+    { runtimeMode: "auto-accept-edits", turnIdKind: "null" },
+  ] as const)(
+    "handles MCP access approvals in $runtimeMode with a $turnIdKind turn id",
+    ({ runtimeMode, turnIdKind }) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "mcp-approval-thread";
+        const nativeTurnId = "mcp-approval-turn";
+        const prompt = "Read the dashboard in Chrome.";
+        const pending = yield* Queue.unbounded<OrchestrationV2RuntimeRequest>();
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: `mcp-approval-${turnIdKind}`,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId,
+                prompt,
+                ...(runtimeMode === "full-access"
+                  ? {}
+                  : {
+                      turnPolicy: {
+                        approvalPolicy: "on-request",
+                        sandboxPolicy: { type: "workspaceWrite" },
+                      },
+                    }),
+              }),
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 0,
+                  method: "mcpServer/elicitation/request",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: turnIdKind === "null" ? null : nativeTurnId,
+                    serverName: "browser",
+                    mode: "form",
+                    message: "Allow ChatGPT to use Google Chrome?",
+                    requestedSchema: {
+                      type: "object",
+                      properties: { approval: { type: "string", enum: ["once", "always"] } },
+                      required: ["approval"],
+                    },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: { id: 0, result: { action: "accept", content: { approval: "once" } } },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          }),
+          (event) =>
+            event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"
+              ? Queue.offer(pending, event.runtimeRequest)
+              : Effect.void,
+        );
+        const turnInput = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make(`mcp-approval-${turnIdKind}-attempt`),
+          text: prompt,
+        });
+        yield* harness.runtime.startTurn({
+          ...turnInput,
+          runtimePolicy: { ...turnInput.runtimePolicy, runtimeMode },
+        });
+        if (runtimeMode === "full-access") {
+          const request = yield* Effect.raceFirst(
+            harness.firstTerminal.pipe(Effect.as(undefined)),
+            Queue.take(pending),
+          );
+          assert.isUndefined(request, "Full access must not wait for an MCP approval");
+          assert.deepEqual(
+            harness.terminalEvents().map((event) => event.status),
+            ["completed"],
+          );
+          return;
+        }
+        const request = yield* Effect.raceFirst(
+          Queue.take(pending),
+          harness.firstTerminal.pipe(Effect.andThen(Effect.die("MCP approval was not presented"))),
+        );
+        assert.equal(request.kind, "mcp-elicitation");
+        const approvals = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "approval_request" &&
+          event.turnItem.requestId === request.id
+            ? [event.turnItem]
+            : [],
+        );
+        assert.deepEqual(
+          approvals.map((approval) => [approval.threadId, approval.appName, approval.prompt]),
+          [[harness.threadId, "Google Chrome", "Allow ChatGPT to use Google Chrome?"]],
+        );
+        yield* harness.runtime.respondToRuntimeRequest({
+          requestId: request.id,
+          decision: "accept",
+        });
+        yield* harness.firstTerminal;
+        assert.deepEqual(
+          harness.terminalEvents().map((event) => event.status),
+          ["completed"],
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   it.effect("keeps native image views available to the clients", () =>
     Effect.gen(function* () {
       const nativeThreadId = "image-view-thread";
@@ -3138,7 +3267,17 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           },
         ],
       });
-      const harness = yield* makeCodexReplayHarness(transcript);
+      const eventsAtRequest =
+        yield* Deferred.make<ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>>();
+      const publishedEvents: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
+      const harness = yield* makeCodexReplayHarness(transcript, (event) =>
+        Effect.gen(function* () {
+          publishedEvents.push(event);
+          if (event.type === "runtime_request.updated") {
+            yield* Deferred.succeed(eventsAtRequest, [...publishedEvents]);
+          }
+        }),
+      );
       yield* harness.runtime.startTurn(
         makeCodexTestTurnInput({
           threadId: harness.threadId,
@@ -3155,7 +3294,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.lengthOf(requests, 1);
       assert.equal(requests[0]?.status, "pending");
       assert.deepEqual(requests[0]?.responseCapability, { type: "message" });
-      const questionItem = harness.events.find(
+      const questionItem = (yield* Deferred.await(eventsAtRequest)).find(
         (event) =>
           event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
       );
@@ -3164,6 +3303,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         questionItem?.type === "turn_item.updated" &&
         questionItem.turnItem.type === "user_input_request"
       ) {
+        assert.equal(questionItem.turnItem.requestId, requests[0]?.id);
+        assert.equal(questionItem.turnItem.nodeId, requests[0]?.nodeId);
         assert.deepEqual(
           questionItem.turnItem.questions[0]?.options.map((option) => option.label),
           ["main", "dev"],
