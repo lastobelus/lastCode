@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { CommandId, EnvironmentId, IsoDateTime, ThreadId } from "./baseSchemas.ts";
+import { CommandId, EnvironmentId, IsoDateTime, NonNegativeInt, ThreadId } from "./baseSchemas.ts";
 import {
   ThreadArchivedWith,
   ThreadArchiveChildDisposition,
@@ -71,8 +71,13 @@ export type PeerArchiveGeneration = typeof PeerArchiveGeneration.Type;
 export const PeerArchiveApplyInput = Schema.Struct({
   ...PeerArchiveGeneration.fields,
   ownerThreadIds: PeerArchiveInventoryInput.fields.ownerThreadIds,
-  cohorts: Schema.Array(PeerArchiveCohort).check(Schema.isMinLength(1)),
-});
+  selectionRevision: Schema.optional(NonNegativeInt),
+  cohorts: Schema.Array(PeerArchiveCohort),
+}).check(
+  Schema.makeFilter(
+    ({ selectionRevision, cohorts }) => (selectionRevision ?? 0) > 0 || cohorts.length > 0,
+  ),
+);
 export type PeerArchiveApplyInput = typeof PeerArchiveApplyInput.Type;
 
 export const PeerArchiveReceipt = Schema.Struct({

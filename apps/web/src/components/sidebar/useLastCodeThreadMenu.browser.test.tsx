@@ -81,6 +81,11 @@ vi.mock("./LastCodeThreadActions", () => ({
 vi.mock("../../hooks/useWorktreeSuspensionActions", () => ({
   useWorktreeSuspensionActions: () => ({ menuItems: () => [], run: async () => false }),
 }));
+vi.mock("../../hooks/useLastCodeLinkedArchiveRecovery", () => ({
+  LINKED_ARCHIVE_STATUS_ACTION: "linked-archive-status",
+  linkedArchiveStatusMenuItem: () => [],
+  useLastCodeLinkedArchiveRecovery: () => async () => {},
+}));
 vi.mock("../../localApi", () => ({
   readLocalApi: () => ({ contextMenu: { show: mocks.menu }, dialogs: { confirm: mocks.confirm } }),
 }));

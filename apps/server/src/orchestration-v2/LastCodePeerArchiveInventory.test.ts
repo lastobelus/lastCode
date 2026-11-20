@@ -18,6 +18,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import {
@@ -27,6 +28,7 @@ import {
 import { PeerLinks } from "../peer/PeerLinks.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import { EventSinkV2 } from "./EventSink.ts";
+import { makeLastCodeArchiveJournal } from "./LastCodeArchiveJournal.ts";
 import * as LinkedOperations from "./LastCodeLinkedArchiveOperations.ts";
 import * as LinkedPreview from "./LastCodeLinkedArchivePreview.ts";
 import {
@@ -135,7 +137,7 @@ const environmentLayer = ProjectionStore.layer.pipe(
   Layer.fresh,
 );
 
-it.effect("returns after the local archive and retries its recorded selection independently", () =>
+it.effect("retries linked archive and restore independently of later local archives", () =>
   Effect.gen(function* () {
     yield* saveThread(orchestrator);
     const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -153,9 +155,15 @@ it.effect("returns after the local archive and retries its recorded selection in
         payload: { ...thread, archivedAt: now },
       },
     };
-    const outcomes = [yield* Deferred.make<CommandId>(), yield* Deferred.make<CommandId>()];
+    const outcomes = [
+      yield* Deferred.make<CommandId>(),
+      yield* Deferred.make<CommandId>(),
+      yield* Deferred.make<CommandId>(),
+    ];
+    const restores = [yield* Deferred.make<CommandId>(), yield* Deferred.make<CommandId>()];
     let committed = false;
     let calls = 0;
+    let restoreCalls = 0;
     const local = store.apply(archived.event).pipe(
       Effect.tap(() =>
         Effect.sync(() => {
@@ -206,6 +214,109 @@ it.effect("returns after the local archive and retries its recorded selection in
       );
       assert.equal(retry.sequence, 4);
       assert.equal(yield* Deferred.await(outcomes[1]!), archiveId);
+
+      const journal = makeLastCodeArchiveJournal(yield* SqlClient.SqlClient);
+      const stale = yield* journal.read({
+        role: "source",
+        ownerEnvironmentId: origin,
+        ownerThreadId: orchestrator,
+        sourceArchiveCommandId: archiveId,
+      });
+      if (stale === null) return yield* Effect.die("Missing archive generation");
+      const previous = JSON.parse(stale.stateJson);
+      // A user message on the peer made its earlier choice stale.
+      yield* journal.compareAndReplace(
+        stale,
+        stale.revision,
+        JSON.stringify({
+          ...previous,
+          machines: previous.machines.map((machine: object) => ({
+            ...machine,
+            status: "blocked",
+            reason: "selection_changed",
+          })),
+        }),
+      );
+      assert.equal((yield* operations.status(orchestrator))?.machines[0]?.requiresReview, true);
+      yield* operations.dispatch(
+        {
+          type: "thread.archive",
+          threadId: orchestrator,
+          commandId: CommandId.make("review-updated-choice"),
+          expectedLinkedArchiveCommandId: archiveId,
+          linkedArchiveSelection: [
+            { label: "Build machine", environmentId: destination, status: "ready", cohorts: [] },
+          ],
+        },
+        Effect.die("Fresh linked consent must use the same local archive"),
+      );
+      assert.equal(yield* Deferred.await(outcomes[2]!), archiveId);
+
+      const restoreId = CommandId.make("local-restore");
+      const unarchived: OrchestrationV2StoredEvent = {
+        sequence: 5,
+        commandId: restoreId,
+        event: {
+          id: EventId.make("local-restore-commit"),
+          type: "thread.unarchived",
+          threadId: orchestrator,
+          occurredAt: now,
+          payload: thread,
+        },
+      };
+      yield* operations.dispatch(
+        { type: "thread.unarchive", threadId: orchestrator, commandId: restoreId },
+        store.apply(unarchived.event).pipe(Effect.as({ sequence: 5, storedEvents: [unarchived] })),
+      );
+      assert.equal(yield* Deferred.await(restores[0]!), archiveId);
+
+      const nextId = CommandId.make("next-local-archive");
+      const nextAt = DateTime.add(now, { seconds: 1 });
+      const nextArchive: OrchestrationV2StoredEvent = {
+        ...archived,
+        sequence: 6,
+        commandId: nextId,
+        event: {
+          id: EventId.make("next-local-archive-commit"),
+          type: "thread.archived",
+          threadId: orchestrator,
+          occurredAt: nextAt,
+          payload: { ...thread, archivedAt: nextAt },
+        },
+      };
+      yield* operations.dispatch(
+        {
+          type: "thread.archive",
+          threadId: orchestrator,
+          commandId: nextId,
+          linkedArchiveSelection: [
+            {
+              label: "Second machine",
+              environmentId: thirdEnvironment,
+              status: "pending",
+              reason: "offline",
+            },
+          ],
+        },
+        store
+          .apply(nextArchive.event)
+          .pipe(Effect.as({ sequence: 6, storedEvents: [nextArchive] })),
+      );
+      assert.include(yield* operations.status(orchestrator), {
+        operation: "restore",
+        sourceArchiveCommandId: archiveId,
+      });
+      yield* operations.dispatch(
+        {
+          type: "thread.unarchive",
+          threadId: orchestrator,
+          commandId: CommandId.make("retry-prior-restore"),
+          expectedLinkedArchiveCommandId: archiveId,
+        },
+        Effect.die("Retrying an older restore must leave the new local archive alone"),
+      );
+      assert.equal(yield* Deferred.await(restores[1]!), archiveId);
+      assert.isNotNull((yield* store.getThread(orchestrator)).archivedAt);
     }).pipe(
       Effect.provide(
         LinkedOperations.layer.pipe(
@@ -222,10 +333,24 @@ it.effect("returns after the local archive and retries its recorded selection in
                 apply: (id, request) =>
                   Effect.gen(function* () {
                     assert.equal(id, destination);
-                    assert.deepEqual(request.cohorts[0]?.selectedThreadIds, [direct]);
+                    if (calls === 2) {
+                      assert.equal(request.selectionRevision, 1);
+                      assert.deepEqual(request.cohorts, []);
+                    } else {
+                      assert.deepEqual(request.cohorts[0]?.selectedThreadIds, [direct]);
+                    }
                     const signal = outcomes[calls++];
                     if (signal === undefined)
                       return yield* Effect.die("Unexpected linked archive attempt");
+                    yield* Deferred.succeed(signal, request.sourceArchiveCommandId);
+                    return yield* Effect.never;
+                  }),
+                restore: (id, request) =>
+                  Effect.gen(function* () {
+                    assert.equal(id, destination);
+                    const signal = restores[restoreCalls++];
+                    if (signal === undefined)
+                      return yield* Effect.die("Unexpected linked restore attempt");
                     yield* Deferred.succeed(signal, request.sourceArchiveCommandId);
                     return yield* Effect.never;
                   }),

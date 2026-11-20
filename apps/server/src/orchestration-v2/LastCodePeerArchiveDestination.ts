@@ -74,12 +74,26 @@ const Cohort = Schema.Struct({
 });
 type Cohort = typeof Cohort.Type;
 
+const SelectionReview = Schema.Struct({
+  revision: NonNegativeInt,
+  cohorts: Schema.Array(PeerArchiveCohort),
+});
+type SelectionReview = typeof SelectionReview.Type;
+const FailedArchiveHold = Schema.Struct({
+  anchorThreadId: ThreadId,
+  selectedThreadIds: PeerArchiveCohort.fields.selectedThreadIds,
+  commandId: CommandId,
+});
+type FailedArchiveHold = typeof FailedArchiveHold.Type;
+
 const DestinationState = Schema.Struct({
   nonce: Schema.String,
   sessionId: Schema.String,
   fenced: Schema.Boolean,
   ownerThreadIds: Schema.Array(ThreadId),
   cohorts: Schema.Array(Cohort),
+  review: Schema.optional(SelectionReview),
+  failedHolds: Schema.optional(Schema.Array(FailedArchiveHold)),
 });
 type DestinationState = typeof DestinationState.Type;
 const DestinationStateJson = Schema.fromJsonString(DestinationState);
@@ -87,6 +101,7 @@ const decodeState = Schema.decodeUnknownEffect(DestinationStateJson);
 const encodeState = Schema.encodeEffect(DestinationStateJson);
 const generationLockKey = Schema.encodeSync(Schema.fromJsonString(PeerArchiveGeneration));
 const sameThreadIds = Schema.toEquivalence(Schema.Array(ThreadId));
+const sameCohort = Schema.toEquivalence(PeerArchiveCohort);
 const sameCohorts = Schema.toEquivalence(Schema.Array(PeerArchiveCohort));
 const encodeAttemptKey = Schema.encodeSync(
   Schema.fromJsonString(Schema.Tuple([Schema.String, ThreadId, Schema.String, NonNegativeInt])),
@@ -99,13 +114,17 @@ const denied = { status: "blocked", reason: "denied" } satisfies PeerArchiveUnav
 const orderBy = <T>(rows: readonly T[], key: (row: T) => string) =>
   rows.toSorted((a, b) => (key(a) < key(b) ? -1 : key(a) === key(b) ? 0 : 1));
 
+const cohortsByAnchor = (cohorts: readonly PeerArchiveCohort[]) =>
+  new Map(cohorts.map((cohort) => [cohort.anchorThreadId, cohort]));
+
 function reviewedSelection(input: PeerArchiveApplyInput) {
+  const revision = input.selectionRevision ?? 0;
   const ownerThreadIds = input.ownerThreadIds.toSorted();
   const selected = new Set<ThreadId>();
   if (
     !ownerThreadIds.includes(input.ownerThreadId) ||
     new Set(ownerThreadIds).size !== ownerThreadIds.length ||
-    input.cohorts.length === 0
+    (revision === 0 && input.cohorts.length === 0)
   )
     return null;
   for (const cohort of input.cohorts) {
@@ -120,6 +139,7 @@ function reviewedSelection(input: PeerArchiveApplyInput) {
     }
   }
   return {
+    revision,
     ownerThreadIds,
     cohorts: orderBy(input.cohorts, (cohort) => cohort.anchorThreadId).map((cohort) => ({
       anchorThreadId: cohort.anchorThreadId,
@@ -205,7 +225,7 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
     const open = Effect.fnUntraced(function* (
       key: LastCodeArchiveJournalKey,
       client: McpClientCaller,
-      initial: Pick<DestinationState, "fenced" | "ownerThreadIds" | "cohorts">,
+      initial: Pick<DestinationState, "fenced" | "ownerThreadIds" | "cohorts" | "review">,
     ) {
       let row = yield* journal.read(key).pipe(Effect.catch(unavailable));
       if (row === null) {
@@ -234,6 +254,7 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
         get state() {
           return state;
         },
+        save,
         fence: () => (state.fenced ? Effect.void : save({ ...state, fenced: true })),
         saveCohort: (cohort: Cohort) =>
           save({
@@ -343,12 +364,70 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
     });
 
     type Generation = Effect.Success<ReturnType<typeof open>>;
+    const reconcileReview = Effect.fnUntraced(function* (
+      generation: Generation,
+      review: SelectionReview,
+    ) {
+      const { state } = generation;
+      const selected = cohortsByAnchor(review.cohorts);
+      const cohorts = new Map<ThreadId, Cohort>();
+      const heldThreads = new Set<ThreadId>();
+      const failedHolds = new Map<ThreadId, FailedArchiveHold>(
+        state.failedHolds?.map((hold) => [hold.anchorThreadId, hold]),
+      );
+      for (const entry of state.cohorts) {
+        const { selection, archive } = entry;
+        const { anchorThreadId, selectedThreadIds } = selection;
+        const next = selected.get(anchorThreadId);
+        const unchanged = next !== undefined && sameCohort(selection, next);
+        const evidence =
+          entry.archived !== undefined || archive === undefined
+            ? undefined
+            : yield* readArchiveEvidence(selection, archive);
+        const archived =
+          entry.archived ?? (evidence?.state === "archived" ? evidence.threads : undefined);
+        const admitted = evidence?.state === "pending" || evidence?.state === "unproven";
+
+        if (archived !== undefined || admitted) {
+          failedHolds.delete(anchorThreadId);
+          cohorts.set(anchorThreadId, archived === undefined ? entry : { ...entry, archived });
+          for (const id of archived?.map(({ threadId }) => threadId) ?? selectedThreadIds)
+            heldThreads.add(id);
+          continue;
+        }
+
+        // A rejected or interrupted retry can still leave the original failed hold in place.
+        const failedId = evidence?.state === "failed" ? archive?.id : archive?.retryOf;
+        if (failedId !== undefined)
+          failedHolds.set(anchorThreadId, {
+            anchorThreadId,
+            selectedThreadIds,
+            commandId: failedId,
+          });
+        if (unchanged) cohorts.set(anchorThreadId, entry);
+      }
+      for (const selection of review.cohorts) {
+        if (
+          cohorts.has(selection.anchorThreadId) ||
+          selection.selectedThreadIds.some((id) => heldThreads.has(id))
+        )
+          continue;
+        cohorts.set(selection.anchorThreadId, { selection });
+      }
+      yield* generation.save({
+        ...state,
+        review,
+        cohorts: orderBy([...cohorts.values()], ({ selection }) => selection.anchorThreadId),
+        failedHolds: [...failedHolds.values()],
+      });
+    });
+
     const observeArchive = Effect.fnUntraced(function* (
       generation: Generation,
       client: McpClientCaller,
       key: LastCodeArchiveJournalKey,
       entry: Cohort,
-      operation: "apply" | "restore",
+      canDispatch: boolean,
     ) {
       if (entry.archived !== undefined) return { entry, remaining: undefined };
       const selection = entry.selection;
@@ -356,16 +435,27 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
       let evidence =
         attempt === undefined ? undefined : yield* readArchiveEvidence(selection, attempt);
       const observed = evidence?.state;
-      if (operation === "restore" && observed === "dispatch")
-        return { entry, remaining: undefined };
+      if (!canDispatch && observed === "dispatch") return { entry, remaining: undefined };
       const replaceAttempt =
-        operation === "apply" &&
-        (observed === undefined || observed === "rejected" || observed === "failed");
+        canDispatch && (observed === undefined || observed === "rejected" || observed === "failed");
 
       if (replaceAttempt) {
-        const retryOf = observed === "failed" ? attempt?.id : attempt?.retryOf;
+        const { nonce, review, failedHolds } = generation.state;
+        const failedHold = failedHolds?.find(
+          (hold) =>
+            hold.anchorThreadId === selection.anchorThreadId &&
+            sameThreadIds(hold.selectedThreadIds, selection.selectedThreadIds),
+        );
+        const retryOf =
+          observed === "failed" ? attempt?.id : (attempt?.retryOf ?? failedHold?.commandId);
         attempt = {
-          ...nextAttempt(generation.state.nonce, selection.anchorThreadId, "archive", attempt),
+          // An anchor can disappear and return with a new selection and no prior attempt.
+          ...nextAttempt(
+            review === undefined ? nonce : `${nonce}:${review.revision}`,
+            selection.anchorThreadId,
+            "archive",
+            attempt,
+          ),
           ...(retryOf === undefined ? {} : { retryOf }),
           access: client.access,
           limit: clientModeCeiling(client),
@@ -375,11 +465,7 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
       }
 
       let dispatchOutcome: Remaining;
-      if (
-        attempt !== undefined &&
-        operation === "apply" &&
-        (replaceAttempt || observed === "dispatch")
-      ) {
+      if (attempt !== undefined && canDispatch && (replaceAttempt || observed === "dispatch")) {
         dispatchOutcome = yield* dispatch(
           {
             type: "thread.archive",
@@ -410,9 +496,9 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
             entry = { ...entry, archive: { ...attempt, failed: true } };
             yield* generation.saveCohort(entry);
           }
-          return { entry, remaining: operation === "apply" ? changed : undefined };
+          return { entry, remaining: canDispatch ? changed : undefined };
         case "rejected":
-          return { entry, remaining: operation === "apply" ? changed : undefined };
+          return { entry, remaining: canDispatch ? changed : undefined };
         case "unproven":
           return { entry, remaining: changed };
         case "pending":
@@ -492,27 +578,43 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
         Effect.gen(function* () {
           const reviewed = reviewedSelection(input);
           if (reviewed === null) return yield* Effect.fail(changed);
+          const review = { revision: reviewed.revision, cohorts: reviewed.cohorts };
           const generation = yield* open(key, client, {
             ownerThreadIds: reviewed.ownerThreadIds,
             cohorts: reviewed.cohorts.map((selection) => ({ selection })),
             fenced: false,
+            ...(review.revision === 0 ? {} : { review }),
           });
           const { state } = generation;
+          const revision = state.review?.revision ?? 0;
           if (
             state.fenced ||
             !sameThreadIds(state.ownerThreadIds, reviewed.ownerThreadIds) ||
-            !sameCohorts(
-              state.cohorts.map(({ selection }) => selection),
-              reviewed.cohorts,
-            )
+            review.revision < revision
           )
             return yield* Effect.fail(changed);
+          if (review.revision > revision) {
+            yield* reconcileReview(generation, review);
+          } else if (
+            !sameCohorts(
+              state.review?.cohorts ?? state.cohorts.map(({ selection }) => selection),
+              review.cohorts,
+            )
+          ) {
+            return yield* Effect.fail(changed);
+          }
 
           const receipts: PeerArchiveReceipt[] = [];
+          const committed = new Set<ThreadId>();
+          const unhandled = cohortsByAnchor(review.cohorts);
           let remaining: Remaining;
-          for (const entry of state.cohorts) {
+          for (const entry of generation.state.cohorts) {
+            const { anchorThreadId } = entry.selection;
+            const selection = unhandled.get(anchorThreadId);
+            const current = selection !== undefined && sameCohort(entry.selection, selection);
+            if (current) unhandled.delete(anchorThreadId);
             const observed = yield* Effect.result(
-              observeArchive(generation, client, key, entry, "apply"),
+              observeArchive(generation, client, key, entry, current),
             );
             if (observed._tag === "Failure") {
               remaining = mergeRemaining(remaining, observed.failure);
@@ -522,10 +624,17 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
             remaining = mergeRemaining(remaining, unavailable);
             if (cohort.archived === undefined) continue;
             receipts.push({
-              anchorThreadId: cohort.selection.anchorThreadId,
+              anchorThreadId,
               threads: cohort.archived,
             });
-            remaining = mergeRemaining(remaining, missingArchiveRows(cohort));
+            for (const { threadId } of cohort.archived) committed.add(threadId);
+            if (current) remaining = mergeRemaining(remaining, missingArchiveRows(cohort));
+          }
+          // A new selection that overlaps an old admission must stay exact. Once the
+          // admission resolves, its receipts may already cover the entire selection.
+          for (const { selectedThreadIds } of unhandled.values()) {
+            if (selectedThreadIds.some((id) => !committed.has(id)))
+              remaining = mergeRemaining(remaining, changed);
           }
           return { receipts, ...(remaining === undefined ? {} : { remaining }) };
         }),
@@ -541,18 +650,27 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
           });
           yield* generation.fence();
 
+          const { review } = generation.state;
+          const selected = review === undefined ? undefined : cohortsByAnchor(review.cohorts);
           const restoredThreadIds: ThreadId[] = [];
           let remaining: Remaining;
           for (const entry of generation.state.cohorts) {
             const result = yield* Effect.result(
               Effect.gen(function* () {
-                const observed = yield* observeArchive(generation, client, key, entry, "restore");
+                const observed = yield* observeArchive(generation, client, key, entry, false);
                 if (observed.remaining !== undefined)
                   return { restored: [], remaining: observed.remaining };
                 const result = yield* restoreCohort(generation, client, key, observed.entry);
+                const selection = selected?.get(entry.selection.anchorThreadId);
+                const current =
+                  selected === undefined ||
+                  (selection !== undefined && sameCohort(selection, entry.selection));
                 return {
                   restored: result.restored,
-                  remaining: mergeRemaining(result.remaining, missingArchiveRows(observed.entry)),
+                  remaining: mergeRemaining(
+                    result.remaining,
+                    current ? missingArchiveRows(observed.entry) : undefined,
+                  ),
                 };
               }),
             );

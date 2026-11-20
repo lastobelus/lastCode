@@ -335,7 +335,7 @@ export function makePeerArchiveDispatch(ports: {
           const record = yield* ports.store
             .getThread(id)
             .pipe(
-              Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(null)),
+              Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
             );
           return record?.deletedAt == null
             ? null

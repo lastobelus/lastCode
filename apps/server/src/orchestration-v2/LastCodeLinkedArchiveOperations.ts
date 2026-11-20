@@ -2,6 +2,7 @@ import {
   CommandId,
   type LinkedArchiveOperation,
   LinkedArchiveSelection,
+  NonNegativeInt,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
   PeerArchiveReceipt,
@@ -35,6 +36,7 @@ const StoredMachine = Schema.Struct({
   selection: LinkedArchiveSelection,
   status: Schema.Literals(["pending", "blocked", "review", "committed", "restored"]),
   reason: Schema.optional(PeerArchiveUnavailable.fields.reason),
+  selectionRevision: Schema.optional(NonNegativeInt),
   receipts: Schema.Array(PeerArchiveReceipt),
 });
 const State = Schema.Struct({
@@ -114,11 +116,13 @@ const make = Effect.gen(function* () {
       Effect.map(Option.isSome),
     );
 
-  const current = Effect.fnUntraced(function* (threadId: ThreadId) {
+  const generations = Effect.fn("LastCodeLinkedArchive.generations")(function* (
+    threadId: ThreadId,
+  ) {
     const rows = yield* rowsFor(threadId);
-    if (rows.length === 0) return undefined;
+    if (rows.length === 0) return [];
     const shell = yield* store.getThreadShell(threadId);
-    if (shell === null) return undefined;
+    if (shell === null) return [];
     const currentArchive =
       shell.archivedAt === null ? undefined : DateTime.formatIso(shell.archivedAt);
     const candidates = yield* Effect.forEach(rows, (row) =>
@@ -126,18 +130,17 @@ const make = Effect.gen(function* () {
         const state = readState(row.stateJson);
         const committed = state.localArchive ?? (yield* archived(row));
         if (committed === undefined) return undefined;
-        if (
-          currentArchive === committed.archivedAt ||
-          (currentArchive === undefined &&
-            state.restoreCommandId !== undefined &&
-            (state.localRestoreCommandId === state.restoreCommandId ||
-              (yield* restored(threadId, state.restoreCommandId))))
-        ) {
+        const localArchived = currentArchive === committed.archivedAt;
+        const localRestored =
+          state.restoreCommandId !== undefined &&
+          (state.localRestoreCommandId === state.restoreCommandId ||
+            (yield* restored(threadId, state.restoreCommandId)));
+        if (localArchived || localRestored) {
           return {
             row,
             state,
             sequence: committed.sequence,
-            localArchived: currentArchive !== undefined,
+            localArchived: !localRestored && localArchived,
           };
         }
         return undefined;
@@ -145,39 +148,53 @@ const make = Effect.gen(function* () {
     );
     return candidates
       .filter((candidate) => candidate !== undefined)
-      .sort((left, right) => right.sequence - left.sequence)[0];
+      .sort((left, right) => right.sequence - left.sequence);
   });
 
+  const pendingRestore = (entry: Effect.Success<ReturnType<typeof generations>>[number]) =>
+    !entry.localArchived && entry.state.machines.some(({ status }) => status !== "restored");
+
+  const needsReview = (machine: StoredMachine) =>
+    machine.selection.status !== "ready" || machine.reason === "selection_changed";
+
   const status = (threadId: ThreadId) =>
-    current(threadId).pipe(
+    generations(threadId).pipe(
+      Effect.map((entries) => entries.find(pendingRestore) ?? entries[0]),
       Effect.map((entry): LinkedArchiveOperation | undefined =>
         entry === undefined
           ? undefined
           : {
               sourceArchiveCommandId: entry.row.sourceArchiveCommandId,
               operation: entry.localArchived ? "archive" : "restore",
-              machines: entry.state.machines.map(({ selection, status, reason }) => ({
-                environmentId: selection.environmentId,
-                label: selection.label,
-                status: !entry.localArchived && status === "committed" ? "pending" : status,
-                ...(entry.localArchived && selection.status !== "ready"
-                  ? { requiresReview: true }
-                  : {}),
-                reason,
+              machines: entry.state.machines.map((machine) => ({
+                environmentId: machine.selection.environmentId,
+                label: machine.selection.label,
+                status:
+                  !entry.localArchived && machine.status === "committed"
+                    ? "pending"
+                    : machine.status,
+                ...(entry.localArchived && needsReview(machine) ? { requiresReview: true } : {}),
+                reason: machine.reason,
               })),
             },
       ),
     );
 
   const selectedOwnerThreadIds = (threadId: ThreadId) =>
-    current(threadId).pipe(Effect.map((entry) => entry?.state.ownerThreadIds));
+    generations(threadId).pipe(
+      Effect.map(
+        (entries) => entries.find(({ localArchived }) => localArchived)?.state.ownerThreadIds,
+      ),
+    );
 
   const run = Effect.fnUntraced(function* (key: LastCodeArchiveJournalRow) {
     const row = yield* journal.read(key);
     if (row === null) return;
     const state = readState(row.stateJson);
-    const local = yield* current(row.ownerThreadId);
-    if (local?.row.sourceArchiveCommandId !== row.sourceArchiveCommandId) return;
+    const local = (yield* generations(row.ownerThreadId)).find(
+      (entry) => entry.row.sourceArchiveCommandId === row.sourceArchiveCommandId,
+    );
+    if (local === undefined) return;
     const restoring = state.restoreCommandId !== undefined;
     if (restoring === local.localArchived) return;
     const limits = yield* DispatchModeLimit;
@@ -190,7 +207,10 @@ const make = Effect.gen(function* () {
       state.machines,
       (machine) => {
         const { selection } = machine;
-        if (selection.status !== "ready" || selection.cohorts.length === 0)
+        if (
+          selection.status !== "ready" ||
+          (selection.cohorts.length === 0 && machine.selectionRevision === undefined)
+        )
           return Effect.succeed(restoring ? { ...machine, status: "restored" as const } : machine);
         if (restoring) {
           if (machine.status === "restored") return Effect.succeed(machine);
@@ -204,7 +224,7 @@ const make = Effect.gen(function* () {
             }),
           );
         }
-        if (machine.status === "committed") return Effect.succeed(machine);
+        if (machine.status === "committed" || needsReview(machine)) return Effect.succeed(machine);
         return peers
           .apply(
             selection.environmentId,
@@ -212,6 +232,9 @@ const make = Effect.gen(function* () {
               ...generation,
               ownerThreadIds: state.ownerThreadIds,
               cohorts: selection.cohorts,
+              ...(machine.selectionRevision === undefined
+                ? {}
+                : { selectionRevision: machine.selectionRevision }),
             },
             limits,
           )
@@ -287,105 +310,125 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const dispatchLocked = <E, R>(
+  const dispatchLocked = Effect.fn("LastCodeLinkedArchive.dispatch")(function* <E, R>(
     command: ArchiveCommand,
     local: Effect.Effect<OrchestratorV2DispatchResult, E, R>,
-  ) =>
-    Effect.gen(function* () {
-      const previous = yield* current(command.threadId);
-      if (
-        command.expectedLinkedArchiveCommandId !== undefined &&
-        (previous?.row.sourceArchiveCommandId !== command.expectedLinkedArchiveCommandId ||
-          previous.localArchived !== (command.type === "thread.archive"))
-      )
+  ) {
+    const entries = yield* generations(command.threadId);
+    const archivedLocally = entries.find(({ localArchived }) => localArchived);
+    const expected = command.expectedLinkedArchiveCommandId;
+    if (expected !== undefined && command.type === "thread.unarchive") {
+      const restore = entries.find(
+        (entry) => !entry.localArchived && entry.row.sourceArchiveCommandId === expected,
+      );
+      if (restore === undefined)
         return yield* Effect.fail("The linked archive generation changed. Review it again.");
-      const selection =
-        command.type === "thread.archive" ? command.linkedArchiveSelection : undefined;
-      if (
-        new Set(selection?.map(({ environmentId }) => environmentId)).size !==
-        (selection?.length ?? 0)
-      ) {
-        return yield* Effect.fail("Choose each linked machine once.");
-      }
-      if (command.type === "thread.archive" && !previous?.localArchived) {
-        if (!selection?.length) return yield* local;
-        const owner = yield* readPeerArchiveOwnerScope(environmentId, command.threadId, store);
-        const key = {
-          role: "source" as const,
-          ownerEnvironmentId: environmentId,
-          ownerThreadId: command.threadId,
-          sourceArchiveCommandId: command.commandId,
-        };
-        yield* journal.insertOnce(
-          key,
-          writeState({
-            ownerThreadIds:
-              command.includeTypedInThreadIds === undefined
-                ? owner.ownerThreadIds.filter((id) => !owner.keptOwnerThreadIds.includes(id))
-                : owner.ownerThreadIds,
-            machines: selection.map(initialMachine),
-          }),
-        );
-        const row = yield* journal.read(key);
-        const result = yield* local;
-        if (row !== null) {
-          yield* recordLocalTransition(row, command, result);
-          yield* start(row);
-        }
-        return result;
-      }
-      if (previous === undefined) return yield* local;
-      const { row, state, localArchived, sequence } = previous;
-      if (command.type === "thread.archive" && state.restoreCommandId !== undefined)
-        return yield* local;
-      if (command.type === "thread.unarchive" && localArchived) {
-        yield* revise(row, (state) => ({
-          ...state,
-          restoreCommandId: command.commandId,
-        }));
-        const result = yield* local.pipe(
-          Effect.onError(() =>
-            restored(command.threadId, command.commandId).pipe(
-              Effect.flatMap((committed) =>
-                committed
-                  ? start(row)
-                  : revise(row, (state) => ({ ...state, restoreCommandId: undefined })),
-              ),
-              Effect.ignore,
-            ),
-          ),
-        );
+      yield* start(restore.row);
+      return {
+        sequence: restore.sequence,
+        storedEvents: [],
+        replayed: true,
+      } satisfies OrchestratorV2DispatchResult;
+    }
+    const previous = archivedLocally;
+    if (expected !== undefined && archivedLocally?.row.sourceArchiveCommandId !== expected)
+      return yield* Effect.fail("The linked archive generation changed. Review it again.");
+    const selection =
+      command.type === "thread.archive" ? command.linkedArchiveSelection : undefined;
+    if (
+      new Set(selection?.map(({ environmentId }) => environmentId)).size !==
+      (selection?.length ?? 0)
+    ) {
+      return yield* Effect.fail("Choose each linked machine once.");
+    }
+    if (command.type === "thread.archive" && !previous?.localArchived) {
+      if (!selection?.length) return yield* local;
+      const owner = yield* readPeerArchiveOwnerScope(environmentId, command.threadId, store);
+      const key = {
+        role: "source" as const,
+        ownerEnvironmentId: environmentId,
+        ownerThreadId: command.threadId,
+        sourceArchiveCommandId: command.commandId,
+      };
+      yield* journal.insertOnce(
+        key,
+        writeState({
+          ownerThreadIds:
+            command.includeTypedInThreadIds === undefined
+              ? owner.ownerThreadIds.filter((id) => !owner.keptOwnerThreadIds.includes(id))
+              : owner.ownerThreadIds,
+          machines: selection.map(initialMachine),
+        }),
+      );
+      const row = yield* journal.read(key);
+      const result = yield* local;
+      if (row !== null) {
         yield* recordLocalTransition(row, command, result);
         yield* start(row);
-        return result;
       }
-      if (selection?.length) {
-        yield* revise(row, (state) =>
-          state.restoreCommandId !== undefined
-            ? state
-            : {
-                ...state,
-                machines: state.machines.map((machine) => {
-                  if (machine.selection.status === "ready") return machine;
-                  const approved = selection.find(
-                    ({ environmentId }) => environmentId === machine.selection.environmentId,
-                  );
-                  return approved?.status === "ready" ? initialMachine(approved) : machine;
-                }),
-              },
-        );
-      }
+      return result;
+    }
+    if (previous === undefined) return yield* local;
+    const { row, state, localArchived, sequence } = previous;
+    if (command.type === "thread.archive" && state.restoreCommandId !== undefined)
+      return yield* local;
+    if (command.type === "thread.unarchive" && localArchived) {
+      yield* revise(row, (state) => ({
+        ...state,
+        restoreCommandId: command.commandId,
+      }));
+      const result = yield* local.pipe(
+        Effect.onError(() =>
+          restored(command.threadId, command.commandId).pipe(
+            Effect.flatMap((committed) =>
+              committed
+                ? start(row)
+                : revise(row, (state) => ({ ...state, restoreCommandId: undefined })),
+            ),
+            Effect.ignore,
+          ),
+        ),
+      );
+      yield* recordLocalTransition(row, command, result);
       yield* start(row);
-      return { sequence, storedEvents: [], replayed: true } satisfies OrchestratorV2DispatchResult;
-    });
+      return result;
+    }
+    if (selection?.length) {
+      yield* revise(row, (state) =>
+        state.restoreCommandId !== undefined
+          ? state
+          : {
+              ...state,
+              machines: state.machines.map((machine) => {
+                if (!needsReview(machine)) return machine;
+                const approved = selection.find(
+                  ({ environmentId }) => environmentId === machine.selection.environmentId,
+                );
+                if (approved?.status !== "ready") return machine;
+                if (machine.selection.status !== "ready") return initialMachine(approved);
+                return {
+                  ...initialMachine(approved),
+                  status: "pending",
+                  receipts: machine.receipts,
+                  selectionRevision: (machine.selectionRevision ?? 0) + 1,
+                };
+              }),
+            },
+      );
+    }
+    yield* start(row);
+    return { sequence, storedEvents: [], replayed: true } satisfies OrchestratorV2DispatchResult;
+  });
 
   const dispatch = <E, R>(
     command: ArchiveCommand,
     local: Effect.Effect<OrchestratorV2DispatchResult, E, R>,
   ): Effect.Effect<OrchestratorV2DispatchResult, E | OrchestratorDispatchError, R> =>
     (command.type === "thread.archive" &&
-      command.linkedArchiveSelection === undefined &&
-      command.expectedLinkedArchiveCommandId === undefined) ||
+      command.expectedLinkedArchiveCommandId === undefined &&
+      !command.linkedArchiveSelection?.some(
+        (machine) => machine.status !== "ready" || machine.cohorts.length > 0,
+      )) ||
     (command.type === "thread.unarchive" && command.expectedArchiveCommandId !== undefined)
       ? local
       : locks.withLock(command.threadId, dispatchLocked(command, local)).pipe(

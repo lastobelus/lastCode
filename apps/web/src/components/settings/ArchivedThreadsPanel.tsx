@@ -1,8 +1,9 @@
+import { LastCodeLinkedArchiveStatusButton } from "../LastCodeLinkedArchiveStatusButton";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m as resolveMessage } from "~/i18n/messages";
 import { settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 import { Spinner } from "~/components/ui/spinner";
-import { ArchiveIcon, ArchiveX, NetworkIcon, Trash2Icon } from "lucide-react";
+import { ArchiveIcon, ArchiveX, Trash2Icon } from "lucide-react";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { presentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
@@ -310,10 +311,6 @@ export function ArchivedThreadsPanel() {
               const restoreKey = scopedThreadKey(
                 scopeThreadRef(thread.environmentId, restoreThreadId(thread)),
               );
-              const linkedArchiveStatus =
-                restoreThreadId(thread) === thread.id
-                  ? linkedArchiveStatusMenuItem(thread.environmentId)[0]
-                  : undefined;
               return (
                 <div
                   key={`${thread.environmentId}:${thread.id}`}
@@ -344,28 +341,12 @@ export function ArchivedThreadsPanel() {
                     }
                     control={
                       <div className="flex shrink-0 items-center gap-2">
-                        {linkedArchiveStatus && (
-                          <Tooltip>
-                            <TooltipTrigger
-                              render={
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="icon-sm"
-                                  aria-label={linkedArchiveStatus.label}
-                                  disabled={pendingKeys.has(threadKey)}
-                                  onClick={() =>
-                                    void showLinkedArchiveStatus(
-                                      scopeThreadRef(thread.environmentId, thread.id),
-                                    )
-                                  }
-                                />
-                              }
-                            >
-                              <NetworkIcon className="size-3.5" />
-                            </TooltipTrigger>
-                            <TooltipPopup>{linkedArchiveStatus.label}</TooltipPopup>
-                          </Tooltip>
+                        {restoreThreadId(thread) === thread.id && (
+                          <LastCodeLinkedArchiveStatusButton
+                            thread={scopeThreadRef(thread.environmentId, thread.id)}
+                            disabled={pendingKeys.has(threadKey)}
+                            onShow={showLinkedArchiveStatus}
+                          />
                         )}
                         {ARCHIVE_ACTIONS.map(({ action, label, threadLabel, Icon }) => (
                           <Tooltip key={action}>

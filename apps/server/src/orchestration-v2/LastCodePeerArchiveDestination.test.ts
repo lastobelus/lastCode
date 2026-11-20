@@ -3,18 +3,20 @@ import {
   CommandId,
   EnvironmentId,
   EventId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2AppThread,
   type OrchestrationV2StoredEvent,
-  type PeerArchiveApplyInput,
+  PeerArchiveApplyInput,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
@@ -31,6 +33,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 const db = Sqlite.layerMemory;
+const decodeApplyInput = Schema.decodeEffect(PeerArchiveApplyInput);
 const destination = EnvironmentId.make("destination");
 const testLayer = Layer.merge(
   db,
@@ -103,6 +106,31 @@ const thread = (id: ThreadId): OrchestrationV2AppThread => ({
   lastVisitedAt: null,
   deletedAt: null,
 });
+
+const sendHumanMessage = Effect.gen(function* () {
+  const store = yield* ProjectionStoreV2;
+  yield* store.apply({
+    id: EventId.make("fixture:human-message"),
+    type: "message.updated",
+    threadId: anchor,
+    occurredAt: now,
+    payload: {
+      id: MessageId.make("fixture:human-message"),
+      threadId: anchor,
+      runId: null,
+      nodeId: null,
+      role: "user",
+      text: "Keep this conversation open.",
+      attachments: [],
+      streaming: false,
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: now,
+      updatedAt: now,
+    },
+  });
+});
+const typedIn = [{ threadId: anchor, latestHumanMessageAt: DateTime.formatIso(now) }];
 
 const harness = Effect.gen(function* () {
   const journal = makeLastCodeArchiveJournal(yield* SqlClient.SqlClient);
@@ -226,7 +254,7 @@ it.effect("persists a session-bound restore fence before the first apply", () =>
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("restores a committed cohort while waiting for another admitted cohort", () =>
+it.effect("retains committed and admitted cohorts through an empty revised selection", () =>
   Effect.gen(function* () {
     const { service, seed, store, archiveId, complete } = yield* harness;
     yield* seed([anchor, child, other]);
@@ -242,18 +270,25 @@ it.effect("restores a committed cohort while waiting for another admitted cohort
     const second = yield* archiveId(other);
     assert.notStrictEqual(first, second);
     yield* complete(first);
-    const partial = yield* service.apply(client, reviewed);
+    const revised = yield* decodeApplyInput({
+      ...input,
+      selectionRevision: 1,
+      cohorts: [],
+    });
+    const partial = yield* service.apply(client, revised);
     assert.deepStrictEqual(
       partial.receipts.map((entry) => entry.anchorThreadId),
       [anchor],
     );
     assert.deepStrictEqual(partial.remaining, pending);
+    assert.deepStrictEqual(yield* service.apply(client, revised), partial);
+    assert.deepStrictEqual(yield* service.apply(client, reviewed).pipe(Effect.flip), changed);
 
     const restored = yield* service.restore(client, generation);
     assert.deepStrictEqual([...restored.restoredThreadIds].sort(), [anchor, child]);
     assert.deepStrictEqual(restored.remaining, pending);
     assert.strictEqual((yield* store.getThread(other)).archivePending?.commandId, second);
-    assert.deepStrictEqual(yield* service.apply(client, reviewed).pipe(Effect.flip), changed);
+    assert.deepStrictEqual(yield* service.apply(client, revised).pipe(Effect.flip), changed);
 
     yield* complete(second, other);
     const done = yield* service.restore(client, generation);
@@ -262,7 +297,85 @@ it.effect("restores a committed cohort while waiting for another admitted cohort
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("retries a rejected dispatch and a failed shutdown with separate exact attempts", () =>
+it.effect("accepts a freshly reviewed subset and restores receipts from both revisions", () =>
+  Effect.gen(function* () {
+    const { service, ports, seed, store, archiveId, complete } = yield* harness;
+    yield* seed([anchor, child, other]);
+    const otherSelection = { ...selection, anchorThreadId: other, selectedThreadIds: [other] };
+    const original = {
+      ...input,
+      cohorts: [selection, otherSelection],
+    };
+    yield* sendHumanMessage;
+    assert.deepStrictEqual(yield* service.apply(client, original), {
+      receipts: [],
+      remaining: pending,
+    });
+    assert.isUndefined((yield* store.getThread(anchor)).archivePending);
+    const oldCommit = yield* archiveId(other);
+    yield* complete(oldCommit, other);
+    const stale = yield* service.apply(client, original);
+    assert.deepStrictEqual(stale.remaining, changed);
+    assert.deepStrictEqual(
+      stale.receipts.map(({ anchorThreadId }) => anchorThreadId),
+      [other],
+    );
+
+    const revised = {
+      ...input,
+      selectionRevision: 1,
+      cohorts: [{ ...selection, selectedThreadIds: [anchor], typedIn }],
+    };
+    assert.deepStrictEqual(yield* service.apply(secondClient, revised).pipe(Effect.flip), denied);
+    assert.deepStrictEqual(
+      yield* service
+        .apply(client, { ...revised, ownerThreadIds: [...input.ownerThreadIds, child] })
+        .pipe(Effect.flip),
+      changed,
+    );
+    assert.deepStrictEqual(yield* service.apply(client, revised), {
+      receipts: stale.receipts,
+      remaining: pending,
+    });
+    const newCommit = yield* archiveId();
+    const reopened = yield* makeLastCodePeerArchiveDestination(ports);
+    assert.deepStrictEqual(yield* reopened.apply(client, original).pipe(Effect.flip), changed);
+    assert.deepStrictEqual(
+      yield* reopened.apply(client, { ...revised, cohorts: [] }).pipe(Effect.flip),
+      changed,
+    );
+    assert.isUndefined((yield* store.getThread(child)).archivePending);
+    yield* complete(newCommit);
+    const result = yield* reopened.apply(client, revised);
+    assert.isUndefined(result.remaining);
+    assert.deepStrictEqual(
+      result.receipts
+        .flatMap(({ threads }) => threads.map((row) => row.archivedWith.commandId))
+        .sort(),
+      [newCommit, oldCommit].sort(),
+    );
+    const reselected = {
+      ...revised,
+      selectionRevision: 2,
+      cohorts: [
+        ...revised.cohorts,
+        { ...otherSelection, childDisposition: "archive_if_idle" as const },
+      ],
+    };
+    assert.deepStrictEqual(yield* reopened.apply(client, reselected), result);
+    assert.deepStrictEqual(
+      [...(yield* reopened.restore(client, generation)).restoredThreadIds].sort(),
+      [anchor, other],
+    );
+    assert.isNull((yield* store.getThread(child)).archivedAt);
+    assert.deepStrictEqual(
+      yield* reopened.apply(client, { ...revised, selectionRevision: 3 }).pipe(Effect.flip),
+      changed,
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([false, true])("retries a failed shutdown with a fresh review: %s", (fresh) =>
   Effect.gen(function* () {
     const { ports, store, seed, archiveId, complete } = yield* harness;
     const dispatched: CommandId[] = [];
@@ -303,14 +416,32 @@ it.effect("retries a rejected dispatch and a failed shutdown with separate exact
       requestId: first,
       error: "Provider shutdown failed.",
     });
-    assert.deepStrictEqual(yield* service.apply(client, input), {
+    const revised = { ...input, selectionRevision: 2, cohorts: [{ ...selection, typedIn }] };
+    if (fresh) {
+      yield* sendHumanMessage;
+      assert.deepStrictEqual(yield* service.apply(client, input), {
+        receipts: [],
+        remaining: changed,
+      });
+      assert.deepStrictEqual(
+        yield* service.apply(client, {
+          ...revised,
+          selectionRevision: 1,
+          cohorts: [{ ...selection, selectedThreadIds: [anchor], typedIn }],
+        }),
+        { receipts: [], remaining: changed },
+      );
+      assert.strictEqual(yield* archiveId(), first);
+    }
+    const retryInput = fresh ? revised : input;
+    assert.deepStrictEqual(yield* service.apply(client, retryInput), {
       receipts: [],
       remaining: pending,
     });
     const retry = yield* archiveId();
     assert.notStrictEqual(retry, first);
     yield* complete(retry);
-    const result = yield* service.apply(client, input);
+    const result = yield* service.apply(client, retryInput);
     assert.deepStrictEqual(
       result.receipts[0]?.threads.map((row) => row.archivedWith.commandId),
       [retry, retry],
@@ -318,9 +449,9 @@ it.effect("retries a rejected dispatch and a failed shutdown with separate exact
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect(
-  "resumes the same admitted command after interruption without widening its mode ceiling",
-  () =>
+it.effect.each([false, true])(
+  "resumes or replaces an unadmitted reservation after interruption with a fresh review: %s",
+  (fresh) =>
     Effect.gen(function* () {
       const { ports, seed, archiveId, complete } = yield* harness;
       yield* seed([anchor, child]);
@@ -341,32 +472,40 @@ it.effect(
       assert.isNotNull(yield* ports.journal.read(generationKey));
       yield* Fiber.interrupt(fiber);
 
+      const revised = {
+        ...input,
+        selectionRevision: 1,
+        cohorts: [{ ...selection, selectedThreadIds: [anchor] }],
+      };
       const resumed = yield* makeLastCodePeerArchiveDestination({
         ...ports,
         orchestrator: {
           dispatch: (command) =>
             Effect.gen(function* () {
               if (command.type === "thread.archive") {
-                assert.strictEqual(command.commandId, admitted);
-                assert.deepStrictEqual(
-                  (yield* PeerArchiveDispatch)?.client.narrowedTo,
-                  restricted.narrowedTo,
-                );
-                assert.deepStrictEqual(yield* DispatchModeLimit, restricted.narrowedTo);
+                if (fresh) {
+                  assert.notStrictEqual(command.commandId, admitted);
+                } else {
+                  assert.strictEqual(command.commandId, admitted);
+                  assert.deepStrictEqual(
+                    (yield* PeerArchiveDispatch)?.client.narrowedTo,
+                    restricted.narrowedTo,
+                  );
+                  assert.deepStrictEqual(yield* DispatchModeLimit, restricted.narrowedTo);
+                }
               }
               return yield* ports.orchestrator.dispatch(command);
             }),
         },
       });
-      assert.deepStrictEqual(yield* resumed.apply(client, input), {
+      assert.deepStrictEqual(yield* resumed.apply(client, fresh ? revised : input), {
         receipts: [],
         remaining: pending,
       });
-      assert.strictEqual(yield* archiveId(), admitted);
-      yield* complete(admitted);
+      yield* complete(yield* archiveId());
       assert.deepStrictEqual(
         [...(yield* resumed.restore(client, generation)).restoredThreadIds].sort(),
-        [anchor, child],
+        fresh ? [anchor] : [anchor, child],
       );
     }).pipe(Effect.provide(testLayer)),
 );

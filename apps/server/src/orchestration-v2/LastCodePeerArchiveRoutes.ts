@@ -22,14 +22,16 @@ const handler = Layer.effect(
         dispatch: (command, options) =>
           command.type === "thread.archive"
             ? threads.dispatch(command, options).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestratorDispatchError({
-                      commandId: command.commandId,
-                      commandType: command.type,
-                      cause,
-                    }),
-                ),
+                Effect.catchTags({
+                  ThreadManagementProviderInstanceDisabledError: (cause) =>
+                    Effect.fail(
+                      new OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause,
+                      }),
+                    ),
+                }),
                 Effect.timeoutOrElse({
                   duration: "1500 millis",
                   orElse: () =>

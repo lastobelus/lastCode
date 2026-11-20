@@ -115,8 +115,8 @@ If any family member is working or has unread replies, a confirmation lists it.
 Owned conversations you've typed in, and what they own, stay open unless you include
 them. The confirmation lists work on each directly linked machine. A machine that is
 offline, refuses access, or needs an update stays listed while the local archive finishes.
-Open **Linked archive status** in **Archived threads** to retry. When a machine
-becomes available for the first time, review its conversations before archiving them.
+Open **Linked archive status** in **Archived threads** to retry. Review the
+machine's conversations if they were unavailable or changed after your review.
 **Stop active threads & archive** stops unfinished work, cancels pending approvals
 and queued messages, and archives the family. **Archive unread threads** preserves
 replies in archived history. Cancel to inspect children or make eligible threads

@@ -22,7 +22,7 @@ export class PeerArchiveHandler extends Context.Service<
       input: PeerArchiveInventoryInput,
     ) => Effect.Effect<PeerArchiveInventory, PeerArchiveUnavailable>;
   }
->()("t3/peer/LastCodePeerArchiveTransport/PeerArchiveHandler") {}
+>()("t3/peer/LastCodePeerArchiveServices/PeerArchiveHandler") {}
 
 export class PeerArchiveMutationHandler extends Context.Service<
   PeerArchiveMutationHandler,
@@ -36,7 +36,7 @@ export class PeerArchiveMutationHandler extends Context.Service<
       input: PeerArchiveGeneration,
     ) => Effect.Effect<PeerArchiveRestoreResult, PeerArchiveUnavailable>;
   }
->()("t3/peer/LastCodePeerArchiveTransport/PeerArchiveMutationHandler") {}
+>()("t3/peer/LastCodePeerArchiveServices/PeerArchiveMutationHandler") {}
 
 export class LastCodePeerArchiveTransport extends Context.Service<
   LastCodePeerArchiveTransport,
@@ -47,7 +47,7 @@ export class LastCodePeerArchiveTransport extends Context.Service<
       limits?: ClientModes,
     ) => Effect.Effect<PeerArchiveInventory, PeerArchiveUnavailable>;
   }
->()("t3/peer/LastCodePeerArchiveTransport") {}
+>()("t3/peer/LastCodePeerArchiveServices/LastCodePeerArchiveTransport") {}
 
 export class PeerArchiveWriteTransport extends Context.Service<
   PeerArchiveWriteTransport,
@@ -63,4 +63,4 @@ export class PeerArchiveWriteTransport extends Context.Service<
       limits?: ClientModes,
     ) => Effect.Effect<PeerArchiveRestoreResult, PeerArchiveUnavailable>;
   }
->()("t3/peer/LastCodePeerArchiveTransport/PeerArchiveWriteTransport") {}
+>()("t3/peer/LastCodePeerArchiveServices/PeerArchiveWriteTransport") {}
