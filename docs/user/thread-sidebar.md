@@ -451,11 +451,11 @@ even across connected machines. In another project, they appear in a collapsed
 group named after their owner.
 
 To keep an owned thread as a top-level conversation, choose **Promote** from its
-sidebar menu. A launched child can be promoted while it runs. For a delegated task,
-wait until it has delivered its result and finished anything it's waiting on, such
-as a PR watch or Action. Choose **Return to owner** to restore its original owner
-and default placement. If the owner is on another machine, the menu tells you
-its state there wasn't checked.
+sidebar menu. A launched child can be promoted while it runs. If a delegated task
+still owes its result or is waiting on a PR watch or Action, wait for it to finish
+or cancel it first. Choose **Return to owner** to restore its original owner and
+default placement. If the owner is on another machine, the menu tells you its
+state there wasn't checked.
 
 Restoring a thread restores the conversations archived with it, without restarting
 stopped work. Restore the parent before restoring its archived children. Deleting
