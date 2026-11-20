@@ -1,6 +1,7 @@
 import {
   CommandId,
   EnvironmentId,
+  ProjectId,
   ProviderInstanceId,
   RunId,
   ThreadId,
@@ -1099,6 +1100,94 @@ describe("archive family confirmation", () => {
 });
 
 describe("bulk archive progress", () => {
+  it.each([
+    ["owner first", false],
+    ["group first", false],
+    ["owner first", true],
+  ] as const)("refreshes a shared child after %s (new work added=%s)", async (order, added) => {
+    const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
+    const group = makeThreadFixture({
+      id: ThreadId.make("group"),
+      environmentId: owner.environmentId,
+      projectId: ProjectId.make("another-project"),
+    });
+    const child = makeThreadFixture({
+      id: ThreadId.make("shared-child"),
+      environmentId: owner.environmentId,
+      projectId: group.projectId,
+      groupedUnderThreadId: group.id,
+    });
+    const sibling = { ...child, id: ThreadId.make("group-sibling") };
+    const newMember = { ...child, id: ThreadId.make("new-member") };
+    const roots = order === "owner first" ? [owner, group] : [group, owner];
+    const archived = new Set<ThreadId>();
+    familyState.threads = [owner, group, child, sibling, newMember];
+    const childrenFor = (id: ThreadId) =>
+      (id === owner.id
+        ? [child]
+        : [child, sibling, ...(added && archived.size ? [newMember] : [])]
+      ).filter((thread) => !archived.has(thread.id));
+    archiveFamilyLoad.mockImplementation(async (request) => {
+      const root = request.input.threadId === owner.id ? owner : group;
+      const children = childrenFor(root.id);
+      const threads = [root, ...children];
+      const expanded = root === owner && !archived.has(child.id);
+      return {
+        _tag: "Success",
+        value: {
+          ...archiveDecisionFixture(threads, request),
+          children,
+          childThreadIds: children.map(({ id }) => id),
+          requiresConfirmation: expanded,
+          ...(expanded
+            ? {
+                archivePreview: {
+                  environmentId: owner.environmentId,
+                  typedInThreadIds: [],
+                  threads: threads.map(({ id, projectId, title }) => ({
+                    threadId: id,
+                    projectId,
+                    title,
+                  })),
+                },
+              }
+            : {}),
+        },
+      };
+    });
+    commands.archive.mockImplementation(async ({ input }) => {
+      const children = childrenFor(input.threadId);
+      if (
+        JSON.stringify(input.expectedChildThreadIds) !==
+        JSON.stringify(children.map(({ id }) => id))
+      )
+        return { _tag: "Failure", cause: Cause.fail(new Error("Family changed")) };
+      archived.add(input.threadId);
+      for (const { id } of children) archived.add(id);
+      return { _tag: "Success", value: undefined };
+    });
+    archiveDialog.mockImplementation(async (request) => {
+      const error = await request.submit("archive_after_review");
+      return error === null ? "archive_after_review" : null;
+    });
+    const entries = roots.map(({ id, environmentId }) => ({
+      threadKey: `${environmentId}:${id}`,
+      threadRef: { threadId: id, environmentId },
+    }));
+    const outcome = await useThreadActions().archiveThreads(entries);
+    expect(outcome?.archivedThreadKeys).toEqual(
+      (added ? entries.slice(0, 1) : entries).map(({ threadKey }) => threadKey),
+    );
+    expect(outcome?.mutationFailure?._tag ?? null).toBe(added ? "Failure" : null);
+    expect(archiveFamilyLoad).toHaveBeenCalledTimes(3);
+    expect(commands.archive).toHaveBeenCalledTimes(added ? 1 : 2);
+    if (order === "group first")
+      expect(commands.archive.mock.lastCall?.[0].input.expectedArchiveThreadIds).toEqual([
+        owner.id,
+      ]);
+    expect(archived.has(newMember.id)).toBe(false);
+  });
+
   function seedBulkFamilies(retry = false) {
     const second = { ...target, threadId: ThreadId.make("second") };
     const roots = [target, second].map((ref) =>

@@ -562,40 +562,80 @@ export function createLastCodeThreadArchiveActions(ports: {
           >
         >
       | undefined;
-    const entriesByKey = new Map(entries.map((entry) => [entry.threadKey, entry]));
     const perform = async (choice: ThreadArchiveChildDisposition, includeTypedIn?: boolean) => {
+      const completedParticipantKeys = new Set<string>();
       const attempt = await archiveSelectedThreadEntries({
         entries: includeTypedIn ? entriesIncludingTypedIn : entries,
-        archive: (entry, onArchived) => {
-          const { threadRef, family, owner, expectedArchiveCommandId } = entry;
+        archive: async (entry, onArchived) => {
+          const { threadRef, expectedArchiveCommandId } = entry;
+          let { family, owner } = entry;
+          let selection = archivePreviewSelection(family, includeTypedIn);
+          const participantIds = selection.expectedArchiveThreadIds ?? [
+            owner.id,
+            ...family.childThreadIds,
+          ];
+          const keyOf = (id: ThreadId) =>
+            scopedThreadKey(scopeThreadRef(threadRef.environmentId, id));
+          const wasArchived = (id: ThreadId) => completedParticipantKeys.has(keyOf(id));
+          if (family.childThreadIds.some(wasArchived) || participantIds.some(wasArchived)) {
+            const refreshed = await loadArchiveFamily({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (refreshed._tag === "Failure") return refreshed;
+            family = refreshed.value;
+            const freshOwner = family.threads.find(
+              (thread) =>
+                thread.id === threadRef.threadId &&
+                thread.environmentId === threadRef.environmentId,
+            );
+            const freshSelection = archivePreviewSelection(family, includeTypedIn);
+            const remaining = new Set(participantIds.filter((id) => !wasArchived(id)));
+            const freshIds = freshSelection.expectedArchiveThreadIds ?? [
+              threadRef.threadId,
+              ...family.childThreadIds,
+            ];
+            const confirmedTypedIn = new Set(selection.includeTypedInThreadIds);
+            if (
+              !freshOwner ||
+              freshIds.length !== remaining.size ||
+              freshIds.some((id) => !remaining.has(id)) ||
+              freshSelection.includeTypedInThreadIds?.some((id) => !confirmedTypedIn.has(id))
+            ) {
+              return AsyncResult.failure(
+                Cause.fail(
+                  new Error(
+                    "The conversation family changed. Review the archive confirmation again.",
+                  ),
+                ),
+              );
+            }
+            owner = freshOwner;
+            selection = {
+              ...freshSelection,
+              // Keep the exact consent even if removing the overlap returns a legacy family.
+              ...(selection.expectedArchiveThreadIds !== undefined
+                ? { expectedArchiveThreadIds: [...remaining] }
+                : {}),
+            };
+          }
           return archiveThread(threadRef, {
             confirmed: true,
             ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
             familyChoice: {
               childDisposition: choice,
               expectedChildThreadIds: family.childThreadIds,
-              ...archivePreviewSelection(family, includeTypedIn),
+              ...selection,
             },
             familyOwner: owner,
             familySnapshot: family,
-            onArchived,
+            onArchived: () => {
+              for (const threadId of participantIds) completedParticipantKeys.add(keyOf(threadId));
+              onArchived();
+            },
           });
         },
       });
-      const completedParticipantKeys = new Set<string>();
-      for (const threadKey of attempt.archivedThreadKeys) {
-        const entry = entriesByKey.get(threadKey);
-        if (!entry) continue;
-        const selection = archivePreviewSelection(entry.family, includeTypedIn);
-        for (const threadId of selection.expectedArchiveThreadIds ?? [
-          entry.owner.id,
-          ...entry.family.childThreadIds,
-        ]) {
-          completedParticipantKeys.add(
-            scopedThreadKey(scopeThreadRef(entry.threadRef.environmentId, threadId)),
-          );
-        }
-      }
       outcome = {
         ...attempt,
         // Retry owners identify commands; selection still identifies the original rows.
