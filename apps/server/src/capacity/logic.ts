@@ -142,7 +142,7 @@ function applyRecovery(
 export function evaluateCapacity(
   state: CapacityState,
   now: number,
-  mode: CapacityMode,
+  mode: CapacitySnapshot["mode"],
 ): {
   readonly state: CapacityState;
   readonly snapshot: CapacitySnapshot;

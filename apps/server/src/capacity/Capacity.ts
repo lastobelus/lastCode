@@ -1,7 +1,6 @@
 import type {
   CapacityActivity,
   CapacityMeasurements,
-  CapacityMode,
   CapacitySnapshot,
   HostPowerSnapshot,
 } from "@t3tools/contracts";
@@ -35,7 +34,7 @@ export class Capacity extends Context.Reference<{ readonly read: Effect.Effect<C
 ) {}
 
 export interface CapacityInputs {
-  readonly mode: Effect.Effect<CapacityMode>;
+  readonly mode: Effect.Effect<CapacitySnapshot["mode"]>;
   readonly activity: Effect.Effect<CapacityActivity, Error>;
   readonly worktreesDir: Effect.Effect<string | null, Error>;
   readonly ownerPower: Effect.Effect<HostPowerSnapshot, Error>;
@@ -119,10 +118,7 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       );
       return [next.snapshot, next.state] as const;
     });
-    if (
-      mode === "observe" &&
-      (snapshot.verdicts.agent.state !== "open" || snapshot.verdicts.background.state !== "open")
-    ) {
+    if (snapshot.verdicts.agent.state !== "open" || snapshot.verdicts.background.state !== "open") {
       yield* Effect.logInfo("capacity.would-hold", { capacity: snapshot });
     }
   });
