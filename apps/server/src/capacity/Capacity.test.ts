@@ -91,17 +91,12 @@ describe("Capacity service", () => {
       expect(firstRead.verdicts.background.state).toBe("open");
       expect(firstRead.activity).toEqual(yield* activity);
 
+      // Activity is informational, so a failed read reports null without gating verdicts.
       yield* Ref.set(activityFailure, true);
       const failedRead = yield* service.read;
-      expect(failedRead.verdicts.agent.state).toBe("unknown");
-      expect(failedRead.verdicts.background.state).toBe("unknown");
-      expect(failedRead.verdicts.owner.state).toBe("open");
-      expect(failedRead.verdicts.agent.reasons).toContainEqual({
-        signal: "activity",
-        comparison: "unreadable",
-        value: null,
-        limit: null,
-      });
+      expect(failedRead.activity).toBeNull();
+      expect(failedRead.verdicts.agent).toEqual({ state: "open", reasons: [] });
+      expect(failedRead.verdicts.background).toEqual({ state: "open", reasons: [] });
       yield* Ref.set(activityFailure, false);
       expect((yield* service.read).verdicts.agent.state).toBe("open");
       yield* Ref.set(mode, "off");
@@ -123,7 +118,7 @@ describe("Capacity service", () => {
   });
 
   it.effect(
-    "samples every five seconds, logs full verdicts each held sample, and skips sampling while off",
+    "samples every five seconds, logs held verdicts when they change, and skips sampling while off",
     () => {
       const logs: Array<unknown> = [];
       let firstSample: Deferred.Deferred<void>;
@@ -174,25 +169,29 @@ describe("Capacity service", () => {
           },
         ]);
 
+        // The same held verdict and reasons are not logged again.
+        yield* TestClock.adjust("5 seconds");
+        expect(yield* Ref.get(reads)).toBe(3);
+        expect(logs).toHaveLength(2);
+
         yield* Ref.set(mode, "off");
         yield* TestClock.adjust("60 seconds");
-        expect(yield* Ref.get(reads)).toBe(2);
+        expect(yield* Ref.get(reads)).toBe(3);
         expect(logs).toHaveLength(2);
-        const cached = yield* service.read;
-        expect(cached.mode).toBe("off");
-        expect(cached.sampledAt).toBe(5_000);
-        expect(cached.stale).toBe(true);
-        expect(cached.verdicts.agent.state).toBe("unknown");
-        expect(cached.verdicts.owner.state).toBe("open");
+        // Off samples and holds nothing, so it reports no measurements and open verdicts.
+        const off = yield* service.read;
+        expect(off).toMatchObject({ mode: "off", sampledAt: null, measurements: null });
+        expect(off.verdicts.agent).toEqual({ state: "open", reasons: [] });
+        expect(off.verdicts.background).toEqual({ state: "open", reasons: [] });
 
         yield* Ref.set(mode, "enforce");
         yield* TestClock.adjust("5 seconds");
-        expect(yield* Ref.get(reads)).toBe(3);
+        expect(yield* Ref.get(reads)).toBe(4);
         expect(logs).toHaveLength(3);
         expect(logs[2]).toMatchObject(["capacity.would-hold", { capacity: { mode: "enforce" } }]);
         const resumed = yield* service.read;
         expect(resumed.mode).toBe("enforce");
-        expect(resumed.sampledAt).toBe(70_000);
+        expect(resumed.sampledAt).toBe(75_000);
         expect(resumed.smoothed.sampleCount).toBe(1);
         expect(resumed.ownerIdleSeconds).toBeNull();
 
@@ -201,7 +200,7 @@ describe("Capacity service", () => {
         yield* TestClock.adjust("5 seconds");
         yield* Ref.set(mode, "observe");
         yield* TestClock.adjust("5 seconds");
-        expect(yield* Ref.get(reads)).toBe(4);
+        expect(yield* Ref.get(reads)).toBe(5);
         expect((yield* service.read).smoothed.sampleCount).toBe(1);
         expect(logs).toHaveLength(4);
 
@@ -249,7 +248,7 @@ describe("Capacity service", () => {
         yield* TestClock.adjust("0 seconds");
         const off = yield* service.read;
         expect(off.sampledAt).toBeNull();
-        expect(off.verdicts.agent.state).toBe("unknown");
+        expect(off.verdicts.agent.state).toBe("open");
         expect(yield* Ref.get(reads)).toBe(0);
         yield* Ref.set(mode, "observe");
         yield* TestClock.adjust("5 seconds");

@@ -1,5 +1,4 @@
 import type {
-  CapacityActivity,
   CapacityMeasurements,
   CapacityReason,
   CapacitySnapshot,
@@ -19,7 +18,6 @@ interface Recovery {
 
 export interface CapacityState {
   readonly samples: ReadonlyArray<CapacityMeasurements>;
-  readonly activity: CapacityActivity | null;
   readonly ownerIdleSeconds: number | null;
   readonly agent: Recovery;
   readonly background: Recovery;
@@ -27,7 +25,6 @@ export interface CapacityState {
 
 export const initialCapacityState = (): CapacityState => ({
   samples: [],
-  activity: null,
   ownerIdleSeconds: null,
   agent: { held: false, healthySince: null },
   background: { held: false, healthySince: null },
@@ -39,7 +36,6 @@ const valid = (value: number | null): value is number =>
 export function recordCapacitySample(
   state: CapacityState,
   sample: CapacityMeasurements,
-  activity: CapacityActivity | null,
   ownerIdleSeconds: number | null,
 ): CapacityState {
   const previous = state.samples.at(-1);
@@ -56,7 +52,6 @@ export function recordCapacitySample(
         : []),
       sample,
     ],
-    activity,
     ownerIdleSeconds: valid(ownerIdleSeconds) ? ownerIdleSeconds : null,
     agent: continuous ? state.agent : { ...state.agent, healthySince: null },
     background: continuous ? state.background : { ...state.background, healthySince: null },
@@ -181,9 +176,8 @@ export function evaluateCapacity(
         value: latest.memoryPressure,
         limit: "warning",
       });
-    if (!valid(latest.swapUsedBytes)) unreadable("swapUsedBytes");
+    // Swap and worktree folder counts are informational: no rule reads them.
     if (!valid(latest.worktreesFreeBytes)) unreadable("worktreesFreeBytes");
-    if (latest.worktreeFoldersByProject === null) unreadable("worktreeFoldersByProject");
   }
   const agentReasons = [...common];
   const backgroundReasons = [...common];
@@ -242,7 +236,7 @@ export function evaluateCapacity(
       stale,
       measurements: latest,
       smoothed: smooth,
-      activity: state.activity,
+      activity: null,
       ownerIdleSeconds: state.ownerIdleSeconds,
       verdicts: {
         owner: { state: "open", reasons: [] },
@@ -258,4 +252,16 @@ export function unknownCapacitySnapshot(
   mode: CapacitySnapshot["mode"] = "unknown",
 ): CapacitySnapshot {
   return evaluateCapacity(initialCapacityState(), now, mode).snapshot;
+}
+
+// Off samples nothing and holds nothing, so both verdicts are open.
+export function offCapacitySnapshot(now: number): CapacitySnapshot {
+  return {
+    ...unknownCapacitySnapshot(now, "off"),
+    verdicts: {
+      owner: { state: "open", reasons: [] },
+      agent: { state: "open", reasons: [] },
+      background: { state: "open", reasons: [] },
+    },
+  };
 }

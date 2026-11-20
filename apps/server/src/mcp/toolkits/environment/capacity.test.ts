@@ -73,7 +73,7 @@ it.effect("publishes local and linked capacity for a read-only environment clien
   Effect.gen(function* () {
     const local = unknownCapacitySnapshot(1);
     const remote = { ...unknownCapacitySnapshot(2), mode: "off" as const };
-    const result = yield* invoke(scope).pipe(
+    const result = yield* invoke(scope, true).pipe(
       Effect.provide(
         Layer.mergeAll(
           Layer.succeed(Capacity.Capacity, { read: Effect.succeed(local) }),
@@ -129,7 +129,7 @@ it.effect("checks the credential's environment before reading capacity", () =>
 
 it.effect("publishes unknown when capacity and forwarding services are absent", () =>
   Effect.gen(function* () {
-    expect(yield* invoke(scope)).toMatchObject({
+    expect(yield* invoke(scope, true)).toMatchObject({
       capacity: {
         linkedObservation: "unknown",
         linked: [],
@@ -140,8 +140,9 @@ it.effect("publishes unknown when capacity and forwarding services are absent", 
         },
       },
     });
-    expect(yield* invoke(scope, false)).toMatchObject({
-      capacity: { linkedObservation: "not-requested", linked: [] },
-    });
+    for (const includeLinked of [undefined, false])
+      expect(yield* invoke(scope, includeLinked)).toMatchObject({
+        capacity: { linkedObservation: "not-requested", linked: [] },
+      });
   }),
 );

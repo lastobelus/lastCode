@@ -15,6 +15,7 @@ import * as Schedule from "effect/Schedule";
 import {
   evaluateCapacity,
   initialCapacityState,
+  offCapacitySnapshot,
   recordCapacitySample,
   SAMPLE_INTERVAL_MS,
   STALE_AFTER_MS,
@@ -71,10 +72,12 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
     return yield* source.read;
   });
   const paused = yield* Ref.make(false);
+  const loggedVerdicts = yield* Ref.make("");
   const sample = Effect.fn("capacity.sample")(function* () {
     const mode = yield* inputs.mode;
     if (mode === "off") {
       yield* Ref.set(paused, true);
+      yield* Ref.set(loggedVerdicts, "");
       return;
     }
     const resumed = yield* Ref.getAndSet(paused, false);
@@ -111,14 +114,19 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
             background: { ...current.background, healthySince: null },
           }
         : current;
-      const next = evaluateCapacity(
-        recordCapacitySample(base, measurements, null, idle),
-        now,
-        mode,
-      );
+      const next = evaluateCapacity(recordCapacitySample(base, measurements, idle), now, mode);
       return [next.snapshot, next.state] as const;
     });
-    if (snapshot.verdicts.agent.state !== "open" || snapshot.verdicts.background.state !== "open") {
+    const { agent, background } = snapshot.verdicts;
+    // Log a held verdict once per change of state or reasons, not on every sample.
+    const verdicts = [agent, background]
+      .map(
+        ({ state, reasons }) =>
+          `${state}(${reasons.map(({ signal, comparison }) => `${signal}:${comparison}`).join(",")})`,
+      )
+      .join(" ");
+    const previous = yield* Ref.getAndSet(loggedVerdicts, verdicts);
+    if (verdicts !== previous && (agent.state !== "open" || background.state !== "open")) {
       yield* Effect.logInfo("capacity.would-hold", { capacity: snapshot });
     }
   });
@@ -126,33 +134,16 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
 
   const read = Effect.gen(function* () {
     const mode = yield* inputs.mode;
-    const activity =
-      mode === "off"
-        ? null
-        : yield* inputs.activity.pipe(
-            Effect.timeout("3 seconds"),
-            Effect.orElseSucceed(() => null),
-          );
+    if (mode === "off") return offCapacitySnapshot(yield* Clock.currentTimeMillis);
+    // Activity is informational: no rule reads it, so a failed read never gates a verdict.
+    const activity = yield* inputs.activity.pipe(
+      Effect.timeout("3 seconds"),
+      Effect.orElseSucceed(() => null),
+    );
     const now = yield* Clock.currentTimeMillis;
-    const snapshot = evaluateCapacity(yield* Ref.get(state), now, mode).snapshot;
-    if (activity !== null) return { ...snapshot, activity };
-    const unreadable = {
-      signal: "activity",
-      comparison: "unreadable",
-      value: null,
-      limit: null,
-    } as const;
     return {
-      ...snapshot,
+      ...evaluateCapacity(yield* Ref.get(state), now, mode).snapshot,
       activity,
-      verdicts: {
-        ...snapshot.verdicts,
-        agent: { state: "unknown", reasons: [...snapshot.verdicts.agent.reasons, unreadable] },
-        background: {
-          state: "unknown",
-          reasons: [...snapshot.verdicts.background.reasons, unreadable],
-        },
-      },
     } satisfies CapacitySnapshot;
   });
   return Capacity.of({ read });

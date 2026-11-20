@@ -44,6 +44,7 @@ it.effect("provides live capacity in the production route graph", () =>
     );
     expect(snapshot.mode).toBe("off");
     expect(snapshot.verdicts.owner.state).toBe("open");
-    expect(snapshot.verdicts.agent.state).toBe("unknown");
+    expect(snapshot.verdicts.agent).toEqual({ state: "open", reasons: [] });
+    expect(snapshot.measurements).toBeNull();
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

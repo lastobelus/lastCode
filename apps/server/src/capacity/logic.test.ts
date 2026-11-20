@@ -9,7 +9,6 @@ import {
   unknownCapacitySnapshot,
 } from "./logic.ts";
 
-const activity = { runningTurns: 3, startingTurns: 2, heldTurns: 1 };
 const measurement = (
   sampledAt: number,
   patch: Partial<CapacityMeasurements> = {},
@@ -26,8 +25,8 @@ const measurement = (
 });
 
 function pair(patch: Partial<CapacityMeasurements> = {}) {
-  const first = recordCapacitySample(initialCapacityState(), measurement(0, patch), activity, null);
-  return recordCapacitySample(first, measurement(5_000, patch), activity, null);
+  const first = recordCapacitySample(initialCapacityState(), measurement(0, patch), null);
+  return recordCapacitySample(first, measurement(5_000, patch), null);
 }
 
 describe("capacity verdicts", () => {
@@ -79,7 +78,6 @@ describe("capacity verdicts", () => {
           load5: 4,
           worktreesFreeBytes: (100 - tick / 6) * GB,
         }),
-        activity,
         100,
       );
     }
@@ -93,16 +91,15 @@ describe("capacity verdicts", () => {
     });
     expect(snapshot.verdicts.agent.state).toBe("open");
     expect(snapshot.ownerIdleSeconds).toBe(100);
-    expect(snapshot.activity).toEqual(activity);
+    expect(snapshot.activity).toBeNull();
     expect(snapshot.measurements?.worktreeFoldersByProject).toEqual({ example: 2 });
   });
 
   it("holds only agents when disk falls faster than 2 GB per minute, and permits gains", () => {
-    const first = recordCapacitySample(initialCapacityState(), measurement(0), activity, null);
+    const first = recordCapacitySample(initialCapacityState(), measurement(0), null);
     const drop = recordCapacitySample(
       first,
       measurement(5_000, { worktreesFreeBytes: 100 * GB - GB / 6 - 1 }),
-      activity,
       null,
     );
     const snapshot = evaluateCapacity(drop, 5_000, "observe").snapshot;
@@ -113,7 +110,6 @@ describe("capacity verdicts", () => {
     const gain = recordCapacitySample(
       first,
       measurement(5_000, { worktreesFreeBytes: 101 * GB }),
-      activity,
       null,
     );
     expect(evaluateCapacity(gain, 5_000, "observe").snapshot.verdicts.agent.state).toBe("open");
@@ -125,13 +121,11 @@ describe("capacity verdicts", () => {
     { load1: null },
     { load5: Number.NaN },
     { memoryPressure: "unknown" },
-    { swapUsedBytes: null },
     { worktreesFreeBytes: null },
-    { worktreeFoldersByProject: null },
   ] satisfies ReadonlyArray<Partial<CapacityMeasurements>>)(
     "never fills an unreadable current measurement from history: %j",
     (patch) => {
-      const state = recordCapacitySample(pair(), measurement(10_000, patch), activity, null);
+      const state = recordCapacitySample(pair(), measurement(10_000, patch), null);
       const snapshot = evaluateCapacity(state, 10_000, "observe").snapshot;
       expect(snapshot.verdicts.agent.state).toBe("unknown");
       expect(snapshot.verdicts.background.state).toBe("unknown");
@@ -139,13 +133,20 @@ describe("capacity verdicts", () => {
     },
   );
 
-  it("keeps activity and owner presence out of measurement verdicts", () => {
+  it("keeps informational signals and owner presence out of verdicts", () => {
     expect(evaluateCapacity(pair(), 5_000, "observe").snapshot.verdicts.agent.state).toBe("open");
-    const state = recordCapacitySample(pair(), measurement(10_000), null, null);
+    const state = recordCapacitySample(
+      pair(),
+      measurement(10_000, { swapUsedBytes: null, worktreeFoldersByProject: null }),
+      null,
+    );
     const snapshot = evaluateCapacity(state, 10_000, "observe").snapshot;
-    expect(snapshot.verdicts.agent.state).toBe("open");
-    expect(snapshot.verdicts.background.state).toBe("open");
-    expect(snapshot.activity).toBeNull();
+    expect(snapshot.verdicts.agent).toEqual({ state: "open", reasons: [] });
+    expect(snapshot.verdicts.background).toEqual({ state: "open", reasons: [] });
+    expect(snapshot.measurements).toMatchObject({
+      swapUsedBytes: null,
+      worktreeFoldersByProject: null,
+    });
   });
 
   it("treats age greater than 30 seconds, future samples, and an absent remote sample as unknown", () => {
@@ -178,7 +179,7 @@ describe("capacity verdicts", () => {
     let state = evaluateCapacity(pair({ memoryPressure: "warning" }), 5_000, "observe").state;
     for (let now = 10_000; now <= 70_000; now += 5_000) {
       const next = evaluateCapacity(
-        recordCapacitySample(state, measurement(now), activity, null),
+        recordCapacitySample(state, measurement(now), null),
         now,
         "observe",
       );
@@ -187,34 +188,24 @@ describe("capacity verdicts", () => {
       state = next.state;
     }
     state = evaluateCapacity(
-      recordCapacitySample(
-        state,
-        measurement(75_000, { memoryPressure: "unknown" }),
-        activity,
-        null,
-      ),
+      recordCapacitySample(state, measurement(75_000, { memoryPressure: "unknown" }), null),
       75_000,
       "observe",
     ).state;
     for (let now = 80_000; now <= 130_000; now += 5_000) {
       state = evaluateCapacity(
-        recordCapacitySample(state, measurement(now), activity, null),
+        recordCapacitySample(state, measurement(now), null),
         now,
         "observe",
       ).state;
     }
     const failed = evaluateCapacity(
-      recordCapacitySample(
-        state,
-        measurement(135_000, { memoryPressure: "warning" }),
-        activity,
-        null,
-      ),
+      recordCapacitySample(state, measurement(135_000, { memoryPressure: "warning" }), null),
       135_000,
       "observe",
     );
     const resumed = evaluateCapacity(
-      recordCapacitySample(failed.state, measurement(140_000), activity, null),
+      recordCapacitySample(failed.state, measurement(140_000), null),
       140_000,
       "observe",
     );
@@ -226,12 +217,12 @@ describe("capacity verdicts", () => {
   it("does not count an unobserved gap as healthy recovery", () => {
     const held = evaluateCapacity(pair({ memoryPressure: "warning" }), 5_000, "observe").state;
     const healthy = evaluateCapacity(
-      recordCapacitySample(held, measurement(10_000), activity, null),
+      recordCapacitySample(held, measurement(10_000), null),
       10_000,
       "observe",
     ).state;
     const afterGap = evaluateCapacity(
-      recordCapacitySample(healthy, measurement(75_000), activity, null),
+      recordCapacitySample(healthy, measurement(75_000), null),
       75_000,
       "observe",
     );
@@ -250,7 +241,6 @@ describe("capacity verdicts", () => {
         measurement(10_000, {
           worktreesFreeBytes: null,
         }),
-        activity,
         null,
       ),
       10_000,
@@ -258,7 +248,7 @@ describe("capacity verdicts", () => {
     ).state;
     for (let now = 15_000; now <= 80_000; now += 5_000) {
       const next = evaluateCapacity(
-        recordCapacitySample(state, measurement(now), activity, null),
+        recordCapacitySample(state, measurement(now), null),
         now,
         "observe",
       );

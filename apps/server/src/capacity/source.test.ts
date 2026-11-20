@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  parseDarwinLiveValues,
   parseDarwinMemoryPressure,
   parseDarwinSwapUsed,
   parseLinuxSwapUsed,
@@ -45,6 +46,10 @@ describe("capacity native parsing", () => {
     expect(parseDarwinSwapUsed("used = 0.00M")).toBe(0);
     expect(parseDarwinSwapUsed("used = -1M")).toBeNull();
     expect(parseDarwinSwapUsed("permission denied")).toBeNull();
+    expect(
+      parseDarwinLiveValues("2\ntotal = 1024.00M  used = 512.00M  free = 512.00M  (encrypted)\n"),
+    ).toEqual({ memoryPressure: "warning", swapUsedBytes: 512 * 1024 ** 2 });
+    expect(parseDarwinLiveValues("")).toEqual({ memoryPressure: "unknown", swapUsedBytes: null });
     expect(parseLinuxSwapUsed("SwapTotal: 1024 kB\nSwapFree: 256 kB\nMemAvailable: 2 kB\n")).toBe(
       768 * 1024,
     );

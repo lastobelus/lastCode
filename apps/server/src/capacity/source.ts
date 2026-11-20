@@ -7,6 +7,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 export interface CapacitySource {
@@ -55,6 +56,18 @@ export function parseDarwinSwapUsed(text: string): number | null {
   return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
 }
 
+// `sysctl -n kern.memorystatus_vm_pressure_level vm.swapusage` prints one value per line.
+export function parseDarwinLiveValues(text: string): {
+  readonly memoryPressure: CapacityMemoryPressure;
+  readonly swapUsedBytes: number | null;
+} {
+  const [pressure = "", swap = ""] = text.split("\n");
+  return {
+    memoryPressure: parseDarwinMemoryPressure(pressure),
+    swapUsedBytes: parseDarwinSwapUsed(swap),
+  };
+}
+
 export function parseLinuxSwapUsed(text: string): number | null {
   const total = /^SwapTotal:\s*(\d+)\s+kB\s*$/m.exec(text)?.[1];
   const free = /^SwapFree:\s*(\d+)\s+kB\s*$/m.exec(text)?.[1];
@@ -89,10 +102,13 @@ export const nativeSource = Effect.fn("capacity.nativeSource")(function* (worktr
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const platform = yield* HostProcess.Platform;
-  const sysctl = (name: string) =>
+  const sysctl = (...names: ReadonlyArray<string>) =>
     spawner
       .string(
-        ChildProcess.make("/usr/sbin/sysctl", ["-n", name], { stdin: "ignore", stderr: "ignore" }),
+        ChildProcess.make("/usr/sbin/sysctl", ["-n", ...names], {
+          stdin: "ignore",
+          stderr: "ignore",
+        }),
       )
       .pipe(Effect.timeout("1 second"));
   const linuxCores = Effect.gen(function* () {
@@ -143,30 +159,45 @@ export const nativeSource = Effect.fn("capacity.nativeSource")(function* (worktr
     Effect.map(Object.fromEntries),
     Effect.orElseSucceed(() => null),
   );
+  // The core count never changes, so read it until it is known and then reuse it.
+  const knownCores = yield* Ref.make<number | null>(null);
+  const physicalCores = Effect.gen(function* () {
+    const known = yield* Ref.get(knownCores);
+    if (known !== null) return known;
+    const cores = yield* (
+      platform === "darwin"
+        ? sysctl("hw.physicalcpu").pipe(Effect.map(parsePhysicalCores))
+        : platform === "linux"
+          ? linuxCores
+          : Effect.succeed(null)
+    ).pipe(Effect.orElseSucceed(() => null));
+    yield* Ref.set(knownCores, cores);
+    return cores;
+  });
+  const unknownLive = { memoryPressure: "unknown", swapUsedBytes: null } as const;
+  const live =
+    platform === "darwin"
+      ? sysctl("kern.memorystatus_vm_pressure_level", "vm.swapusage").pipe(
+          Effect.map(parseDarwinLiveValues),
+          Effect.orElseSucceed(() => unknownLive),
+        )
+      : platform === "linux"
+        ? fs.readFileString("/proc/meminfo").pipe(
+            Effect.map((text) => ({
+              memoryPressure: "unknown" as const,
+              swapUsedBytes: parseLinuxSwapUsed(text),
+            })),
+            Effect.orElseSucceed(() => unknownLive),
+          )
+        : Effect.succeed(unknownLive);
   return {
     read: Effect.gen(function* () {
       // Timestamp the beginning: slow or stalled reads never acquire a fresh timestamp on completion.
       const sampledAt = yield* Clock.currentTimeMillis;
-      const values = yield* Effect.all(
+      const { live: liveValues, ...values } = yield* Effect.all(
         {
-          physicalCores: (platform === "darwin"
-            ? sysctl("hw.physicalcpu").pipe(Effect.map(parsePhysicalCores))
-            : platform === "linux"
-              ? linuxCores
-              : Effect.succeed(null)
-          ).pipe(Effect.orElseSucceed(() => null)),
-          memoryPressure: (platform === "darwin"
-            ? sysctl("kern.memorystatus_vm_pressure_level").pipe(
-                Effect.map(parseDarwinMemoryPressure),
-              )
-            : Effect.succeed("unknown" as const)
-          ).pipe(Effect.orElseSucceed(() => "unknown" as const)),
-          swapUsedBytes: (platform === "darwin"
-            ? sysctl("vm.swapusage").pipe(Effect.map(parseDarwinSwapUsed))
-            : platform === "linux"
-              ? fs.readFileString("/proc/meminfo").pipe(Effect.map(parseLinuxSwapUsed))
-              : Effect.succeed(null)
-          ).pipe(Effect.orElseSucceed(() => null)),
+          physicalCores,
+          live,
           worktreesFreeBytes: Effect.promise(() => volumeFreeBytes(worktreesDir, path.dirname)),
           worktreeFoldersByProject: folders,
         },
@@ -176,6 +207,7 @@ export const nativeSource = Effect.fn("capacity.nativeSource")(function* (worktr
       return {
         sampledAt,
         ...values,
+        ...liveValues,
         load1: load1 !== undefined && Number.isFinite(load1) && load1 >= 0 ? load1 : null,
         load5: load5 !== undefined && Number.isFinite(load5) && load5 >= 0 ? load5 : null,
       };
