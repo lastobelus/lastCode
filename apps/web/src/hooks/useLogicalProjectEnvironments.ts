@@ -20,6 +20,7 @@ import { useClientSettings } from "./useSettings";
 export function useLogicalProjectEnvironments(
   activeProject: EnvironmentProject | null,
   scratchDraft: boolean,
+  temporaryDraftOrigin: EnvironmentProject | null = null,
 ): readonly EnvironmentOption[] {
   const { environments } = useEnvironments();
   const discoverable = useDiscoverableProjects();
@@ -62,9 +63,10 @@ export function useLogicalProjectEnvironments(
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
     const seen = new Set<string>();
     // A draft opened through a temporary project's thread still has its exact target.
-    if (isTemporaryProject(activeProject)) {
-      seen.add(activeProject.environmentId);
-      pushEnvironment(activeProject.environmentId, activeProject.id);
+    const explicit = isTemporaryProject(activeProject) ? activeProject : temporaryDraftOrigin;
+    if (explicit !== null) {
+      seen.add(explicit.environmentId);
+      pushEnvironment(explicit.environmentId, explicit.id);
     }
     for (const p of discoverable) {
       if (seen.has(p.environmentId)) continue;

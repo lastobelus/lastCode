@@ -1,3 +1,5 @@
+import { contextualProjectSettings } from "../projectSettingsNavigation";
+import { useTemporaryDraftOrigin } from "../hooks/useTemporaryDraftOrigin";
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { useGT, useMessages } from "gt-react";
@@ -1210,10 +1212,7 @@ export default function ChatView(props: ChatViewProps) {
       : undefined;
   const handleOpenDraftProjectSettings = () => {
     if (!activeDraftLogicalProjectKey) return;
-    void navigate({
-      to: "/projects/$projectKey",
-      params: { projectKey: activeDraftLogicalProjectKey },
-    });
+    void navigate(contextualProjectSettings(activeDraftLogicalProjectKey, activeProject));
   };
   const handleOpenDraftProjectSettingsStable = useStableCallback(handleOpenDraftProjectSettings);
   const activeEnvironmentBootstrapComplete = useEnvironmentShellHasSnapshot(
@@ -1274,9 +1273,11 @@ export default function ChatView(props: ChatViewProps) {
       activeProject,
       environmentById.get(activeProject.environmentId)?.serverConfig?.scratchWorkspaceRoot ?? null,
     );
+  const temporaryDraft = useTemporaryDraftOrigin(draftId, activeProject);
   const logicalProjectEnvironments = useLogicalProjectEnvironments(
     activeProject,
     activeProjectIsScratch && draftId !== null,
+    temporaryDraft.origin,
   );
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
   const canAutoBalanceEnvironments = hasMultipleEnvironments && !activeProjectIsScratch;
@@ -1898,6 +1899,7 @@ export default function ChatView(props: ChatViewProps) {
     envLocked,
     automaticEnvironment,
     logicalProjectEnvironments,
+    rememberRetarget: temporaryDraft.rememberRetarget,
     environmentById,
     providersByEnvironment,
     loadBalancingSettings,

@@ -11,6 +11,7 @@ import { useScratchProject } from "../../hooks/useScratchProject";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   type EnvironmentId,
+  type ScopedProjectRef,
   type ProviderDriverKind,
   ProviderInstanceId,
   resolveProjectProviderInstanceEnabled,
@@ -54,6 +55,7 @@ interface DraftEnvironmentRoutingInput {
   readonly envLocked: boolean;
   readonly automaticEnvironment: boolean;
   readonly logicalProjectEnvironments: ReturnType<typeof useLogicalProjectEnvironments>;
+  readonly rememberRetarget?: ((project: ScopedProjectRef) => void) | undefined;
   readonly environmentById: ReadonlyMap<EnvironmentId, EnvironmentPresentation>;
   readonly providersByEnvironment: ReturnType<typeof useEnvironmentProviders>;
   readonly loadBalancingSettings: {
@@ -97,6 +99,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     envLocked,
     automaticEnvironment,
     logicalProjectEnvironments,
+    rememberRetarget,
     environmentById,
     providersByEnvironment,
     loadBalancingSettings,
@@ -242,14 +245,15 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       const projectRef = scopeProjectRef(target.environmentId, target.projectId);
       if (originalDraft) carryFanoutSelections(originalDraft, target.environmentId);
       // The send must read the target project's composer and provider context after retargeting.
-      flushSync(() =>
+      flushSync(() => {
+        rememberRetarget?.(projectRef);
         setDraftThreadContext(draftId, {
           projectRef,
           environmentSelection: "auto",
           loadBalancedEnvironmentId: target.environmentId,
           branch: originalDraft?.branch ?? null,
-        }),
-      );
+        });
+      });
       return true;
     });
   };
@@ -294,8 +298,10 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     if (!target?.projectId) return;
     const draft = getDraftSession(draftId);
     if (draft) carryFanoutSelections(draft, target.environmentId);
+    const projectRef = scopeProjectRef(target.environmentId, target.projectId);
+    rememberRetarget?.(projectRef);
     setDraftThreadContext(draftId, {
-      projectRef: scopeProjectRef(target.environmentId, target.projectId),
+      projectRef,
       environmentSelection: "auto",
       loadBalancedEnvironmentId: target.environmentId,
     });
@@ -309,6 +315,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     activeProviderInstanceId,
     selectedProvider,
     draftId,
+    rememberRetarget,
     logicalProjectEnvironments,
     sendInFlightRef,
     getDraftSession,
@@ -420,6 +427,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       }
       carryFanoutSelections(currentDraft, target.environmentId);
       const projectRef = scopeProjectRef(target.environmentId, project.id);
+      rememberRetarget?.(projectRef);
       if (activeProjectIsScratch) {
         setLogicalProjectDraftThreadId(
           deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),

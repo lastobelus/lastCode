@@ -1,4 +1,5 @@
 import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import type { EnvironmentProject } from "./models.ts";
 import { AtomRegistry } from "effect/reactivity";
 import { expect, it } from "vite-plus/test";
 import { derivePhysicalProjectKey } from "./projectGrouping.ts";
@@ -29,7 +30,7 @@ it("hides only marked project records until reveal or Keep", () => {
 });
 
 it("keeps hidden checkouts out of ordinary group settings and honors an exact checkout link", () => {
-  const ordinary = {
+  const ordinary: EnvironmentProject = {
     id: ProjectId.make("ordinary"),
     environmentId: EnvironmentId.make("local"),
     title: "Acme App",

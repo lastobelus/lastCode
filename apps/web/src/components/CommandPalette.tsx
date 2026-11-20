@@ -1,3 +1,5 @@
+import { contextualProjectPin, contextualProjectSettings } from "../projectSettingsNavigation";
+import { useProject } from "../state/entities";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { decodeMsg, msg, T, useGT, useMessages, Var } from "gt-react";
 import { m, type MessageResolver } from "../i18n/messages";
@@ -282,7 +284,12 @@ import { suggestAppAccessForRemote } from "./sourceControlAppAccessToast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
-import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
+import {
+  deriveLogicalProjectKeyFromSettings,
+  derivePhysicalProjectKey,
+  pickableProjectGroups,
+  selectProjectGroupingSettings,
+} from "@t3tools/client-runtime/state/project-grouping";
 import {
   buildSidebarProjectPickerEntries,
   orderProjectMembersForPicker,
@@ -586,13 +593,22 @@ function OpenCommandPaletteDialog(props: {
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
   const { environmentLabelById, projectEnvironmentLocationById } = useEnvironmentLookups();
   const projectGroups = useSortedProjectGroups(environmentLabelById);
-  const allProjectGroups = useSettingsProjectGroups();
   const contextualProjectRef = resolveThreadActionProjectRef({
     activeDraftThread,
     activeThread: activeThread ?? undefined,
     defaultProjectRef,
     handleNewThread,
   });
+  const contextualProject = useProject(contextualProjectRef);
+  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const projectSettingsKey = contextualProject
+    ? deriveLogicalProjectKeyFromSettings(contextualProject, projectGroupingSettings)
+    : undefined;
+  const contextualGroups = useSettingsProjectGroups(
+    contextualProject
+      ? { project: projectSettingsKey, checkout: derivePhysicalProjectKey(contextualProject) }
+      : {},
+  );
   const projectPickerEntries = buildSidebarProjectPickerEntries({
     groups: pickableProjectGroups(projectGroups),
     preferredProjectRef: contextualProjectRef,
@@ -1882,7 +1898,7 @@ function OpenCommandPaletteDialog(props: {
   // Every group, so an archived project's thread still opens its own settings.
   const currentProjectGroup =
     (contextualProjectRef
-      ? allProjectGroups.find((group) =>
+      ? contextualGroups.find((group) =>
           group.memberProjectRefs.some(
             (ref) =>
               ref.environmentId === contextualProjectRef.environmentId &&
@@ -1890,19 +1906,21 @@ function OpenCommandPaletteDialog(props: {
           ),
         )
       : null) ?? null;
-  if (currentProjectGroup && canPinProjectGroup(currentProjectGroup)) {
+  const pinTarget =
+    currentProjectGroup && contextualProjectPin(currentProjectGroup, contextualProject);
+  if (currentProjectGroup && pinTarget && canPinProjectGroup(pinTarget)) {
     actionItems.push({
       kind: "action",
       value: "action:project-pin",
       searchTerms: ["pin", "unpin", "project", "favorite"],
-      title: currentProjectGroup.pinned ? gt("Unpin project") : gt("Pin project"),
+      title: pinTarget.pinned ? gt("Unpin project") : gt("Pin project"),
       description: currentProjectGroup.displayName,
-      icon: currentProjectGroup.pinned ? (
+      icon: pinTarget.pinned ? (
         <PinOffIcon className={ITEM_ICON_CLASS} />
       ) : (
         <PinIcon className={ITEM_ICON_CLASS} />
       ),
-      run: async () => toggleProjectGroupPin(currentProjectGroup),
+      run: async () => toggleProjectGroupPin(pinTarget),
     });
   }
   const contextualProjectGroup = currentProjectGroup ?? projectGroups[0] ?? null;
@@ -1945,10 +1963,9 @@ function OpenCommandPaletteDialog(props: {
       description: contextualProjectGroup.displayName,
       icon: <FolderIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
-        await navigate({
-          to: "/projects/$projectKey",
-          params: { projectKey: contextualProjectGroup.projectKey },
-        });
+        await navigate(
+          contextualProjectSettings(contextualProjectGroup.projectKey, contextualProject),
+        );
       },
     });
   }

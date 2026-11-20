@@ -1,3 +1,4 @@
+import { contextualProjectSettings } from "../projectSettingsNavigation";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { msg, T, useGT, useMessages } from "gt-react";
 import { m } from "../i18n/messages";
@@ -120,6 +121,7 @@ import { SidebarFolderDrop } from "./sidebar/SidebarFolderDrop";
 import { useRightPanelStore } from "../rightPanelStore";
 import {
   pickableProjectGroups,
+  deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import {
@@ -1267,21 +1269,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   });
 
   const openProjectSettings = useStableCallback(
-    (projectGroup: SidebarProjectSnapshot, projectRef?: ScopedProjectRef) => {
-      if (isMobile) {
-        setOpenMobile(false);
-      }
-      void router.navigate({
-        to: "/projects/$projectKey",
-        params: {
-          projectKey: getSidebarProjectSettingsKey(
-            projectGroup,
-            projectGroupingSettings,
-            projects,
-            projectRef,
-          ),
-        },
-      });
+    (projectGroup: SidebarProjectSnapshot | null | undefined, projectRef?: ScopedProjectRef) => {
+      const project = projectRef
+        ? projectByKey.get(`${projectRef.environmentId}:${projectRef.projectId}`)
+        : projectGroup;
+      const key = projectGroup
+        ? getSidebarProjectSettingsKey(projectGroup, projectGroupingSettings, projects, projectRef)
+        : project && deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings);
+      if (!key) return;
+      if (isMobile) setOpenMobile(false);
+      void router.navigate(contextualProjectSettings(key, project));
     },
   );
   const {
@@ -2660,15 +2657,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               ref.environmentId === session.environmentId && ref.projectId === session.projectId,
           ),
         );
-        const workspacePath =
-          session.worktreePath ??
-          projectByKey.get(`${session.environmentId}:${session.projectId}`)?.workspaceRoot;
+        const project = projectByKey.get(`${session.environmentId}:${session.projectId}`);
+        const workspacePath = session.worktreePath ?? project?.workspaceRoot;
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildDraftActionMenuItems({
               hasPath: Boolean(workspacePath),
               hasBranch: Boolean(session.branch),
-              hasProject: projectGroup != null,
+              hasProject: project != null,
             }),
             position,
             source,
@@ -2677,11 +2673,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         if (clicked._tag === "Failure") return;
         switch (clicked.value) {
           case "project-settings":
-            if (projectGroup)
-              openProjectSettings(projectGroup, {
-                environmentId: session.environmentId,
-                projectId: session.projectId,
-              });
+            openProjectSettings(projectGroup, {
+              environmentId: session.environmentId,
+              projectId: session.projectId,
+            });
             return;
           case "copy-path":
             if (workspacePath) copyPathToClipboard(workspacePath, { path: workspacePath });
@@ -2863,11 +2858,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
             return;
           case "project-settings":
-            if (threadProjectGroup)
-              openProjectSettings(threadProjectGroup, {
-                environmentId: threadRef.environmentId,
-                projectId: thread.projectId,
-              });
+            openProjectSettings(threadProjectGroup, {
+              environmentId: threadRef.environmentId,
+              projectId: thread.projectId,
+            });
             return;
           case "new-thread-on-branch": {
             const result = await settlePromise(() =>
