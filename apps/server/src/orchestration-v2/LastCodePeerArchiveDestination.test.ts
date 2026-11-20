@@ -341,59 +341,57 @@ it.effect("persists a session-bound restore fence before the first apply", () =>
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect(
-  "an empty revised selection clears the failed hold and keeps committed and admitted cohorts",
-  () =>
-    Effect.gen(function* () {
-      const { service, seed, store, archiveId, complete, fail } = yield* harness;
-      const failed = ThreadId.make("d-failed");
-      yield* seed([anchor, child, other, failed]);
-      const reviewed = {
-        ...input,
-        cohorts: [
-          selection,
-          { ...selection, anchorThreadId: other, selectedThreadIds: [other] },
-          { ...selection, anchorThreadId: failed, selectedThreadIds: [failed] },
-        ],
-      };
-      assert.deepStrictEqual(yield* service.apply(client, reviewed), {
-        receipts: [],
-        remaining: pending,
-      });
-      const first = yield* archiveId();
-      const second = yield* archiveId(other);
-      assert.notStrictEqual(first, second);
-      yield* complete(first);
-      yield* fail(yield* archiveId(failed), failed);
-      assert.strictEqual((yield* store.getThread(failed)).archivePending?.status, "failed");
-      const revised = yield* decodeApplyInput({
-        ...input,
-        selectionRevision: 1,
-        cohorts: [],
-      });
-      const partial = yield* service.apply(client, revised);
-      assert.deepStrictEqual(
-        partial.receipts.map((entry) => entry.anchorThreadId),
-        [anchor],
-      );
-      assert.deepStrictEqual(partial.remaining, pending);
-      assert.isNull((yield* store.getThread(failed)).archivePending);
-      assert.isNull((yield* store.getThread(failed)).archivedAt);
-      assert.strictEqual((yield* store.getThread(other)).archivePending?.commandId, second);
-      assert.deepStrictEqual(yield* service.apply(client, revised), partial);
-      assert.deepStrictEqual(yield* service.apply(client, reviewed).pipe(Effect.flip), changed);
+it.effect("an empty revised selection preserves committed and admitted cohorts", () =>
+  Effect.gen(function* () {
+    const { service, seed, store, archiveId, complete, fail } = yield* harness;
+    const failed = ThreadId.make("d-failed");
+    yield* seed([anchor, child, other, failed]);
+    const reviewed = {
+      ...input,
+      cohorts: [
+        selection,
+        { ...selection, anchorThreadId: other, selectedThreadIds: [other] },
+        { ...selection, anchorThreadId: failed, selectedThreadIds: [failed] },
+      ],
+    };
+    assert.deepStrictEqual(yield* service.apply(client, reviewed), {
+      receipts: [],
+      remaining: pending,
+    });
+    const first = yield* archiveId();
+    const second = yield* archiveId(other);
+    assert.notStrictEqual(first, second);
+    yield* complete(first);
+    yield* fail(yield* archiveId(failed), failed);
+    assert.isNull((yield* store.getThread(failed)).archivePending);
+    const revised = yield* decodeApplyInput({
+      ...input,
+      selectionRevision: 1,
+      cohorts: [],
+    });
+    const partial = yield* service.apply(client, revised);
+    assert.deepStrictEqual(
+      partial.receipts.map((entry) => entry.anchorThreadId),
+      [anchor],
+    );
+    assert.deepStrictEqual(partial.remaining, pending);
+    assert.isNull((yield* store.getThread(failed)).archivePending);
+    assert.isNull((yield* store.getThread(failed)).archivedAt);
+    assert.strictEqual((yield* store.getThread(other)).archivePending?.commandId, second);
+    assert.deepStrictEqual(yield* service.apply(client, revised), partial);
+    assert.deepStrictEqual(yield* service.apply(client, reviewed).pipe(Effect.flip), changed);
 
-      const restored = yield* service.restore(client, generation);
-      assert.deepStrictEqual([...restored.restoredThreadIds].sort(), [anchor, child]);
-      assert.deepStrictEqual(restored.remaining, pending);
-      assert.strictEqual((yield* store.getThread(other)).archivePending?.commandId, second);
-      assert.deepStrictEqual(yield* service.apply(client, revised).pipe(Effect.flip), changed);
+    const restored = yield* service.restore(client, generation);
+    assert.deepStrictEqual([...restored.restoredThreadIds].sort(), [anchor, child]);
+    assert.deepStrictEqual(restored.remaining, pending);
+    assert.strictEqual((yield* store.getThread(other)).archivePending?.commandId, second);
+    assert.deepStrictEqual(yield* service.apply(client, revised).pipe(Effect.flip), changed);
 
-      yield* complete(second, other);
-      const done = yield* service.restore(client, generation);
-      assert.deepStrictEqual([...done.restoredThreadIds].sort(), [anchor, child, other]);
-      assert.isUndefined(done.remaining);
-    }).pipe(Effect.provide(testLayer)),
+    yield* complete(second, other);
+    const done = yield* service.restore(client, generation);
+    assert.deepStrictEqual([...done.restoredThreadIds].sort(), [anchor, child, other]);
+    assert.isUndefined(done.remaining);
+  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("accepts a freshly reviewed subset and restores receipts from both revisions", () =>
@@ -516,7 +514,7 @@ it.effect.each([false, true])("retries a failed shutdown with a fresh review: %s
         receipts: [],
         remaining: changed,
       });
-      assert.strictEqual(yield* archiveId(), first);
+      assert.isNull((yield* store.getThread(anchor)).archivePending);
     }
     const retryInput = fresh ? revised : input;
     assert.deepStrictEqual(yield* service.apply(client, retryInput), {
@@ -534,143 +532,55 @@ it.effect.each([false, true])("retries a failed shutdown with a fresh review: %s
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect(
-  "releases the exact failed hold before archiving a revised subset that keeps a typed-in child",
-  () =>
-    Effect.gen(function* () {
-      const { service, store, seed, archiveId, complete, fail } = yield* harness;
-      yield* seed([anchor, child]);
-      assert.deepStrictEqual(yield* service.apply(client, input), {
-        receipts: [],
-        remaining: pending,
-      });
-      const failed = yield* archiveId();
-      yield* fail(failed);
-      assert.strictEqual((yield* store.getThread(anchor)).archivePending?.status, "failed");
-      assert.strictEqual((yield* store.getThread(child)).archivePending?.commandId, failed);
-      yield* sendHumanMessage(child);
-      const revised = {
-        ...input,
-        selectionRevision: 1,
-        cohorts: [{ ...selection, selectedThreadIds: [anchor] }],
-      };
-      assert.deepStrictEqual(yield* service.apply(secondClient, revised).pipe(Effect.flip), denied);
-      assert.strictEqual(yield* archiveId(), failed);
+it.effect("archives a freshly reviewed subset after a peer shutdown fails", () =>
+  Effect.gen(function* () {
+    const { service, store, seed, archiveId, complete, fail } = yield* harness;
+    yield* seed([anchor, child]);
+    assert.deepStrictEqual(yield* service.apply(client, input), {
+      receipts: [],
+      remaining: pending,
+    });
+    const failed = yield* archiveId();
+    yield* fail(failed);
+    assert.isNull((yield* store.getThread(anchor)).archivePending);
+    assert.isNull((yield* store.getThread(child)).archivePending);
+    yield* sendHumanMessage(child);
+    const revised = {
+      ...input,
+      selectionRevision: 1,
+      cohorts: [{ ...selection, selectedThreadIds: [anchor] }],
+    };
+    assert.deepStrictEqual(yield* service.apply(secondClient, revised).pipe(Effect.flip), denied);
+    assert.isNull((yield* store.getThread(anchor)).archivePending);
 
-      assert.deepStrictEqual(yield* service.apply(client, revised), {
-        receipts: [],
-        remaining: pending,
-      });
-      const heldChild = yield* store.getThread(child);
-      assert.isNull(heldChild.archivePending);
-      assert.isNull(heldChild.archivedAt);
+    assert.deepStrictEqual(yield* service.apply(client, revised), {
+      receipts: [],
+      remaining: pending,
+    });
+    assert.isNull((yield* store.getThread(child)).archivePending);
 
-      const replacement = yield* archiveId();
-      assert.notStrictEqual(replacement, failed);
-      yield* complete(replacement);
-      const result = yield* service.apply(client, revised);
-      assert.isUndefined(result.remaining);
-      assert.deepStrictEqual(
-        result.receipts.flatMap(({ threads }) => threads.map(({ threadId }) => threadId)),
-        [anchor],
-      );
-      assert.isNull((yield* store.getThread(child)).archivedAt);
-    }).pipe(Effect.provide(testLayer)),
+    const replacement = yield* archiveId();
+    assert.notStrictEqual(replacement, failed);
+    yield* complete(replacement);
+    const result = yield* service.apply(client, revised);
+    assert.isUndefined(result.remaining);
+    assert.deepStrictEqual(
+      result.receipts.flatMap(({ threads }) => threads.map(({ threadId }) => threadId)),
+      [anchor],
+    );
+    assert.isNull((yield* store.getThread(child)).archivedAt);
+  }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect.each(["resume subset", "reselect cohort"] as const)(
-  "recovers a committed dismissal after an interruption and can %s",
-  (nextReview) =>
-    Effect.gen(function* () {
-      const { service, ports, seed, store, archiveId, complete, fail } = yield* harness;
-      yield* seed([anchor, child]);
-      yield* service.apply(client, input);
-      const failed = yield* archiveId();
-      yield* fail(failed);
-      const dismissed = yield* Deferred.make<void>();
-      const interrupted = yield* makeLastCodePeerArchiveDestination({
-        ...ports,
-        orchestrator: {
-          dispatch: (command) =>
-            ports.orchestrator
-              .dispatch(command)
-              .pipe(
-                Effect.tap(() =>
-                  command.type === "thread.unarchive"
-                    ? Deferred.succeed(dismissed, undefined).pipe(Effect.andThen(Effect.never))
-                    : Effect.void,
-                ),
-              ),
-        },
-      });
-      const revised = {
-        ...input,
-        selectionRevision: 1,
-        cohorts: [{ ...selection, selectedThreadIds: [anchor] }],
-      };
-      const fiber = yield* Effect.forkScoped(interrupted.apply(client, revised));
-      yield* Deferred.await(dismissed);
-      yield* Fiber.interrupt(fiber);
-      assert.isNull((yield* store.getThread(anchor)).archivePending);
-      assert.isNull((yield* store.getThread(child)).archivePending);
-
-      const reopened = yield* makeLastCodePeerArchiveDestination(ports);
-      const next = nextReview === "resume subset" ? revised : { ...input, selectionRevision: 2 };
-      assert.deepStrictEqual(yield* reopened.apply(client, next), {
-        receipts: [],
-        remaining: pending,
-      });
-      const replacement = yield* archiveId();
-      assert.notStrictEqual(replacement, failed);
-      yield* complete(replacement);
-      const result = yield* reopened.apply(client, next);
-      assert.isUndefined(result.remaining);
-      assert.deepStrictEqual(
-        result.receipts[0]?.threads.map(({ threadId }) => threadId).toSorted(),
-        nextReview === "resume subset" ? [anchor] : [anchor, child],
-      );
-    }).pipe(Effect.provide(testLayer)),
-);
-
-it.effect.each([false, true])(
-  "releases a failed shutdown when restoring a fenced generation (revised: %s)",
-  (revised) =>
-    Effect.gen(function* () {
-      const { service, ports, seed, store, archiveId, fail } = yield* harness;
-      yield* seed([anchor, child]);
-      yield* service.apply(client, input);
-      const failed = yield* archiveId();
-      yield* fail(failed);
-      if (revised) {
-        const dismissing = yield* Deferred.make<void>();
-        const interrupted = yield* makeLastCodePeerArchiveDestination({
-          ...ports,
-          orchestrator: {
-            dispatch: (command, options) =>
-              command.type === "thread.unarchive"
-                ? Deferred.succeed(dismissing, undefined).pipe(Effect.andThen(Effect.never))
-                : ports.orchestrator.dispatch(command, options),
-          },
-        });
-        const next = yield* decodeApplyInput({ ...input, selectionRevision: 1, cohorts: [] });
-        const fiber = yield* Effect.forkScoped(interrupted.apply(client, next));
-        yield* Deferred.await(dismissing);
-        yield* Fiber.interrupt(fiber);
-      }
-      assert.equal((yield* store.getThread(child)).archivePending?.status, "failed");
-      const reopened = yield* makeLastCodePeerArchiveDestination(ports);
-      for (const _ of [0, 1]) {
-        assert.deepStrictEqual(yield* reopened.restore(client, generation), {
-          restoredThreadIds: [],
-        });
-        assert.isNull((yield* store.getThread(anchor)).archivePending);
-        assert.isNull((yield* store.getThread(child)).archivePending);
-      }
-      assert.deepStrictEqual(yield* reopened.apply(client, input).pipe(Effect.flip), changed);
-      const next = { ...input, sourceArchiveCommandId: CommandId.make("next-archive") };
-      assert.deepStrictEqual((yield* reopened.apply(client, next)).remaining, pending);
-      assert.notEqual(yield* archiveId(), failed);
-    }).pipe(Effect.provide(testLayer)),
+it.effect("a failed shutdown has no archived threads to restore", () =>
+  Effect.gen(function* () {
+    const { service, seed, archiveId, fail } = yield* harness;
+    yield* seed([anchor, child]);
+    yield* service.apply(client, input);
+    yield* fail(yield* archiveId());
+    assert.deepStrictEqual(yield* service.restore(client, generation), { restoredThreadIds: [] });
+    assert.deepStrictEqual(yield* service.apply(client, input).pipe(Effect.flip), changed);
+  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect.each([false, true])(

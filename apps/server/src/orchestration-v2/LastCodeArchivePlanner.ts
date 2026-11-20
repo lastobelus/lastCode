@@ -1259,7 +1259,12 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           occurredAt: now,
           payload: {
             ...thread,
-            archivePending: { ...thread.archivePending, status: "failed", error: command.error },
+            // Linked failures are reported by the source operation. Release only
+            // the hold installed for this request so the next review can change it.
+            archivePending:
+              peer === undefined
+                ? { ...thread.archivePending, status: "failed", error: command.error }
+                : null,
             updatedAt: now,
           },
         });
@@ -1716,16 +1721,12 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         yield* dispatchArchiveFamilyResult(command, events, effects);
         return undefined;
       case "thread.unarchive":
-        if (peer?.kind === "restore") {
+        if (peer !== undefined) {
+          if (peer.kind !== "restore")
+            return yield* peerDispatch.reject(command, "Expected a linked restore.");
           for (const threadId of yield* peerDispatch.restoreThreadIds(command, peer))
             yield* dispatchThreadMutation({ ...command, threadId }, events, effects);
-        } else {
-          if (peer?.kind === "dismiss-failed")
-            yield* peerDispatch.validateFailedDismissal(command, peer);
-          else if (peer !== undefined)
-            return yield* peerDispatch.reject(command, "Expected a linked restore or dismissal.");
-          yield* dispatchUnarchiveFamily(command, events, effects);
-        }
+        } else yield* dispatchUnarchiveFamily(command, events, effects);
         return undefined;
     }
   });

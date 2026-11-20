@@ -43,11 +43,6 @@ export type PeerArchiveDispatchInput =
       readonly typedIn: ThreadArchivePeerGuard["typedIn"];
     })
   | (PeerArchiveCaller & {
-      readonly kind: "dismiss-failed";
-      readonly failedCommandId: CommandId;
-      readonly selectedThreadIds: readonly ThreadId[];
-    })
-  | (PeerArchiveCaller & {
       readonly kind: "restore";
       /** Exact transitions from the destination's committed archive events. */
       readonly committed: readonly PeerArchiveCommittedThread[];
@@ -182,29 +177,15 @@ const validatePeerArchive = Effect.fnUntraced(function* <E>(input: {
   readonly selected: readonly ThreadId[];
   readonly rows: Rows;
   readonly completedShutdown?: CommandId;
-  readonly retryOf?: CommandId;
   readonly checkMode: (thread: OrchestrationV2ThreadShell) => Effect.Effect<void, E>;
   readonly reject: Reject<E>;
 }) {
-  const { guard, rows, selected, anchor, reject, completedShutdown, retryOf } = input;
+  const { guard, rows, selected, anchor, reject, completedShutdown } = input;
   const destination = yield* checkScope(input.destination, guard, guard, reject);
   const ids = new Set(selected);
   const evidence = new Map(guard.typedIn.map((row) => [row.threadId, row.latestHumanMessageAt]));
   if (!ids.has(anchor) || ids.size !== selected.length || evidence.size !== guard.typedIn.length)
     return yield* Effect.fail(reject(peerArchiveChanged));
-
-  const expectedRequest = completedShutdown ?? retryOf;
-  if (retryOf !== undefined) {
-    const prior = getThreadArchivePlan(rows.get(anchor)?.archivePending);
-    if (
-      prior?.peer?.ownerEnvironmentId !== guard.ownerEnvironmentId ||
-      prior.peer.linkSessionId !== guard.linkSessionId ||
-      prior.archiveThreadIds.length !== ids.size ||
-      new Set(prior.archiveThreadIds).size !== ids.size ||
-      prior.archiveThreadIds.some((id) => !ids.has(id))
-    )
-      return yield* Effect.fail(reject(peerArchiveChanged));
-  }
 
   const sources = new Set(guard.ownerThreadIds);
   const checkedEvidence = new Set<ThreadId>();
@@ -218,12 +199,11 @@ const validatePeerArchive = Effect.fnUntraced(function* <E>(input: {
       thread.deletedAt !== null ||
       thread.archivedAt !== null ||
       thread.persistent === true ||
-      (expectedRequest === undefined
+      (completedShutdown === undefined
         ? thread.archivePending != null
         : thread.archivePending?.threadId !== anchor ||
-          thread.archivePending.commandId !== expectedRequest ||
-          thread.archivePending.status !==
-            (completedShutdown === undefined ? "failed" : "stopping"))
+          thread.archivePending.commandId !== completedShutdown ||
+          thread.archivePending.status !== "stopping")
     )
       return yield* Effect.fail(reject(peerArchiveChanged));
 
@@ -380,6 +360,7 @@ export function makePeerArchiveDispatch(ports: {
       command.expectedChildThreadIds !== undefined ||
       command.expectedArchiveThreadIds !== undefined ||
       command.includeTypedInThreadIds !== undefined ||
+      command.expectedArchiveCommandId !== undefined ||
       command.savedWorkspace !== undefined
     )
       return yield* scope.reject("Use the reviewed linked archive selection and disposition.");
@@ -393,9 +374,6 @@ export function makePeerArchiveDispatch(ports: {
       modeLimit,
       rows,
       selected: archive.selectedThreadIds,
-      ...(command.expectedArchiveCommandId === undefined
-        ? {}
-        : { retryOf: command.expectedArchiveCommandId }),
     });
     const selected = new Set(archive.selectedThreadIds);
     for (const thread of participants) {
@@ -490,56 +468,6 @@ export function makePeerArchiveDispatch(ports: {
     });
   });
 
-  const validateFailedDismissal = Effect.fnUntraced(function* (
-    command: Extract<LastCodeArchiveCommand, { type: "thread.unarchive" }>,
-    dismiss: Extract<PeerArchiveDispatchInput, { kind: "dismiss-failed" }>,
-  ) {
-    const { anchor, checkMode, reject } = peerScope(command);
-    const { client, failedCommandId, selectedThreadIds } = dismiss;
-    const link = { linkSessionId: client.sessionId, linkAccess: client.access };
-    const destination = yield* checkScope(ports.destination, dismiss, link, reject);
-    const ids = new Set(selectedThreadIds);
-    if (
-      client.linked !== true ||
-      command.expectedArchiveCommandId !== failedCommandId ||
-      !ids.has(anchor) ||
-      ids.size !== selectedThreadIds.length
-    )
-      return yield* reject(peerArchiveChanged);
-
-    const rows = yield* peerRows(command, selectedThreadIds);
-    const plan = getThreadArchivePlan(rows.get(anchor)?.archivePending);
-    const owners = new Set(dismiss.ownerThreadIds);
-    if (
-      plan?.familyVersion !== 2 ||
-      plan.peer?.linkSessionId !== link.linkSessionId ||
-      plan.peer.ownerEnvironmentId !== dismiss.ownerEnvironmentId ||
-      plan.peer.ownerThreadIds.length !== owners.size ||
-      new Set(plan.peer.ownerThreadIds).size !== owners.size ||
-      plan.peer.ownerThreadIds.some((id) => !owners.has(id)) ||
-      plan.archiveThreadIds.length !== ids.size ||
-      new Set(plan.archiveThreadIds).size !== ids.size ||
-      plan.archiveThreadIds.some((id) => !ids.has(id))
-    )
-      return yield* reject(peerArchiveChanged);
-
-    const limit = clientModeCeiling(client);
-    for (const id of ids) {
-      const thread = rows.get(id);
-      if (
-        thread == null ||
-        thread.archivedAt !== null ||
-        thread.deletedAt !== null ||
-        thread.archivePending?.status !== "failed" ||
-        thread.archivePending.threadId !== anchor ||
-        thread.archivePending.commandId !== failedCommandId ||
-        reachableOwnerPath(destination, dismiss, owners, anchor, id, rows) === null
-      )
-        return yield* reject(peerArchiveChanged);
-      yield* authorizeTarget(thread, link, limit, checkMode, reject);
-    }
-  });
-
   const collectLockRows = Effect.fnUntraced(function* (
     command: OrchestrationV2ServerCommand,
     peer: PeerArchiveDispatchInput | undefined,
@@ -548,8 +476,6 @@ export function makePeerArchiveDispatch(ports: {
       return yield* peerRows(command, peer.selectedThreadIds);
     if (command.type === "thread.unarchive" && peer?.kind === "restore")
       return yield* restoreRows(command, peer);
-    if (command.type === "thread.unarchive" && peer?.kind === "dismiss-failed")
-      return yield* peerRows(command, peer.selectedThreadIds);
     if (command.type === "thread.archive.complete" || command.type === "thread.archive.fail") {
       const shell = yield* ports.store
         .getThreadShell(command.threadId)
@@ -585,11 +511,9 @@ export function makePeerArchiveDispatch(ports: {
         ? peer.selectedThreadIds
         : command.type === "thread.unarchive" && peer?.kind === "restore"
           ? peer.committed.map(({ threadId }) => threadId)
-          : command.type === "thread.unarchive" && peer?.kind === "dismiss-failed"
-            ? peer.selectedThreadIds
-            : pending?.peer === undefined
-              ? undefined
-              : pending.archiveThreadIds;
+          : pending?.peer === undefined
+            ? undefined
+            : pending.archiveThreadIds;
     if (exact !== undefined) {
       const allowed = new Set(exact);
       if (
@@ -614,7 +538,6 @@ export function makePeerArchiveDispatch(ports: {
     prepareArchive,
     validateCompletion,
     restoreThreadIds,
-    validateFailedDismissal,
     guardTargets,
     reject: ports.reject,
   };

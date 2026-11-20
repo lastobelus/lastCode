@@ -288,78 +288,10 @@ it.effect.each(["first human message", "promotion", "raised mode"] as const)(
       for (const id of [rootId, childId]) {
         const row = yield* store.getThread(id);
         assert.isNull(row.archivedAt);
-        assert.strictEqual(row.archivePending?.status, "failed");
+        assert.isNull(row.archivePending);
       }
       assert.isTrue((yield* store.getThread(ownerId)).archivePending == null);
     }).pipe(Effect.provide(testLayer)),
-);
-
-it.effect("limits a linked dismissal to the exact failed attempt, participants, and session", () =>
-  Effect.gen(function* () {
-    const store = yield* ProjectionStore.ProjectionStoreV2;
-    const orchestrator = yield* OrchestratorV2;
-    yield* save(thread(rootId));
-    yield* save(thread(childId));
-    const request = command("peer:held-cohort");
-    const selected = [rootId, childId];
-    yield* orchestrator
-      .dispatch(request)
-      .pipe(Effect.provideService(PeerArchiveDispatch, archive(selected)));
-    const proof = {
-      ...scope,
-      kind: "dismiss-failed",
-      failedCommandId: request.commandId,
-      selectedThreadIds: selected,
-    } as const;
-    const dismiss = (
-      id: string,
-      provided: Extract<PeerArchiveDispatchInput, { kind: "dismiss-failed" }> = proof,
-      expectedArchiveCommandId = request.commandId,
-    ) =>
-      orchestrator
-        .dispatch({
-          type: "thread.unarchive",
-          threadId: rootId,
-          commandId: CommandId.make(id),
-          expectedArchiveCommandId,
-        })
-        .pipe(Effect.provideService(PeerArchiveDispatch, provided));
-    yield* dismiss("dismiss:stopping").pipe(Effect.flip);
-    assert.strictEqual((yield* store.getThread(childId)).archivePending?.status, "stopping");
-
-    yield* orchestrator.dispatch({
-      type: "thread.archive.fail",
-      threadId: rootId,
-      commandId: CommandId.make(`${request.commandId}:failed`),
-      requestId: request.commandId,
-      error: "Provider shutdown failed.",
-    });
-    yield* dismiss("dismiss:wrong-session", {
-      ...proof,
-      client: { ...client, sessionId: "another-session" },
-    }).pipe(Effect.flip);
-    yield* dismiss("dismiss:subset", { ...proof, selectedThreadIds: [rootId] }).pipe(Effect.flip);
-    yield* dismiss("dismiss:wrong-attempt", proof, CommandId.make("another-attempt")).pipe(
-      Effect.flip,
-    );
-    for (const id of selected) {
-      const pending = (yield* store.getThread(id)).archivePending;
-      assert.strictEqual(pending?.commandId, request.commandId);
-      assert.strictEqual(pending?.status, "failed");
-    }
-
-    yield* dismiss("dismiss:exact");
-    const newer = command("peer:newer-cohort");
-    yield* orchestrator
-      .dispatch(newer)
-      .pipe(Effect.provideService(PeerArchiveDispatch, archive(selected)));
-    yield* dismiss("dismiss:already-gone").pipe(Effect.flip);
-    for (const id of selected) {
-      const pending = (yield* store.getThread(id)).archivePending;
-      assert.strictEqual(pending?.commandId, newer.commandId);
-      assert.strictEqual(pending?.status, "stopping");
-    }
-  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect(
