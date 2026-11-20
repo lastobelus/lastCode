@@ -102,6 +102,8 @@ export class PeerLinks extends Context.Service<
       input: PeerLinkPreflightInput,
     ) => Effect.Effect<PeerLinkPreflightResult, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
+    /** Stored links, including offline peers, with no network probes. */
+    readonly listStored?: Effect.Effect<ReadonlyArray<PeerLink>, PeerLinkError>;
     /** The stored link, without asking the peer whether it answers. */
     readonly get: (
       environmentId: EnvironmentId,
@@ -111,6 +113,7 @@ export class PeerLinks extends Context.Service<
     /** An address that answers as the linked peer, with its token, ready to call. */
     readonly resolve: (
       environmentId: EnvironmentId,
+      options?: { readonly refreshLabel?: boolean },
     ) => Effect.Effect<ResolvedPeerLink, PeerLinkError>;
     /** Records the outcome of a call, so listing shows whether the peer answered last time. */
     readonly recordOutcome: (
@@ -629,8 +632,10 @@ const make = Effect.gen(function* () {
     return { ...(yield* withLabel(link, answered.value.label)), status: "reachable" };
   });
 
+  const listStored = Effect.flatMap(readRows, (rows) => Effect.forEach(rows, toLink));
+
   const list: PeerLinks["Service"]["list"] = Effect.gen(function* () {
-    const links = yield* Effect.forEach(yield* readRows, toLink);
+    const links = yield* listStored;
     const now = yield* DateTime.now;
     return yield* Effect.forEach(links, (link) => statusOf(link, now), {
       concurrency: "unbounded",
@@ -661,7 +666,7 @@ const make = Effect.gen(function* () {
   );
 
   const resolve: PeerLinks["Service"]["resolve"] = Effect.fn("PeerLinks.resolve")(
-    function* (environmentId) {
+    function* (environmentId, options) {
       const notLinked = new PeerLinkError({
         reason: "unknown_link",
         message: `This environment is not linked to ${environmentId}. t3_environment_links lists the linked ones.`,
@@ -714,7 +719,7 @@ const make = Effect.gen(function* () {
         });
       }
       return {
-        link: yield* withLabel(link, peer.label),
+        link: options?.refreshLabel === false ? link : yield* withLabel(link, peer.label),
         url,
         token: new TextDecoder().decode(stored.value),
       };
@@ -744,6 +749,7 @@ const make = Effect.gen(function* () {
     preflight,
     link,
     list,
+    listStored,
     get,
     unlink,
     resolve,

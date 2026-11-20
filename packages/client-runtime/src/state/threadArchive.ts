@@ -2,6 +2,7 @@ import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   CommandId,
   MessageId,
+  type LinkedArchivePreview,
   type ScopedThreadRef,
   type ThreadArchiveConsultationTarget,
   type ThreadArchiveTemporaryProjectSelection,
@@ -60,8 +61,20 @@ export function archivePreviewSelection(
   };
 }
 
+export function requiresThreadArchiveConfirmation(
+  family: Pick<ThreadArchiveFamily, "requiresConfirmation" | "linkedArchivePreview">,
+) {
+  return (
+    family.requiresConfirmation ||
+    family.linkedArchivePreview?.some(
+      (peer) => peer.status !== "ready" || peer.inventory.threads.length > 0,
+    ) === true
+  );
+}
+
 type ArchivePreviewFamily = {
   readonly archivePreview?: ThreadArchiveFamily["archivePreview"];
+  readonly linkedArchivePreview?: ThreadArchiveFamily["linkedArchivePreview"];
   readonly keptThreadIds?: readonly ThreadId[];
   readonly threads: ReadonlyArray<{
     readonly id: ThreadId;
@@ -74,6 +87,92 @@ function keptArchivePreviewThreadIds(
   includeTypedIn: boolean,
 ) {
   return includeTypedIn ? family.archivePreview?.keptWithTypedInThreadIds : family.keptThreadIds;
+}
+
+const linkedArchiveReasons = {
+  offline: msg("Offline", { $context: "connection status" }),
+  denied: msg("Access denied"),
+  unsupported: msg("Update this machine to review its threads"),
+  unlinked: msg("Machine is no longer linked"),
+  changed: msg("A different machine answered"),
+};
+
+function archivePreviewThreadKey(
+  environmentId: EnvironmentThreadShell["environmentId"] | undefined,
+  threadId: ThreadId,
+) {
+  return JSON.stringify([environmentId, threadId]);
+}
+
+function buildLinkedArchiveSections(
+  families: readonly ArchivePreviewFamily[],
+  selectedKeys: ReadonlySet<string>,
+  resolve: MFunctionType,
+) {
+  const machines = new Map<LinkedArchivePreview["environmentId"], LinkedArchivePreview[]>();
+  for (const family of families) {
+    for (const peer of family.linkedArchivePreview ?? []) {
+      const previews = machines.get(peer.environmentId);
+      if (previews) previews.push(peer);
+      else machines.set(peer.environmentId, [peer]);
+    }
+  }
+  return [...machines].map(([environmentId, peers]) => {
+    const inventories = peers.flatMap((peer) => (peer.status === "ready" ? [peer.inventory] : []));
+    const activeIds = new Set(inventories.flatMap(({ activeThreadIds }) => activeThreadIds));
+    const unreadIds = new Set(inventories.flatMap(({ unreadThreadIds }) => unreadThreadIds));
+    const protectedIds = new Set(
+      inventories.flatMap(({ protectedThreadIds }) => protectedThreadIds),
+    );
+    const typedInIds = new Set(inventories.flatMap(({ typedInThreadIds }) => typedInThreadIds));
+    const threads = new Map(
+      inventories.flatMap(({ threads }) => threads.map((thread) => [thread.threadId, thread])),
+    );
+    const warnings = new Set(
+      peers.flatMap((peer) =>
+        peer.status === "ready"
+          ? []
+          : [
+              [
+                resolve(
+                  peer.status === "pending"
+                    ? msg("Pending", { $context: "linked archive status" })
+                    : msg("Blocked", { $context: "linked archive status" }),
+                ),
+                resolve(linkedArchiveReasons[peer.reason]),
+              ].join(" · "),
+            ],
+      ),
+    );
+    return {
+      environmentId,
+      label: peers[0]?.label || environmentId,
+      warnings: [...warnings],
+      threads: [...threads.values()].map((thread) => ({
+        ...thread,
+        title: thread.title || resolve(msg("Untitled thread")),
+        label: [
+          resolve(
+            selectedKeys.has(archivePreviewThreadKey(environmentId, thread.threadId))
+              ? msg("Archive")
+              : msg("Keep open"),
+          ),
+          activeIds.has(thread.threadId)
+            ? resolve(msg("Working", { $context: "thread status" }))
+            : null,
+          unreadIds.has(thread.threadId)
+            ? resolve(msg("Unread", { $context: "thread status" }))
+            : null,
+          protectedIds.has(thread.threadId)
+            ? resolve(msg("Persistent", { $context: "thread protected from archiving" }))
+            : null,
+          typedInIds.has(thread.threadId) ? resolve(msg("You wrote in this thread")) : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      })),
+    };
+  });
 }
 
 /** One shared presentation for web and mobile; family membership and activity come from the server. */
@@ -89,6 +188,7 @@ export function buildThreadArchiveConfirmation<
     readonly protectedChildThreadIds: readonly string[];
     readonly canStopAndArchive: boolean;
     readonly archivePreview?: ThreadArchiveFamily["archivePreview"];
+    readonly linkedArchivePreview?: ThreadArchiveFamily["linkedArchivePreview"];
     readonly keptThreadIds?: readonly ThreadId[];
     readonly bulkPreviews?: readonly ArchivePreviewFamily[];
     readonly bulkPreviewsIncludingTypedIn?: readonly ArchivePreviewFamily[];
@@ -102,15 +202,19 @@ export function buildThreadArchiveConfirmation<
     : typedInChoice;
   const hasPreview = previews.some(({ archivePreview }) => archivePreview !== undefined);
   const keyOf = (thread: T | ArchivePreviewFamily["threads"][number]) =>
-    `${thread.environmentId}:${thread.id}`;
+    archivePreviewThreadKey(thread.environmentId, thread.id);
+  const selectedThreads = previews.flatMap((preview) => {
+    const kept = new Set(keptArchivePreviewThreadIds(preview, includeTypedIn));
+    return preview.threads.filter(({ id }) => !kept.has(id));
+  });
+  const selectedKeys = new Set(selectedThreads.map(keyOf));
+  const linkedMachines = buildLinkedArchiveSections(previews, selectedKeys, resolve);
+  const showBulkSelection = family.bulkPreviews !== undefined && linkedMachines.length > 0;
   const previewKeys = new Set(
-    hasPreview ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
+    hasPreview || showBulkSelection ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
   );
-  const selectedKeys = new Set(
-    previews.flatMap((preview) => {
-      const kept = new Set(keptArchivePreviewThreadIds(preview, includeTypedIn));
-      return preview.threads.filter(({ id }) => !kept.has(id)).map(keyOf);
-    }),
+  const archivesOnLinkedMachine = linkedMachines.some(({ environmentId }) =>
+    selectedThreads.some((thread) => thread.environmentId === environmentId),
   );
   const keep = (thread: T) => previewKeys.has(keyOf(thread)) && !selectedKeys.has(keyOf(thread));
   const inScope = (thread: T) => !hasPreview || previewKeys.has(keyOf(thread));
@@ -121,6 +225,7 @@ export function buildThreadArchiveConfirmation<
   const unreadCount = participants.filter(({ id }) => unreadIds.has(id)).length;
   const active = activeCount > 0;
   const unread = unreadCount > 0;
+  const onlyLinkedReview = linkedMachines.length > 0 && !hasPreview && !active && !unread;
   const protectedThreads = participants.filter((thread) => thread.persistent);
   const blocked = !family.canStopAndArchive || protectedThreads.length > 0;
   const canIncludeTypedIn = typedInChoice.some(
@@ -174,17 +279,22 @@ export function buildThreadArchiveConfirmation<
               { count: activeCount },
             ),
           )
-        : resolve(
-            msg(
-              "{count, plural, one {{count} thread has replies you haven't read.} other {{count} threads have replies you haven't read.}} Archiving closes the whole family. Replies stay in archived history.",
-              { count: unreadCount },
-            ),
-          );
+        : onlyLinkedReview
+          ? null
+          : resolve(
+              msg(
+                "{count, plural, one {{count} thread has replies you haven't read.} other {{count} threads have replies you haven't read.}} Archiving closes the whole family. Replies stay in archived history.",
+                { count: unreadCount },
+              ),
+            );
   const preservesAllHistory = !blocked && temporaryProjects.length === 0;
   const description = [
     summary,
     preservesAllHistory && active && unread
       ? resolve(msg("Unread replies stay in archived history."))
+      : null,
+    linkedMachines.length > 0 && !archivesOnLinkedMachine
+      ? resolve(msg("Threads on linked machines will stay open."))
       : null,
     preservesAllHistory
       ? resolve(msg("Unarchiving reopens history. Stopped work won't restart."))
@@ -200,12 +310,17 @@ export function buildThreadArchiveConfirmation<
     temporaryProjects,
     temporaryProjectsWarning:
       temporaryProjects.length > 0 ? resolve(TEMPORARY_PROJECT_ARCHIVE_WARNING) : null,
+    linkedMachines,
     confirmLabel: active
       ? resolve(msg("Stop active threads & archive"))
-      : hasPreview
+      : hasPreview || onlyLinkedReview
         ? resolve(msg("Archive threads"))
         : resolve(msg("Archive unread threads")),
-    disposition: active ? ("stop_and_archive" as const) : ("archive_after_review" as const),
+    disposition: active
+      ? ("stop_and_archive" as const)
+      : onlyLinkedReview
+        ? ("archive_if_idle" as const)
+        : ("archive_after_review" as const),
     threads: family.threads
       .filter(
         (thread) =>
@@ -328,7 +443,9 @@ export type ThreadArchiveFamily = Extract<
 export function resolveThreadArchiveFamily(
   family: ThreadArchiveFamily,
   resolve: MFunctionType = mFallback,
-  projectName: (thread: EnvironmentThreadShell) => string = ({ projectId }) => projectId,
+  projectName: (thread: Pick<EnvironmentThreadShell, "environmentId" | "projectId">) => string = ({
+    projectId,
+  }) => projectId,
 ) {
   const confirmation = buildThreadArchiveConfirmation(family, resolve);
   const details = confirmation.threads.map(({ thread, label, showLocation }) =>
@@ -338,6 +455,20 @@ export function resolveThreadArchiveFamily(
       label,
     ].join(" · "),
   );
+  const machines = confirmation.linkedMachines.map(({ environmentId, label, warnings, threads }) =>
+    [
+      label,
+      ...warnings,
+      ...threads.map((thread) =>
+        [
+          thread.title,
+          thread.projectTitle ?? projectName({ environmentId, projectId: thread.projectId }),
+          thread.label,
+        ].join(" · "),
+      ),
+      ...(!warnings.length && !threads.length ? [resolve(LINKED_ARCHIVE_EMPTY_MESSAGE)] : []),
+    ].join("\n"),
+  );
   return {
     ...family,
     confirmLabel: confirmation.confirmLabel,
@@ -346,6 +477,7 @@ export function resolveThreadArchiveFamily(
     message: [
       confirmation.description,
       details.join("\n"),
+      ...machines,
       confirmation.temporaryProjectsWarning,
       confirmation.temporaryProjects.map(({ title }) => title).join("\n"),
     ]
@@ -353,6 +485,8 @@ export function resolveThreadArchiveFamily(
       .join("\n\n"),
   };
 }
+
+export const LINKED_ARCHIVE_EMPTY_MESSAGE = msg("Nothing to review on this machine");
 
 export const THREAD_ARCHIVE_CONSULTATION_BUSY_MESSAGE = msg(
   "This agent is busy right now. Open its conversation, or stop active threads and archive.",

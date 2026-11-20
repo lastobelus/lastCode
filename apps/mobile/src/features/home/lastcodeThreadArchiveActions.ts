@@ -4,6 +4,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import {
   archivePreviewSelection,
   consultThreadArchiveAgent,
+  requiresThreadArchiveConfirmation,
   resolveThreadArchiveFamily,
   threadArchiveConsultationUnavailableReason,
   THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
@@ -90,7 +91,7 @@ export async function prepareLastCodeMobileThreadArchive(
   }
 
   const family = familyResult.value;
-  const childDisposition = family.requiresConfirmation
+  const childDisposition = requiresThreadArchiveConfirmation(family)
     ? await new Promise<ThreadArchiveChildDisposition | null>((resolve) => {
         const reviewFamily = () => {
           resolve(null);
@@ -232,12 +233,10 @@ export async function prepareLastCodeMobileThreadArchive(
           const confirmation = resolveThreadArchiveFamily(
             family,
             m,
-            (candidate) =>
+            ({ environmentId, projectId }) =>
               appAtomRegistry.get(
-                environmentProjects.projectAtom(
-                  scopeProjectRef(candidate.environmentId, candidate.projectId),
-                ),
-              )?.title ?? candidate.projectId,
+                environmentProjects.projectAtom(scopeProjectRef(environmentId, projectId)),
+              )?.title ?? projectId,
           );
           Dialog.alert(
             m(msg('Archive "{title}"?', { title: thread.title || m(msg("Untitled thread")) })),

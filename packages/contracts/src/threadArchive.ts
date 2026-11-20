@@ -88,6 +88,12 @@ export const ThreadArchiveTemporaryProjectPlan = Schema.Struct({
 });
 export type ThreadArchiveTemporaryProjectPlan = typeof ThreadArchiveTemporaryProjectPlan.Type;
 
+export const ThreadArchivePreviewThread = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  title: Schema.String,
+});
+
 export const ThreadArchivePreview = Schema.Struct({
   environmentId: EnvironmentId,
   typedInThreadIds: Schema.Array(ThreadId),
@@ -101,13 +107,7 @@ export const ThreadArchivePreview = Schema.Struct({
       }),
     ),
   ),
-  threads: Schema.Array(
-    Schema.Struct({
-      threadId: ThreadId,
-      projectId: ProjectId,
-      title: Schema.String,
-    }),
-  ),
+  threads: Schema.Array(ThreadArchivePreviewThread),
 });
 
 export const ThreadArchiveConsultationTarget = Schema.Struct({

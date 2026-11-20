@@ -13164,5 +13164,15 @@
   "6d41d41d8eb64606": "Avisos de hilos terminados",
   "f36fe70ddf163463": "Qué hilos avisan cuando terminan, fallan o alcanzan un límite de uso. Tus hilos son los que iniciaste o en los que enviaste un mensaje. Las solicitudes de entrada o aprobación siempre avisan.",
   "fb3e494a31288492": "notificación aviso completado terminado agente mcp delegado eval míos todos notification toast",
-  "cb49755a81176f6c": "Se eliminarán estos proyectos temporales y el historial de sus hilos. Sus carpetas y archivos permanecerán en el disco. Desarchivar no los restaurará."
+  "cb49755a81176f6c": "Se eliminarán estos proyectos temporales y el historial de sus hilos. Sus carpetas y archivos permanecerán en el disco. Desarchivar no los restaurará.",
+  "5767b3de281f2914": "Acceso denegado",
+  "0153c5b9fed9bc9b": "Actualiza este equipo para revisar sus hilos",
+  "01305ebe0785aec6": "El equipo ya no está vinculado",
+  "8ddeafa5a89dfb71": "Respondió otro equipo",
+  "efd21c99f6427833": "Pendiente",
+  "f71b8e9f2c4a743e": "Bloqueado",
+  "c679d979f46fb995": "Has escrito en esta conversación",
+  "a96e1f8d266f75fe": "No hay nada que revisar en este equipo",
+  "ad095a37f818d67e": "Equipos vinculados",
+  "06113789f35a4598": "Las conversaciones en equipos vinculados seguirán abiertas."
 }

@@ -197,6 +197,14 @@ it.each([false, true])(
             canPromote: false,
             canStopAndArchive: true,
             requiresConfirmation: true,
+            linkedArchivePreview: [
+              {
+                environmentId: EnvironmentId.make("linked-machine"),
+                label: "Build machine",
+                status: "pending",
+                reason: "offline",
+              },
+            ],
             archivePreview: {
               environmentId,
               threads: [root, child].map(({ id, title, projectId }) => ({
@@ -225,6 +233,11 @@ it.each([false, true])(
       </RegistryProvider>,
     );
     await screen.getByRole("button", { name: "Archive with saved copies" }).click();
+    const linkedMachines = page.getByRole("list", { name: "Linked machines" });
+    await expect
+      .element(linkedMachines.getByRole("heading", { name: "Build machine" }))
+      .toBeVisible();
+    await expect.element(linkedMachines.getByText("Pending · Offline")).toBeVisible();
     const savedCopies = page.getByRole("list", { name: "Saved copies to discard" });
     await expect
       .element(page.getByRole("list", { name: "Saved copies retained" }).getByText(/Saved work/))

@@ -10,6 +10,7 @@ import { create } from "zustand";
 import type { SavedWorkspace, ThreadArchiveChildDisposition } from "@t3tools/contracts";
 import { formatBytes } from "../lib/formatBytes";
 import { LastCodeArchiveTemporaryProjects } from "./LastCodeArchiveTemporaryProjects";
+import { LastCodeLinkedArchivePreview } from "./LastCodeLinkedArchivePreview";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import {
@@ -104,6 +105,9 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
                 </li>
               ))}
             </ul>
+          )}
+          {archiveFamily && (
+            <LastCodeLinkedArchivePreview machines={archiveFamily.linkedMachines} />
           )}
           {archiveFamily?.canIncludeTypedIn && (
             <label className="flex items-center gap-2 text-sm">

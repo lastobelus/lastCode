@@ -5583,5 +5583,14 @@
   "c9b2723ade9155f6": "Save dependency retention days",
   "f3287c4ed3bdb117": "Save",
   "45d8a48a56da69a3": "Filter settings environments",
-  "cb49755a81176f6c": "Esses projetos temporários e o histórico de suas threads serão excluídos. As pastas e os arquivos permanecerão no disco. O desarquivamento não os restaurará."
+  "cb49755a81176f6c": "Esses projetos temporários e o histórico de suas threads serão excluídos. As pastas e os arquivos permanecerão no disco. O desarquivamento não os restaurará.",
+  "5767b3de281f2914": "Acesso negado",
+  "0153c5b9fed9bc9b": "Atualize esta máquina para revisar as conversas",
+  "01305ebe0785aec6": "A máquina não está mais vinculada",
+  "8ddeafa5a89dfb71": "Outra máquina respondeu",
+  "efd21c99f6427833": "Pendente",
+  "f71b8e9f2c4a743e": "Bloqueado",
+  "c679d979f46fb995": "Você escreveu nesta conversa",
+  "a96e1f8d266f75fe": "Não há nada para revisar nesta máquina",
+  "06113789f35a4598": "As conversas nas máquinas vinculadas continuarão abertas."
 }

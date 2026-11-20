@@ -105,6 +105,8 @@ import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
+import * as LinkedArchivePreview from "./orchestration-v2/LastCodeLinkedArchivePreview.ts";
+import * as PeerArchiveTransport from "./peer/LastCodePeerArchiveTransport.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
@@ -937,11 +939,16 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
     Layer.provide(ProjectionStoreV2.layer),
   ),
+  PeerArchiveTransport.routeLayer.pipe(
+    Layer.provide(LinkedArchivePreview.layerHandler.pipe(Layer.provide(ProjectStore.layer))),
+    Layer.provide(McpOAuth.layerMcpClientAuthenticator),
+  ),
   // Follows delegated tasks running in linked environments, including after a restart.
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
 )
+  .pipe(Layer.provide(LinkedArchivePreview.layer.pipe(Layer.provide(PeerArchiveTransport.layer))))
   .pipe(
     Layer.provide(
       PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),

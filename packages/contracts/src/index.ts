@@ -87,6 +87,7 @@ export * from "./settingsSecretValue.ts";
 export * from "./clientRpcPermissions.ts";
 export * from "./threadRecovery.ts";
 export * from "./threadArchive.ts";
+export * from "./lastCodePeerArchive.ts";
 export * from "./lastCodeThreadOwnership.ts";
 
 export * from "./environmentPause.ts";

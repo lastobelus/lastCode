@@ -5583,5 +5583,14 @@
   "c9b2723ade9155f6": "Save dependency retention days",
   "f3287c4ed3bdb117": "Save",
   "45d8a48a56da69a3": "Filter settings environments",
-  "cb49755a81176f6c": "Ces projets temporaires et l’historique de leurs fils seront supprimés. Leurs dossiers et fichiers resteront sur le disque. Le désarchivage ne les restaurera pas."
+  "cb49755a81176f6c": "Ces projets temporaires et l’historique de leurs fils seront supprimés. Leurs dossiers et fichiers resteront sur le disque. Le désarchivage ne les restaurera pas.",
+  "5767b3de281f2914": "Accès refusé",
+  "0153c5b9fed9bc9b": "Mettez cette machine à jour pour examiner ses conversations",
+  "01305ebe0785aec6": "Cette machine n’est plus liée",
+  "8ddeafa5a89dfb71": "Une autre machine a répondu",
+  "efd21c99f6427833": "En attente",
+  "f71b8e9f2c4a743e": "Bloqué",
+  "c679d979f46fb995": "Vous avez écrit dans cette conversation",
+  "a96e1f8d266f75fe": "Rien à examiner sur cette machine",
+  "06113789f35a4598": "Les conversations sur les machines liées resteront ouvertes."
 }

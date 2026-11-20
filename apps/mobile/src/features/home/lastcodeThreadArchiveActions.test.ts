@@ -123,9 +123,15 @@ it("keeps newly busy-owner feedback visible without sending or granting archive 
   expect(test.review).not.toHaveBeenCalled();
 });
 
-it("keeps typed-in branches open and confirms only default projects", async () => {
+it("keeps local and linked typed-in branches open and confirms only default projects", async () => {
   const test = setup();
   const scratch = ProjectId.make("scratch");
+  const environmentId = EnvironmentId.make("linked-machine");
+  const linkedThread = {
+    threadId: test.child.id,
+    projectId: ProjectId.make("remote-project"),
+    title: "Linked work",
+  };
   test.loadArchiveFamily.mockResolvedValue(
     AsyncResult.success({
       ...test.family,
@@ -148,6 +154,22 @@ it("keeps typed-in branches open and confirms only default projects", async () =
           title,
         })),
       },
+      linkedArchivePreview: [
+        {
+          environmentId,
+          label: "Build machine",
+          status: "ready",
+          inventory: {
+            environmentId,
+            threads: [linkedThread],
+            typedInThreadIds: [linkedThread.threadId],
+            activeThreadIds: [linkedThread.threadId],
+            unreadThreadIds: [],
+            protectedThreadIds: [],
+            keptThreadIds: [linkedThread.threadId],
+          },
+        },
+      ],
     }),
   );
   const pending = prepareLastCodeMobileThreadArchive(test.owner, test);
@@ -155,6 +177,9 @@ it("keeps typed-in branches open and confirms only default projects", async () =
   expect(state.alerts[0]?.message).toContain("Keep open");
   expect(state.alerts[0]?.message).toContain("Unarchiving won't restore them.\n\nScratch");
   expect(state.alerts[0]?.message).not.toContain("Opt-in project");
+  expect(state.alerts[0]?.message).toContain(
+    `Build machine\nLinked work · ${linkedThread.projectId} · Keep open · Working · You wrote in this thread`,
+  );
   expect(state.alerts[0]?.buttons.map(({ text }) => text)).toEqual([
     "Cancel",
     "Review",

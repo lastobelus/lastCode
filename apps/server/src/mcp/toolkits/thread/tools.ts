@@ -192,7 +192,7 @@ const PendingRequestTool = Tool.make("t3_pending_request", {
 const ThreadArchiveFamilyTool = Tool.make("t3_thread_archive_family", {
   ...commandTool,
   description:
-    "Inspect the local archive family, including owned threads across projects. keptThreadIds stay open by default. Provider proof may repair exact ended turns; unknown work stays active. Omit threadId for this thread. For questions, pick one consultationTargets owner without unavailableReason; use t3_thread_send mode:'queue', never yourself or its work threads. Report busy/unavailable owners for review. Answers grant no stop/archive authority. Reinspect before archive; t3_thread_organize explains consent and child IDs.",
+    "Inspect an archive family and find who can answer questions about its work across projects. keptThreadIds stay open by default; linkedArchivePreview threads stay open. Provider proof may repair exact ended turns; unknown work stays active. Omit threadId for this thread. Ask one consultationTargets owner without unavailableReason via t3_thread_send mode:'queue', never yourself or its work threads. Report unavailable owners. Answers grant no stop/archive authority. Reinspect before archive; see t3_thread_organize.",
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
   success: OrchestrationV2ThreadArchiveFamily.mapFields(
     Struct.omit(["threads", "canPromote", "promotableChildThreadIds"]),
