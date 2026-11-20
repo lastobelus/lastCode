@@ -89,17 +89,14 @@ and worktree while you stay in the new thread composer. This requires a Git proj
 
 ## Organize related threads
 
-Ask an agent to create empty parent threads and move existing conversations under them.
+Ask an agent to create a group thread and move existing conversations under it.
 Parents can nest to any depth, and moving a parent brings its children along. A thread
 and its parent must be in the same project and environment.
 
-Organizing changes only where a thread sits. It doesn't change who created the thread,
+Organizing changes only where a thread sits. It doesn't change the thread's owner,
 stop or move running work, or change who receives a delegated task's result. A delegated
-child that its task still owns can't move until it is released.
-
-Archiving a parent archives the threads under it now, not ones moved elsewhere. To see a
-group, ask the agent to list a parent's children. To undo a move, ask it to put the thread
-back under its previous parent or at top level.
+child that its task still owns can't move until it is released. To see a group, ask the
+agent to list a parent's children. To undo a move, ask it to restore the previous placement.
 
 ## Pin and reorder threads
 
@@ -112,8 +109,11 @@ viewing. Discarding an unsent draft from the sidebar works the same way: Undo br
 back its text and attachments. `mod+z` triggers the most recent Undo, even from the composer; see
 [Keybindings](./keybindings.md#commands-with-special-behavior).
 
-Archiving includes grouped interactive children and subagents, recursively.
+Archiving includes grouped threads, subagents, and owned work in other projects on
+the same machine.
 If any family member is working or has unread replies, a confirmation lists it.
+Owned conversations you've typed in, and what they own, stay open unless you include
+them on web or desktop.
 **Stop active threads & archive** stops unfinished work, cancels pending approvals
 and queued messages, and archives the family. **Archive unread threads** preserves
 replies in archived history. Cancel to inspect children or make eligible threads
@@ -445,18 +445,23 @@ fill the screen; close the full-screen view to return to the parent and inspecto
 Stop on a thread also stops the subagents it delegated to.
 Before archiving the parent, wait for its delegated tasks to finish or cancel them.
 
+A thread an agent starts belongs to the thread that started it, unless you ask for
+a top-level thread. In the same project, owned threads appear under their owner,
+even across connected machines. In another project, they appear in a collapsed
+group named after their owner.
+
 To keep an owned thread as a top-level conversation, choose **Promote** from its
-sidebar menu. A launched child can be promoted while it runs. For a delegated
-task, wait for it to finish or cancel it first. Choose **Return to owner** to
-restore its original owner and default placement. If the owner is on another
-machine, the menu tells you its state there wasn't checked.
+sidebar menu. A launched child can be promoted while it runs. For a delegated task,
+wait until it has delivered its result and finished anything it's waiting on, such
+as a PR watch or Action. Choose **Return to owner** to restore its original owner
+and default placement. If the owner is on another machine, the menu tells you
+its state there wasn't checked.
 
-Archiving a thread also archives its grouped children. Restoring the parent restores
-children archived with it, without restarting stopped work. Deleting the parent
-deletes its subagents too. Restore the parent before restoring children archived with it. Independent
-conversations stay separate.
+Restoring a thread restores the conversations archived with it, without restarting
+stopped work. Restore the parent before restoring its archived children. Deleting
+the parent deletes its subagents too.
 
-Subagent threads started by the agent can't take messages; message the parent
+Provider-native subagents can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
 

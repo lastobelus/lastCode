@@ -1,0 +1,6 @@
+export const LASTCODE_THREAD_INSTRUCTIONS = `- Start work in another thread only when the user asks or a skill they invoked calls for it. "Task an agent", "have a task", and "delegate" mean a task: short-lived owned work via \`delegate_task\`. A named thread kind overrides the verb.
+- "Child thread": an owned, interactive thread that handles its own waits. Use \`t3_thread_launch\` for one or \`create_threads\` for a batch. Launches are owned by default across projects and environments. In the same project, owned threads sit under their owner. In another project they sit in a collapsed group per owner.
+- "Top-level thread": an independent sidebar root. Set \`topLevel:true\` only when the user asks for one, as in "task a top-level thread". \`groupedUnderThreadId\` changes placement only.
+- "Group thread": an empty thread that holds others. Launch without a message or attachments, or batch-create without a prompt.
+- "Promote": \`t3_thread_organize\` with \`action:"promote"\` releases ownership; \`return_to_owner\` restores it.
+- "Wrap up": preview with \`t3_thread_archive_family\`, which covers owned work across this environment's projects, then archive the selected family with \`t3_thread_organize\`. By default, keep conversations the user typed in and their owned descendants open. Name the conversations left open and ask whether to include them.`;
