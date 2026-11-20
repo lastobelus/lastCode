@@ -265,7 +265,8 @@ The derived files are `pnpm-lock.yaml`,
 Regeneration rewrites only those fixtures' instruction fields from the tree's
 runtime instructions. Resolve conflicts in their recorded behavior normally.
 
-The agent-context snapshot is refreshed from the completed checkpoint tree.
+Clean nightly carry checkpoints refresh the agent-context snapshot after replay.
+When replay needs a repair, the regeneration command below refreshes it.
 LastCode PR CI measures the proposed merge against its exact base and reports the
 byte change for each value. Growth in any value requires a maintainer to add
 `agent-context-increase` to the PR. Leave snapshot updates to checkpoint regeneration.
