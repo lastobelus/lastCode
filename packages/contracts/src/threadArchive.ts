@@ -6,7 +6,10 @@ import {
   RunAttemptId,
   ProjectId,
   EnvironmentId,
+  IsoDateTime,
+  TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { AuthMcpClientAccess } from "./auth.ts";
 import { RuntimeMode, ProviderInteractionMode } from "./providerPolicy.ts";
 import * as Schema from "effect/Schema";
 import type {
@@ -28,6 +31,16 @@ export const ThreadArchiveParticipant = Schema.Struct({
   status: Schema.Literals(["stopping", "failed"]),
   error: Schema.optional(Schema.String),
 });
+/** The destination's reviewed authority and human-message evidence survive shutdown. */
+export const ThreadArchivePeerGuard = Schema.Struct({
+  ownerEnvironmentId: EnvironmentId,
+  ownerThreadIds: Schema.Array(ThreadId),
+  linkSessionId: TrimmedNonEmptyString,
+  linkAccess: AuthMcpClientAccess,
+  typedIn: Schema.Array(Schema.Struct({ threadId: ThreadId, latestHumanMessageAt: IsoDateTime })),
+});
+export type ThreadArchivePeerGuard = typeof ThreadArchivePeerGuard.Type;
+
 /** Only the operation owner stores the family plan; participants hold a compact reference. */
 export const ThreadArchiveOperation = Schema.Struct({
   ...ThreadArchiveParticipant.fields,
@@ -44,6 +57,7 @@ export const ThreadArchiveOperation = Schema.Struct({
   childThreadIds: Schema.Array(ThreadId),
   archiveThreadIds: Schema.Array(ThreadId),
   promoteThreadIds: Schema.Array(ThreadId),
+  peer: Schema.optional(ThreadArchivePeerGuard),
   /** Keeps a limited caller's ceiling across provider shutdown and server recovery. */
   modeLimit: Schema.optional(
     Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
