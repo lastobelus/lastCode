@@ -255,9 +255,19 @@ describe("LastCode GitHub CI workflow", () => {
   });
 
   it.each([
-    { packages: "", filters: ["!t3", "!@t3tools/monorepo", "!@t3tools/web"] },
-    { packages: "@t3tools/scripts", filters: ["@t3tools/scripts"] },
-  ])("tests packages '$packages' on the project Node", ({ packages, filters }) => {
+    {
+      filters: [
+        "!t3",
+        "!@t3tools/monorepo",
+        "!@t3tools/web",
+        "!@t3tools/mobile",
+        "!@t3tools/scripts",
+        "!@t3tools/shared",
+      ],
+    },
+    { filters: ["@t3tools/scripts"] },
+    { filters: ["@t3tools/desktop", "@t3tools/ssh"] },
+  ])("forwards package filters $filters on the project Node", ({ filters }) => {
     const steps = asRecord(asRecord(asRecord(parse(workflow))?.jobs)?.test)?.steps;
     if (!Array.isArray(steps)) throw new Error("CI test job is missing its steps.");
     const script = steps.map(asRecord).find((step) => step?.name === "Test")?.run;
@@ -266,7 +276,7 @@ describe("LastCode GitHub CI workflow", () => {
     const result = NodeChildProcess.spawnSync(
       "bash",
       ["-e", "-c", `vp() { printf '%s\\n' "$*"; }\n${script}`],
-      { env: { ...process.env, TEST_PACKAGES: packages }, encoding: "utf8" },
+      { env: { ...process.env, TEST_FILTERS: filters.join(" ") }, encoding: "utf8" },
     );
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim().split("\n")).toEqual([

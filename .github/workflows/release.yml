@@ -265,11 +265,24 @@ jobs:
   # Keep tests on their own runners, using the same package split and server
   # shards as CI (test, test_web, test_server in ci.yml). Keep the two in sync.
   test:
-    name: Release tests
+    name: Release ${{ matrix.name }}
     needs: [preflight]
     if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match the full-run rows in .github/scripts/lastcode-ci-test-matrix.cjs.
+        include:
+          - name: tests
+            filters: "!t3 !@t3tools/monorepo !@t3tools/web !@t3tools/mobile !@t3tools/scripts !@t3tools/shared"
+          - name: mobile tests
+            filters: "@t3tools/mobile"
+          - name: script tests
+            filters: "@t3tools/scripts"
+          - name: shared tests
+            filters: "@t3tools/shared"
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -296,7 +309,13 @@ jobs:
           sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config build-essential attr acl e2fsprogs
 
       - name: Test
-        run: vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' --filter '!@t3tools/web' test
+        env:
+          TEST_FILTERS: ${{ matrix.filters }}
+        run: |
+          filters=()
+          read -r -a packages <<< "$TEST_FILTERS"
+          for package in "${packages[@]}"; do filters+=(--filter "$package"); done
+          vp run --parallel --concurrency-limit 4 "${filters[@]}" test
 
   # Web browser tests time out when they share a runner with the other package
   # suites: Chromium gets too little CPU and diff workers miss their 10s start budget.
