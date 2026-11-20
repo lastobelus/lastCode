@@ -124,7 +124,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
           yield* runLastCodeMigrations({ toMigrationInclusive: 20 });
           yield* sql`INSERT INTO auth_sessions(session_id, subject, scopes, method, issued_at, expires_at)
         VALUES ('existing', 'paired', '["orchestration:read"]', 'browser-session-cookie', '1970-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')`;
-          assert.deepEqual(yield* runDatabaseMigrations(), [[21, "ThreadReadAuthority"]]);
+          assert.deepEqual(yield* runDatabaseMigrations(), [
+            [21, "ThreadReadAuthority"],
+            [22, "ProjectRegistration"],
+          ]);
           const store = yield* Store.make;
           assert.isDefined(yield* store.captureAuthenticatedSessionAuthority("existing"));
           assert.deepEqual(yield* sql`SELECT * FROM lastcode_thread_read_grants`, []);

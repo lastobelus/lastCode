@@ -13283,5 +13283,9 @@
   "af190199950e20f4": "Le propriétaire de ce fil ne peut pas être changé.",
   "5256993b35562b07": "Retour impossible : le fil propriétaire est introuvable, archivé ou en cours d’archivage.",
   "606f561d56d94e2f": "La tâche est encore en cours pour le fil qui l’a demandée. Attendez qu’elle se termine ou annulez-la, puis promouvez le fil.",
-  "16a49bb79c3f2cdd": "Impossible de changer le propriétaire du fil"
+  "16a49bb79c3f2cdd": "Impossible de changer le propriétaire du fil",
+  "0c5204be873f3a76": "Afficher les projets temporaires",
+  "66dc3acf46bef713": "Conserver le projet",
+  "35fa9b4a4dc657c7": "Impossible de conserver le projet",
+  "a7c92c59b409fa46": "Projet temporaire"
 }

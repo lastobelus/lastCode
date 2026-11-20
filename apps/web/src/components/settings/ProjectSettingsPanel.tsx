@@ -55,6 +55,7 @@ import {
 } from "./ProjectFaviconPickerDialog";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
+import { KeepTemporaryProjectRows } from "./KeepTemporaryProjectRows";
 import {
   defaultProjectIcon,
   hasDefaultProjectIcon,
@@ -596,6 +597,7 @@ function ProjectDetail({
           </AlertDescription>
         </Alert>
         <SettingsSection id="project-overview" title={gt("Project")} hideTitle>
+          <KeepTemporaryProjectRows members={group.memberProjects} />
           {!canEditGroup ? (
             <p className="px-3 py-2 text-sm text-muted-foreground sm:px-4">
               {group.memberProjects.length > 1

@@ -13,6 +13,7 @@ import {
   createLastCodeSidebarProjectLookup,
   indexLastCodeSidebarThreads,
   sortLastCodeSidebarProjects,
+  temporaryProjectsWithThreads,
 } from "./lastcodeSidebarProjects";
 const first = EnvironmentId.make("first"),
   second = EnvironmentId.make("second");
@@ -60,6 +61,19 @@ function groups(
   });
 }
 describe("scoped sidebar collection", () => {
+  it("retains a hidden project's thread shelf when none of its older threads are loaded", () => {
+    const local = { ...projects[0]!, temporary: true };
+    const remote = { ...projects[1]!, temporary: true };
+    const empty = { ...local, id: ProjectId.make("empty") };
+    expect(
+      temporaryProjectsWithThreads(
+        [local, remote, empty],
+        [],
+        new Map([[second, new Map([[remote.id, 2]])]]),
+      ),
+    ).toEqual([remote]);
+  });
+
   it.each(["repository", "repository_path", "separate"] as const)(
     "preserves environment collisions and every deduplicated alias in %s",
     (mode) => {

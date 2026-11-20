@@ -295,6 +295,10 @@
       "types": "./src/state/projects.ts",
       "default": "./src/state/projects.ts"
     },
+    "./state/temporary-projects": {
+      "types": "./src/state/temporaryProjects.ts",
+      "default": "./src/state/temporaryProjects.ts"
+    },
     "./state/provider-instance-display": {
       "types": "./src/state/providerInstanceDisplay.ts",
       "default": "./src/state/providerInstanceDisplay.ts"

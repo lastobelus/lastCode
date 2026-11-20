@@ -8,6 +8,7 @@ import { useLastCodeSidebarShortcuts } from "./useLastCodeSidebarShortcuts";
 /** Compose route, family order and shortcuts with the existing three-thread prewarm cap. */
 export function useLastCodeSidebarNavigation(
   projects: readonly SidebarProjectSnapshot[],
+  threadOnlyProjects: readonly SidebarProjectSnapshot[],
   index: ReturnType<typeof indexLastCodeSidebarThreads>,
   expandedLists: ReadonlySet<string>,
 ) {
@@ -18,6 +19,7 @@ export function useLastCodeSidebarNavigation(
     route.routeThreadKey,
     expandedLists,
     index,
+    threadOnlyProjects,
   );
   const shortcuts = useLastCodeSidebarShortcuts(keys, index.byThreadKey, route);
   const prewarmKeys = getSidebarThreadIdsToPrewarm(keys);

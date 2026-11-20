@@ -13278,5 +13278,9 @@
   "af190199950e20f4": "No se puede cambiar el propietario de este hilo.",
   "5256993b35562b07": "No se puede devolver: el hilo propietario no existe, está archivado o se está archivando.",
   "606f561d56d94e2f": "La tarea sigue trabajando para el hilo que la solicitó. Espera a que termine o cancélala y luego promueve el hilo.",
-  "16a49bb79c3f2cdd": "No se pudo cambiar el propietario del hilo"
+  "16a49bb79c3f2cdd": "No se pudo cambiar el propietario del hilo",
+  "0c5204be873f3a76": "Mostrar proyectos temporales",
+  "66dc3acf46bef713": "Conservar proyecto",
+  "35fa9b4a4dc657c7": "No se pudo conservar el proyecto",
+  "a7c92c59b409fa46": "Proyecto temporal"
 }

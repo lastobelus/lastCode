@@ -48,6 +48,7 @@ import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
 import { requireRemoteDelegationPeer } from "../../linkOrigin.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { resolveLaunchOwnership } from "../../threadLaunchOwnership.ts";
+import { listAgentProjects, planAgentProjectRegistration } from "../../projectRegistration.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
@@ -559,9 +560,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     Effect.gen(function* () {
       const projects = yield* access;
       // Identities are resolved: linked environments find this side's project by repository.
-      const page = yield* projects
-        .listPage({ cursor: input.cursor ?? 0, limit: input.limit ?? 20 })
-        .pipe(Effect.mapError(unavailable));
+      const page = yield* listAgentProjects(projects, input).pipe(Effect.mapError(unavailable));
       return { ...page, projects: page.projects.map(yield* withSavedDefaultModel) };
     }),
   ),
@@ -578,9 +577,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     }),
   ),
   t3_project_create: McpToolAccess.writesEnvironment(
-    ({ workspaceRoot, ...input }) =>
+    ({ workspaceRoot, temporary, ...input }, check) =>
       Effect.gen(function* () {
         const projects = yield* Project.ProjectService;
+        const registration = yield* Effect.fromResult(
+          planAgentProjectRegistration(temporary, yield* check),
+        );
         if (workspaceRoot === undefined) {
           // Only updates record model defaults; reject defaults that creation would silently drop.
           if (
@@ -594,15 +596,17 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 "A project started from its title takes only a title; set scripts or defaultModelSelection afterwards with t3_project_update.",
             });
           const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
-          const created = yield* folders.createNamedProject({ name: input.title }).pipe(
-            Effect.mapError(
-              (error) =>
-                new OrchestratorMcpFailure({
-                  code: "orchestration_error",
-                  message: error.message,
-                }),
-            ),
-          );
+          const created = yield* folders
+            .createNamedProject({ name: input.title }, registration)
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message: error.message,
+                  }),
+              ),
+            );
           const project = yield* projects
             .getById(created.projectId)
             .pipe(
@@ -618,7 +622,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         const commandId = yield* newCommandId();
         return yield* projects
-          .create({ ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) })
+          .create(
+            { ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) },
+            registration,
+          )
           .pipe(Effect.mapError(projectFailure));
       }),
     // Linked work may bring the repository it works in; an existing

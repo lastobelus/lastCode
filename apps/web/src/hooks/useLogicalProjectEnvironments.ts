@@ -12,8 +12,8 @@ import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
-import { useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { useDraftProjectChoices } from "./useProjectPickerGroups";
 import { useClientSettings } from "./useSettings";
 
 export function useLogicalProjectEnvironments(
@@ -21,7 +21,7 @@ export function useLogicalProjectEnvironments(
   scratchDraft: boolean,
 ): readonly EnvironmentOption[] {
   const { environments } = useEnvironments();
-  const allProjects = useProjects();
+  const allProjects = useDraftProjectChoices(activeProject);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
 

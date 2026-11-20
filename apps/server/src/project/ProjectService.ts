@@ -6,6 +6,8 @@ import {
   ProjectId,
   type Project,
   type ProjectCreatePayload,
+  type ProjectRegistration,
+  type ThreadOwner,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
   type ProjectScript,
@@ -53,6 +55,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as AutoPullStatus from "./AutoPullStatus.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import { makeIsWorktreeContainer } from "./worktreeContainer.ts";
+import { projectRegistrationView, temporaryProjectsOwnedBy } from "./projectRegistration.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
@@ -156,10 +159,23 @@ export type ProjectServiceError =
   | ProjectInvalidError
   | ProjectOperationError;
 
+interface ProjectPageBounds {
+  readonly cursor: number;
+  readonly limit: number;
+}
+
+interface ProjectPage {
+  readonly projects: ReadonlyArray<Project>;
+  readonly nextCursor: number | null;
+}
+
 export class ProjectService extends Context.Service<
   ProjectService,
   {
-    readonly create: (input: ProjectCreateInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly create: (
+      input: ProjectCreateInput,
+      registration?: ProjectRegistration,
+    ) => Effect.Effect<Project, ProjectServiceError>;
     readonly bootstrap: (
       input: ProjectBootstrapInput,
     ) => Effect.Effect<
@@ -195,13 +211,14 @@ export class ProjectService extends Context.Service<
      * A page of active projects in creation order, each with its repository
      * identity resolved, so a caller can match projects by repository.
      */
-    readonly listPage: (input: {
-      readonly cursor: number;
-      readonly limit: number;
-    }) => Effect.Effect<
-      { readonly projects: ReadonlyArray<Project>; readonly nextCursor: number | null },
-      ProjectOperationError
-    >;
+    readonly listPage: (
+      input: ProjectPageBounds,
+    ) => Effect.Effect<ProjectPage, ProjectOperationError>;
+    /** Active temporary projects registered by this exact environment and thread. */
+    readonly listTemporaryOwnedBy: (
+      owner: ThreadOwner,
+      page?: ProjectPageBounds,
+    ) => Effect.Effect<ProjectPage, ProjectOperationError>;
     readonly getShell: (
       projectId: ProjectId,
     ) => Effect.Effect<Option.Option<OrchestrationProjectShell>, ProjectOperationError>;
@@ -252,6 +269,7 @@ export const make = Effect.gen(function* () {
     scripts: row.scripts,
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
+    ...projectRegistrationView(row.registration),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt,
@@ -461,7 +479,7 @@ export const make = Effect.gen(function* () {
   });
 
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
-    function* (input) {
+    function* (input, registration) {
       const workspaceRoot = yield* withProjectRootLease(
         Effect.gen(function* () {
           let root: string;
@@ -529,6 +547,7 @@ export const make = Effect.gen(function* () {
             projectId: input.projectId,
             title: input.title,
             workspaceRoot: root,
+            ...(registration === undefined ? {} : { registration }),
             ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
           });
           return root;
@@ -577,6 +596,7 @@ export const make = Effect.gen(function* () {
           ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
           ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
           ...(input.archived === undefined ? {} : { archived: input.archived }),
+          ...(input.keepTemporary === undefined ? {} : { keepTemporary: input.keepTemporary }),
         });
         if (workspaceRoot !== previousRoot) {
           yield* rootGuard.protect(workspaceRoot);
@@ -965,26 +985,35 @@ export const make = Effect.gen(function* () {
     } satisfies ProjectSnapshot;
   });
 
-  const listPage: ProjectService["Service"]["listPage"] = Effect.fn("ProjectService.listPage")(
-    function* ({ cursor, limit }) {
-      const rows = (yield* listRows).filter((project) => project.deletedAt === null);
-      const projects = yield* Effect.forEach(
-        rows.slice(cursor, cursor + limit),
-        (row) =>
-          hydrate(row).pipe(
-            Effect.filterOrElse(
-              (project) => project.repositoryIdentity !== null,
-              (project) =>
-                projectEnrichment
-                  .readRepositoryIdentity(project.workspaceRoot)
-                  .pipe(Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity }))),
-            ),
+  const pageOfRows = Effect.fn("ProjectService.pageOfRows")(function* (
+    rows: ReadonlyArray<ProjectStore.ProjectRow>,
+    { cursor, limit }: ProjectPageBounds,
+  ) {
+    const projects = yield* Effect.forEach(
+      rows.slice(cursor, cursor + limit),
+      (row) =>
+        hydrate(row).pipe(
+          Effect.filterOrElse(
+            (project) => project.repositoryIdentity !== null,
+            (project) =>
+              projectEnrichment
+                .readRepositoryIdentity(project.workspaceRoot)
+                .pipe(Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity }))),
           ),
-        { concurrency: 8 },
-      );
-      return { projects, nextCursor: cursor + limit < rows.length ? cursor + limit : null };
-    },
-  );
+        ),
+      { concurrency: 8 },
+    );
+    return { projects, nextCursor: cursor + limit < rows.length ? cursor + limit : null };
+  });
+
+  const listPage: ProjectService["Service"]["listPage"] = (page) =>
+    listRows.pipe(Effect.flatMap((rows) => pageOfRows(rows, page)));
+
+  const listTemporaryOwnedBy: ProjectService["Service"]["listTemporaryOwnedBy"] = (owner, page) =>
+    listRows.pipe(
+      Effect.map((rows) => temporaryProjectsOwnedBy(rows, owner)),
+      Effect.flatMap((rows) => pageOfRows(rows, page ?? { cursor: 0, limit: rows.length })),
+    );
 
   return ProjectService.of({
     create,
@@ -997,6 +1026,7 @@ export const make = Effect.gen(function* () {
     workspaceScanDirectory,
     snapshot,
     listPage,
+    listTemporaryOwnedBy,
     getShell,
     listShells,
   });

@@ -1,6 +1,15 @@
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import {
+  discoverableProjects,
+  isTemporaryProject,
+  showTemporaryProjectsAtom,
+} from "@t3tools/client-runtime/state/temporary-projects";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useMessages } from "gt-react";
 import { useProjects, useThreadShells } from "../../state/entities";
+import { environmentProjects } from "../../state/projects";
+import { olderSettledThreads } from "../../state/threads";
 import { useClientSettings, useClientSetting } from "../../hooks/useSettings";
 import { useUiStateStore, legacyProjectCwdPreferenceKey } from "../../uiStateStore";
 import {
@@ -14,7 +23,21 @@ import {
   createLastCodeSidebarProjectLookup,
   indexLastCodeSidebarThreads,
   sortLastCodeSidebarProjects,
+  temporaryProjectsWithThreads,
 } from "./lastcodeSidebarProjects";
+
+const olderTemporaryThreadCountsAtom = Atom.make((get) => {
+  const hidden = get(showTemporaryProjectsAtom)
+    ? []
+    : get(environmentProjects.projectsAtom).filter(isTemporaryProject);
+  return new Map(
+    Array.from(new Set(hidden.map((project) => project.environmentId)), (environmentId) => [
+      environmentId,
+      get(olderSettledThreads.olderSettledAtom(environmentId))?.counts,
+    ]),
+  );
+});
+
 interface ProjectEnvironments {
   primaryEnvironmentId: EnvironmentId | null;
   scratchWorkspaceRootsByEnvironmentId: ReadonlyMap<EnvironmentId, string>;
@@ -46,20 +69,42 @@ export function useLastCodeSidebarProjects(environments: ProjectEnvironments) {
     desktopLocalEnvironmentIds,
     wslEnvironmentIds,
   } = environments;
-  const groups = buildSidebarProjectSnapshots({
-    projects: orderedProjects,
+  const projectGrouping = {
     settings,
     primaryEnvironmentId,
-    scratchWorkspaceRootsByEnvironmentId,
     resolveMessage: messages,
-    resolveEnvironmentLabel: (id) => environmentLabelById.get(id) ?? null,
-    isDesktopLocalEnvironment: (id) => desktopLocalEnvironmentIds.has(id),
-    isWslEnvironment: (id) => wslEnvironmentIds.has(id),
+    resolveEnvironmentLabel: (id: EnvironmentId) => environmentLabelById.get(id) ?? null,
+    isDesktopLocalEnvironment: (id: EnvironmentId) => desktopLocalEnvironmentIds.has(id),
+    isWslEnvironment: (id: EnvironmentId) => wslEnvironmentIds.has(id),
+  };
+  const visibleProjects = discoverableProjects(
+    orderedProjects,
+    useAtomValue(showTemporaryProjectsAtom),
+  );
+  const groups = buildSidebarProjectSnapshots({
+    ...projectGrouping,
+    projects: visibleProjects,
+    scratchWorkspaceRootsByEnvironmentId,
   });
-  const resolveProjectKey = createLastCodeSidebarProjectLookup(orderedProjects, groups);
+  const olderCounts = useAtomValue(olderTemporaryThreadCountsAtom);
+  const threadGroups =
+    visibleProjects === orderedProjects
+      ? []
+      : buildSidebarProjectSnapshots({
+          ...projectGrouping,
+          projects: temporaryProjectsWithThreads(orderedProjects, threads, olderCounts),
+          groupScratchProjects: false,
+        }).map((group) => ({ ...group, projectKey: `temporary:${group.projectKey}` }));
+  const resolveProjectKey = createLastCodeSidebarProjectLookup(orderedProjects, [
+    ...groups,
+    ...threadGroups,
+  ]);
   const hiddenThreadKeys = useLastCodeHiddenThreadKeys(threads);
   const index = indexLastCodeSidebarThreads(threads, resolveProjectKey, hiddenThreadKeys);
   const sortedProjects = sortLastCodeSidebarProjects(groups, threads, resolveProjectKey, sortOrder);
+  const threadOnlyProjects = threadGroups.length
+    ? sortLastCodeSidebarProjects(threadGroups, threads, resolveProjectKey, sortOrder)
+    : [];
   const orderedProjectKeys = orderedProjects.map(getProjectOrderKey);
-  return { sortedProjects, orderedProjectKeys, resolveProjectKey, index };
+  return { sortedProjects, threadOnlyProjects, orderedProjectKeys, resolveProjectKey, index };
 }
