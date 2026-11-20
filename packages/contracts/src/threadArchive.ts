@@ -1,4 +1,12 @@
-import { ThreadId, CommandId, NodeId, RunId, RunAttemptId } from "./baseSchemas.ts";
+import {
+  ThreadId,
+  CommandId,
+  NodeId,
+  RunId,
+  RunAttemptId,
+  ProjectId,
+  EnvironmentId,
+} from "./baseSchemas.ts";
 import { RuntimeMode, ProviderInteractionMode } from "./providerPolicy.ts";
 import * as Schema from "effect/Schema";
 import type {
@@ -24,7 +32,8 @@ export const ThreadArchiveParticipant = Schema.Struct({
 export const ThreadArchiveOperation = Schema.Struct({
   ...ThreadArchiveParticipant.fields,
   /** Missing on deployed plans whose consent covered delegated ownership only. */
-  familyVersion: Schema.optional(Schema.Literal(1)),
+  familyVersion: Schema.optional(Schema.Literals([1, 2])),
+  includeTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
   // Already-deployed pending operations may finish their original promotion plan.
   childDisposition: Schema.Literals([
     "archive_if_idle",
@@ -44,6 +53,18 @@ export const ThreadArchivePending = Schema.Union([
   ThreadArchiveOperation,
   ThreadArchiveParticipant,
 ]);
+
+export const ThreadArchivePreview = Schema.Struct({
+  environmentId: EnvironmentId,
+  typedInThreadIds: Schema.Array(ThreadId),
+  threads: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      projectId: ProjectId,
+      title: Schema.String,
+    }),
+  ),
+});
 
 export const ThreadArchiveConsultationTarget = Schema.Struct({
   ownerThreadId: ThreadId,
@@ -130,17 +151,22 @@ export function getArchiveFamilyParentThreadId(
 export function getOwnedThreadFamily<T extends FamilyThread>(
   threads: ReadonlyArray<T>,
   rootThreadId: ThreadId,
+  recordedParentOf?: (thread: T) => ThreadId | null,
 ) {
   const byId = new Map(threads.map((thread) => [thread.id, thread]));
-  const parentOf = (thread: T) =>
-    getArchiveFamilyParentThreadId(thread, byId.get(getInteractiveThreadParentThreadId(thread)!));
+  const parentsOf = (thread: T) =>
+    new Set([
+      getArchiveFamilyParentThreadId(thread, byId.get(getInteractiveThreadParentThreadId(thread)!)),
+      recordedParentOf?.(thread) ?? null,
+    ]);
   const byParent = new Map<ThreadId, T[]>();
   for (const thread of threads) {
-    const parent = parentOf(thread);
-    if (parent === null) continue;
-    const siblings = byParent.get(parent) ?? [];
-    siblings.push(thread);
-    byParent.set(parent, siblings);
+    for (const parent of parentsOf(thread)) {
+      if (parent === null) continue;
+      const siblings = byParent.get(parent) ?? [];
+      siblings.push(thread);
+      byParent.set(parent, siblings);
+    }
   }
   const visited = new Set<ThreadId>([rootThreadId]);
   const children: T[] = [];
@@ -159,7 +185,7 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
     }
   };
   visit(rootThreadId);
-  const directChildren = children.filter((child) => parentOf(child) === rootThreadId);
+  const directChildren = children.filter((child) => parentsOf(child).has(rootThreadId));
   const promotableChildren = directChildren.filter((child) => child.creationSource !== "provider");
   const nativeChildren = directChildren.filter((child) => child.creationSource === "provider");
   const protectedChildren = children.filter((child) => child.persistent === true);

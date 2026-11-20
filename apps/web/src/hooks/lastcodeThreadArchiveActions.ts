@@ -11,6 +11,7 @@ import {
 } from "@t3tools/client-runtime/environment";
 import {
   archiveRetryThreadId,
+  archivePreviewSelection,
   consultThreadArchiveAgent,
   THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
 } from "@t3tools/client-runtime/state/thread-archive";
@@ -176,6 +177,8 @@ export function createLastCodeThreadArchiveActions(ports: {
       familyChoice?: {
         childDisposition: ThreadArchiveChildDisposition;
         expectedChildThreadIds: readonly ThreadId[];
+        expectedArchiveThreadIds?: readonly ThreadId[];
+        includeTypedInThreadIds?: readonly ThreadId[];
       };
       familyOwner?: EnvironmentThreadShell;
       familySnapshot?: ArchiveFamily;
@@ -239,6 +242,7 @@ export function createLastCodeThreadArchiveActions(ports: {
 
     let savedWorkspace: SavedWorkspaceDisposition | undefined;
     let lifecycleChildDisposition: ThreadArchiveChildDisposition | undefined;
+    let lifecycleIncludeTypedIn: boolean | undefined;
     if (opts.discardSavedWorkspace) {
       const confirmation = await settlePromise(() =>
         workspaceLifecycle.confirm(
@@ -268,9 +272,20 @@ export function createLastCodeThreadArchiveActions(ports: {
       if (confirmation.value === null) return AsyncResult.failure(Cause.interrupt());
       savedWorkspace = confirmation.value.dispositions[0];
       lifecycleChildDisposition = confirmation.value.childDisposition;
+      lifecycleIncludeTypedIn = confirmation.value.includeTypedIn;
     }
     const expectedChildThreadIds = family?.childThreadIds ?? [];
-    const mutate = (childDisposition?: ThreadArchiveChildDisposition) => {
+    let participantIds: readonly ThreadId[] = [];
+    const mutate = (childDisposition?: ThreadArchiveChildDisposition, includeTypedIn?: boolean) => {
+      const selection =
+        familyChoice ??
+        (family === null
+          ? {}
+          : archivePreviewSelection(family, includeTypedIn ?? lifecycleIncludeTypedIn));
+      participantIds = selection.expectedArchiveThreadIds ?? [
+        threadRef.threadId,
+        ...expectedChildThreadIds,
+      ];
       action?.finish();
       action = ThreadUndo.begin("archive", scopedThreadKey(threadRef));
       return archiveThreadMutation({
@@ -285,6 +300,7 @@ export function createLastCodeThreadArchiveActions(ports: {
                   childDisposition:
                     childDisposition ?? lifecycleChildDisposition ?? "archive_if_idle",
                   expectedChildThreadIds,
+                  ...selection,
                 }
               : {})),
         },
@@ -332,8 +348,8 @@ export function createLastCodeThreadArchiveActions(ports: {
               },
             }
           : {}),
-        submit: async (selected) => {
-          archiveResult = await mutate(selected);
+        submit: async (selected, includeTypedIn) => {
+          archiveResult = await mutate(selected, includeTypedIn);
           if (archiveResult._tag === "Success") return null;
           const error = squashAtomCommandFailure(archiveResult);
           const message = error instanceof Error ? error.message : "The archive did not complete.";
@@ -373,7 +389,7 @@ export function createLastCodeThreadArchiveActions(ports: {
       action.finish();
       return archiveResult;
     }
-    for (const threadId of [threadRef.threadId, ...(family?.childThreadIds ?? [])]) {
+    for (const threadId of participantIds) {
       expireThreadUndos(
         scopeThreadRef(threadRef.environmentId, threadId),
         LIST_PLACEMENT_UNDO_KINDS,
@@ -384,7 +400,7 @@ export function createLastCodeThreadArchiveActions(ports: {
       currentRouteThreadRef.environmentId === threadRef.environmentId &&
       (currentRouteThreadRef.threadId === threadRef.threadId ||
         currentRouteThreadRef.threadId === target.threadId ||
-        (family?.childThreadIds.includes(currentRouteThreadRef.threadId) ?? false));
+        participantIds.includes(currentRouteThreadRef.threadId));
     const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
     if (wokeAt !== null) {
       markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -528,7 +544,7 @@ export function createLastCodeThreadArchiveActions(ports: {
         >
       | undefined;
     const entriesByKey = new Map(entries.map((entry) => [entry.threadKey, entry]));
-    const perform = async (choice: ThreadArchiveChildDisposition) => {
+    const perform = async (choice: ThreadArchiveChildDisposition, includeTypedIn?: boolean) => {
       const attempt = await archiveSelectedThreadEntries({
         entries,
         archive: (entry, onArchived) => {
@@ -539,6 +555,10 @@ export function createLastCodeThreadArchiveActions(ports: {
             familyChoice: {
               childDisposition: choice,
               expectedChildThreadIds: family.childThreadIds,
+              ...archivePreviewSelection(
+                family,
+                includeTypedIn && (family.archivePreview?.typedInThreadIds.length ?? 0) > 0,
+              ),
             },
             familyOwner: owner,
             familySnapshot: family,
@@ -550,7 +570,11 @@ export function createLastCodeThreadArchiveActions(ports: {
       for (const threadKey of attempt.archivedThreadKeys) {
         const entry = entriesByKey.get(threadKey);
         if (!entry) continue;
-        for (const threadId of [entry.owner.id, ...entry.family.childThreadIds]) {
+        const selection = archivePreviewSelection(entry.family, includeTypedIn);
+        for (const threadId of selection.expectedArchiveThreadIds ?? [
+          entry.owner.id,
+          ...entry.family.childThreadIds,
+        ]) {
           completedParticipantKeys.add(
             scopedThreadKey(scopeThreadRef(entry.threadRef.environmentId, threadId)),
           );
@@ -590,6 +614,9 @@ export function createLastCodeThreadArchiveActions(ports: {
           unreadThreadIds: entries.flatMap(({ family }) => family.unreadThreadIds),
           protectedChildThreadIds: entries.flatMap(({ family }) => family.protectedChildThreadIds),
           canStopAndArchive: entries.every(({ family }) => family.canStopAndArchive),
+          ...(entries.some(({ family }) => family.archivePreview !== undefined)
+            ? { bulkPreviews: entries.map(({ family }) => family) }
+            : {}),
         },
         submit: perform,
       });

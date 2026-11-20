@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   alerts: [] as { message: string; buttons: { text: string; onPress?: () => void }[] }[],
 }));
 vi.mock("../../state/threads", () => ({ environmentThreadShells: { threadShellsAtom: "shells" } }));
+vi.mock("../../state/projects", () => ({ environmentProjects: { projectAtom: () => "project" } }));
 vi.mock("../../state/server", () => ({ environmentServerConfigsAtom: "configs" }));
 vi.mock("../../state/atom-registry", () => ({
   appAtomRegistry: {

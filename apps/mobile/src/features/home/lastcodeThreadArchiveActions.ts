@@ -1,6 +1,8 @@
 import type { AtomCommand, AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
+  archivePreviewSelection,
   consultThreadArchiveAgent,
   resolveThreadArchiveFamily,
   threadArchiveConsultationUnavailableReason,
@@ -17,6 +19,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { m } from "../../i18n/messages";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentProjects } from "../../state/projects";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { environmentThreadShells, type threadEnvironment } from "../../state/threads";
 
@@ -87,8 +90,11 @@ export async function prepareLastCodeMobileThreadArchive(
   }
 
   const family = familyResult.value;
-  const childDisposition = family.requiresConfirmation
-    ? await new Promise<ThreadArchiveChildDisposition | null>((resolve) => {
+  const choice = family.requiresConfirmation
+    ? await new Promise<{
+        childDisposition: ThreadArchiveChildDisposition;
+        includeTypedIn?: boolean;
+      } | null>((resolve) => {
         const reviewFamily = () => {
           resolve(null);
           ports.review({ environmentId: thread.environmentId, threadId: thread.id });
@@ -225,8 +231,18 @@ export async function prepareLastCodeMobileThreadArchive(
           };
           selectOwner(0);
         };
-        const showFamily = () => {
-          const confirmation = resolveThreadArchiveFamily(family, m);
+        const showFamily = (includeTypedIn = false) => {
+          const confirmation = resolveThreadArchiveFamily(
+            family,
+            m,
+            includeTypedIn,
+            (candidate) =>
+              appAtomRegistry.get(
+                environmentProjects.projectAtom(
+                  scopeProjectRef(candidate.environmentId, candidate.projectId),
+                ),
+              )?.title ?? candidate.projectId,
+          );
           Dialog.alert(
             m(msg('Archive "{title}"?', { title: thread.title || m(msg("Untitled thread")) })),
             confirmation.message,
@@ -238,16 +254,24 @@ export async function prepareLastCodeMobileThreadArchive(
                 style: "cancel",
                 onPress: () => resolve(null),
               },
-              {
-                text: m(msg("Review", { $context: "verb, inspect a thread before archiving" })),
-                onPress: review,
-              },
+              confirmation.canIncludeTypedIn
+                ? {
+                    text: includeTypedIn
+                      ? m(msg("Keep threads you’ve written in open"))
+                      : m(msg("Also archive threads you’ve written in")),
+                    onPress: () => showFamily(!includeTypedIn),
+                  }
+                : {
+                    text: m(msg("Review", { $context: "verb, inspect a thread before archiving" })),
+                    onPress: review,
+                  },
               ...(!confirmation.blocked
                 ? [
                     {
                       text: confirmation.confirmLabel,
                       style: "destructive" as const,
-                      onPress: () => resolve(confirmation.disposition),
+                      onPress: () =>
+                        resolve({ childDisposition: confirmation.disposition, includeTypedIn }),
                     },
                   ]
                 : []),
@@ -257,16 +281,18 @@ export async function prepareLastCodeMobileThreadArchive(
         };
         showFamily();
       })
-    : "archive_if_idle";
-  if (childDisposition === null) return null;
+    : { childDisposition: "archive_if_idle" as const };
+  if (choice === null) return null;
+  const selection = archivePreviewSelection(family, choice.includeTypedIn);
   return {
     owner: thread,
-    participantIds: [thread.id, ...family.childThreadIds],
+    participantIds: selection.expectedArchiveThreadIds ?? [thread.id, ...family.childThreadIds],
     input: {
       threadId: thread.id,
       ...(failedAttempt === undefined ? {} : { expectedArchiveCommandId: failedAttempt.commandId }),
-      childDisposition,
+      childDisposition: choice.childDisposition,
       expectedChildThreadIds: family.childThreadIds,
+      ...selection,
     },
   };
 }

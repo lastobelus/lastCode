@@ -5,6 +5,7 @@ import {
   getThreadArchivePlan,
   isOrchestrationV2WorkActive,
   isOwnedSubagentThread,
+  type EnvironmentId,
   type OrchestrationV2AppThread,
   type OrchestrationV2Command,
   type OrchestrationV2DomainEvent,
@@ -13,9 +14,11 @@ import {
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2ThreadArchiveFamily,
   type ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import { getThreadOwner } from "@t3tools/shared/threadOwnership";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -61,6 +64,8 @@ type ArchiveEffect<A = void> = Effect.Effect<A, OrchestratorV2Error>;
 type WithLock = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
 
 interface LastCodeArchivePlannerPorts {
+  readonly environmentId?: EnvironmentId;
+
   readonly reader: {
     readonly store: Pick<
       ProjectionStoreV2Shape,
@@ -75,6 +80,9 @@ interface LastCodeArchivePlannerPorts {
     readonly ownedThreadFamily: (
       command: OrchestrationV2ServerCommand,
     ) => ArchiveEffect<ReadonlyArray<ThreadId>>;
+    readonly readArchiveFamilyShells: (
+      threadId: ThreadId,
+    ) => ArchiveEffect<ReadonlyArray<OrchestrationV2ThreadShell>>;
     readonly archiveFamilyShells: (
       command: OrchestrationV2ServerCommand,
     ) => ArchiveEffect<ReadonlyArray<OrchestrationV2ThreadShell>>;
@@ -82,10 +90,12 @@ interface LastCodeArchivePlannerPorts {
       command: OrchestrationV2ServerCommand,
       thread: OrchestrationV2ThreadShell | OrchestrationV2AppThread,
     ) => ArchiveEffect<ThreadId | null>;
-    readonly archiveThreadPolicy: (
-      thread: OrchestrationV2ThreadShell,
-    ) => Effect.Effect<
-      { readonly unfinished: boolean; readonly unread: boolean },
+    readonly archiveThreadPolicy: (thread: OrchestrationV2ThreadShell) => Effect.Effect<
+      {
+        readonly unfinished: boolean;
+        readonly unread: boolean;
+        readonly requiresConfirmation: boolean;
+      },
       ProjectionStoreV2Error
     >;
     readonly liveSideChatIds: (threadId: ThreadId) => ArchiveEffect<ReadonlyArray<ThreadId>>;
@@ -169,6 +179,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     store: projectionStore,
     ownedThreadFamily,
     archiveFamilyShells,
+    readArchiveFamilyShells,
     readArchiveFamilyParentThreadId,
     archiveThreadPolicy,
     liveSideChatIds,
@@ -205,6 +216,148 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
             }),
         ),
       );
+
+  const recordedParentOf = (thread: OrchestrationV2ThreadShell | OrchestrationV2AppThread) => {
+    if (ports.environmentId === undefined) return null;
+    const owner = getThreadOwner(thread, ports.environmentId);
+    return owner?.environmentId === ports.environmentId ? owner.threadId : null;
+  };
+
+  const selectArchiveFamily = (
+    shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+    rootId: ThreadId,
+  ) => {
+    const family = getOwnedThreadFamily(shells, rootId, recordedParentOf);
+    const typedInThreadIds = family.children
+      .filter(
+        (thread) => recordedParentOf(thread) !== null && thread.latestUserAuthoredMessageAt != null,
+      )
+      .map((thread) => thread.id);
+    const keptThreadIds = new Set(
+      typedInThreadIds.flatMap((id) => [
+        id,
+        ...getOwnedThreadFamily(shells, id, recordedParentOf).children.map((thread) => thread.id),
+      ]),
+    );
+    keptThreadIds.delete(rootId);
+    const legacyIds = new Set(getOwnedThreadFamily(shells, rootId).children.map(({ id }) => id));
+    const widened = family.children.filter(({ id }) => !legacyIds.has(id));
+    const selectedIds = new Set([
+      rootId,
+      ...family.children.filter(({ id }) => !keptThreadIds.has(id)).map(({ id }) => id),
+    ]);
+    const groupIds = new Set(
+      widened.filter(({ id }) => selectedIds.has(id)).map(getInteractiveThreadParentThreadId),
+    );
+    const emptyGroups = shells.filter(
+      (group) =>
+        groupIds.has(group.id) &&
+        group.id !== rootId &&
+        !selectedIds.has(group.id) &&
+        !keptThreadIds.has(group.id) &&
+        group.groupThread === true &&
+        group.lineage.independent !== true &&
+        group.archivedAt === null &&
+        group.deletedAt === null &&
+        group.persistent !== true &&
+        group.workspaceUserAdopted !== true &&
+        group.actionResume?.outcome !== "running" &&
+        (group.archivePending?.status !== "failed" || group.archivePending.threadId === rootId) &&
+        group.latestRunId === null &&
+        group.latestUserMessageAt === null &&
+        group.latestVisibleMessage === null &&
+        shells.every(
+          (thread) =>
+            thread.archivedAt !== null ||
+            thread.deletedAt !== null ||
+            (getArchiveFamilyParentThreadId(thread, group) !== group.id &&
+              recordedParentOf(thread) !== group.id) ||
+            selectedIds.has(thread.id),
+        ),
+    );
+    return {
+      ...family,
+      children: [...family.children, ...emptyGroups],
+      typedInThreadIds,
+      keptThreadIds,
+      expanded: widened.length > 0,
+    };
+  };
+
+  const getThreadArchiveFamily = Effect.fn("LastCodeArchivePlanner.getThreadArchiveFamily")(
+    function* (
+      threadId: ThreadId,
+    ): Effect.fn.Return<OrchestrationV2ThreadArchiveFamily, OrchestratorV2Error> {
+      const shells = yield* readArchiveFamilyShells(threadId);
+      const family = selectArchiveFamily(shells, threadId);
+      const owner = shells.find((thread) => thread.id === threadId);
+      const threads = owner === undefined ? [...family.children] : [owner, ...family.children];
+      const hasArchivePreview = family.expanded || family.typedInThreadIds.length > 0;
+      if (hasArchivePreview) {
+        const familyIds = new Set(threads.map(({ id }) => id));
+        const sideChats = yield* archivableSideChats(threadId).pipe(
+          Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+        );
+        for (const { id } of sideChats) {
+          if (familyIds.has(id)) continue;
+          const shell = yield* projectionStore
+            .getThreadShell(id)
+            .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+          if (shell !== null) threads.push(shell);
+        }
+      }
+      const archiveCandidates = threads.filter(({ id }) => !family.keptThreadIds.has(id));
+      const activity = yield* Effect.forEach(threads, (thread) =>
+        archiveThreadPolicy(thread).pipe(
+          Effect.map((policy) => ({ id: thread.id, ...policy })),
+          Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+        ),
+      );
+      const activeThreadIds = activity.filter((entry) => entry.unfinished).map((entry) => entry.id);
+      const unreadThreadIds = activity.filter((entry) => entry.unread).map((entry) => entry.id);
+      const protectedChildThreadIds = threads
+        .filter(({ id, persistent }) => id !== threadId && persistent === true)
+        .map(({ id }) => id);
+      const protectedArchiveCandidate = protectedChildThreadIds.some(
+        (id) => !family.keptThreadIds.has(id),
+      );
+      return {
+        threads,
+        ...(hasArchivePreview && ports.environmentId !== undefined
+          ? {
+              archivePreview: {
+                environmentId: ports.environmentId,
+                typedInThreadIds: family.typedInThreadIds,
+                threads: threads.map(({ id, projectId, title }) => ({
+                  threadId: id,
+                  projectId,
+                  title,
+                })),
+              },
+            }
+          : {}),
+        childThreadIds: family.children.map(({ id }) => id),
+        activeThreadIds,
+        unreadThreadIds,
+        activeChildThreadIds: activeThreadIds.filter((id) =>
+          family.children.some((child) => child.id === id),
+        ),
+        promotableChildThreadIds: [],
+        keptThreadIds: [...family.keptThreadIds],
+        protectedChildThreadIds,
+        nativeStopCount: archiveCandidates.filter(
+          ({ id, creationSource }) => id !== threadId && creationSource === "provider",
+        ).length,
+        requiresConfirmation:
+          hasArchivePreview ||
+          activity.some((entry) => entry.requiresConfirmation) ||
+          protectedArchiveCandidate,
+        canPromote: false,
+        canStopAndArchive: owner?.persistent !== true && !protectedArchiveCandidate,
+      };
+    },
+  );
+
   const WORKSPACE_PREPARATION_INPUT = "Preparing workspace";
 
   // An already archived intermediate owner retains its own restore cohort.
@@ -259,9 +412,8 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     const threads = yield* Effect.forEach(yield* ownedThreadFamily(command), (id) =>
       projectionStore.getThread(id).pipe(mapDispatchError(command)),
     );
-    const participants = threads.filter(
-      (thread) => thread.id !== root.id && thread.deletedAt === null && thread.archivedAt === null,
-    );
+    const legacyIds = new Set(getOwnedThreadFamily(threads, root.id).children.map(({ id }) => id));
+    const participants = threads.filter(({ id }) => legacyIds.has(id));
     if (participants.length === 0) return;
     const owner = root.archivedWith ?? { threadId: root.id, commandId: command.commandId };
     yield* dispatchThreadMutation(command, events, effects, owner);
@@ -290,8 +442,15 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     const originallyOwned = new Set(
       yield* projectionStore.getOwnedThreadIds(root.id).pipe(mapDispatchError(command)),
     );
-    for (const thread of getOwnedThreadFamily(yield* archiveFamilyShells(command), root.id)
-      .children) {
+    const shells = yield* archiveFamilyShells(command);
+    const family = selectArchiveFamily(shells, root.id);
+    if (family.expanded || family.typedInThreadIds.length > 0)
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Review the archive family before repairing it.",
+      });
+    for (const thread of family.children) {
       const policy = yield* archiveThreadPolicy(thread).pipe(mapDispatchError(command));
       if (archiveRepairNeedsConfirmation(policy, originallyOwned.has(thread.id)))
         return yield* new OrchestratorDispatchError({
@@ -306,7 +465,6 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     const plannedEvents = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const plannedEffects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
     yield* planArchivedFamilyRepair(command, root, plannedEvents, plannedEffects);
-    const family = getOwnedThreadFamily(yield* archiveFamilyShells(command), root.id);
     const contexts = yield* Effect.forEach(family.children, (child) =>
       projectionStore
         .getThreadRecords(child.id, ["providerSessions", "providerThreads"])
@@ -349,9 +507,16 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     threads: ReadonlyArray<OrchestrationV2ThreadShell>,
     rootId: ThreadId,
     disposition: NonNullable<ReturnType<typeof getThreadArchivePlan>>["childDisposition"],
+    options?: { readonly includeTypedInThreadIds?: ReadonlyArray<ThreadId> | undefined },
   ) => {
-    const family = getOwnedThreadFamily(threads, rootId);
-    const retained = disposition === "promote" ? family.keptThreadIds : new Set<ThreadId>();
+    const legacy = getOwnedThreadFamily(threads, rootId);
+    const family = options === undefined ? legacy : selectArchiveFamily(threads, rootId);
+    const retained =
+      disposition === "promote"
+        ? legacy.keptThreadIds
+        : options !== undefined && options.includeTypedInThreadIds === undefined
+          ? family.keptThreadIds
+          : new Set<ThreadId>();
     return {
       family,
       archiveIds: [
@@ -359,21 +524,19 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         ...family.children.filter((child) => !retained.has(child.id)).map((child) => child.id),
       ],
       promoteIds:
-        disposition === "promote" ? family.promotableChildren.map((child) => child.id) : [],
+        disposition === "promote" ? legacy.promotableChildren.map((child) => child.id) : [],
     };
   };
 
-  const readSideChats = (command: LastCodeArchiveCommand) =>
-    liveSideChatIds(command.threadId).pipe(
+  const readSideChats = (threadId: ThreadId) =>
+    liveSideChatIds(threadId).pipe(
       Effect.flatMap((ids) =>
-        Effect.forEach(ids, (id) =>
-          projectionStore.getThreadRecords(id, ["subagents"]).pipe(mapDispatchError(command)),
-        ),
+        Effect.forEach(ids, (id) => projectionStore.getThreadRecords(id, ["subagents"])),
       ),
     );
 
-  const archivableSideChats = (command: LastCodeArchiveCommand) =>
-    readSideChats(command).pipe(
+  const archivableSideChats = (threadId: ThreadId) =>
+    readSideChats(threadId).pipe(
       Effect.map((chats) =>
         chats.flatMap(({ thread, subagents }) =>
           thread.archivedAt === null &&
@@ -525,23 +688,25 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
   ) {
     const shells = yield* archiveFamilyShells(command);
     const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
-    const {
-      family,
-      archiveIds: explicitArchiveIds,
-      promoteIds,
-    } = archiveParticipants(
-      shells,
-      command.threadId,
-      command.childDisposition ?? "stop_and_archive",
+    const selection = selectArchiveFamily(shells, root.id);
+    const familyIds = new Set([root.id, ...selection.children.map(({ id }) => id)]);
+    const sideChats = (yield* archivableSideChats(root.id).pipe(mapDispatchError(command))).filter(
+      ({ id }) => !familyIds.has(id),
     );
-    const familyIds = new Set([root.id, ...family.children.map((child) => child.id)]);
-    // Side chats follow implicitly; the confirmation still names the explicit family.
-    const sideChats = (yield* archivableSideChats(command)).filter(
-      (thread) => !familyIds.has(thread.id),
-    );
-    const archiveIds = [...explicitArchiveIds, ...sideChats.map((thread) => thread.id)];
+    const allIds = [...familyIds, ...sideChats.map(({ id }) => id)];
+    const defaultIds = allIds.filter((id) => !selection.keptThreadIds.has(id));
+    const expected = command.expectedArchiveThreadIds;
+    const includeTypedIn =
+      selection.typedInThreadIds.length > 0 &&
+      expected !== undefined &&
+      command.includeTypedInThreadIds !== undefined &&
+      sameThreadIds(command.includeTypedInThreadIds, selection.typedInThreadIds) &&
+      sameThreadIds(expected, allIds) &&
+      (command.childDisposition === "archive_after_review" ||
+        command.childDisposition === "stop_and_archive");
+    const family = selection;
+    const archiveIds = includeTypedIn ? allIds : defaultIds;
     const archiveIdSet = new Set(archiveIds);
-    const changingIds = new Set([...archiveIds, ...promoteIds]);
     const reject = (cause: string) =>
       new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -574,6 +739,15 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     if (root.deletedAt !== null || (root.archivedAt !== null && !archivedRepair))
       return yield* reject("This conversation is no longer available to archive.");
     if (
+      !includeTypedIn &&
+      (command.includeTypedInThreadIds !== undefined ||
+        ((selection.expanded || selection.typedInThreadIds.length > 0 || expected !== undefined) &&
+          (expected === undefined || !sameThreadIds(expected, defaultIds))))
+    )
+      return yield* reject(
+        "Review the archive preview again and pass expectedArchiveThreadIds for the threads to close. Leave keptThreadIds out unless the user confirms archiving them.",
+      );
+    if (
       family.children.length > 0 &&
       (command.childDisposition === undefined || command.expectedChildThreadIds === undefined)
     )
@@ -601,7 +775,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       );
     if (
       [...shells, ...sideChats].some(
-        (thread) => changingIds.has(thread.id) && thread.archivePending?.status === "stopping",
+        (thread) => archiveIdSet.has(thread.id) && thread.archivePending?.status === "stopping",
       )
     )
       return yield* reject("A conversation in this family is already being archived.");
@@ -615,7 +789,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         projectionStore.getThreadShell(id).pipe(mapDispatchError(command)),
       );
       const participants = [
-        ...shells.filter((thread) => familyIds.has(thread.id)),
+        ...shells.filter((thread) => archiveIdSet.has(thread.id) && familyIds.has(thread.id)),
         ...sideChatShells,
       ];
       for (const thread of participants) {
@@ -632,7 +806,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     }
     // Shutdown and ownership release complete after this command. Check every
     // target while the requesting caller's limit is in scope, before stopping.
-    for (const thread of [...shells.filter((shell) => familyIds.has(shell.id)), ...sideChats]) {
+    for (const thread of [...shells.filter((shell) => archiveIdSet.has(shell.id)), ...sideChats]) {
       yield* refuseAboveDispatchModeLimit(command, thread.id, thread);
     }
     const context = yield* projectionStore
@@ -686,11 +860,13 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     const pending = {
       threadId: command.threadId,
       commandId: command.commandId,
-      familyVersion: 1 as const,
+      familyVersion:
+        selection.expanded || selection.typedInThreadIds.length > 0 ? (2 as const) : (1 as const),
+      ...(includeTypedIn ? { includeTypedInThreadIds: selection.typedInThreadIds } : {}),
       childDisposition: command.childDisposition ?? "stop_and_archive",
       childThreadIds: family.children.map((child) => child.id),
       archiveThreadIds: archiveIds,
-      promoteThreadIds: promoteIds,
+      promoteThreadIds: [],
       ...(modeLimit === undefined
         ? {}
         : {
@@ -701,6 +877,28 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           }),
       status: "stopping" as const,
     };
+    const previous = getThreadArchivePlan(root.archivePending);
+    if (previous?.familyVersion === 2 && previous.status === "failed") {
+      for (const id of previous.archiveThreadIds) {
+        if (archiveIdSet.has(id)) continue;
+        const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+        if (
+          thread.archivePending?.threadId !== root.id ||
+          thread.archivePending.commandId !== previous.commandId ||
+          thread.archivePending.status !== "failed"
+        )
+          continue;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: now,
+          payload: { ...thread, archivePending: null, updatedAt: now },
+        });
+      }
+    }
     for (const id of archiveIds) {
       const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
       yield* emit(
@@ -761,16 +959,29 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     // so unrelated creator groups do not change old consent.
     const legacyOwnedThreadIds =
       command.type === "thread.archive.complete" &&
-      (pending.familyVersion !== 1 || pending.childDisposition === "promote")
+      (pending.familyVersion === undefined || pending.childDisposition === "promote")
         ? yield* projectionStore.getOwnedThreadIds(root.id).pipe(mapDispatchError(command))
         : null;
     if (command.type === "thread.archive.complete") {
       const shells = yield* archiveFamilyShells(command);
       const legacyOwnedIds = legacyOwnedThreadIds === null ? null : new Set(legacyOwnedThreadIds);
+      if (
+        pending.includeTypedInThreadIds !== undefined &&
+        !sameThreadIds(
+          pending.includeTypedInThreadIds,
+          selectArchiveFamily(shells, root.id).typedInThreadIds,
+        )
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Human participation changed while stopping. Review the archive choices again.",
+        });
       const current = archiveParticipants(
         legacyOwnedIds === null ? shells : shells.filter((thread) => legacyOwnedIds.has(thread.id)),
         root.id,
         pending.childDisposition,
+        pending.familyVersion === 2 ? pending : undefined,
       );
       const explicitIds = new Set([root.id, ...pending.childThreadIds]);
       const selectedSideChatIds = new Set(
@@ -778,15 +989,16 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       );
       // A chat initially skipped for active delegated work stays outside this operation.
       const currentSideChatIds =
-        pending.familyVersion !== 1 || selectedSideChatIds.size === 0
+        pending.familyVersion === undefined || selectedSideChatIds.size === 0
           ? []
-          : (yield* archivableSideChats(command)).flatMap((thread) =>
-              selectedSideChatIds.has(thread.id) &&
-              thread.archivePending?.commandId === pending.commandId &&
-              thread.archivePending.threadId === root.id &&
-              thread.archivePending.status === "stopping"
-                ? [thread.id]
-                : [],
+          : (yield* archivableSideChats(root.id).pipe(mapDispatchError(command))).flatMap(
+              (thread) =>
+                selectedSideChatIds.has(thread.id) &&
+                thread.archivePending?.commandId === pending.commandId &&
+                thread.archivePending.threadId === root.id &&
+                thread.archivePending.status === "stopping"
+                  ? [thread.id]
+                  : [],
             );
       // Retained branches may keep delegating during shutdown. Consent still
       // covers them as long as neither the stopped set nor promoted roots change.
@@ -805,8 +1017,8 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       if (pending.modeLimit !== undefined) {
         for (const id of new Set([
           root.id,
-          ...pending.childThreadIds,
-          ...current.family.children.map((child) => child.id),
+          ...current.archiveIds,
+          ...current.promoteIds,
           ...currentSideChatIds,
         ])) {
           const participant = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
@@ -900,13 +1112,11 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
             payload: { ...turn, status: "cancelled", completedAt: now },
           });
       const current = (yield* getProjectionWithPendingEvents(id, events)).thread;
-      const archivedWith = yield* archiveOwnerFor(
-        command,
-        current,
-        familyThreads,
-        root.archivedWith ?? { threadId: root.id, commandId: command.requestId },
-        events,
-      );
+      const owner = root.archivedWith ?? { threadId: root.id, commandId: command.requestId };
+      const archivedWith =
+        pending.familyVersion === 2
+          ? owner
+          : yield* archiveOwnerFor(command, current, familyThreads, owner, events);
       yield* emit(
         events,
         command,
@@ -1018,7 +1228,9 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
   ) {
     const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
     const cohort = root.archivedWith;
-    const sideChats = (yield* readSideChats(command)).map(({ thread }) => thread);
+    const sideChats = (yield* readSideChats(root.id).pipe(mapDispatchError(command))).map(
+      ({ thread }) => thread,
+    );
     const failedArchive = getThreadArchivePlan(root.archivePending);
     if (command.expectedArchiveCommandId !== undefined) {
       if (
@@ -1037,14 +1249,19 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
               : "This failed archive changed. Review the conversation before dismissing it.",
         });
       const now = yield* DateTime.now;
-      const participants = [
-        root,
-        ...new Map(
-          [...(yield* archiveFamilyShells(command)), ...sideChats]
-            .filter((thread) => thread.id !== root.id)
-            .map((thread) => [thread.id, thread]),
-        ).values(),
-      ];
+      const participants =
+        failedArchive.familyVersion === 2
+          ? yield* Effect.forEach(new Set([root.id, ...failedArchive.archiveThreadIds]), (id) =>
+              projectionStore.getThread(id).pipe(mapDispatchError(command)),
+            )
+          : [
+              root,
+              ...new Map(
+                [...(yield* archiveFamilyShells(command)), ...sideChats]
+                  .filter((thread) => thread.id !== root.id)
+                  .map((thread) => [thread.id, thread]),
+              ).values(),
+            ];
       for (const participant of participants) {
         if (
           participant.archivedAt !== null ||
@@ -1069,7 +1286,9 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       }
       return;
     }
-    const familyParentId = yield* readArchiveFamilyParentThreadId(command, root);
+    const familyParentId =
+      (cohort?.threadId === root.id ? null : recordedParentOf(root)) ??
+      (yield* readArchiveFamilyParentThreadId(command, root));
     if (familyParentId !== null) {
       const owner = yield* projectionStore
         .getThreadShell(familyParentId)
@@ -1162,6 +1381,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
               )
               .map((thread) => ({ ...thread, archivedAt: null })),
             root.id,
+            recordedParentOf,
           ).children.map((thread) => thread.id),
         )
       : null;
@@ -1412,7 +1632,10 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
                     .pipe(mapDispatchError(command))
                 : [];
             const familyParentId =
-              root == null ? null : yield* readArchiveFamilyParentThreadId(command, root);
+              root == null
+                ? null
+                : (recordedParentOf(root) ??
+                  (yield* readArchiveFamilyParentThreadId(command, root)));
             const ids = [
               ...new Set([
                 ...family,
@@ -1459,6 +1682,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
   });
 
   return {
+    getThreadArchiveFamily,
     plan,
     guardCommand,
     guardParticipants,

@@ -127,6 +127,8 @@ export interface ArchiveThreadInput extends ThreadCommandInput {
   readonly savedWorkspace?: SavedWorkspaceDisposition;
   readonly childDisposition?: ThreadArchiveChildDisposition;
   readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
+  readonly expectedArchiveThreadIds?: ReadonlyArray<ThreadId>;
+  readonly includeTypedInThreadIds?: ReadonlyArray<ThreadId>;
   readonly expectedArchiveCommandId?: CommandId;
 }
 export type UnarchiveThreadInput = ThreadCommandInput & {
@@ -675,6 +677,12 @@ export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(func
     ...(input.expectedChildThreadIds === undefined
       ? {}
       : { expectedChildThreadIds: input.expectedChildThreadIds }),
+    ...(input.expectedArchiveThreadIds === undefined
+      ? {}
+      : { expectedArchiveThreadIds: input.expectedArchiveThreadIds }),
+    ...(input.includeTypedInThreadIds === undefined
+      ? {}
+      : { includeTypedInThreadIds: input.includeTypedInThreadIds }),
     ...(input.expectedArchiveCommandId === undefined
       ? {}
       : { expectedArchiveCommandId: input.expectedArchiveCommandId }),

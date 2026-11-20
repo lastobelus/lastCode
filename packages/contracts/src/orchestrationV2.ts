@@ -3,6 +3,7 @@ import {
   ThreadArchivedWith,
   ThreadArchivePending,
   ThreadArchiveConsultationTarget,
+  ThreadArchivePreview,
 } from "./threadArchive.ts";
 export {
   ThreadArchiveChildDisposition,
@@ -3529,6 +3530,8 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     childDisposition: Schema.optional(ThreadArchiveChildDisposition),
     expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    expectedArchiveThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    includeTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
     /** Retries only this failed archive attempt on its original owner. */
     expectedArchiveCommandId: Schema.optional(CommandId),
     savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
@@ -5165,6 +5168,7 @@ export class OrchestrationV2SearchThreadError extends Schema.TaggedError<Orchest
 // canPromote/promotableChildThreadIds stay false/[] for older archive clients; MCP omits them.
 export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   consultationTargets: Schema.optional(Schema.Array(ThreadArchiveConsultationTarget)),
+  archivePreview: Schema.optional(Schema.UndefinedOr(ThreadArchivePreview)),
   threads: Schema.Array(OrchestrationV2ThreadShell),
   childThreadIds: Schema.Array(ThreadId),
   activeChildThreadIds: Schema.Array(ThreadId),

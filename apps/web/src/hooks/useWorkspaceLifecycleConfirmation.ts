@@ -122,6 +122,7 @@ export function useWorkspaceLifecycleConfirmation() {
     );
     return {
       childDisposition: choice.childDisposition,
+      includeTypedIn: choice.includeTypedIn,
       dispositions,
       batches: targets.map((target, index) => ({
         ...target,

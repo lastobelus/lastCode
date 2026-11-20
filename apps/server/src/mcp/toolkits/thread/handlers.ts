@@ -491,6 +491,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.expectedChildThreadIds === undefined
               ? {}
               : { expectedChildThreadIds: input.expectedChildThreadIds }),
+            ...(input.expectedArchiveThreadIds === undefined
+              ? {}
+              : { expectedArchiveThreadIds: input.expectedArchiveThreadIds }),
+            ...(input.includeTypedInThreadIds === undefined
+              ? {}
+              : { includeTypedInThreadIds: input.includeTypedInThreadIds }),
             ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
           };
           break;
