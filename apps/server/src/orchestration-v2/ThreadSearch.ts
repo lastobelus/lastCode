@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as SqlError from "effect/sql/SqlError";
 import * as SqlSchema from "effect/sql/SqlSchema";
+import { isListedThreadLineageSql } from "./ThreadOwnershipSql.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { rankThreadMentions } from "@t3tools/shared/lastcodeThreadMentionSearch";
 import {
@@ -499,9 +500,7 @@ export const make = Effect.gen(function* () {
       WHERE threads.deleted_at IS NULL
         AND threads.archived_at IS NULL
         AND projects.deleted_at IS NULL
-        AND json_extract(threads.payload_json, '$.lineage.relationshipToParent')
-          IS NOT 'subagent'
-        AND json_extract(threads.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND ${isListedThreadLineageSql(sql, "threads")}
         AND json_extract(threads.payload_json, '$.settledOverride') = 'settled'
         AND json_extract(threads.payload_json, '$.settledAt') < ${before}
         AND (${projectIds} IS NULL
@@ -522,9 +521,7 @@ export const make = Effect.gen(function* () {
       WHERE threads.thread_id IN (SELECT value FROM json_each(${threadIds}))
         AND threads.deleted_at IS NULL
         AND threads.archived_at IS NULL
-        AND json_extract(threads.payload_json, '$.lineage.relationshipToParent')
-          IS NOT 'subagent'
-        AND json_extract(threads.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND ${isListedThreadLineageSql(sql, "threads")}
         AND json_extract(threads.payload_json, '$.settledOverride') = 'settled'
         AND json_extract(threads.payload_json, '$.settledAt') < ${before}
         AND (${projectIds} IS NULL

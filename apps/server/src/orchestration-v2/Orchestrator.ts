@@ -1,7 +1,10 @@
 import { makeLastCodeArchivePlanner } from "./LastCodeArchivePlanner.ts";
+import { makeLastCodeThreadPromotion, threadPlacementParentId } from "./LastCodeThreadPromotion.ts";
 import { planGroupThreadUse } from "./planGroupThreadUse.ts";
 import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import {
+  checkNewRemoteDelegation,
+  RemoteDelegationReleasedThreadError,
   remoteDelegationProgress,
   sameRemoteDelegation,
   remoteDelegationMayStart,
@@ -468,6 +471,7 @@ export class OrchestratorCommandIdConflictError extends Schema.TaggedError<Orche
 }
 
 export const OrchestratorV2Error = Schema.Union([
+  RemoteDelegationReleasedThreadError,
   OrchestratorDispatchError,
   OrchestratorThreadAlreadyExistsError,
   OrchestratorCommandRejectedError,
@@ -626,6 +630,9 @@ export interface OrchestratorV2Shape {
   readonly getThreadProjection: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadProjection, OrchestratorV2Error>;
+  readonly getThreadOwnershipAvailability: (
+    threadId: ThreadId,
+  ) => Effect.Effect<import("@t3tools/contracts").ThreadOwnershipAvailability, OrchestratorV2Error>;
   readonly getCheckpointContext: (
     threadId: ThreadId,
   ) => Effect.Effect<ProjectionCheckpointContext, OrchestratorV2Error>;
@@ -889,6 +896,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.preparation.finish":
     case "thread.worktree-suspension.transition":
     case "thread.metadata.update":
+    case "thread.ownership.change":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
@@ -1881,6 +1889,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const actionEnvironmentIdentity = yield* Effect.serviceOption(
     ServerEnvironment.ServerEnvironmentIdentity,
+  );
+  const promotion = makeLastCodeThreadPromotion(
+    projectionStore,
+    Option.match(actionEnvironmentIdentity, {
+      onNone: () => Effect.fail("Environment identity is unavailable."),
+      onSome: (identity) => identity.getEnvironmentId,
+    }),
   );
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -4535,7 +4550,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const validateThreadPlacement = Effect.fn("Orchestrator.validateThreadPlacement")(function* (
     command: Extract<
       OrchestrationV2Command,
-      { readonly type: "thread.create" | "thread.metadata.update" }
+      { readonly type: "thread.create" | "thread.metadata.update" | "thread.ownership.change" }
     >,
     projectId: ProjectId,
     parentId: ThreadId | null,
@@ -4572,9 +4587,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           field: "groupedUnderThreadId",
         });
       if (next === parentId) yield* refuseAboveDispatchModeLimit(command, parent.id, parent);
-      const organizationalParent = getInteractiveThreadParentThreadId(parent);
-      // Execution lineage remains part of the tree for an owned delegated destination.
-      next = isOwnedSubagentThread(parent) ? parent.lineage.parentThreadId : organizationalParent;
+      next = threadPlacementParentId(parent);
     }
   });
 
@@ -12495,6 +12508,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (command.type === "remote_delegation.prepare" && old !== undefined) return;
+      yield* checkNewRemoteDelegation(command.type, thread);
       if (command.type === "remote_delegation.activate" && old?.stage !== "prepared") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -18709,6 +18723,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
         break;
       }
+      case "thread.ownership.change": {
+        const { returnParentId, ...event } = yield* promotion
+          .plan(command.threadId, command.action)
+          .pipe(mapDispatchError(command));
+        yield* validateThreadPlacement(command, event.payload.projectId, returnParentId);
+        yield* emit(events, command)(event);
+        break;
+      }
       case "thread.pull-request-watch.checks-reopen":
         yield* dispatchThreadMutation(command, events, effects);
         break;
@@ -20575,6 +20597,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return yield* archivePlanner.dispatchFamily(command, (sideChatIds) =>
           dispatchAccepted(undefined, sideChatIds),
         );
+      if (command.type === "thread.ownership.change")
+        return yield* promotion.participants(command.threadId).pipe(
+          mapDispatchError(command),
+          Effect.flatMap((ids) => withThreadDispatchLocks(ids, dispatchAccepted())),
+        );
       if (
         (command.type === "thread.create" &&
           (command.creatorThreadId !== undefined || command.groupedUnderThreadId != null)) ||
@@ -21896,6 +21923,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .getThreadRecords(threadId, fields, filter)
           .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       },
+    ),
+    getThreadOwnershipAvailability: Effect.fn("OrchestratorV2.getThreadOwnershipAvailability")(
+      (threadId) =>
+        promotion.read(threadId).pipe(
+          Effect.map(({ availability }) => availability),
+          Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+        ),
     ),
     listAppOwnedChildThreadIds: Effect.fn("OrchestratorV2.listAppOwnedChildThreadIds")(
       function (threadId) {

@@ -47,6 +47,8 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { loadSubscriberShellSnapshot } from "./ShellStream.ts";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as ProjectionReplay from "./testkit/ProjectionReplay.ts";
 import * as EventStore from "./EventStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -164,7 +166,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
   Layer.provideMerge(UpdateDrainAdmissionTestkit.layerOpen),
-  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
   Layer.provideMerge(ServerSettings.layerTest()),
@@ -503,6 +505,297 @@ const layerFollowups = Layer.merge(layerTest, ProviderContinuationRequests.layer
 );
 
 it.layer(layerFollowups)("delegated background wakes", (it) => {
+  it.effect("refuses return that would put a launched child under its own descendant", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projects = yield* ProjectService.ProjectService;
+      const projectId = ProjectId.make("project:return-cycle");
+      const ownerId = ThreadId.make("return-cycle-owner");
+      const childId = ThreadId.make("return-cycle-child");
+      yield* projects.create({
+        commandId: CommandId.make("project:return-cycle"),
+        projectId,
+        title: "Return cycle",
+        workspaceRoot: "/workspace/return-cycle",
+      });
+      const create = {
+        type: "thread.create" as const,
+        projectId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+      };
+      yield* orchestrator.dispatch({
+        ...create,
+        commandId: CommandId.make("cycle:owner"),
+        threadId: ownerId,
+        title: "Owner",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        ...create,
+        commandId: CommandId.make("cycle:child"),
+        threadId: childId,
+        title: "Child",
+        createdBy: "agent",
+        creationSource: "mcp",
+        creatorThreadId: ownerId,
+        creatorOrigin: {
+          kind: "thread_launch",
+          threadId: ownerId,
+          environmentId: EnvironmentId.make("local-test"),
+          owned: true,
+        },
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.ownership.change",
+        commandId: CommandId.make("cycle:promote"),
+        threadId: childId,
+        action: "promote",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("cycle:group"),
+        threadId: ownerId,
+        groupedUnderThreadId: childId,
+      });
+      const refusal = yield* Effect.flip(
+        orchestrator.dispatch({
+          type: "thread.ownership.change",
+          commandId: CommandId.make("cycle:return"),
+          threadId: childId,
+          action: "return_to_owner",
+        }),
+      );
+      assert.include(JSON.stringify(refusal), "descendants");
+      assert.isTrue((yield* orchestrator.getThreadProjection(childId)).thread.lineage.independent);
+    }),
+  );
+  it.effect("refuses a new remote task association while the destination thread is promoted", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projects = yield* ProjectService.ProjectService;
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:remote-promotion");
+      const threadId = ThreadId.make("thread:remote-promotion");
+      const owner = {
+        environmentId: EnvironmentId.make("requester"),
+        threadId: ThreadId.make("owner"),
+        title: "Requester",
+      };
+      yield* projects.create({
+        commandId: CommandId.make("project:remote-promotion"),
+        projectId,
+        title: "Remote promotion",
+        workspaceRoot: "/workspace/remote-promotion",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:remote-promotion"),
+        threadId,
+        projectId,
+        title: "Delegate",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent",
+        creationSource: "mcp",
+        delegatedFrom: owner,
+        linkOrigin: { sessionId: "owner-link", label: "Requester", access: "full-access" },
+      });
+      const before = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      const original = {
+        parentEnvironmentId: owner.environmentId,
+        parentThreadId: owner.threadId,
+        sourceTaskId: NodeId.make("original-task"),
+        delegationId: "original-delegation",
+        linkSessionId: "owner-link",
+        stage: "disposed" as const,
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("seed:disposed-delegation"),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...before, remoteDelegations: [original] },
+          },
+        ],
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.ownership.change",
+        commandId: CommandId.make("promote:remote"),
+        threadId,
+        action: "promote",
+      });
+      const prepare = {
+        type: "remote_delegation.prepare" as const,
+        commandId: CommandId.make("prepare:released"),
+        threadId,
+        association: {
+          ...original,
+          sourceTaskId: NodeId.make("new-task"),
+          delegationId: "new-delegation",
+          stage: "prepared" as const,
+        },
+      };
+      const refusal = yield* Effect.flip(orchestrator.dispatch(prepare));
+      assert.include(refusal.message, "Return to owner");
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.remoteDelegations,
+        [original],
+      );
+
+      yield* orchestrator.dispatch({
+        type: "thread.ownership.change",
+        commandId: CommandId.make("return:remote"),
+        threadId,
+        action: "return_to_owner",
+      });
+      yield* orchestrator.dispatch({ ...prepare, commandId: CommandId.make("prepare:returned") });
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.remoteDelegations,
+        [original, prepare.association],
+      );
+    }),
+  );
+  it.effect(
+    "promotes a local delegate after its requester observes the result and can return it",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        const parentThreadId = ThreadId.make("thread:promotion-parent");
+        const projectId = ProjectId.make("project:promotion");
+        const parentRunId = RunId.make("run:promotion-parent");
+        const rootNodeId = NodeId.make("node:promotion-parent");
+        yield* seedParentWithTerminalTask({
+          threadId: parentThreadId,
+          projectId,
+          runId: parentRunId,
+          rootNodeId,
+          taskId: NodeId.make("node:promotion-seed"),
+          deliveryState: "acknowledged",
+          now,
+        });
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId,
+          projectId,
+          parentRunId,
+          rootNodeId,
+          name: "promotion-child",
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: "completed",
+          now,
+        });
+        const command = {
+          type: "thread.ownership.change" as const,
+          commandId: CommandId.make("command:promote-child"),
+          threadId: child.childThreadId,
+          action: "promote" as const,
+        };
+        const before = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
+        yield* orchestrator.recoverDelegatedTasks;
+        const availability = yield* orchestrator.getThreadOwnershipAvailability(
+          child.childThreadId,
+        );
+        assert.strictEqual(availability?.refusal, "in_flight");
+        const refusal = yield* Effect.flip(
+          orchestrator.dispatch({
+            ...command,
+            commandId: CommandId.make("command:promote-child-before-ack"),
+          }),
+        );
+        assert.include(JSON.stringify(refusal), "task_cancel");
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(child.childThreadId)).thread,
+          before,
+        );
+
+        yield* orchestrator.dispatch({
+          type: "delegated_task.completion-delivery.acknowledge",
+          commandId: CommandId.make("command:ack-promoted-child"),
+          parentThreadId,
+          taskId: child.taskId,
+          observedByRunId: parentRunId,
+        });
+        const result = yield* orchestrator.dispatch(command);
+        const promoted = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
+        assert.deepEqual(promoted.lineage, { ...before.lineage, independent: true });
+        assert.isNull(promoted.groupedUnderThreadId);
+        assert.deepEqual(promoted.forkedFrom, before.forkedFrom);
+        assert.strictEqual((yield* orchestrator.dispatch(command)).sequence, result.sequence);
+
+        const sql = yield* SqlClient.SqlClient;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const { snapshot } = yield* loadSubscriberShellSnapshot({
+          sql,
+          listShellIndex: store.listActiveShellIndex(),
+          readThreads: (threadIds) =>
+            store.readShellSnapshot({
+              location: "active",
+              ...(threadIds === undefined ? {} : { threadIds }),
+            }),
+          listProjects: Effect.succeed([]),
+          latestSequence: Effect.succeed(result.sequence),
+          options: { omitIdleSubagents: true, omitOlderSettled: true },
+        });
+        assert.isTrue(snapshot.threads.some((thread) => thread.id === child.childThreadId));
+
+        const projects = yield* ProjectService.ProjectService;
+        const sink = yield* EventSink.EventSinkV2;
+        const movedProject = ProjectId.make("project:promotion-moved");
+        yield* projects.create({
+          commandId: CommandId.make("project:promotion-moved"),
+          projectId: movedProject,
+          title: "Moved owner",
+          workspaceRoot: "/workspace/promotion-moved",
+        });
+        const owner = (yield* orchestrator.getThreadProjection(parentThreadId)).thread;
+        const placeOwner = (projectId: ProjectId) =>
+          sink.write({
+            events: [
+              {
+                type: "thread.metadata-updated",
+                id: EventId.make(`event:promotion-owner:${projectId}`),
+                threadId: parentThreadId,
+                occurredAt: now,
+                payload: { ...owner, projectId },
+              },
+            ],
+          });
+        yield* placeOwner(movedProject);
+        const invalidParent = yield* Effect.flip(
+          orchestrator.dispatch({
+            ...command,
+            action: "return_to_owner",
+            commandId: CommandId.make("command:return-with-moved-owner"),
+          }),
+        );
+        assert.include(JSON.stringify(invalidParent), "in this project");
+        assert.isTrue(
+          (yield* orchestrator.getThreadProjection(child.childThreadId)).thread.lineage.independent,
+        );
+        yield* placeOwner(projectId);
+
+        yield* orchestrator.dispatch({
+          ...command,
+          action: "return_to_owner",
+          commandId: CommandId.make("command:return-child"),
+        });
+        const returned = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
+        assert.deepEqual(returned.lineage, before.lineage);
+        assert.isNull(returned.groupedUnderThreadId);
+      }),
+  );
   it.effect.each(["active", "paused", "released", "independent"] as const)(
     "handles a background command's wake after the original result while %s",
     (state) =>

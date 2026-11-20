@@ -2,7 +2,9 @@ import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 import { mergeWorktreeSuspensionMenuItems } from "../worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "../../hooks/threadReadActions";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { ScopedThreadRef, ThreadOwnershipAction } from "@t3tools/contracts";
+import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
+import { threadOwnershipChangeFailed } from "./lastcodeThreadPromotionCopy";
 import { threadAnnotationId } from "@t3tools/shared/threadAnnotation";
 import {
   scopedProjectKey,
@@ -63,6 +65,13 @@ export function useLastCodeThreadMenu(
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const loadOwnershipAvailability = useOrchestrationCommand(
+    threadEnvironment.loadOwnershipAvailability,
+    { reportFailure: false },
+  );
+  const changeOwnership = useOrchestrationCommand(threadEnvironment.changeOwnership, {
+    reportFailure: false,
+  });
   const resolveAnnotation = useOrchestrationCommand(threadEnvironment.resolveAnnotation, {
     reportFailure: false,
   });
@@ -89,11 +98,33 @@ export function useLastCodeThreadMenu(
     if (!api) return;
     const thread = getThread(ref);
     if (!thread) return;
+    const owner = getRecordedThreadOwner(thread, ref.environmentId);
+    const checked =
+      owner === null
+        ? null
+        : await loadOwnershipAvailability({
+            environmentId: ref.environmentId,
+            input: { threadId: ref.threadId },
+          });
+    const ownership =
+      checked?._tag === "Success"
+        ? checked.value
+        : owner === null
+          ? null
+          : {
+              action:
+                thread.lineage.independent === true
+                  ? ("return_to_owner" as const)
+                  : ("promote" as const),
+              ownerHere: owner.environmentId === ref.environmentId,
+              refusal: "unavailable" as const,
+            };
     const target = readLastCodeThreadMenuTarget(
       thread,
       readLastCodeThreadMenuProject(thread, project, members, settings),
       handoffsLimit,
       hasStoppableProcesses,
+      ownership,
     );
     const clicked = await api.contextMenu.show(
       withThreadReadPermissions(
@@ -128,6 +159,16 @@ export function useLastCodeThreadMenu(
         msg("Failed to update persistent thread"),
       );
     };
+    const setOwnership = async (action: ThreadOwnershipAction) => {
+      if (ownership?.action !== action || ownership.refusal !== null) return;
+      reportThreadOperationFailure(
+        await changeOwnership({
+          environmentId: ref.environmentId,
+          input: { threadId: ref.threadId, action },
+        }),
+        threadOwnershipChangeFailed,
+      );
+    };
     const handlers: Record<LastCodeThreadActionId, () => Promise<void> | void> = {
       "dismiss-archive-failure": async () => {
         const pending = thread.archivePending;
@@ -140,6 +181,8 @@ export function useLastCodeThreadMenu(
       },
       "creator-independent": () => setCreatorGrouping("independent"),
       "creator-grouped": () => setCreatorGrouping("grouped"),
+      promote: () => setOwnership("promote"),
+      "return-to-owner": () => setOwnership("return_to_owner"),
       "open-creator": async () => {
         if (target.creator.ref && target.creator.canOpen)
           await navigateToThread(target.creator.ref);

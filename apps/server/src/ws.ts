@@ -2288,6 +2288,20 @@ const layerCoreWsRpc = (
         ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getThreadFamily, (input) =>
           readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
         ),
+        ServerWsRpcGroup.toLayerHandler(
+          ORCHESTRATION_V2_WS_METHODS.getThreadOwnershipAvailability,
+          ({ threadId }) =>
+            threadManagement.getThreadOwnershipAvailability(threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationV2GetThreadProjectionError({
+                    threadId,
+                    message: "Failed to check thread ownership",
+                    cause,
+                  }),
+              ),
+            ),
+        ),
         ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds, (input) =>
           readOmittableShellRows(
             { worktreePath: input.worktreePath },

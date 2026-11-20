@@ -48,6 +48,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.serverListTextGeneratorModels]: AuthSettingsWriteScope,
   [WS_METHODS.serverRefreshProviders]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily]: AuthOrchestrationOperateScope,
+  [ORCHESTRATION_V2_WS_METHODS.getThreadOwnershipAvailability]: AuthOrchestrationReadScope,
   [WS_METHODS.serverPauseEnvironment]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverRetryEnvironmentPause]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverResumeEnvironment]: AuthOrchestrationOperateScope,

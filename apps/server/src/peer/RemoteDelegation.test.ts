@@ -14,6 +14,7 @@ import {
   MessageId,
   type ModelSelection,
   NodeId,
+  type OrchestrationV2AppThread,
   type OrchestrationV2Run,
   type RemoteDelegationAssociation,
   ProjectId,
@@ -55,6 +56,7 @@ import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import { makeLastCodeThreadPromotion } from "../orchestration-v2/LastCodeThreadPromotion.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -108,6 +110,8 @@ interface BoxThread {
   readonly linkOrigin: Ref.Ref<{ readonly sessionId: string; readonly label: string } | null>;
   /** The parent the launch names, so the thread there can link back to it. */
   readonly delegatedFrom: Ref.Ref<ThreadLaunch.ThreadLaunchInput["delegatedFrom"] | null>;
+  readonly promoteWhenSettled: Ref.Ref<boolean>;
+  readonly promoted: Ref.Ref<OrchestrationV2AppThread | null>;
   /** The model and modes it was launched with. */
   readonly launchedWith: Ref.Ref<LaunchedWith | null>;
   /** The first message the thread there was launched with. */
@@ -176,6 +180,8 @@ const makeBoxThread = Effect.gen(function* () {
       null,
     ),
     delegatedFrom: yield* Ref.make<ThreadLaunch.ThreadLaunchInput["delegatedFrom"] | null>(null),
+    promoteWhenSettled: yield* Ref.make(false),
+    promoted: yield* Ref.make<OrchestrationV2AppThread | null>(null),
     launchedWith: yield* Ref.make<LaunchedWith | null>(null),
     message: yield* Ref.make<string | null>(null),
     status: yield* SubscriptionRef.make<OrchestrationV2Run["status"]>("running"),
@@ -270,13 +276,18 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean, worktrees: boolean) 
         return null;
       const linkOrigin = yield* Ref.get(thread.linkOrigin);
       const modes = yield* Ref.get(thread.launchedWith);
+      const delegatedFrom = yield* Ref.get(thread.delegatedFrom);
+      const promoted = yield* Ref.get(thread.promoted);
+      const shell = liveThreadShell(threadId, {
+        runtimeMode: modes?.runtimeMode ?? "full-access",
+        interactionMode: modes?.interactionMode ?? "default",
+      });
       return {
-        ...liveThreadShell(threadId, {
-          runtimeMode: modes?.runtimeMode ?? "full-access",
-          interactionMode: modes?.interactionMode ?? "default",
-        }),
+        ...shell,
         projectId: boxProject,
         remoteDelegations: [...associations.values()],
+        ...(delegatedFrom == null ? {} : { delegatedFrom }),
+        ...promoted,
         ...(linkOrigin === null ? {} : { linkOrigin }),
       };
     });
@@ -682,6 +693,21 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean, worktrees: boolean) 
                       status: status as "completed" | "failed" | "cancelled" | "interrupted",
                     },
                   });
+                  if (yield* Ref.get(thread.promoteWhenSettled)) {
+                    const promotion = makeLastCodeThreadPromotion(
+                      {
+                        getThread: (id) =>
+                          Effect.map(projectionOf(id), (projection) => projection.thread),
+                        getThreadShell: shellOf,
+                        getThreadRecords: (id) => projectionOf(id),
+                      },
+                      Effect.succeed(box.environmentId),
+                    );
+                    const event = yield* promotion
+                      .plan(command.threadId, "promote")
+                      .pipe(Effect.orDie);
+                    yield* Ref.set(thread.promoted, event.payload);
+                  }
                 }
                 return { sequence: 0, storedEvents: [] } as never;
               })
@@ -1531,6 +1557,40 @@ it.effect("a task delegated to the box wakes the laptop's parent when it ends th
       expect(acknowledged.subagents[0]?.completionDelivery).toEqual({
         state: "acknowledged",
         observedByRunId: parentRunId,
+      });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("retrieves and records a remote result after the destination thread is promoted", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      yield* Ref.set(thread.promoteWhenSettled, true);
+      const destination = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const requester = yield* makeLaptop(database, offers);
+      yield* linkTo(requester.links, destination, "full-access");
+      yield* seedParent(requester);
+      const delegated = yield* delegateToBox(requester);
+
+      yield* Ref.set(thread.reply, "The requested work is complete.");
+      yield* SubscriptionRef.set(thread.status, "completed");
+      yield* Deferred.succeed(thread.finished, undefined);
+      const task = yield* taskResult(requester, delegated.taskId);
+      const promoted = yield* Ref.get(thread.promoted);
+      expect(promoted?.lineage.independent).toBe(true);
+      expect(promoted?.groupedUnderThreadId).toBeNull();
+      expect(promoted?.remoteDelegations?.[0]).toMatchObject({
+        stage: "settled",
+        finalRun: { runId: boxRunId, status: "completed" },
+      });
+      expect(task).toMatchObject({
+        status: "completed",
+        result: "The requested work is complete.",
       });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),

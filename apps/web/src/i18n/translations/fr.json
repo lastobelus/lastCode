@@ -13276,5 +13276,12 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "4e34aa6fcebd836d": "Promouvoir",
+  "2f51bba9a3626b55": "Rendre au propriétaire",
+  "0b4d06773f0cfd2c": "Le propriétaire se trouve sur une autre machine. Son état sur cette machine n’a pas été vérifié.",
+  "af190199950e20f4": "Le propriétaire de ce fil ne peut pas être changé.",
+  "5256993b35562b07": "Retour impossible : le fil propriétaire est introuvable, archivé ou en cours d’archivage.",
+  "606f561d56d94e2f": "La tâche est encore en cours pour le fil qui l’a demandée. Attendez qu’elle se termine ou annulez-la, puis promouvez le fil.",
+  "16a49bb79c3f2cdd": "Impossible de changer le propriétaire du fil"
 }

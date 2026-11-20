@@ -1,10 +1,49 @@
-import type {
-  OrchestrationV2Command,
-  OrchestrationV2ThreadProjection,
-  RemoteDelegationSelector,
+import {
+  OrchestratorMcpFailure,
+  type OrchestrationV2Command,
+  type OrchestrationV2ThreadProjection,
+  type RemoteDelegationSelector,
 } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { delegatedTaskProgress } from "@t3tools/provider-core/server/subagentProjection";
+
+const releasedThreadRefusal =
+  "This thread was promoted. Use Return to owner before delegating another task to it.";
+
+export class RemoteDelegationReleasedThreadError extends Schema.TaggedError<RemoteDelegationReleasedThreadError>()(
+  "RemoteDelegationReleasedThreadError",
+  {},
+) {
+  override get message() {
+    return releasedThreadRefusal;
+  }
+}
+
+export const checkNewRemoteDelegation = (
+  commandType: string,
+  thread: Pick<OrchestrationV2ThreadProjection["thread"], "lineage">,
+) =>
+  commandType === "remote_delegation.prepare" && thread.lineage.independent === true
+    ? Effect.fail(new RemoteDelegationReleasedThreadError())
+    : Effect.void;
+
+export function releasedRemotePreparationFailure(error: {
+  readonly _tag: string;
+  readonly detail?: string;
+}): OrchestratorMcpFailure | undefined {
+  if (
+    error._tag === "RemoteDelegationReleasedThreadError" ||
+    (error._tag === "OrchestratorCommandPreviouslyRejectedError" &&
+      error.detail === releasedThreadRefusal)
+  ) {
+    return new OrchestratorMcpFailure({
+      code: "capability_denied",
+      message: releasedThreadRefusal,
+    });
+  }
+}
 
 export const sameRemoteDelegation = (
   left: RemoteDelegationSelector | undefined,

@@ -41,7 +41,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, restore, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active. Before archiving, use t3_thread_archive_family to inspect grouped interactive children and subagents, with active/unread status. Archiving a thread with children requires an explicit childDisposition and its returned childThreadIds as expectedChildThreadIds. A childless active or unread thread also needs stop_and_archive or archive_after_review, respectively. archive_if_idle refuses active or unread family members; archive_after_review confirms unread replies but refuses newly active work; stop_and_archive confirms stopping active family members and archiving the whole family. archive with expectedArchiveCommandId retries only that exact failed attempt. unarchive restores an archived thread; with expectedArchiveCommandId it instead dismisses that exact failed archive on an active family, without stopping or restarting work. Failed participants resolve to the original owner and archive retries retain the observed failed attempt. This does not schedule a future action.",
+    "Pin, snooze, settle, archive, restore, or mark a thread unread. promote releases an owned thread to top level; return_to_owner restores its ownership. Omit threadId for this thread. snooze requires snoozedUntil. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active. Before archiving, use t3_thread_archive_family to inspect grouped interactive children and subagents, with active/unread status. Archiving a thread with children requires an explicit childDisposition and its returned childThreadIds as expectedChildThreadIds. A childless active or unread thread also needs stop_and_archive or archive_after_review, respectively. archive_if_idle refuses active or unread family members; archive_after_review confirms unread replies but refuses newly active work; stop_and_archive confirms stopping active family members and archiving the whole family. archive with expectedArchiveCommandId retries only that exact failed attempt. unarchive restores an archived thread; with expectedArchiveCommandId it instead dismisses that exact failed archive on an active family, without stopping or restarting work. Failed participants resolve to the original owner and archive retries retain the observed failed attempt. This does not schedule a future action.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -55,6 +55,8 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "archive",
       "unarchive",
       "mark_unread",
+      "promote",
+      "return_to_owner",
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
     childDisposition: Schema.optional(ThreadArchiveChildDisposition),
@@ -62,7 +64,10 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
     expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   success: Schema.Union([
-    OrchestrationV2DispatchCommandResult,
+    Schema.Struct({
+      ...OrchestrationV2DispatchCommandResult.fields,
+      ownerStateChecked: Schema.optional(Schema.Boolean),
+    }),
     Schema.Struct({ settlesWhenTurnEnds: Schema.Literal(true) }),
   ]),
   failure: OrchestratorMcpFailure,

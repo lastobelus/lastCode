@@ -529,6 +529,7 @@ export interface ThreadManagementServiceShape {
   readonly getThreadLinkMetadata: Orchestrator.OrchestratorV2["Service"]["getThreadLinkMetadata"];
   readonly getThreadTitles: Orchestrator.OrchestratorV2["Service"]["getThreadTitles"];
   readonly getThreadArchiveFamily: Orchestrator.OrchestratorV2["Service"]["getThreadArchiveFamily"];
+  readonly getThreadOwnershipAvailability: Orchestrator.OrchestratorV2["Service"]["getThreadOwnershipAvailability"];
   readonly setThreadParents: (
     input: ThreadPlacementInput,
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadPlacementResult>>;
@@ -2254,6 +2255,7 @@ const make = Effect.gen(function* () {
     getThreadTitles: orchestrator.getThreadTitles,
     getThreadLinkMetadata: orchestrator.getThreadLinkMetadata,
     getThreadArchiveFamily: orchestrator.getThreadArchiveFamily,
+    getThreadOwnershipAvailability: orchestrator.getThreadOwnershipAvailability,
     listProjectThreads,
     sendToThread,
     assertProviderInstanceEnabled,

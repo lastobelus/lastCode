@@ -24,6 +24,7 @@ import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageInt
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import { validateRemoteWorktreePreparation } from "../../../peer/remoteWorktreeDelegation.ts";
+import { releasedRemotePreparationFailure } from "../../../peer/remoteOwnership.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import { mutateProjectWithClone } from "../../../project/ProjectMutation.ts";
@@ -268,7 +269,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               threadId: target.thread.id,
               association: { ...delegation!, linkSessionId: peer!.sessionId, stage: "prepared" },
             })
-            .pipe(Effect.mapError(unavailable));
+            .pipe(
+              Effect.mapError((error) => releasedRemotePreparationFailure(error) ?? unavailable()),
+            );
           return {
             threadId: target.thread.id,
             projectId: target.thread.projectId,

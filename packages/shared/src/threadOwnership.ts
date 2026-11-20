@@ -5,8 +5,12 @@ export interface ThreadOwner {
   readonly threadId: ThreadId;
 }
 
+type ThreadOwnershipProvenance = Pick<OrchestrationV2AppThread, "creatorOrigin" | "lineage"> & {
+  readonly delegatedFrom?: OrchestrationV2AppThread["delegatedFrom"] | null;
+};
+
 export function getThreadOwner(
-  thread: Pick<OrchestrationV2AppThread, "creatorOrigin" | "delegatedFrom" | "lineage">,
+  thread: ThreadOwnershipProvenance,
   environmentId: EnvironmentId,
 ): ThreadOwner | null {
   if (thread.lineage.independent === true) return null;
@@ -22,4 +26,14 @@ export function getThreadOwner(
   return origin?.kind === "thread_launch" && origin.owned === true
     ? { environmentId: origin.environmentId, threadId: origin.threadId }
     : null;
+}
+
+export function getRecordedThreadOwner(
+  thread: ThreadOwnershipProvenance,
+  environmentId: EnvironmentId,
+) {
+  return getThreadOwner(
+    { ...thread, lineage: { ...thread.lineage, independent: false } },
+    environmentId,
+  );
 }

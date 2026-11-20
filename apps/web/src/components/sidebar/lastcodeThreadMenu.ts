@@ -1,6 +1,14 @@
 import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
-import type { ContextMenuItem, ThreadId } from "@t3tools/contracts";
+import type { ContextMenuItem, ThreadId, ThreadOwnershipAvailability } from "@t3tools/contracts";
+import {
+  delegatedTaskInFlight,
+  promoteThreadLabel,
+  remoteOwnerStateUnchecked,
+  returnThreadToOwnerLabel,
+  threadOwnerUnavailable,
+  threadOwnershipUnavailable,
+} from "./lastcodeThreadPromotionCopy";
 import type { SidebarThreadSummary } from "../../types";
 import {
   lastcodeThreadPersistenceAction,
@@ -21,6 +29,8 @@ export const LASTCODE_THREAD_ACTION_POLICY = {
   "mark-read": false,
   "creator-independent": true,
   "creator-grouped": true,
+  promote: true,
+  "return-to-owner": true,
   "open-creator": false,
   "mark-persistent": true,
   "disable-persistence": true,
@@ -56,6 +66,7 @@ interface ThreadMenuInput {
   thread: Pick<SidebarThreadSummary, "branch" | "persistent" | "archivePending">;
   parentThreadId: ThreadId | null;
   creator: { groupingEligible: boolean; canOpen: boolean };
+  ownership?: ThreadOwnershipAvailability;
   canAnnotate: boolean;
   hasActiveAnnotation: boolean;
   supportsPersistence: boolean;
@@ -84,7 +95,31 @@ function metadataItems(input: ThreadMenuInput): ContextMenuItem<string>[] {
   }
   items.push({ id: "mark-unread", label: m(msg("Mark unread")) });
   items.push({ id: "mark-read", label: m(msg("Mark read")) });
-  if (input.parentThreadId !== null || input.creator.groupingEligible) {
+  const ownership = input.ownership;
+  if (ownership) {
+    const returning = ownership.action === "return_to_owner";
+    const refusal = {
+      in_flight: delegatedTaskInFlight,
+      owner_unavailable: threadOwnerUnavailable,
+      unavailable: threadOwnershipUnavailable,
+    };
+    const detail =
+      ownership.refusal !== null
+        ? refusal[ownership.refusal]
+        : returning && !ownership.ownerHere
+          ? remoteOwnerStateUnchecked
+          : undefined;
+    items.push({
+      id: returning ? "return-to-owner" : "promote",
+      label: m(returning ? returnThreadToOwnerLabel : promoteThreadLabel),
+      disabled: ownership.refusal !== null,
+      ...(detail === undefined ? {} : { detail: m(detail) }),
+    });
+  }
+  if (
+    ownership?.action !== "promote" &&
+    (input.parentThreadId !== null || input.creator.groupingEligible)
+  ) {
     const grouped = input.parentThreadId !== null;
     items.push({
       id: grouped ? "creator-independent" : "creator-grouped",

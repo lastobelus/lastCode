@@ -10,6 +10,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   isListedThreadLineage,
+  isOwnedSubagentThread,
   isProviderNativeSubagentThread,
   OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
@@ -103,7 +104,7 @@ export function resolveListedAncestorThreadRef(
     if (!isListedThreadLineage(thread.lineage)) {
       if (thread.lineage.parentThreadId === null) return ref;
       parent = { environmentId: thread.environmentId, threadId: thread.lineage.parentThreadId };
-    } else if (thread.delegatedFrom != null) {
+    } else if (thread.lineage.independent !== true && thread.delegatedFrom != null) {
       parent = {
         environmentId: thread.delegatedFrom.environmentId,
         threadId: thread.delegatedFrom.threadId,
@@ -128,6 +129,7 @@ function subagentRequest(thread: OrchestrationV2ThreadShell): PendingSubagentReq
   if (
     kind === undefined ||
     kind === "auth_refresh" ||
+    thread.lineage.independent === true ||
     (thread.lineage.relationshipToParent !== "subagent" && thread.delegatedFrom === undefined) ||
     isProviderNativeSubagentThread(thread) ||
     !isChildRunLive(thread)
@@ -182,7 +184,7 @@ function pendingSubagentRequestsByThread(
       if (requests.get(parentId) !== "approval") requests.set(parentId, request);
       const parent = byId.get(parentId);
       parentId =
-        parent?.lineage.relationshipToParent === "subagent" || parent?.lineage.sideChat === true
+        parent && (isOwnedSubagentThread(parent) || parent.lineage.sideChat === true)
           ? parent.lineage.parentThreadId
           : null;
     }
@@ -196,7 +198,7 @@ function pendingSubagentRequestsByThread(
       }
       continue;
     }
-    if (child.lineage.relationshipToParent !== "subagent") continue;
+    if (!isOwnedSubagentThread(child)) continue;
     const request = rolledUpRequest(child, subagentRequest(child));
     if (request !== null) flag(parentId, request, new Set([child.id]));
   }
@@ -369,7 +371,12 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const runsIn of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       for (const thread of get(environmentThreadsAtom(runsIn))) {
         const from = thread.delegatedFrom;
-        if (from === undefined || from.environmentId === runsIn) continue;
+        if (
+          from === undefined ||
+          from.environmentId === runsIn ||
+          thread.lineage.independent === true
+        )
+          continue;
         const task = { runsIn, thread, parentThreadId: from.threadId };
         const tasks = tasksByDelegator.get(from.environmentId);
         if (tasks === undefined) tasksByDelegator.set(from.environmentId, [task]);
@@ -530,10 +537,10 @@ export function createEnvironmentThreadShellAtoms(input: {
           const parent = thread.lineage.parentThreadId;
           if (
             parent !== null &&
-            (thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true)
+            (isOwnedSubagentThread(thread) || thread.lineage.sideChat === true)
           ) {
             addChild({ environmentId, threadId: parent }, environmentId, thread);
-          } else if (thread.delegatedFrom !== undefined) {
+          } else if (thread.lineage.independent !== true && thread.delegatedFrom !== undefined) {
             addChild(thread.delegatedFrom, environmentId, thread);
           }
         }
@@ -745,6 +752,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const environmentId of environmentIds) {
       for (const thread of get(environmentThreadsAtom(environmentId))) {
         const parent = thread.delegatedFrom;
+        if (thread.lineage.independent === true) continue;
         const parentThread =
           parent !== undefined && environmentIds.has(parent.environmentId)
             ? get(environmentThreadIndexAtom(parent.environmentId)).get(parent.threadId)
