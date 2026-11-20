@@ -92,8 +92,16 @@ const linkedArchiveReasons = {
   changed: msg("A different machine answered"),
 };
 
+function archivePreviewThreadKey(
+  environmentId: EnvironmentThreadShell["environmentId"] | undefined,
+  threadId: ThreadId,
+) {
+  return JSON.stringify([environmentId, threadId]);
+}
+
 function buildLinkedArchiveSections(
   families: readonly ArchivePreviewFamily[],
+  selectedKeys: ReadonlySet<string>,
   resolve: MFunctionType,
 ) {
   const machines = new Map<LinkedArchivePreview["environmentId"], LinkedArchivePreview[]>();
@@ -139,7 +147,11 @@ function buildLinkedArchiveSections(
         ...thread,
         title: thread.title || resolve(msg("Untitled thread")),
         label: [
-          resolve(msg("Keep open")),
+          resolve(
+            selectedKeys.has(archivePreviewThreadKey(environmentId, thread.threadId))
+              ? msg("Archive")
+              : msg("Keep open"),
+          ),
           activeIds.has(thread.threadId)
             ? resolve(msg("Working", { $context: "thread status" }))
             : null,
@@ -184,17 +196,19 @@ export function buildThreadArchiveConfirmation<
     ? (family.bulkPreviewsIncludingTypedIn ?? typedInChoice)
     : typedInChoice;
   const hasPreview = previews.some(({ archivePreview }) => archivePreview !== undefined);
-  const linkedMachines = buildLinkedArchiveSections(previews, resolve);
   const keyOf = (thread: T | ArchivePreviewFamily["threads"][number]) =>
-    `${thread.environmentId}:${thread.id}`;
+    archivePreviewThreadKey(thread.environmentId, thread.id);
   const previewKeys = new Set(
     hasPreview ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
   );
-  const selectedKeys = new Set(
-    previews.flatMap((preview) => {
-      const kept = new Set(keptArchivePreviewThreadIds(preview, includeTypedIn));
-      return preview.threads.filter(({ id }) => !kept.has(id)).map(keyOf);
-    }),
+  const selectedThreads = previews.flatMap((preview) => {
+    const kept = new Set(keptArchivePreviewThreadIds(preview, includeTypedIn));
+    return preview.threads.filter(({ id }) => !kept.has(id));
+  });
+  const selectedKeys = new Set(selectedThreads.map(keyOf));
+  const linkedMachines = buildLinkedArchiveSections(previews, selectedKeys, resolve);
+  const archivesOnLinkedMachine = linkedMachines.some(({ environmentId }) =>
+    selectedThreads.some((thread) => thread.environmentId === environmentId),
   );
   const keep = (thread: T) => previewKeys.has(keyOf(thread)) && !selectedKeys.has(keyOf(thread));
   const inScope = (thread: T) => !hasPreview || previewKeys.has(keyOf(thread));
@@ -273,7 +287,9 @@ export function buildThreadArchiveConfirmation<
     preservesAllHistory && active && unread
       ? resolve(msg("Unread replies stay in archived history."))
       : null,
-    linkedMachines.length > 0 ? resolve(msg("Threads on linked machines will stay open.")) : null,
+    linkedMachines.length > 0 && !archivesOnLinkedMachine
+      ? resolve(msg("Threads on linked machines will stay open."))
+      : null,
     preservesAllHistory
       ? resolve(msg("Unarchiving reopens history. Stopped work won't restart."))
       : null,

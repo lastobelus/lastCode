@@ -185,6 +185,20 @@ describe("archive confirmation", () => {
     expect(defaultConfirmation.linkedMachines[3]?.warnings).toEqual([
       "Blocked · Update this machine to review its threads",
     ]);
+
+    const selectedPeerThread = { ...base, environmentId, id: remoteWork };
+    const overlappingId = { ...base, id: writtenIn };
+    const mixedSelection = buildThreadArchiveConfirmation({
+      ...bulk,
+      threads: [...bulk.threads, selectedPeerThread, overlappingId],
+      bulkPreviews: [linked, { threads: [selectedPeerThread, overlappingId] }],
+    });
+    expect(mixedSelection.description).not.toContain("Threads on linked machines will stay open.");
+    expect(mixedSelection.linkedMachines[0]?.threads.map(({ label }) => label)).toEqual([
+      "Archive · Unread",
+      "Keep open · Working · You wrote in this thread",
+      "Keep open · Persistent",
+    ]);
   });
 });
 const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShellJson);

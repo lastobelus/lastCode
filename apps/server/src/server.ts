@@ -948,6 +948,7 @@ const layerMakeRoutes = Layer.mergeAll(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
 )
+  .pipe(Layer.provide(LinkedArchivePreview.layer.pipe(Layer.provide(PeerArchiveTransport.layer))))
   .pipe(
     Layer.provide(
       PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
@@ -957,7 +958,6 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
     // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
     Layer.provide(PeerLinkRequests.layer),
-    Layer.provide(LinkedArchivePreview.layer.pipe(Layer.provide(PeerArchiveTransport.layer))),
     Layer.provide(PublishedDocumentPreview.layer),
     // Share the service so HTTP/WS clients single-flight reads and invalidate each other's cached patches.
     Layer.provide(layerPullRequestService),
