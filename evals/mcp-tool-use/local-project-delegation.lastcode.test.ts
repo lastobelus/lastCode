@@ -20,6 +20,13 @@ it.each([
   ["valid launch", callback(threadId, environmentId, "queue"), "origin/main", null, true],
   ["swapped destination", callback(environmentId, threadId, "queue"), "origin/main", null, false],
   [
+    "correct caller in context but wrong callback destination",
+    `Parent context: threadId ${threadId}, environmentId ${environmentId}. ${callback("22222222-2222-4222-8222-222222222222", environmentId, "queue")}`,
+    "origin/main",
+    null,
+    false,
+  ],
+  [
     "wrong mode with a queue mention",
     `${callback(threadId, environmentId, "auto")} The queue will receive it.`,
     "origin/main",
@@ -27,6 +34,20 @@ it.each([
     false,
   ],
   ["invalid base", callback(threadId, environmentId, "queue"), "origin/missing", null, false],
+  [
+    "shell checkout requested in the brief",
+    `${callback(threadId, environmentId, "queue")} Before editing, run \x60git worktree add /tmp/report\x60.`,
+    "origin/main",
+    null,
+    false,
+  ],
+  [
+    "shell checkout explicitly prohibited in the brief",
+    `${callback(threadId, environmentId, "queue")} Do not run \x60git worktree add\x60.`,
+    "origin/main",
+    null,
+    true,
+  ],
   [
     "shell checkout from argv",
     callback(threadId, environmentId, "queue"),

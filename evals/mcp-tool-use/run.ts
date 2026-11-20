@@ -80,7 +80,11 @@ import { proxyConfig } from "../shared/proxy.ts";
 import { changeRequestsCreatedBy } from "../../apps/server/src/orchestration-v2/PullRequestSyncReactor.ts";
 import { type BackgroundWait, makeBackgroundWait } from "./backgroundWait.ts";
 import { localProjectRefusal } from "./localProjectRefusal.ts";
-import { hasLaunchCallback, LaunchCallbackExpect } from "./launchCallbackGrading.ts";
+import {
+  directsShellCheckout,
+  hasLaunchCallback,
+  LaunchCallbackExpect,
+} from "./localProjectRecoveryGrading.ts";
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
 import { FileLinksExpect, gradeFileLinks } from "./file-link-grading.ts";
 import {
@@ -2385,6 +2389,10 @@ export const gradeSample = (
     const callback = expect.launchCallback;
     const requests = newThreadRequests(calls);
     add("launchCallback", requests.length === 1 && hasLaunchCallback(requests[0]?.brief, callback));
+    add(
+      "launchBriefUsesManagedCheckout",
+      !requests.some(({ brief }) => directsShellCheckout(brief)),
+    );
   }
   if (expect.endsTurnAfter !== undefined) {
     const lastStep = Math.max(-1, ...calls.map((call) => call.step));
