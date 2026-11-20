@@ -1,4 +1,4 @@
-import { EnvironmentId } from "./baseSchemas.ts";
+import { EnvironmentId, ForwardCompatibleArray } from "./baseSchemas.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -116,14 +116,14 @@ export const OptionalCapacitySnapshot = optionalObservation(ReportedCapacitySnap
 const LinkedCapacity = Schema.Struct({
   environmentId: EnvironmentId,
   label: Schema.String,
-  // One malformed linked reading drops only itself, not the peer's whole block.
-  capacity: OptionalCapacitySnapshot,
+  capacity: ReportedCapacitySnapshot,
 });
 
 export const EnvironmentCapacitySnapshot = Schema.Struct({
   ...ReportedCapacitySnapshot.fields,
   linkedObservation: Schema.String,
-  linked: Schema.Array(LinkedCapacity),
+  // One malformed linked entry or reading drops only itself, not the peer's whole block.
+  linked: ForwardCompatibleArray(LinkedCapacity),
 });
 export type EnvironmentCapacitySnapshot = typeof EnvironmentCapacitySnapshot.Type;
 

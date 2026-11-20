@@ -56,7 +56,7 @@ const shared = {
 const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
-    "Read this server's identity, preferences, and capacity. Each verdict covers one class (owner, agent, background) and comes with sampled metrics and reasons. Owner is always open. Agent or background is `unknown` and would hold when its sample can't be read or is older than 30s. `observe` only reports: it never holds work. Mode `unknown`: that machine's mode could not be read. Providers and models: `orchestrator_capabilities`.",
+    "Read this server's identity, preferences, and capacity. Each verdict covers one class (owner, agent, background) with metrics and reasons. Owner is always open. Agent or background is `unknown` (would hold) when its sample is unreadable or over 30s old. Mode `observe` only reports, never holds; `unknown`: mode unreadable. Providers and models: `orchestrator_capabilities`.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     includeLinked: Schema.optional(Schema.Boolean),

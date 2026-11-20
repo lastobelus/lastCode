@@ -294,7 +294,11 @@ const linkedBad = { environmentId: "linked-bad", label: "Bad" };
 const futureLinkedCapacity = {
   ...futureEnvironmentCapacity,
   linkedObservation: "partial",
-  linked: [linkedGood, { ...linkedBad, capacity: { mode: "enforce" } }],
+  linked: [
+    linkedGood,
+    { ...linkedBad, capacity: { mode: "enforce" } },
+    { label: "No environment", capacity: futureCapacity },
+  ],
 };
 
 it.effect("keeps a forwarded environment read with newer capacity and preferences", () =>
@@ -304,7 +308,7 @@ it.effect("keeps a forwarded environment read with newer capacity and preference
       yield* forwarding.call(scope, EnvironmentToolkit.tools.t3_environment_read, target, {}),
     ).toEqual({
       ...environmentResult,
-      capacity: { ...futureLinkedCapacity, linked: [linkedGood, linkedBad] },
+      capacity: { ...futureLinkedCapacity, linked: [linkedGood] },
     });
   }).pipe(Effect.provide(forwardingWith({ ...environmentResult, capacity: futureLinkedCapacity }))),
 );
