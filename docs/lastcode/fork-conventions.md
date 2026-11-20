@@ -61,12 +61,13 @@ In LastCode delivery:
   seams: an import plus a one-line call, hook, Layer entry or `case` that hands
   off to that module. Prefer seams upstream already has, such as its Effect
   services and Layers, registries and context providers, over a new hook cut
-  into an upstream function. Add lines and leave upstream's existing lines
-  untouched, because wrapping, re-indenting or reformatting them gives later
-  upstream edits more places to conflict. When a seam must wrap upstream code,
-  as a new context provider does, wrap the smallest block that works. Never
-  copy an upstream module to fork it: the copy drifts from upstream with no
-  conflict to show it.
+  into an upstream function. Add lines rather than editing upstream's existing
+  ones, because wrapping, re-indenting or reformatting them gives later
+  upstream edits more places to conflict. When a seam must touch existing
+  lines, such as an entry in a one-line list or a new context provider that
+  wraps upstream JSX, keep that edit as small as it can be. Never copy an
+  upstream module to fork it: the copy drifts from upstream with no conflict
+  to show it.
 - Fix existing behavior where it lives, even in an upstream-owned file. A fix
   in an upstream-owned module places its test as the `AGENTS.md` test rules say.
 - Put tests for a fork-owned module in a fork-owned test file, including a
