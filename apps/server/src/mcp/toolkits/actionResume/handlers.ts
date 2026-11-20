@@ -1,3 +1,4 @@
+import * as Capacity from "../../../capacity/Capacity.ts";
 import { ActionResumeError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -43,7 +44,7 @@ export const layer = McpToolAccess.toLayer(ActionResumeToolkit, {
           message: "Action resume is unavailable in this server runtime.",
         });
       }
-      return yield* service.value.runProjectActionAndResume(
+      const result = yield* service.value.runProjectActionAndResume(
         {
           threadId: invocation.thread.threadId,
           providerInstanceId: invocation.thread.providerInstanceId,
@@ -53,6 +54,7 @@ export const layer = McpToolAccess.toLayer(ActionResumeToolkit, {
         },
         actionId,
       );
+      return { ...result, capacity: yield* (yield* Capacity.Capacity).read };
     }),
   ),
   inspect_action_run: McpToolAccess.readsAsCaller(({ runId }) =>

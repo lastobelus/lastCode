@@ -1,3 +1,4 @@
+import * as CapacityLive from "./capacity/live.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -945,6 +946,7 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(
       PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
     ),
+    Layer.provide(CapacityLive.layer.pipe(Layer.provide(layerHostPowerMonitor))),
     // delegate_task to a linked environment, from /mcp and the follower above.
     Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
     // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.

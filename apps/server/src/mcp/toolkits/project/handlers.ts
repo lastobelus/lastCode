@@ -1,3 +1,4 @@
+import * as Capacity from "../../../capacity/Capacity.ts";
 import {
   CommandId,
   MessageId,
@@ -274,6 +275,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               Effect.mapError((error) => releasedRemotePreparationFailure(error) ?? unavailable()),
             );
           return {
+            capacity: yield* (yield* Capacity.Capacity).read,
             threadId: target.thread.id,
             projectId: target.thread.projectId,
             modelSelection: target.thread.modelSelection,
@@ -537,6 +539,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const thread = result.projection.thread;
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
         return {
+          capacity: yield* (yield* Capacity.Capacity).read,
           threadId: thread.id,
           link: McpInvocationContext.threadLinkFor(scope, thread.id, thread.title),
           ...(delegation === undefined ? {} : { delegation }),

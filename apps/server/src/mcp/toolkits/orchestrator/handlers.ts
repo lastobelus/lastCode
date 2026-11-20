@@ -1,3 +1,4 @@
+import { capacityForTarget } from "../../capacityRead.ts";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
@@ -24,7 +25,8 @@ const handlers = {
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.delegateTask(scope, input);
+      const result = yield* service.delegateTask(scope, input);
+      return { ...result, capacity: yield* capacityForTarget(scope, input.target?.environmentId) };
     }),
   ),
   task_status: McpToolAccess.actsAsCaller(({ taskId }) =>
@@ -151,7 +153,8 @@ const handlers = {
         input.threads.map((thread) => thread.groupedUnderThreadId),
       );
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.createThreads(caller.scope, input);
+      const result = yield* service.createThreads(caller.scope, input);
+      return { ...result, capacity: yield* capacityForTarget(caller.scope, undefined) };
     }),
   ),
   t3_thread_list: McpToolAccess.reads((input) =>

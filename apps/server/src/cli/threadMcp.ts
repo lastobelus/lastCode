@@ -1,4 +1,7 @@
 import {
+  OptionalCapacitySnapshot,
+  OptionalEnvironmentCapacitySnapshot,
+  EnvironmentId,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -13,6 +16,8 @@ import {
   type OrchestratorMcpThreadStatus,
   type OrchestratorMcpThreadTimelineItem,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
+import { unknownCapacitySnapshot } from "../capacity/logic.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -171,6 +176,7 @@ const ProjectListResult = Schema.Struct({
 });
 
 const ThreadLaunchResult = Schema.Struct({
+  capacity: OptionalCapacitySnapshot,
   threadId: ThreadId,
   projectId: ProjectId,
   runId: Schema.NullOr(RunId),
@@ -980,5 +986,45 @@ export const threadShowCommand = Command.make("show", {
         }),
       );
     }).pipe(reportThreadErrors),
+  ),
+);
+
+export const threadCapacityCommand = Command.make("capacity", {
+  ...projectLocationFlags,
+  environment: Flag.String("environment").pipe(
+    Flag.withDescription("Environment id to forward the read to. Defaults to this environment."),
+    Flag.optional,
+  ),
+}).pipe(
+  Command.withDescription(
+    "Print this environment's capacity as JSON: mode, per-class verdicts, sampled metrics and reasons. Reports only; never holds work.",
+  ),
+  Command.withHandler((flags) =>
+    withThreadTools({ ...flags, json: true }, (tools) =>
+      tools
+        .call(
+          "t3_environment_read",
+          Option.isSome(flags.environment)
+            ? { environmentId: EnvironmentId.make(flags.environment.value) }
+            : {},
+          Schema.Struct({
+            environmentId: EnvironmentId,
+            capacity: OptionalEnvironmentCapacitySnapshot,
+          }),
+        )
+        .pipe(
+          Effect.flatMap((result) =>
+            Effect.gen(function* () {
+              const capacity = result.capacity ?? {
+                ...unknownCapacitySnapshot(yield* Clock.currentTimeMillis),
+                mode: "unknown",
+                linkedObservation: "unknown",
+                linked: [],
+              };
+              return yield* printJson({ ...result, capacity });
+            }),
+          ),
+        ),
+    ).pipe(reportThreadErrors),
   ),
 );
