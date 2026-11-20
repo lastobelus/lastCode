@@ -1691,18 +1691,23 @@ describe("checkpoint ref cleanup", () => {
   it.live("cleans more checkpoint refs than default git output holds", () =>
     runCleanupTest(
       Effect.gen(function* () {
-        const { service, repo, addThread, listRefs } = yield* checkpointCleanupFixture();
-        const git = yield* GitVcsDriver.GitVcsDriver;
+        const { service, fs, repo, command, addThread, listRefs } =
+          yield* checkpointCleanupFixture();
         const prefix = (yield* addThread("many-checkpoints", { deleted: true }))[0]!.slice(0, -1);
-        yield* git.execute({
-          operation: "cleanup-test.seed-checkpoints",
-          cwd: repo,
-          args: ["update-ref", "--stdin"],
-          stdin: Array.from(
+        const head = (yield* command(repo, ["rev-parse", "HEAD"])).stdout.trim();
+        // Packed refs avoid thousands of fixture writes under the Git command deadline.
+        const packed = `${repo}/.git/packed-refs.fixture`;
+        yield* fs.writeFileString(
+          packed,
+          `# pack-refs with: sorted\n${Array.from(
             { length: 12_283 },
-            (_, ordinal) => `update ${prefix}${ordinal} HEAD\n`,
-          ).join(""),
-        });
+            (_, ordinal) => `${head} ${prefix}${ordinal}\n`,
+          )
+            .sort()
+            .join("")}`,
+        );
+        yield* fs.rename(packed, `${repo}/.git/packed-refs`);
+        expect(yield* listRefs()).toHaveLength(12_284);
         yield* service.runNow;
         expect(yield* listRefs()).toEqual([]);
       }).pipe(Effect.provide(Sqlite.layerMemory)),
