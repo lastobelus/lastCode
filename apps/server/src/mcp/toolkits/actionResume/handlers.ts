@@ -80,4 +80,40 @@ export const layer = McpToolAccess.toLayer(ActionResumeToolkit, {
       );
     }),
   ),
+  resume_interrupted_action: McpToolAccess.actsAsCaller(() =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("action-resume");
+      const invocation = yield* McpInvocationContext.requireThreadScope(
+        scope,
+        "resume_interrupted_action",
+      );
+      const service = yield* Effect.serviceOption(ActionResume);
+      if (Option.isNone(service)) {
+        return yield* new ActionResumeError({
+          reason: "internal_error",
+          message: "Action resume is unavailable in this server runtime.",
+        });
+      }
+      yield* service.value.resumeInterrupted(invocation.thread.threadId);
+      return { resumed: true as const };
+    }),
+  ),
+  discard_interrupted_action: McpToolAccess.actsAsCaller(() =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("action-resume");
+      const invocation = yield* McpInvocationContext.requireThreadScope(
+        scope,
+        "discard_interrupted_action",
+      );
+      const service = yield* Effect.serviceOption(ActionResume);
+      if (Option.isNone(service)) {
+        return yield* new ActionResumeError({
+          reason: "internal_error",
+          message: "Action resume is unavailable in this server runtime.",
+        });
+      }
+      yield* service.value.discardInterrupted(invocation.thread.threadId);
+      return { discarded: true as const };
+    }),
+  ),
 });
