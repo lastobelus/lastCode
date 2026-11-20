@@ -2967,7 +2967,7 @@ const make = Effect.gen(function* () {
       ) {
         return yield* failure(
           "invalid_request",
-          "A local task runs in this thread's project. Omit target.projectId, or pass target.environmentId to run it in that environment's project.",
+          "A local task runs in this thread's project. Omit target.projectId for this project. If this request authorizes a thread in the other local project, use t3_thread_launch with that projectId. If the request calls for isolation, set a worktree workspaceStrategy so T3 creates the checkout. Include a t3_thread_send callback in the brief if you'll act on the result.",
         );
       }
       const providers = yield* loadProviders;

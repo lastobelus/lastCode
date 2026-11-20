@@ -79,6 +79,7 @@ import {
 import { proxyConfig } from "../shared/proxy.ts";
 import { changeRequestsCreatedBy } from "../../apps/server/src/orchestration-v2/PullRequestSyncReactor.ts";
 import { type BackgroundWait, makeBackgroundWait } from "./backgroundWait.ts";
+import { localProjectRefusal } from "./localProjectRefusal.ts";
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
 import { FileLinksExpect, gradeFileLinks } from "./file-link-grading.ts";
 import {
@@ -182,6 +183,7 @@ const PriorToolCall = Schema.Struct({
   /**
    * For a device tool or t3_background_wait, `"default"` runs the call on the world's devices or
    * background tasks for T3's result.
+   * For delegate_task, `"local-project-refusal"` replays T3's cross-project local refusal.
    */
   result: Schema.Unknown,
   /** Repository-relative file whose current contents supply this tool result. */
@@ -1075,6 +1077,19 @@ export const withBackgroundWait = Effect.fn("evaluateMcpToolUse.withBackgroundWa
     const result = yield* backgroundWait(call.input);
     sample.priorResults.set(call, result.text);
     if (result.isError) sample.priorErrors.add(call);
+  }
+});
+
+const prepareSample = Effect.fn("evaluateMcpToolUse.prepareSample")(function* (sample: Sample) {
+  yield* withDevices(sample);
+  yield* withBackgroundWait(sample);
+  for (const call of (sample.testCase.setup.priorTurns ?? []).flatMap(
+    (turn) => turn.toolCalls ?? [],
+  )) {
+    if (call.tool !== "delegate_task" || call.result !== "local-project-refusal") continue;
+    const refusal = yield* localProjectRefusal(call.input);
+    sample.priorResults.set(call, valueText(refusal));
+    sample.priorErrors.add(call);
   }
 });
 
@@ -2649,8 +2664,7 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
   spent: { readonly usage: Usage; readonly shellUsage: Usage },
 ) {
   const sample = { ...makeSample(testCase, base), shellUsage: spent.shellUsage };
-  yield* withDevices(sample);
-  yield* withBackgroundWait(sample);
+  yield* prepareSample(sample);
   const runPromise = Effect.runPromiseWith(yield* Effect.context<HttpClient.HttpClient>());
   const messages = buildMessages(sample);
   const input = base.codex ? codexMessages(messages) : undefined;
@@ -3093,7 +3107,7 @@ const main = Effect.gen(function* () {
     // One JSON line per case. Without --case this also checks that every case builds.
     for (const testCase of selected) {
       const sample = makeSample(testCase, baseFor(testCase));
-      yield* Effect.scoped(Effect.andThen(withDevices(sample), withBackgroundWait(sample)));
+      yield* Effect.scoped(prepareSample(sample));
       const messages = buildMessages(sample);
       const body = sample.base.codex
         ? codexRequest(sample.base, codexMessages(messages))
