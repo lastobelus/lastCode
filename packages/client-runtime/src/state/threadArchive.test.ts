@@ -216,6 +216,13 @@ describe("archive confirmation", () => {
       bulkPreviews: [linked, { threads: [selectedPeerThread, overlappingId] }],
     });
     expect(mixedSelection.description).not.toContain("Threads on linked machines will stay open.");
+    expect(mixedSelection.threads).toEqual(
+      [base, child, selectedPeerThread, overlappingId].map((thread) => ({
+        thread,
+        label: "Archive",
+        showLocation: true,
+      })),
+    );
     expect(mixedSelection.linkedMachines[0]?.threads.map(({ label }) => label)).toEqual([
       "Archive · Unread",
       "Keep open · Working · You wrote in this thread",

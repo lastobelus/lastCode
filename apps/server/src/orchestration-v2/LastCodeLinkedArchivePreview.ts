@@ -5,6 +5,7 @@ import {
   type PeerArchiveUnavailable,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -15,6 +16,7 @@ import { type ClientModes, clientModeCeiling } from "../mcp/McpInvocationContext
 import type { Caller } from "../mcp/threadAccess.ts";
 import {
   LastCodePeerArchiveTransport,
+  PEER_ARCHIVE_PREVIEW_TIMEOUT_MS,
   PeerArchiveHandler,
 } from "../peer/LastCodePeerArchiveTransport.ts";
 import { PeerLinks } from "../peer/PeerLinks.ts";
@@ -103,27 +105,39 @@ export const layer = Layer.effect(
         limits?: ClientModes,
       ) {
         if (!family.threads.some((thread) => thread.id === threadId)) return family;
+        const deadline = (yield* Clock.currentTimeMillis) + PEER_ARCHIVE_PREVIEW_TIMEOUT_MS;
         const peers = yield* links.listStored ?? Effect.succeed([]);
         if (peers.length === 0 || !(yield* links.enabled)) return family;
-        const input = yield* readPeerArchiveOwnerScope(environmentId, threadId, store);
+        const beforeDeadline = <A, E>(request: Effect.Effect<A, E>) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap((now) =>
+              now < deadline
+                ? request.pipe(Effect.timeoutOption(deadline - now))
+                : Effect.succeed(Option.none<A>()),
+            ),
+          );
+        const input = yield* beforeDeadline(
+          readPeerArchiveOwnerScope(environmentId, threadId, store),
+        );
         const linkedArchivePreview = yield* Effect.forEach(
           peers,
-          ({ environmentId, label }) =>
-            transport.inventory(environmentId, input, limits).pipe(
+          ({ environmentId, label }) => {
+            const pending = { environmentId, label, ...offline } satisfies LinkedArchivePreview;
+            if (Option.isNone(input)) return Effect.succeed(pending);
+            return beforeDeadline(transport.inventory(environmentId, input.value, limits)).pipe(
               Effect.match({
-                onSuccess: (inventory): LinkedArchivePreview => ({
-                  environmentId,
-                  label,
-                  status: "ready",
-                  inventory,
-                }),
+                onSuccess: (inventory): LinkedArchivePreview =>
+                  Option.isSome(inventory)
+                    ? { environmentId, label, status: "ready", inventory: inventory.value }
+                    : pending,
                 onFailure: (unavailable): LinkedArchivePreview => ({
                   environmentId,
                   label,
                   ...unavailable,
                 }),
               }),
-            ),
+            );
+          },
           { concurrency: "unbounded" },
         );
         return { ...family, linkedArchivePreview };

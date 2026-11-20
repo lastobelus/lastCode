@@ -203,15 +203,16 @@ export function buildThreadArchiveConfirmation<
   const hasPreview = previews.some(({ archivePreview }) => archivePreview !== undefined);
   const keyOf = (thread: T | ArchivePreviewFamily["threads"][number]) =>
     archivePreviewThreadKey(thread.environmentId, thread.id);
-  const previewKeys = new Set(
-    hasPreview ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
-  );
   const selectedThreads = previews.flatMap((preview) => {
     const kept = new Set(keptArchivePreviewThreadIds(preview, includeTypedIn));
     return preview.threads.filter(({ id }) => !kept.has(id));
   });
   const selectedKeys = new Set(selectedThreads.map(keyOf));
   const linkedMachines = buildLinkedArchiveSections(previews, selectedKeys, resolve);
+  const showBulkSelection = family.bulkPreviews !== undefined && linkedMachines.length > 0;
+  const previewKeys = new Set(
+    hasPreview || showBulkSelection ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
+  );
   const archivesOnLinkedMachine = linkedMachines.some(({ environmentId }) =>
     selectedThreads.some((thread) => thread.environmentId === environmentId),
   );

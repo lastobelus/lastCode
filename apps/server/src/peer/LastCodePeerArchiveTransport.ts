@@ -71,6 +71,7 @@ const decodeModeLimit = Schema.decodeUnknownOption(
 );
 
 const noStore = { "cache-control": "no-store" };
+export const PEER_ARCHIVE_PREVIEW_TIMEOUT_MS = 1_000;
 const emptyResponse = (status: number) => HttpServerResponse.empty({ status, headers: noStore });
 const unavailableStatus = 409;
 const encodeUnavailable = HttpServerResponse.schemaJson(PeerArchiveUnavailable);
@@ -243,7 +244,10 @@ export const layer = Layer.effect(
               (result) => result.environmentId === environmentId,
               () => changed,
             ),
-            Effect.timeoutOrElse({ duration: "1 second", orElse: () => Effect.fail(offline) }),
+            Effect.timeoutOrElse({
+              duration: PEER_ARCHIVE_PREVIEW_TIMEOUT_MS,
+              orElse: () => Effect.fail(offline),
+            }),
           ),
       ),
     });
