@@ -14,6 +14,7 @@ import {
 import "~/index.css";
 
 const state = vi.hoisted(() => ({ preview: vi.fn(), canDiscard: true, toast: vi.fn() }));
+vi.mock("../state/entities", () => ({ readProject: () => null }));
 vi.mock("../components/ui/toast", () => ({
   toastManager: { add: state.toast },
   stackedThreadToast: (value: unknown) => value,

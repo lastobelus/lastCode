@@ -84,6 +84,10 @@ vi.mock("../../state/presentation", () => ({
 vi.mock("../../state/server", () => ({
   environmentServerConfigsAtom: "server-configs",
 }));
+vi.mock("../../state/projects", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return { environmentProjects: { projectAtom: Atom.family(() => Atom.make(null)) } };
+});
 vi.mock("../../state/atom-registry", async () => {
   const registry = (await import("effect/reactivity")).AtomRegistry.make();
   const stub = {

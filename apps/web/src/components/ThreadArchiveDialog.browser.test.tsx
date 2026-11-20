@@ -39,7 +39,7 @@ it("closes a failed action and requires a new confirmation for the fresh family"
   await act(() => button("Stop active threads & archive").click());
   expect(await result).toBeNull();
   expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-  expect(submit).toHaveBeenCalledExactlyOnceWith("stop_and_archive");
+  expect(submit).toHaveBeenCalledExactlyOnceWith("stop_and_archive", undefined);
 
   const freshSubmit = vi.fn().mockResolvedValue(null);
   await act(() => {
@@ -49,7 +49,7 @@ it("closes a failed action and requires a new confirmation for the fresh family"
   expect(freshSubmit).not.toHaveBeenCalled();
   await act(() => button("Stop active threads & archive").click());
   expect(await result).toBe("stop_and_archive");
-  expect(freshSubmit).toHaveBeenCalledExactlyOnceWith("stop_and_archive");
+  expect(freshSubmit).toHaveBeenCalledExactlyOnceWith("stop_and_archive", undefined);
 });
 
 it("confirms unread replies without granting permission to stop work", async () => {
@@ -78,7 +78,7 @@ it("confirms unread replies without granting permission to stop work", async () 
   ]);
   await act(() => button("Archive unread threads").click());
   expect(await result).toBe("archive_after_review");
-  expect(submit).toHaveBeenCalledExactlyOnceWith("archive_after_review");
+  expect(submit).toHaveBeenCalledExactlyOnceWith("archive_after_review", undefined);
 });
 
 it.each(["returned", "thrown"] as const)(
@@ -97,7 +97,7 @@ it.each(["returned", "thrown"] as const)(
     await act(() => button("Stop active threads & archive").click());
     expect(await result).toBeNull();
     expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-    expect(submit).toHaveBeenCalledExactlyOnceWith("stop_and_archive");
+    expect(submit).toHaveBeenCalledExactlyOnceWith("stop_and_archive", undefined);
   },
 );
 
