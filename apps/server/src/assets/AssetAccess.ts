@@ -1,4 +1,4 @@
-import type { AssetResource, ProjectId } from "@t3tools/contracts";
+import type { AssetResource } from "@t3tools/contracts";
 import {
   AssetAttachmentNotFoundError,
   AssetSourceControlMediaUrlValidationError,
@@ -34,7 +34,6 @@ import {
   type ImageDimensions,
 } from "@t3tools/shared/imageDimensions";
 import { MCP_APP_MAX_HTML_BYTES } from "@t3tools/shared/mcpApp";
-import { mediaMimeTypeFromExtension } from "@t3tools/shared/mediaPreview";
 import {
   isProjectFaviconPath,
   PROJECT_FAVICON_FALLBACK_MARKER,
@@ -58,7 +57,6 @@ import { parseAttachmentFileExtension, resolveAttachmentPathById } from "../atta
 import * as ServerConfig from "../config.ts";
 import { findThemeBackground } from "../environmentTheme.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
-import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import { isWithinRoot } from "../workspace/KnownWorkspaces.ts";
@@ -68,7 +66,6 @@ import * as ThreadLinkedFiles from "../workspace/ThreadLinkedFiles.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import { extractIcnsPng } from "./icns.ts";
-import { renderProjectIconSvg } from "./projectIconSvg.ts";
 import { openMediaFile, readMediaFileHeader, type OpenMediaFile } from "./MediaFile.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as PreviewHosting from "../preview/Hosting.ts";
@@ -81,9 +78,6 @@ const PROJECT_FAVICON_TOKEN_BUCKET_MS = 30 * 60 * 1000;
 const HTML_ATTACHMENT_TOKEN_BUCKET_MS = 30 * 60 * 1000;
 const PROJECT_FAVICON_VERSION_PREFIX = "v";
 const PROJECT_FAVICON_ICNS_MIN_SIZE = 96;
-const PROJECT_ICON_MAX_BYTES = 128 * 1024;
-// An ICNS container can include many larger representations of the same icon.
-const PROJECT_ICON_ICNS_MAX_BYTES = 8 * 1024 * 1024;
 const INLINE_VIDEO_MIME_TYPE_PATTERN = /^video\/[\w!#$&^.+-]+$/i;
 // Use server-assigned attachment extensions, never client MIME types.
 const INLINE_PREVIEW_MIME_TYPES: Record<string, string> = {
@@ -371,76 +365,6 @@ const resolveCanonicalWorkspaceFile = Effect.fn("AssetAccess.resolveCanonicalWor
     return (yield* isServerInternalPath(canonicalFile.value)) ? null : canonicalFile.value;
   },
 );
-
-const isExternalFaviconOverride = (
-  path: Path.Path,
-  resolved: string | null,
-  configured: string | null | undefined,
-) =>
-  resolved !== null &&
-  configured != null &&
-  path.isAbsolute(configured) &&
-  path.normalize(resolved) === path.normalize(configured);
-
-const readProjectFavicon = Effect.fn("AssetAccess.readProjectFavicon")(
-  function* (workspaceRoot: string, faviconPath: string | null) {
-    const path = yield* Path.Path;
-    const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
-    const root = yield* workspacePaths.normalizeWorkspaceRoot(workspaceRoot);
-    const resolver = yield* ProjectFaviconResolver.ProjectFaviconResolver;
-    const resolved = yield* resolver.resolvePath(root, faviconPath ?? undefined);
-    if (!resolved || !isProjectFaviconPath(resolved)) return null;
-
-    const filePath = yield* isExternalFaviconOverride(path, resolved, faviconPath)
-      ? resolveCanonicalFile(resolved)
-      : resolveCanonicalWorkspaceFile({
-          workspaceRoot: root,
-          relativePath: path.relative(root, resolved),
-        });
-    if (!filePath || !isProjectFaviconPath(filePath)) return null;
-
-    const extension = path.extname(filePath).toLowerCase();
-    const isIcns = extension === ".icns";
-    const mediaType = isIcns ? "image/png" : mediaMimeTypeFromExtension(extension);
-    if (!mediaType?.startsWith("image/")) return null;
-
-    const file = yield* openMediaFile(filePath);
-    const limit = isIcns ? PROJECT_ICON_ICNS_MAX_BYTES : PROJECT_ICON_MAX_BYTES;
-    if (!file || file.info.size === 0n || file.info.size > BigInt(limit)) return null;
-
-    const size = Number(file.info.size);
-    const bytes = yield* readMediaFileHeader(filePath, file, size + 1);
-    if (bytes.byteLength !== size) return null;
-
-    const icon = isIcns
-      ? extractIcnsPng(bytes, PROJECT_FAVICON_ICNS_MIN_SIZE, PROJECT_ICON_MAX_BYTES)
-      : bytes;
-    return icon ? { mediaType, base64: Buffer.from(icon).toString("base64") } : null;
-  },
-  Effect.scoped,
-  Effect.catch((cause) =>
-    Effect.logDebug("Could not read project favicon.", { cause }).pipe(Effect.as(null)),
-  ),
-);
-
-export const readProjectIcon = Effect.fn("AssetAccess.readProjectIcon")(function* (
-  projectId: ProjectId,
-) {
-  const projects = yield* ProjectStore.ProjectStoreV2;
-  const project = yield* projects.get(projectId);
-  if (Option.isNone(project)) return null;
-
-  const override = project.value.projectIcon;
-  if (override) {
-    const svg = yield* Effect.promise(() => renderProjectIconSvg(override));
-    const bytes = Buffer.from(svg);
-    return bytes.byteLength <= PROJECT_ICON_MAX_BYTES
-      ? { mediaType: "image/svg+xml", base64: bytes.toString("base64") }
-      : null;
-  }
-
-  return yield* readProjectFavicon(project.value.workspaceRoot, project.value.faviconPath);
-});
 
 const resolveCanonicalWorkspaceFileForRequest = (input: {
   readonly workspaceRoot: string;
@@ -941,11 +865,11 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
                     }),
                 ),
               );
-      const isExternalOverride = isExternalFaviconOverride(
-        path,
-        faviconPath,
-        input.projectFaviconPath,
-      );
+      const isExternalOverride =
+        faviconPath !== null &&
+        input.projectFaviconPath !== undefined &&
+        path.isAbsolute(input.projectFaviconPath) &&
+        path.normalize(faviconPath) === path.normalize(input.projectFaviconPath);
       const relativePath =
         faviconPath && !isExternalOverride ? path.relative(workspaceRoot, faviconPath) : null;
       const sourceFaviconPath = isExternalOverride ? faviconPath : relativePath;
@@ -1341,3 +1265,4 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     ? ({ kind: "file", path: workspaceFile, renderIntent: "file-preview" } satisfies ResolvedAsset)
     : null;
 });
+export { PROJECT_FAVICON_ICNS_MIN_SIZE, resolveCanonicalFile, resolveCanonicalWorkspaceFile };
