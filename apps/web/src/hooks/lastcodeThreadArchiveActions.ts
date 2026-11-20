@@ -473,11 +473,16 @@ export function createLastCodeThreadArchiveActions(ports: {
         owner: EnvironmentThreadShell;
       }
     > = [];
-    for (const entry of normalizedEntries) {
-      const result = await loadArchiveFamily({
-        environmentId: entry.threadRef.environmentId,
-        input: { threadId: entry.threadRef.threadId },
-      });
+    const previews = await Promise.all(
+      normalizedEntries.map(async (entry) => ({
+        entry,
+        result: await loadArchiveFamily({
+          environmentId: entry.threadRef.environmentId,
+          input: { threadId: entry.threadRef.threadId },
+        }),
+      })),
+    );
+    for (const { entry, result } of previews) {
       if (result._tag === "Failure")
         return {
           archivedThreadKeys: [],

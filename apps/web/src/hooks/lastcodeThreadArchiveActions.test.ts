@@ -790,10 +790,11 @@ describe("archive family confirmation", () => {
       environmentId: target.environmentId,
     });
     familyState.threads = [{ ...owner, runtime: null }, eligible];
-    archiveFamilyLoad.mockImplementation(async ({ input }) => ({
-      _tag: "Success",
-      value: input.threadId === owner.id ? [owner] : [eligible],
-    }));
+    const pending = Promise.withResolvers<void>();
+    archiveFamilyLoad.mockImplementation(async ({ input }) => {
+      if (input.threadId === eligible.id) await pending.promise;
+      return { _tag: "Success", value: input.threadId === owner.id ? [owner] : [eligible] };
+    });
     archiveDialog.mockImplementation(async (request) => {
       expect(archiveFamilyLoad).toHaveBeenCalledTimes(2);
       expect(request.family.activeThreadIds).toEqual([owner.id]);
@@ -805,7 +806,11 @@ describe("archive family confirmation", () => {
       threadRef: { environmentId: thread.environmentId, threadId: thread.id },
       threadKey: `${thread.environmentId}:${thread.id}`,
     }));
-    const outcome = await useThreadActions().archiveThreads(selected);
+    const archiving = useThreadActions().archiveThreads(selected);
+    expect(archiveFamilyLoad).toHaveBeenCalledTimes(2);
+    expect(archiveDialog).not.toHaveBeenCalled();
+    pending.resolve();
+    const outcome = await archiving;
     expect(outcome?.mutationFailure).toBeNull();
     expect(outcome?.archivedThreadKeys).toEqual(selected.map(({ threadKey }) => threadKey));
     expect(archiveConfirm).not.toHaveBeenCalled();

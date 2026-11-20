@@ -18,9 +18,6 @@ import {
   readPeerArchiveOwnerScope,
 } from "./LastCodePeerArchiveInventory.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
-import * as ThreadManagement from "./ThreadManagementService.ts";
-import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 const origin = EnvironmentId.make("workstation");
 const destination = EnvironmentId.make("managed-server");
@@ -41,6 +38,7 @@ const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
     readonly typed?: boolean;
     readonly archived?: boolean;
     readonly persistent?: boolean;
+    readonly unread?: boolean;
   },
 ) {
   const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -80,7 +78,7 @@ const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
     occurredAt: now,
     payload: thread,
   });
-  if (options?.typed) {
+  if (options?.typed || options?.unread) {
     yield* store.apply({
       id: EventId.make(`message:${id}`),
       type: "message.updated",
@@ -91,12 +89,12 @@ const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
         threadId: id,
         runId: null,
         nodeId: null,
-        role: "user",
-        text: "Keep this branch open",
+        role: options.typed ? "user" : "assistant",
+        text: options.typed ? "Keep this branch open" : "The work is ready to review",
         attachments: [],
         streaming: false,
-        createdBy: "user",
-        creationSource: "web",
+        createdBy: options.typed ? "user" : "agent",
+        creationSource: options.typed ? "web" : "mcp",
         createdAt: now,
         updatedAt: now,
       },
@@ -104,20 +102,7 @@ const saveThread = Effect.fn("PeerArchiveInventoryTest.saveThread")(function* (
   }
 });
 
-const environmentLayer = (name: string) => {
-  const database = Sqlite.layerMemory;
-  const replay = ProviderReplayHarness.layerWithRegistry(
-    { name },
-    ProviderAdapterRegistry.layerFromAdapters([]),
-    { databaseLayer: database, runEffectWorker: false },
-  );
-  return ThreadManagement.layer.pipe(
-    Layer.provideMerge(
-      Layer.mergeAll(replay, ProjectionStore.layer.pipe(Layer.provideMerge(database))),
-    ),
-    Layer.fresh,
-  );
-};
+const environmentLayer = ProjectionStore.layer.pipe(Layer.provide(Sqlite.layerMemory), Layer.fresh);
 
 it.effect("reads only recorded ownership across two separate environment databases", () =>
   Effect.gen(function* () {
@@ -131,13 +116,17 @@ it.effect("reads only recorded ownership across two separate environment databas
       );
       const store = yield* ProjectionStore.ProjectionStoreV2;
       return yield* readPeerArchiveOwnerScope(origin, orchestrator, store);
-    }).pipe(Effect.provide(environmentLayer("archive-inventory-origin")));
+    }).pipe(Effect.provide(environmentLayer));
 
     assert.sameMembers([...request.ownerThreadIds], [orchestrator, localChild, typedLocal]);
     assert.deepEqual(request.keptOwnerThreadIds, [typedLocal]);
 
     yield* Effect.gen(function* () {
-      yield* saveThread(direct, { environmentId: origin, threadId: orchestrator });
+      yield* saveThread(
+        direct,
+        { environmentId: origin, threadId: orchestrator },
+        { unread: true },
+      );
       yield* saveThread(remoteChild, { environmentId: origin, threadId: localChild });
       yield* saveThread(
         typedBranch,
@@ -156,11 +145,8 @@ it.effect("reads only recorded ownership across two separate environment databas
       });
       yield* saveThread(ThreadId.make("thread:unowned"));
       const store = yield* ProjectionStore.ProjectionStoreV2;
-      const threads = yield* ThreadManagement.ThreadManagementService;
-      const family = threads.getThreadArchiveFamily;
       const inventory = yield* readPeerArchiveInventory(destination, request, {
         store,
-        family,
         authorize: () => Effect.void,
       });
       assert.equal(inventory.environmentId, destination);
@@ -170,13 +156,16 @@ it.effect("reads only recorded ownership across two separate environment databas
       );
       assert.sameMembers([...inventory.keptThreadIds], [nested, remotelyKept]);
       assert.deepEqual(inventory.protectedThreadIds, [nested]);
+      assert.deepEqual(inventory.unreadThreadIds, [direct]);
 
       const refusal = yield* readPeerArchiveInventory(destination, request, {
-        store,
-        family: () => Effect.die("Read activity before authorizing every member"),
+        store: {
+          ...store,
+          getThreadRecords: () => Effect.die("Read activity before authorizing every member"),
+        },
         authorize: ({ id }) => (id === nested ? Effect.fail("denied" as const) : Effect.void),
       }).pipe(Effect.flip);
       assert.equal(refusal, "denied");
-    }).pipe(Effect.provide(environmentLayer("archive-inventory-destination")));
+    }).pipe(Effect.provide(environmentLayer));
   }),
 );

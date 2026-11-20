@@ -188,7 +188,7 @@ const makePeerArchivePost = (
     ) {
       if (!(yield* links.enabled)) return yield* Effect.fail(denied);
       const { url, token } = yield* links
-        .resolve(environmentId)
+        .resolve(environmentId, { refreshLabel: false })
         .pipe(Effect.mapError(fromLinkError));
       const request = yield* HttpClientRequest.post(`${url}${post.path}`).pipe(
         HttpClientRequest.acceptJson,
@@ -224,13 +224,7 @@ const makePeerArchivePost = (
           return yield* Effect.fail(unavailable);
         }
         return yield* decodeOutput(body).pipe(Effect.mapError(() => unsupported));
-      }).pipe(
-        Effect.scoped,
-        Effect.timeoutOrElse({
-          duration: PeerLinks.probeTimeout(url),
-          orElse: () => Effect.fail(offline),
-        }),
-      );
+      }).pipe(Effect.scoped);
     });
   };
 };
@@ -249,6 +243,7 @@ export const layer = Layer.effect(
               (result) => result.environmentId === environmentId,
               () => changed,
             ),
+            Effect.timeoutOrElse({ duration: "1 second", orElse: () => Effect.fail(offline) }),
           ),
       ),
     });

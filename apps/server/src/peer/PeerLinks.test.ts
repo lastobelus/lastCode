@@ -588,6 +588,9 @@ it.effect("a linked peer that is renamed shows its new name", () =>
       yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
 
       yield* Ref.set(b.descriptor, descriptorOf(box.environmentId, "Box Mini"));
+      const preview = yield* a.links.resolve(box.environmentId, { refreshLabel: false });
+      expect(preview.link.label).toBe("Box");
+      expect(Option.getOrThrow(yield* a.links.get(box.environmentId)).label).toBe("Box");
       expect((yield* a.links.resolve(box.environmentId)).link.label).toBe("Box Mini");
       const stored = yield* a.links.get(box.environmentId);
       expect(Option.map(stored, (link) => link.label)).toEqual(Option.some("Box Mini"));

@@ -26,7 +26,6 @@ import {
 import { OrchestratorProjectionError } from "./Orchestrator.ts";
 import { ProjectStoreV2 } from "./ProjectStore.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
-import { ThreadManagementService } from "./ThreadManagementService.ts";
 
 export class LastCodeLinkedArchivePreview extends Context.Service<
   LastCodeLinkedArchivePreview,
@@ -48,7 +47,6 @@ export const layerHandler = Layer.effect(
     const { getEnvironmentId } = yield* ServerEnvironment;
     const environmentId = yield* getEnvironmentId;
     const store = yield* ProjectionStoreV2;
-    const threads = yield* ThreadManagementService;
     const projects = yield* ProjectStoreV2;
 
     return PeerArchiveHandler.of({
@@ -56,16 +54,6 @@ export const layerHandler = Layer.effect(
         const limits = clientModeCeiling(client);
         const inventory = yield* readPeerArchiveInventory(environmentId, input, {
           store,
-          family: (id) =>
-            threads
-              .getThreadArchiveFamily(id)
-              .pipe(
-                Effect.catch((cause) =>
-                  Effect.logWarning("Could not read peer archive activity", cause).pipe(
-                    Effect.andThen(Effect.fail(offline)),
-                  ),
-                ),
-              ),
           authorize: (shell) =>
             (linkOriginIsFenced(client) && shell.linkOrigin?.sessionId !== client.sessionId) ||
             exceededDispatchModeLimit(limits, shell) !== undefined

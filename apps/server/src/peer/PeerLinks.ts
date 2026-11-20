@@ -113,6 +113,7 @@ export class PeerLinks extends Context.Service<
     /** An address that answers as the linked peer, with its token, ready to call. */
     readonly resolve: (
       environmentId: EnvironmentId,
+      options?: { readonly refreshLabel?: boolean },
     ) => Effect.Effect<ResolvedPeerLink, PeerLinkError>;
     /** Records the outcome of a call, so listing shows whether the peer answered last time. */
     readonly recordOutcome: (
@@ -665,7 +666,7 @@ const make = Effect.gen(function* () {
   );
 
   const resolve: PeerLinks["Service"]["resolve"] = Effect.fn("PeerLinks.resolve")(
-    function* (environmentId) {
+    function* (environmentId, options) {
       const notLinked = new PeerLinkError({
         reason: "unknown_link",
         message: `This environment is not linked to ${environmentId}. t3_environment_links lists the linked ones.`,
@@ -718,7 +719,7 @@ const make = Effect.gen(function* () {
         });
       }
       return {
-        link: yield* withLabel(link, peer.label),
+        link: options?.refreshLabel === false ? link : yield* withLabel(link, peer.label),
         url,
         token: new TextDecoder().decode(stored.value),
       };

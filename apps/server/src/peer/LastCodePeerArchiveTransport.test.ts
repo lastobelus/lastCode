@@ -300,8 +300,29 @@ it.effect("times out a silent peer and aborts the request", () =>
       Effect.forkScoped,
     );
     const signal = yield* Deferred.await(started);
-    yield* TestClock.adjust("10 seconds");
+    yield* TestClock.adjust("1 second");
     expect(yield* Fiber.join(pending)).toEqual({ status: "pending", reason: "offline" });
     expect(signal.aborted).toBe(true);
+  }),
+);
+
+it.effect("uses the same deadline while resolving a linked peer", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const http = HttpClient.make(() => Effect.die("Resolved peer should not reach HTTP"));
+    const pending = yield* ArchiveTransport.LastCodePeerArchiveTransport.pipe(
+      Effect.flatMap((transport) => transport.inventory(environmentId, input)),
+      Effect.provide(
+        transportLayer((_id, options) => {
+          expect(options?.refreshLabel).toBe(false);
+          return Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never));
+        }).pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, http))),
+      ),
+      Effect.flip,
+      Effect.forkScoped,
+    );
+    yield* Deferred.await(started);
+    yield* TestClock.adjust("1 second");
+    expect(yield* Fiber.join(pending)).toEqual({ status: "pending", reason: "offline" });
   }),
 );

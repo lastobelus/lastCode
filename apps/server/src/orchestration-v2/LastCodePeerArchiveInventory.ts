@@ -1,6 +1,5 @@
 import {
   type EnvironmentId,
-  type OrchestrationV2ThreadArchiveFamily,
   type OrchestrationV2ThreadShell,
   type PeerArchiveInventory,
   type PeerArchiveInventoryInput,
@@ -9,13 +8,14 @@ import {
 import { getThreadOwner } from "@t3tools/shared/threadOwnership";
 import * as Effect from "effect/Effect";
 import type { ProjectionStoreV2Shape, ProjectionStoreV2Error } from "./ProjectionStore.ts";
+import { hasUnreadArchiveResponse, hasUnfinishedArchiveWork } from "./ThreadArchivePolicy.ts";
 
 type ArchiveInventoryStore = Pick<
   ProjectionStoreV2Shape,
   "getThreadShell" | "getArchiveFamilyThreadIds"
 >;
 
-function inventoryBranches(
+function liveInventory(
   environmentId: EnvironmentId,
   request: PeerArchiveInventoryInput,
   shells: readonly OrchestrationV2ThreadShell[],
@@ -26,7 +26,6 @@ function inventoryBranches(
   const pending: Array<{
     shell: OrchestrationV2ThreadShell;
     kept: boolean;
-    root?: ThreadId;
   }> = [];
   for (const shell of shells) {
     const owner = getThreadOwner(shell, environmentId);
@@ -41,22 +40,16 @@ function inventoryBranches(
   }
 
   const visited = new Set<ThreadId>();
-  const branches = new Map<ThreadId, Array<{ shell: OrchestrationV2ThreadShell; kept: boolean }>>();
+  const live: Array<{ shell: OrchestrationV2ThreadShell; kept: boolean }> = [];
   for (const entry of pending) {
     if (visited.has(entry.shell.id)) continue;
     visited.add(entry.shell.id);
     const { shell } = entry;
     const kept = entry.kept || shell.latestUserAuthoredMessageAt != null;
-    const root = entry.root ?? (shell.archivedAt === null ? shell.id : undefined);
-    if (root !== undefined && shell.archivedAt === null) {
-      const branch = branches.get(root);
-      if (branch === undefined) branches.set(root, [{ shell, kept }]);
-      else branch.push({ shell, kept });
-    }
-    for (const child of localChildren.get(shell.id) ?? [])
-      pending.push({ shell: child, kept, ...(root === undefined ? {} : { root }) });
+    if (shell.archivedAt === null) live.push({ shell, kept });
+    for (const child of localChildren.get(shell.id) ?? []) pending.push({ shell: child, kept });
   }
-  return branches;
+  return live;
 }
 
 const candidateShells = Effect.fn("LastCodePeerArchive.candidateShells")(function* (
@@ -107,18 +100,16 @@ export const readPeerArchiveInventory = Effect.fn("LastCodePeerArchive.readInven
   environmentId: EnvironmentId,
   request: PeerArchiveInventoryInput,
   ports: {
-    readonly store: ArchiveInventoryStore;
-    readonly family: (id: ThreadId) => Effect.Effect<OrchestrationV2ThreadArchiveFamily, E>;
+    readonly store: ArchiveInventoryStore &
+      Pick<ProjectionStoreV2Shape, "getThreadRecords" | "getThreadLatestAssistantMessageAt">;
     readonly authorize: (shell: OrchestrationV2ThreadShell) => Effect.Effect<void, E>;
   },
 ): Effect.fn.Return<PeerArchiveInventory, E | ProjectionStoreV2Error> {
   const shells = yield* candidateShells(request.ownerThreadIds, ports.store);
-  const branches = inventoryBranches(environmentId, request, shells);
+  const live = liveInventory(environmentId, request, shells);
 
   // A refusal is per environment. Never present a partial branch as an empty or complete inventory.
-  for (const branch of branches.values()) {
-    for (const { shell } of branch) yield* ports.authorize(shell);
-  }
+  for (const { shell } of live) yield* ports.authorize(shell);
 
   const threads: Array<PeerArchiveInventory["threads"][number]> = [];
   const typedInThreadIds: ThreadId[] = [];
@@ -126,18 +117,19 @@ export const readPeerArchiveInventory = Effect.fn("LastCodePeerArchive.readInven
   const unreadThreadIds: ThreadId[] = [];
   const protectedThreadIds: ThreadId[] = [];
   const keptThreadIds: ThreadId[] = [];
-  for (const [root, branch] of branches) {
-    const family = yield* ports.family(root);
-    const active = new Set(family.activeThreadIds);
-    const unread = new Set(family.unreadThreadIds);
-    for (const { shell, kept } of branch) {
-      threads.push({ threadId: shell.id, title: shell.title, projectId: shell.projectId });
-      if (shell.latestUserAuthoredMessageAt != null) typedInThreadIds.push(shell.id);
-      if (active.has(shell.id)) activeThreadIds.push(shell.id);
-      if (unread.has(shell.id)) unreadThreadIds.push(shell.id);
-      if (shell.persistent === true) protectedThreadIds.push(shell.id);
-      if (kept) keptThreadIds.push(shell.id);
-    }
+  for (const { shell, kept } of live) {
+    const controls = yield* ports.store.getThreadRecords(
+      shell.id,
+      ["runs", "runtimeRequests", "providerThreads", "providerTurns", "turnItems", "subagents"],
+      { turnItemStatuses: ["pending", "running", "waiting"] },
+    );
+    const latestReply = yield* ports.store.getThreadLatestAssistantMessageAt(shell.id);
+    threads.push({ threadId: shell.id, title: shell.title, projectId: shell.projectId });
+    if (shell.latestUserAuthoredMessageAt != null) typedInThreadIds.push(shell.id);
+    if (hasUnfinishedArchiveWork(controls)) activeThreadIds.push(shell.id);
+    if (hasUnreadArchiveResponse(shell, latestReply)) unreadThreadIds.push(shell.id);
+    if (shell.persistent === true) protectedThreadIds.push(shell.id);
+    if (kept) keptThreadIds.push(shell.id);
   }
   return {
     environmentId,
