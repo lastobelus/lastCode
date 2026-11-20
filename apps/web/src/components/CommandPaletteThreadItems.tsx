@@ -102,7 +102,7 @@ export function useCommandPaletteThreadItems(input: {
   const messages = useMessages();
   const gt = useGT();
   const navigate = useNavigate();
-  const { threads, ...listing } = useLastCodeCommandPaletteThreadListing();
+  const { threads, ...listing } = useLastCodeCommandPaletteThreadListing(threadSearchQuery);
   const { projectEnvironmentLocationById } = useEnvironmentLookups();
   const providerEntryByEnvironmentAndInstanceId = useProviderEntryByEnvironmentAndInstanceId();
   const messageSearch = useConnectedThreadSearch(threadSearchQuery);

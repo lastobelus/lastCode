@@ -48,7 +48,8 @@ export type LastCodeSidebarFamilyItem =
 export interface LastCodeSidebarOwnerGroup {
   type: "owner";
   key: string;
-  title: string;
+  title: string | null;
+  ownerId: ScopedThreadRef["threadId"];
   ownerRef: ScopedThreadRef | null;
   unavailable: boolean;
   count: number;
@@ -256,7 +257,7 @@ function connectCreators(graph: FamilyGraph, ownership: LastCodeSidebarOwnership
   }
 }
 
-type OwnerGroup = Pick<LastCodeSidebarOwnerGroup, "title" | "ownerRef" | "unavailable">;
+type OwnerGroup = Pick<LastCodeSidebarOwnerGroup, "title" | "ownerId" | "ownerRef" | "unavailable">;
 
 function connectOwners(graph: FamilyGraph) {
   const owners = new Map<string, ScopedThreadRef>();
@@ -298,9 +299,10 @@ function groupUnattachedOwnedThreads(
     const thread = graph.byKey.get(key)!;
     const storedTitle = thread.delegatedFrom?.title;
     const existing = groups.get(groupKey);
-    if (!existing || (existing.title === owner.threadId && storedTitle)) {
+    if (!existing || (!existing.title && storedTitle)) {
       groups.set(groupKey, {
-        title: shell?.title || storedTitle || owner.threadId,
+        title: shell?.title || storedTitle || null,
+        ownerId: owner.threadId,
         ownerRef: available ? owner : null,
         // When a known owner is in this project, cycle repair detached the edge.
         unavailable: !available || graph.byKey.has(ownerKey),

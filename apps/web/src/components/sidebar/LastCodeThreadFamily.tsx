@@ -195,7 +195,8 @@ export function LastCodeOwnerGroup({
   const gt = useGT();
   const setCollapsed = useLastCodeSidebarFamiliesStore((state) => state.setCollapsed);
   const compact = useClientSetting("compactLegacySidebarStatuses");
-  const { title, ownerRef } = item;
+  const { ownerRef } = item;
+  const title = item.title ?? gt("Creator unavailable ({id})", { id: item.ownerId });
   return (
     <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
       <div className="flex items-center gap-1 pr-2">

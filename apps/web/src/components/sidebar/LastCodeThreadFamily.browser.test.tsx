@@ -114,6 +114,7 @@ function OwnerGroupNavigationFixture() {
           type: "owner",
           key: "owner-group",
           title: parent.title,
+          ownerId: parent.id,
           ownerRef: scopeThreadRef(parent.environmentId, parent.id),
           unavailable: false,
           count: 1,
@@ -148,6 +149,30 @@ describe("family disclosure ownership", () => {
       selectedThreadKeys: new Set(),
       anchorThreadKey: lastcodeSidebarThreadKey(parent),
     });
+  });
+
+  it("uses the unavailable creator label for an untitled owner group", async () => {
+    setup();
+    await using screen = await render(
+      <ul>
+        <LastCodeOwnerGroup
+          item={{
+            type: "owner",
+            key: "untitled-owner",
+            title: null,
+            ownerId: parent.id,
+            ownerRef: null,
+            unavailable: true,
+            count: 1,
+            expanded: true,
+            status: null,
+          }}
+          navigateToThread={mocks.navigate}
+        />
+      </ul>,
+    );
+    await expect.element(screen.getByText("Creator unavailable (parent)")).toBeVisible();
+    expect(screen.container.querySelector("a")).toBeNull();
   });
 
   it("persists an exact scoped family key and returns to the parent when collapsing its selected child", async () => {

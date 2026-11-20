@@ -1065,8 +1065,21 @@ describe("sidebar ownership", () => {
     expect(keys(missing)).toEqual(["child"]);
     expect(missing.renderedItems[0]).toMatchObject({
       type: "owner",
-      title: "orchestrator",
+      title: null,
+      ownerId: owner.id,
       ownerRef: null,
+    });
+    const delegated = thread("delegated", undefined, {
+      environmentId: EnvironmentId.make("remote"),
+      delegatedFrom: { ...ref(owner), title: "Stored orchestrator title" },
+    });
+    const named = project([child, delegated], {
+      ownership: { ...ownership, byThreadKey: new Map() },
+    });
+    expect(named.renderedItems[0]).toMatchObject({
+      type: "owner",
+      title: "Stored orchestrator title",
+      count: 2,
     });
     expect(missing.renderedRows[0]?.depth).toBe(1);
     expect(project([child, owner], { ownership }).allRows[1]?.parentKey).toBe(
