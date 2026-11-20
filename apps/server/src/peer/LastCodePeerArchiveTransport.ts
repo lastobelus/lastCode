@@ -1,14 +1,19 @@
 import {
   type EnvironmentId,
+  PEER_ARCHIVE_APPLY_ROUTE,
+  PEER_ARCHIVE_RESTORE_ROUTE,
   PEER_ARCHIVE_ROUTE,
+  PeerArchiveApplyInput,
+  PeerArchiveApplyResult,
+  PeerArchiveGeneration,
   PeerArchiveInventory,
   PeerArchiveInventoryInput,
   PeerArchiveUnavailable,
+  PeerArchiveRestoreResult,
   type PeerLinkError,
   ProviderInteractionMode,
   RuntimeMode,
 } from "@t3tools/contracts";
-import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -33,26 +38,13 @@ import {
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 
-export class PeerArchiveHandler extends Context.Service<
-  PeerArchiveHandler,
-  {
-    readonly inventory: (
-      client: McpClientCaller,
-      input: PeerArchiveInventoryInput,
-    ) => Effect.Effect<PeerArchiveInventory, PeerArchiveUnavailable>;
-  }
->()("t3/peer/LastCodePeerArchiveTransport/PeerArchiveHandler") {}
-
-export class LastCodePeerArchiveTransport extends Context.Service<
+import {
   LastCodePeerArchiveTransport,
-  {
-    readonly inventory: (
-      environmentId: EnvironmentId,
-      input: PeerArchiveInventoryInput,
-      limits?: ClientModes,
-    ) => Effect.Effect<PeerArchiveInventory, PeerArchiveUnavailable>;
-  }
->()("t3/peer/LastCodePeerArchiveTransport") {}
+  PEER_ARCHIVE_PREVIEW_TIMEOUT_MS,
+  PeerArchiveHandler,
+  PeerArchiveMutationHandler,
+  PeerArchiveWriteTransport,
+} from "./LastCodePeerArchiveServices.ts";
 
 interface PeerArchivePost<Input, Output> {
   readonly path: `/${string}`;
@@ -66,12 +58,23 @@ const inventoryPost = {
   output: PeerArchiveInventory,
 } satisfies PeerArchivePost<PeerArchiveInventoryInput, PeerArchiveInventory>;
 
+const applyPost = {
+  path: PEER_ARCHIVE_APPLY_ROUTE,
+  input: PeerArchiveApplyInput,
+  output: PeerArchiveApplyResult,
+} satisfies PeerArchivePost<PeerArchiveApplyInput, PeerArchiveApplyResult>;
+
+const restorePost = {
+  path: PEER_ARCHIVE_RESTORE_ROUTE,
+  input: PeerArchiveGeneration,
+  output: PeerArchiveRestoreResult,
+} satisfies PeerArchivePost<PeerArchiveGeneration, PeerArchiveRestoreResult>;
+
 const decodeModeLimit = Schema.decodeUnknownOption(
   Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
 );
 
 const noStore = { "cache-control": "no-store" };
-export const PEER_ARCHIVE_PREVIEW_TIMEOUT_MS = 1_000;
 const emptyResponse = (status: number) => HttpServerResponse.empty({ status, headers: noStore });
 const unavailableStatus = 409;
 const encodeUnavailable = HttpServerResponse.schemaJson(PeerArchiveUnavailable);
@@ -146,6 +149,17 @@ const peerArchivePostRoute = <Input, Output, Service>(
 export const routeLayer = peerArchivePostRoute(
   inventoryPost,
   PeerArchiveHandler.pipe(Effect.map((handler) => handler.inventory)),
+);
+
+export const writeRouteLayer = Layer.merge(
+  peerArchivePostRoute(
+    applyPost,
+    PeerArchiveMutationHandler.pipe(Effect.map(({ apply }) => apply)),
+  ),
+  peerArchivePostRoute(
+    restorePost,
+    PeerArchiveMutationHandler.pipe(Effect.map(({ restore }) => restore)),
+  ),
 );
 
 const offline = { status: "pending", reason: "offline" } satisfies PeerArchiveUnavailable;
@@ -249,6 +263,29 @@ export const layer = Layer.effect(
               orElse: () => Effect.fail(offline),
             }),
           ),
+      ),
+    });
+  }),
+);
+
+export const writeLayer = Layer.effect(
+  PeerArchiveWriteTransport,
+  Effect.gen(function* () {
+    const links = yield* PeerLinks.PeerLinks;
+    const http = yield* HttpClient.HttpClient;
+    const post = makePeerArchivePost(links, http);
+    const apply = post(applyPost);
+    const restore = post(restorePost);
+    const withinDeadline = <A>(request: Effect.Effect<A, PeerArchiveUnavailable>) =>
+      request.pipe(
+        Effect.timeoutOrElse({ duration: "3 seconds", orElse: () => Effect.fail(offline) }),
+      );
+    return PeerArchiveWriteTransport.of({
+      apply: Effect.fn("PeerArchiveWriteTransport.apply")((environmentId, input, limits) =>
+        withinDeadline(apply(environmentId, input, limits)),
+      ),
+      restore: Effect.fn("PeerArchiveWriteTransport.restore")((environmentId, input, limits) =>
+        withinDeadline(restore(environmentId, input, limits)),
       ),
     });
   }),

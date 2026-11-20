@@ -113,7 +113,11 @@ Archiving includes grouped threads, subagents, and owned work in other projects 
 the same machine.
 If any family member is working or has unread replies, a confirmation lists it.
 Owned conversations you've typed in, and what they own, stay open unless you include
-them on web or desktop.
+them. The confirmation lists work on each directly linked machine. A machine that is
+offline, refuses access, or needs an update stays listed while the local archive finishes.
+Open **Linked archive status** in **Archived threads** to retry. Review the
+machine's conversations if they were unavailable or changed after your review.
+When more than one operation is listed, choose by its archive date.
 **Stop active threads & archive** stops unfinished work, cancels pending approvals
 and queued messages, and archives the family. **Archive unread threads** preserves
 replies in archived history. Cancel to inspect children or make eligible threads
@@ -458,8 +462,10 @@ default placement. If the owner is on another machine, the menu tells you its
 state there wasn't checked.
 
 Restoring a thread restores the conversations archived with it, without restarting
-stopped work. Restore the parent before restoring its archived children. Deleting
-the parent deletes its subagents too.
+stopped work. If some linked machines could not restore their conversations, use
+**Linked archive status** in the restored thread's menu to retry. Older pending
+restores stay listed even if you archive the thread again. Restore the parent
+before restoring its archived children. Deleting the parent deletes its subagents too.
 
 Provider-native subagents can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent

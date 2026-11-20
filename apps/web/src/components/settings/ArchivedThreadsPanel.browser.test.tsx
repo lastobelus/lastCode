@@ -97,6 +97,7 @@ vi.mock("../../state/environments", async (importOriginal) => ({
 }));
 
 vi.mock("../../lib/archivedThreadsState", () => ({
+  refreshArchivedThreadsForEnvironment: vi.fn(),
   useArchivedThreadSnapshots: (environmentIds: EnvironmentId[]) => {
     state.requestedEnvironmentIds = environmentIds;
     return {

@@ -20,6 +20,7 @@ import {
   getArchiveRecoveryRows,
   presentThreadArchive,
   buildThreadArchiveConfirmation,
+  buildLinkedArchiveRecoveries,
   requiresThreadArchiveConfirmation,
 } from "./threadArchive.ts";
 import { presentThreadShell } from "./models.ts";
@@ -207,6 +208,9 @@ describe("archive confirmation", () => {
     expect(defaultConfirmation.linkedMachines[3]?.warnings).toEqual([
       "Blocked · Update this machine to review its threads",
     ]);
+    expect(
+      archivePreviewSelection({ ...linked, keptThreadIds: [] }).linkedArchiveSelection?.[0],
+    ).toEqual({ environmentId, label: "Build machine", status: "blocked", reason: "unsupported" });
 
     const selectedPeerThread = { ...base, environmentId, id: remoteWork };
     const overlappingId = { ...base, id: writtenIn };
@@ -228,6 +232,121 @@ describe("archive confirmation", () => {
       "Keep open · Working · You wrote in this thread",
       "Keep open · Persistent",
     ]);
+  });
+
+  it("ships only the linked cohorts shown for the selected consent and signals a required stop", () => {
+    const environmentId = EnvironmentId.make("linked-machine");
+    const idle = ThreadId.make("linked-idle");
+    const active = ThreadId.make("linked-active");
+    const defaultCohorts = [
+      {
+        anchorThreadId: idle,
+        selectedThreadIds: [idle],
+        childDisposition: "archive_if_idle" as const,
+        typedIn: [],
+      },
+    ];
+    const includingTypedInCohorts = [
+      ...defaultCohorts,
+      {
+        anchorThreadId: active,
+        selectedThreadIds: [active],
+        childDisposition: "stop_and_archive" as const,
+        typedIn: [{ threadId: active, latestHumanMessageAt: base.createdAt }],
+      },
+    ];
+    const peer = {
+      environmentId,
+      label: "Build machine",
+      status: "ready",
+      inventory: {
+        environmentId,
+        threads: [idle, active].map((threadId) => ({
+          threadId,
+          title: threadId,
+          projectId: base.projectId,
+        })),
+        typedInThreadIds: [active],
+        activeThreadIds: [active],
+        unreadThreadIds: [],
+        protectedThreadIds: [],
+        keptThreadIds: [active],
+        archiveChoices: { defaultCohorts, includingTypedInCohorts },
+      },
+    } satisfies LinkedArchivePreview;
+    const linked = {
+      ...family,
+      unreadThreadIds: [],
+      keptThreadIds: [child.id],
+      archivePreview: {
+        environmentId: base.environmentId,
+        typedInThreadIds: [],
+        threads: [base, child].map(({ id, title, projectId }) => ({
+          threadId: id,
+          title,
+          projectId,
+        })),
+      },
+      linkedArchivePreview: [peer],
+    };
+    for (const includeTypedIn of [false, true]) {
+      const confirmation = buildThreadArchiveConfirmation(linked, undefined, includeTypedIn);
+      expect(confirmation.canIncludeTypedIn).toBe(true);
+      expect(confirmation.active).toBe(includeTypedIn);
+      expect(confirmation.disposition).toBe(
+        includeTypedIn ? "stop_and_archive" : "archive_after_review",
+      );
+      expect(confirmation.threads[1]?.label).toBe("Keep open");
+      expect(confirmation.linkedMachines[0]?.threads.map(({ label }) => label)).toEqual([
+        "Archive",
+        `${includeTypedIn ? "Archive" : "Keep open"} · Working · You wrote in this thread`,
+      ]);
+      expect(archivePreviewSelection(linked, includeTypedIn)).toEqual({
+        expectedArchiveThreadIds: [base.id],
+        linkedArchiveSelection: [
+          {
+            environmentId,
+            label: peer.label,
+            status: "ready",
+            cohorts: includeTypedIn ? includingTypedInCohorts : defaultCohorts,
+          },
+        ],
+      });
+    }
+
+    const operation = {
+      sourceArchiveCommandId: CommandId.make("first-archive"),
+      archivedAt: "2026-01-01T00:00:00.000Z",
+      operation: "archive",
+      machines: [{ environmentId, label: peer.label, status: "pending", reason: "offline" }],
+    } as const;
+    const [retry] = buildLinkedArchiveRecoveries({
+      ...linked,
+      linkedArchiveOperations: [operation],
+    });
+    expect(retry?.machines[0]?.status).toBe("Pending · Offline");
+    expect(retry?.canRetry).toBe(true);
+    expect(retry?.selection(true)).toEqual([]);
+    const [review, restore] = buildLinkedArchiveRecoveries({
+      ...linked,
+      linkedArchiveOperations: [
+        {
+          ...operation,
+          machines: [{ environmentId, label: peer.label, status: "review" }],
+        },
+        {
+          ...operation,
+          operation: "restore",
+          sourceArchiveCommandId: CommandId.make("prior-archive"),
+        },
+      ],
+    });
+    expect(review?.canRetry).toBe(true);
+    expect(review?.selection(false)).toEqual([
+      { environmentId, label: peer.label, status: "ready", cohorts: defaultCohorts },
+    ]);
+    expect(restore?.sourceArchiveCommandId).toBe("prior-archive");
+    expect(restore?.selection(true)).toEqual([]);
   });
 });
 const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShellJson);

@@ -621,8 +621,18 @@ export function createLastCodeThreadArchiveActions(ports: {
               );
             }
             owner = freshOwner;
+            const { linkedArchiveSelection } = selection;
             selection = {
-              ...freshSelection,
+              ...(freshSelection.expectedArchiveThreadIds === undefined
+                ? {}
+                : { expectedArchiveThreadIds: freshSelection.expectedArchiveThreadIds }),
+              ...(freshSelection.expectedTemporaryProjects === undefined
+                ? {}
+                : { expectedTemporaryProjects: freshSelection.expectedTemporaryProjects }),
+              ...(freshSelection.includeTypedInThreadIds === undefined
+                ? {}
+                : { includeTypedInThreadIds: freshSelection.includeTypedInThreadIds }),
+              ...(linkedArchiveSelection === undefined ? {} : { linkedArchiveSelection }),
               // Keep the exact consent even if removing the overlap returns a legacy family.
               ...(selection.expectedArchiveThreadIds !== undefined
                 ? { expectedArchiveThreadIds: [...remaining] }

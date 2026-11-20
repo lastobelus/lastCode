@@ -1,4 +1,4 @@
-import { withLinkedArchivePreview } from "../../../orchestration-v2/LastCodeLinkedArchivePreview.ts";
+import * as LinkedArchiveTools from "./LastCodeLinkedArchiveTools.ts";
 import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
@@ -11,7 +11,6 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Struct from "effect/Struct";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
 import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
@@ -127,7 +126,9 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
-export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+type ThreadHandlers = McpToolAccess.Handlers<typeof ThreadToolkit.tools>;
+
+const handlers = (archive: LinkedArchiveTools.LinkedArchiveTools): ThreadHandlers => ({
   t3_thread_group: McpToolAccess.writesThreads(
     (input) =>
       input.items.flatMap((item) => [
@@ -319,7 +320,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         } = yield* readThread(input.threadId);
         const type = modelSelectionCommandType(thread.providerInstanceId, modelSelection);
         const result = yield* threads
-          .dispatch({ type, threadId: thread.id, commandId: yield* newCommandId(), modelSelection })
+          .dispatch({
+            type,
+            threadId: thread.id,
+            commandId: yield* newCommandId(),
+            modelSelection,
+          })
           .pipe(Effect.mapError(dispatchFailure));
         return { sequence: result.sequence };
       }),
@@ -367,11 +373,10 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     Effect.gen(function* () {
       const context = yield* readArchiveThread(input.threadId);
       const { threads, projection } = context;
-      const family = yield* threads.getThreadArchiveFamily(projection.thread.id).pipe(
-        Effect.flatMap((family) => withLinkedArchivePreview(projection.thread.id, family, context)),
+      return yield* threads.getThreadArchiveFamily(projection.thread.id).pipe(
+        Effect.flatMap((family) => archive.preview(projection.thread.id, family, context)),
         Effect.mapError(unavailable),
       );
-      return Struct.omit(family, ["threads", "canPromote", "promotableChildThreadIds"]);
     }),
   ),
   t3_queue: McpToolAccess.either(
@@ -501,6 +506,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.expectedTemporaryProjects === undefined
               ? {}
               : { expectedTemporaryProjects: input.expectedTemporaryProjects }),
+            ...(input.linkedArchiveSelection === undefined
+              ? {}
+              : { linkedArchiveSelection: input.linkedArchiveSelection }),
+            ...(input.expectedLinkedArchiveCommandId === undefined
+              ? {}
+              : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
             ...(input.includeTypedInThreadIds === undefined
               ? {}
               : { includeTypedInThreadIds: input.includeTypedInThreadIds }),
@@ -511,6 +522,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           command = {
             ...common,
             type: "thread.unarchive",
+            ...(input.expectedLinkedArchiveCommandId === undefined
+              ? {}
+              : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
             ...(input.expectedArchiveCommandId === undefined
               ? {}
               : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
@@ -543,8 +557,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         default:
           command = { ...common, type: `thread.${input.action}` };
       }
-      const result = yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
+      return yield* archive.dispatch(command, { caller, scope }, threads);
     }),
   ),
 });
+
+export const layer = McpToolAccess.toLayer(
+  ThreadToolkit,
+  Effect.map(LinkedArchiveTools.capture, handlers),
+);

@@ -18,6 +18,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadArchiveFamily,
+  type ThreadArchiveOperation,
   type ThreadId,
   type ThreadPullRequestLink,
   type WorkspaceLifecycleTarget,
@@ -29,6 +30,7 @@ import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import { DispatchModeLimit, type DispatchModes } from "./DispatchModeLimit.ts";
 import { isGroupedCreatorThread, isThreadPlacementReleaseCommand } from "./CreatorGrouping.ts";
+import { makePeerArchiveDispatch, PeerArchiveDispatch } from "./LastCodePeerArchiveDispatch.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import type {
   OrchestratorDispatchError,
@@ -800,6 +802,69 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     });
   });
 
+  const queueArchiveShutdown = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.archive" }>,
+    events: EventBuffer,
+    effects: EffectBuffer,
+    pending: typeof ThreadArchiveOperation.Type,
+    now: DateTime.Utc,
+    temporaryProjectPlan?: ThreadArchiveTemporaryProjectPlan,
+  ) {
+    for (const id of pending.archiveThreadIds) {
+      const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: id,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          archivePending:
+            id === command.threadId
+              ? pending
+              : {
+                  threadId: pending.threadId,
+                  commandId: pending.commandId,
+                  status: pending.status,
+                },
+          titleRegeneration: null,
+          pullRequests: thread.pullRequests?.map((link) => clearPullRequestWatch(link)),
+          updatedAt: now,
+        },
+      });
+      yield* cancelArchiveWork(command, id, events, now);
+    }
+    yield* Ref.update(effects, (current) => [
+      ...current,
+      {
+        id: `effect:${command.commandId}:thread.archive`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: {
+          type: "thread.archive",
+          requestId: command.commandId,
+          ...(temporaryProjectPlan === undefined ? {} : { temporaryProjectPlan }),
+        },
+      } satisfies PendingOrchestrationEffectV2,
+    ]);
+  });
+
+  const peerDispatch = makePeerArchiveDispatch({
+    destination: ports.environmentId,
+    store: projectionStore,
+    checkMode: refuseAboveDispatchModeLimit,
+    policy: archiveThreadPolicy,
+    mapDispatchError,
+    reject: (command, cause) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      }),
+  });
+
   const dispatchArchiveFamilyRequest = Effect.fnUntraced(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.archive" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -1052,45 +1117,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         });
       }
     }
-    for (const id of archiveIds) {
-      const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
-      yield* emit(
-        events,
-        command,
-      )({
-        type: "thread.metadata-updated",
-        threadId: id,
-        occurredAt: now,
-        payload: {
-          ...thread,
-          archivePending:
-            id === command.threadId
-              ? pending
-              : {
-                  threadId: pending.threadId,
-                  commandId: pending.commandId,
-                  status: pending.status,
-                },
-          titleRegeneration: null,
-          pullRequests: thread.pullRequests?.map((link) => clearPullRequestWatch(link)),
-          updatedAt: now,
-        },
-      });
-      yield* cancelArchiveWork(command, id, events, now);
-    }
-    yield* Ref.update(effects, (current) => [
-      ...current,
-      {
-        id: `effect:${command.commandId}:thread.archive`,
-        commandId: command.commandId,
-        threadId: command.threadId,
-        request: {
-          type: "thread.archive",
-          requestId: command.commandId,
-          ...(temporaryProjectPlan === undefined ? {} : { temporaryProjectPlan }),
-        },
-      } satisfies PendingOrchestrationEffectV2,
-    ]);
+    yield* queueArchiveShutdown(command, events, effects, pending, now, temporaryProjectPlan);
   });
 
   const dispatchArchiveFamilyResult = Effect.fnUntraced(function* (
@@ -1105,22 +1132,32 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     const pending = getThreadArchivePlan(root.archivePending);
     const now = yield* DateTime.now;
     if (pending?.commandId !== command.requestId || pending.status !== "stopping") {
+      if (pending?.peer !== undefined)
+        return yield* peerDispatch.reject(
+          command,
+          "The linked archive request no longer owns this shutdown.",
+        );
       yield* emit(
         events,
         command,
       )({ type: "thread.metadata-updated", threadId: root.id, occurredAt: now, payload: root });
       return;
     }
+    const peer = pending.peer;
+    if (command.type === "thread.archive.complete" && peer !== undefined)
+      yield* peerDispatch.validateCompletion(command, pending, peer);
+
     // Deployed plans used delegated ownership, before ordinary conversation
     // groups joined archive families. Recheck their original edge semantics,
     // so unrelated creator groups do not change old consent.
     const legacyOwnedThreadIds =
       command.type === "thread.archive.complete" &&
+      peer === undefined &&
       (pending.familyVersion === undefined || pending.childDisposition === "promote")
         ? yield* projectionStore.getOwnedThreadIds(root.id).pipe(mapDispatchError(command))
         : null;
     let reachableFamily: ReadonlySet<ThreadId> | undefined;
-    if (command.type === "thread.archive.complete") {
+    if (command.type === "thread.archive.complete" && peer === undefined) {
       const shells = yield* archiveFamilyShells(command);
       const legacyOwnedIds = legacyOwnedThreadIds === null ? null : new Set(legacyOwnedThreadIds);
       const current = archiveParticipants(
@@ -1176,7 +1213,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       }
     }
     const resultIds =
-      command.type === "thread.archive.fail"
+      command.type === "thread.archive.fail" && peer === undefined
         ? [
             ...new Set([
               ...pending.archiveThreadIds,
@@ -1187,14 +1224,32 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           ]
         : pending.archiveThreadIds;
     const familyThreads = new Map(
-      (yield* Effect.forEach(legacyOwnedThreadIds ?? (yield* ownedThreadFamily(command)), (id) =>
-        projectionStore.getThread(id).pipe(mapDispatchError(command)),
-      )).map((thread) => [thread.id, thread]),
+      peer === undefined
+        ? (yield* Effect.forEach(
+            legacyOwnedThreadIds ?? (yield* ownedThreadFamily(command)),
+            (id) => projectionStore.getThread(id).pipe(mapDispatchError(command)),
+          )).map((thread) => [thread.id, thread] as const)
+        : [],
     );
+    const peerIds = peer === undefined ? undefined : new Set(resultIds);
     for (const id of resultIds) {
-      const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
-      if (thread.archivePending?.commandId !== command.requestId) continue;
+      const read = projectionStore.getThread(id);
+      const thread = yield* (
+        peer === undefined
+          ? read
+          : read.pipe(
+              Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+            )
+      ).pipe(mapDispatchError(command));
+      if (
+        thread?.archivePending?.commandId !== command.requestId ||
+        (peer !== undefined &&
+          (thread.archivePending.threadId !== root.id ||
+            thread.archivePending.status !== "stopping"))
+      )
+        continue;
       if (command.type === "thread.archive.fail") {
+        // Release this request's hold even if a permission change blocked completion.
         yield* emit(
           events,
           command,
@@ -1204,7 +1259,12 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           occurredAt: now,
           payload: {
             ...thread,
-            archivePending: { ...thread.archivePending, status: "failed", error: command.error },
+            // Linked failures are reported by the source operation. Release only
+            // the hold installed for this request so the next review can change it.
+            archivePending:
+              peer === undefined
+                ? { ...thread.archivePending, status: "failed", error: command.error }
+                : null,
             updatedAt: now,
           },
         });
@@ -1213,7 +1273,11 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       yield* cancelArchiveWork(command, id, events, now);
       const afterCancel = yield* getProjectionWithPendingEvents(id, events);
       for (const task of afterCancel.subagents) {
-        if (task.childThreadId !== null && pending.promoteThreadIds.includes(task.childThreadId))
+        if (
+          task.childThreadId !== null &&
+          (pending.promoteThreadIds.includes(task.childThreadId) ||
+            peerIds?.has(task.childThreadId) === false)
+        )
           continue;
         if (!["pending", "running", "waiting"].includes(task.status)) continue;
         yield* emit(
@@ -1259,11 +1323,21 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
             payload: { ...turn, status: "cancelled", completedAt: now },
           });
       const current = (yield* getProjectionWithPendingEvents(id, events)).thread;
-      const owner = root.archivedWith ?? { threadId: root.id, commandId: command.requestId };
+      const marker = { threadId: root.id, commandId: command.requestId };
+      const owner = root.archivedWith ?? marker;
       const archivedWith =
-        reachableFamily !== undefined && (id === root.id || !reachableFamily.has(id))
-          ? owner
-          : yield* archiveOwnerFor(command, current, familyThreads, owner, events, reachableFamily);
+        peer !== undefined
+          ? marker
+          : reachableFamily !== undefined && (id === root.id || !reachableFamily.has(id))
+            ? owner
+            : yield* archiveOwnerFor(
+                command,
+                current,
+                familyThreads,
+                owner,
+                events,
+                reachableFamily,
+              );
       yield* emit(
         events,
         command,
@@ -1296,7 +1370,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         } satisfies PendingOrchestrationEffectV2,
       ]);
     }
-    if (command.type === "thread.archive.complete") {
+    if (command.type === "thread.archive.complete" && peer === undefined) {
       const archivedIds = new Set(pending.archiveThreadIds);
       const promotedIds = new Set(pending.promoteThreadIds);
       for (const id of promotedIds) {
@@ -1571,13 +1645,35 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     }
   });
 
+  const cancelEffectsForArchive = (threadIds: ReadonlyArray<ThreadId>): CancelUnsettledEffects => ({
+    threadIds,
+    effectTypes: [
+      "provider-turn.start",
+      "provider-turn.restart",
+      "provider-runtime.continue",
+      "provider-turn.steer",
+      "runtime-request.respond",
+      "thread-title.generate",
+      "prepared-run.auto-retry",
+    ],
+    reason: "Thread family is stopping before archive.",
+  });
+
   const plan = Effect.fnUntraced(function* (
     command: LastCodeArchiveCommand,
     events: EventBuffer,
     effects: EffectBuffer,
   ): Effect.fn.Return<CancelUnsettledEffects | undefined, OrchestratorV2Error> {
+    const peer = yield* PeerArchiveDispatch;
     switch (command.type) {
       case "thread.archive": {
+        if (peer !== undefined) {
+          if (peer.kind !== "archive")
+            return yield* peerDispatch.reject(command, "Expected a linked archive.");
+          const pending = yield* peerDispatch.prepareArchive(command, peer);
+          yield* queueArchiveShutdown(command, events, effects, pending, yield* DateTime.now);
+          return cancelEffectsForArchive(pending.archiveThreadIds);
+        }
         const root = yield* projectionStore
           .getThread(command.threadId)
           .pipe(
@@ -1612,32 +1708,25 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           (event) =>
             event.type === "thread.metadata-updated" && event.threadId === command.threadId,
         );
-        if (
-          pending?.type === "thread.metadata-updated" &&
-          getThreadArchivePlan(pending.payload.archivePending)?.status === "stopping"
-        ) {
-          return {
-            threadIds: getThreadArchivePlan(pending.payload.archivePending)!.archiveThreadIds,
-            effectTypes: [
-              "provider-turn.start",
-              "provider-turn.restart",
-              "provider-runtime.continue",
-              "provider-turn.steer",
-              "runtime-request.respond",
-              "thread-title.generate",
-              "prepared-run.auto-retry",
-            ],
-            reason: "Thread family is stopping before archive.",
-          };
-        }
-        return undefined;
+        const shutdown =
+          pending?.type === "thread.metadata-updated"
+            ? getThreadArchivePlan(pending.payload.archivePending)
+            : null;
+        return shutdown?.status === "stopping"
+          ? cancelEffectsForArchive(shutdown.archiveThreadIds)
+          : undefined;
       }
       case "thread.archive.complete":
       case "thread.archive.fail":
         yield* dispatchArchiveFamilyResult(command, events, effects);
         return undefined;
       case "thread.unarchive":
-        yield* dispatchUnarchiveFamily(command, events, effects);
+        if (peer !== undefined) {
+          if (peer.kind !== "restore")
+            return yield* peerDispatch.reject(command, "Expected a linked restore.");
+          for (const threadId of yield* peerDispatch.restoreThreadIds(command, peer))
+            yield* dispatchThreadMutation({ ...command, threadId }, events, effects);
+        } else yield* dispatchUnarchiveFamily(command, events, effects);
         return undefined;
     }
   });
@@ -1649,6 +1738,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       command.type === "thread.visit" ||
       command.type === "thread.archive.complete" ||
       command.type === "thread.archive.fail" ||
+      (command.type === "thread.unarchive" && (yield* PeerArchiveDispatch)?.kind === "restore") ||
       command.type === "thread.background-work.settle" ||
       // These completions only settle retained metadata; they start no provider work.
       command.type === "message.incoming-summary.complete" ||
@@ -1688,6 +1778,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     planned: {
       readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
       readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
+      readonly cancelUnsettledEffects?: CancelUnsettledEffects;
     },
     participantLimit: DispatchModes | undefined,
   ) {
@@ -1705,6 +1796,11 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       ...planned.events.map((event) => event.threadId),
       ...planned.effects.map((effect) => effect.threadId),
     ]);
+    if (
+      command.type !== "thread.delete" &&
+      (yield* peerDispatch.guardTargets(command, planned, participants))
+    )
+      return;
     const effectOwners = new Set(planned.effects.map((effect) => effect.threadId));
     const otherMutationOwners = new Set(
       planned.events
@@ -1755,6 +1851,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       sideChatIds: ReadonlyArray<ThreadId>,
     ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
+    const peer = yield* PeerArchiveDispatch;
     const recollectAndDispatch = (): Effect.Effect<
       OrchestratorV2DispatchResult,
       OrchestratorV2Error
@@ -1762,6 +1859,18 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       threadDispatch
         .withPersistenceLock(
           Effect.gen(function* () {
+            const peerRows = yield* peerDispatch.collectLockRows(command, peer);
+            if (peerRows !== null) {
+              return yield* withThreadDispatchLocks(
+                [...peerRows.keys()].toSorted(),
+                Effect.gen(function* () {
+                  const current = yield* peerDispatch.collectLockRows(command, peer);
+                  if (current === null || [...current.keys()].some((id) => !peerRows.has(id)))
+                    return null;
+                  return yield* dispatchAccepted([]);
+                }),
+              );
+            }
             const family = yield* ownedThreadFamily(command);
             const sideChatIds = yield* liveSideChatIds(command.threadId);
             const root = yield* projectionStore

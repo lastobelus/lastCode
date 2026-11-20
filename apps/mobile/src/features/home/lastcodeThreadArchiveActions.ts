@@ -23,6 +23,7 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentProjects } from "../../state/projects";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { environmentThreadShells, type threadEnvironment } from "../../state/threads";
+import { requestLastCodeMobileArchiveDialog } from "../archive/lastCodeMobileArchiveDialogState";
 
 type CommandRunner<C> =
   C extends AtomCommand<infer W, infer A, infer E>
@@ -91,6 +92,7 @@ export async function prepareLastCodeMobileThreadArchive(
   }
 
   const family = familyResult.value;
+  let includeTypedIn = false;
   const childDisposition = requiresThreadArchiveConfirmation(family)
     ? await new Promise<ThreadArchiveChildDisposition | null>((resolve) => {
         const reviewFamily = () => {
@@ -230,16 +232,37 @@ export async function prepareLastCodeMobileThreadArchive(
           selectOwner(0);
         };
         const showFamily = () => {
-          const confirmation = resolveThreadArchiveFamily(
-            family,
-            m,
-            ({ environmentId, projectId }) =>
-              appAtomRegistry.get(
-                environmentProjects.projectAtom(scopeProjectRef(environmentId, projectId)),
-              )?.title ?? projectId,
+          const confirm = (includeTypedIn: boolean) =>
+            resolveThreadArchiveFamily(
+              family,
+              m,
+              ({ environmentId, projectId }) =>
+                appAtomRegistry.get(
+                  environmentProjects.projectAtom(scopeProjectRef(environmentId, projectId)),
+                )?.title ?? projectId,
+              includeTypedIn,
+            );
+          const confirmation = confirm(false);
+          const title = m(
+            msg('Archive "{title}"?', { title: thread.title || m(msg("Untitled thread")) }),
           );
+          if (confirmation.canIncludeTypedIn) {
+            void requestLastCodeMobileArchiveDialog({ title, confirm, canReview: true }).then(
+              (choice) => {
+                if (choice === "review") {
+                  review();
+                } else if (choice === null) {
+                  resolve(null);
+                } else {
+                  includeTypedIn = choice.includeTypedIn;
+                  resolve(confirm(includeTypedIn).disposition);
+                }
+              },
+            );
+            return;
+          }
           Dialog.alert(
-            m(msg('Archive "{title}"?', { title: thread.title || m(msg("Untitled thread")) })),
+            title,
             confirmation.message,
             [
               {
@@ -270,7 +293,7 @@ export async function prepareLastCodeMobileThreadArchive(
       })
     : "archive_if_idle";
   if (childDisposition === null) return null;
-  const selection = archivePreviewSelection(family);
+  const selection = archivePreviewSelection(family, includeTypedIn);
   return {
     owner: thread,
     participantIds: selection.expectedArchiveThreadIds ?? [thread.id, ...family.childThreadIds],

@@ -2,6 +2,10 @@ import {
   captureLinkedArchivePreview,
   localArchivePreview,
 } from "./orchestration-v2/LastCodeLinkedArchivePreview.ts";
+import {
+  captureLinkedArchiveOperations,
+  localArchiveOperations,
+} from "./orchestration-v2/LastCodeLinkedArchiveOperations.ts";
 import { WorktreeSuspensionRequestError } from "@t3tools/contracts";
 import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
 import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
@@ -1507,6 +1511,7 @@ const layerCoreWsRpc = (
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
   linkedArchivePreview = localArchivePreview,
+  linkedArchiveOperations = localArchiveOperations,
 ) =>
   Layer.unwrap(
     Effect.gen(function* () {
@@ -2101,12 +2106,15 @@ const layerCoreWsRpc = (
                           ? { ...command, runId: null }
                           : command,
                       )
-                    : ThreadMessageIntake.dispatchUserCommand(
-                        ThreadManagementService.withCreationProvenance(command, {
-                          createdBy: "user",
-                          creationSource:
-                            "creationSource" in command ? command.creationSource : "web",
-                        }),
+                    : linkedArchiveOperations.dispatch(
+                        command,
+                        ThreadMessageIntake.dispatchUserCommand(
+                          ThreadManagementService.withCreationProvenance(command, {
+                            createdBy: "user",
+                            creationSource:
+                              "creationSource" in command ? command.creationSource : "web",
+                          }),
+                        ),
                       )
                   ).pipe(
                     Effect.provide(intakeContext),
@@ -4213,6 +4221,7 @@ const makeRoutes: Effect.Effect<
   const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
   const threadReads = yield* OrchestratorMcpService.OrchestratorMcpService;
   const linkedArchivePreview = yield* captureLinkedArchivePreview;
+  const linkedArchiveOperations = yield* captureLinkedArchiveOperations;
   const serverBrowser = yield* ServerBrowser.ServerBrowser;
   const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
   const npmRelease = yield* NpmRelease.NpmRelease;
@@ -4300,6 +4309,7 @@ const makeRoutes: Effect.Effect<
             reportProfiles,
             readSettingsClient(url.value),
             linkedArchivePreview,
+            linkedArchiveOperations,
           ).pipe(
             Layer.provideMerge(RpcSerialization.layerJson),
             // Handler-context reporters see only request defects, not server-wide defects.

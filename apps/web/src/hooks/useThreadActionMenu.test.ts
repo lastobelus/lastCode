@@ -47,6 +47,11 @@ vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn(
 vi.mock("./useWorktreeSuspensionActions", () => ({
   useWorktreeSuspensionActions: () => ({ menuItems: () => [], run: async () => false }),
 }));
+vi.mock("./useLastCodeLinkedArchiveRecovery", () => ({
+  LINKED_ARCHIVE_STATUS_ACTION: "linked-archive-status",
+  linkedArchiveStatusMenuItem: () => [],
+  useLastCodeLinkedArchiveRecovery: () => async () => {},
+}));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,

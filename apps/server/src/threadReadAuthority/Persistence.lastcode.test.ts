@@ -128,6 +128,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
             [21, "ThreadReadAuthority"],
             [22, "ProjectRegistration"],
             [23, "OrchestrationV2ArchiveRecordedOwnerIndexes"],
+            [24, "LastCodeArchiveJournal"],
           ]);
           const store = yield* Store.make;
           assert.isDefined(yield* store.captureAuthenticatedSessionAuthority("existing"));

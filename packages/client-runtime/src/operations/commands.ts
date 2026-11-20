@@ -27,6 +27,7 @@ import {
   type ThreadId,
   type ThreadEnvMode,
   type ThreadArchiveChildDisposition,
+  type LinkedArchiveSelection,
   type ThreadArchiveTemporaryProjectSelection,
   type UploadChatAttachment,
   type GuestMessageId,
@@ -131,10 +132,13 @@ export interface ArchiveThreadInput extends ThreadCommandInput {
   readonly expectedArchiveThreadIds?: ReadonlyArray<ThreadId>;
   readonly includeTypedInThreadIds?: ReadonlyArray<ThreadId>;
   readonly expectedTemporaryProjects?: ReadonlyArray<ThreadArchiveTemporaryProjectSelection>;
+  readonly linkedArchiveSelection?: ReadonlyArray<LinkedArchiveSelection>;
+  readonly expectedLinkedArchiveCommandId?: CommandId;
   readonly expectedArchiveCommandId?: CommandId;
 }
 export type UnarchiveThreadInput = ThreadCommandInput & {
   readonly expectedArchiveCommandId?: CommandId;
+  readonly expectedLinkedArchiveCommandId?: CommandId;
 };
 export type SettleThreadInput = ThreadCommandInput;
 
@@ -688,6 +692,12 @@ export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(func
     ...(input.expectedTemporaryProjects === undefined
       ? {}
       : { expectedTemporaryProjects: input.expectedTemporaryProjects }),
+    ...(input.linkedArchiveSelection === undefined
+      ? {}
+      : { linkedArchiveSelection: input.linkedArchiveSelection }),
+    ...(input.expectedLinkedArchiveCommandId === undefined
+      ? {}
+      : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
     ...(input.expectedArchiveCommandId === undefined
       ? {}
       : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
@@ -701,6 +711,9 @@ export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(
     type: "thread.unarchive",
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
+    ...(input.expectedLinkedArchiveCommandId === undefined
+      ? {}
+      : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
     ...(input.expectedArchiveCommandId === undefined
       ? {}
       : { expectedArchiveCommandId: input.expectedArchiveCommandId }),

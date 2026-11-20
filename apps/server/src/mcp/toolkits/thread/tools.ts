@@ -21,7 +21,6 @@ import {
   ThreadArchiveTemporaryProjectSelection,
   OrchestratorMcpFailure,
   OrchestrationV2DispatchCommandResult,
-  OrchestrationV2ThreadArchiveFamily,
   ThreadId,
   RunId,
   NonNegativeInt,
@@ -32,17 +31,21 @@ import {
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
-import * as Struct from "effect/Struct";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import {
+  ArchiveFamilyToolResult,
+  ArchiveToolOperation,
+  ArchiveToolSelectionInput,
+} from "./LastCodeLinkedArchiveToolSchemas.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, restore, or mark a thread unread. promote releases ownership to make a top-level thread. If a delegated task still owes its result or holds a continuation, wait or cancel it first. return_to_owner restores ownership. Omit threadId for this thread. snooze requires snoozedUntil. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active. Preview the family with t3_thread_archive_family before archiving. Archiving a family requires childDisposition and its childThreadIds as expectedChildThreadIds. With archivePreview, set expectedArchiveThreadIds to preview threads excluding keptThreadIds. To include typed-in threads with user consent, exclude keptWithTypedInThreadIds instead, pass typedInThreadIds as includeTypedInThreadIds, and use archive_after_review or stop_and_archive. With user consent, pass each selected temporary project’s projectId and threadIds as expectedTemporaryProjects (requiresTypedIn only with typed-in consent). Deletion also removes their thread history, leaving folders on disk. A childless active or unread thread also needs stop_and_archive or archive_after_review, respectively. archive_if_idle refuses active or unread family members; archive_after_review confirms unread replies but refuses newly active work; stop_and_archive confirms stopping active family members and archiving the selected family members. archive with expectedArchiveCommandId retries only that exact failed attempt. unarchive restores an archived thread; with expectedArchiveCommandId it instead dismisses that exact failed archive on an active family, without stopping or restarting work. Failed participants resolve to the original owner and archive retries retain the observed failed attempt. This does not schedule a future action.",
+    "Pin, snooze, settle, archive, restore, or mark a thread unread. promote releases ownership to make a top-level thread. If a delegated task still owes its result or holds a continuation, wait or cancel it first. return_to_owner restores ownership. Omit threadId for this thread. snooze requires snoozedUntil. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active. Call t3_thread_archive_family first to decide archive readiness, who to ask, or whether they are available. Archiving a family requires childDisposition and its childThreadIds as expectedChildThreadIds. With archivePreview, set expectedArchiveThreadIds to preview threads excluding keptThreadIds. To include typed-in threads with user consent, exclude keptWithTypedInThreadIds instead, pass typedInThreadIds as includeTypedInThreadIds, and use archive_after_review or stop_and_archive. With user consent, pass each selected temporary project’s projectId and threadIds as expectedTemporaryProjects (requiresTypedIn only with typed-in consent). Deletion also removes their thread history, leaving folders on disk. Pass linkedArchiveSelection from preview. Include typed-in cohorts or stop linked work only with consent. archive_if_idle refuses active or unread family members; archive_after_review confirms unread replies but refuses newly active work; stop_and_archive confirms stopping active family members and archiving the selected family members. A childless active or unread thread also needs stop_and_archive or archive_after_review, respectively. archive with expectedArchiveCommandId retries only that exact failed attempt. unarchive restores an archived thread; with expectedArchiveCommandId it instead dismisses that exact failed archive on an active family, without stopping or restarting work. Failed participants resolve to the original owner and archive retries retain the observed failed attempt. This does not schedule a future action.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -67,12 +70,16 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       Schema.Array(ThreadArchiveTemporaryProjectSelection),
     ),
     includeTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    linkedArchiveSelection: Schema.optional(ArchiveToolSelectionInput),
+    expectedLinkedArchiveCommandId: Schema.optional(CommandId),
     expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   success: Schema.Union([
     Schema.Struct({
       ...OrchestrationV2DispatchCommandResult.fields,
       ownerStateChecked: Schema.optional(Schema.Boolean),
+      linkedArchiveOperations: Schema.optional(Schema.Array(ArchiveToolOperation)),
+      linkedArchiveGuidance: Schema.optional(Schema.String),
     }),
     Schema.Struct({ settlesWhenTurnEnds: Schema.Literal(true) }),
   ]),
@@ -192,11 +199,9 @@ const PendingRequestTool = Tool.make("t3_pending_request", {
 const ThreadArchiveFamilyTool = Tool.make("t3_thread_archive_family", {
   ...commandTool,
   description:
-    "Inspect an archive family and find who can answer questions about its work across projects. keptThreadIds stay open by default; linkedArchivePreview threads stay open. Provider proof may repair exact ended turns; unknown work stays active. Omit threadId for this thread. Ask one consultationTargets owner without unavailableReason via t3_thread_send mode:'queue', never yourself or its work threads. Report unavailable owners. Answers grant no stop/archive authority. Reinspect before archive; see t3_thread_organize.",
+    "Inspect before deciding whether to stop or archive a family, who owns its work, or whether to ask them. Ask one consultationTargets owner without unavailableReason via t3_thread_send mode:'queue', never yourself or its work threads. Report unavailable owners. Answers grant no stop/archive authority. keptThreadIds stay open by default. Linked operations return retryArgs. Provider proof may repair exact ended turns; unknown work stays active. Omit threadId for this thread. Reinspect before archive; see t3_thread_organize.",
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
-  success: OrchestrationV2ThreadArchiveFamily.mapFields(
-    Struct.omit(["threads", "canPromote", "promotableChildThreadIds"]),
-  ),
+  success: ArchiveFamilyToolResult,
 })
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false);

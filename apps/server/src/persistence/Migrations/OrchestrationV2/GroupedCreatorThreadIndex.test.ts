@@ -26,6 +26,7 @@ it.effect(
         [21, "ThreadReadAuthority"],
         [22, "ProjectRegistration"],
         [23, "OrchestrationV2ArchiveRecordedOwnerIndexes"],
+        [24, "LastCodeArchiveJournal"],
       ]);
       assert.deepEqual(yield* runDatabaseMigrations(), []);
       for (const recovery of [false, true]) {

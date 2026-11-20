@@ -84,6 +84,10 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { useSwipeRowDormant } from "../home/swipe-row-activation";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
+import {
+  LINKED_ARCHIVE_STATUS_ACTION,
+  showLastCodeLinkedArchiveStatus,
+} from "../archive/lastCodeLinkedArchiveRecovery";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import { canTurnThreadIntoProject, turnThreadIntoProject } from "./turnThreadIntoProject";
 import { useCanShareWithGuest } from "./useCanShareWithGuest";
@@ -113,7 +117,10 @@ import {
   withThreadMenuDividers,
 } from "./thread-persistence-menu";
 import { resolveWorktreeCleanupStatus, shouldShowActionWaitingIndicator } from "./thread-status";
-import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
+import {
+  LINKED_ARCHIVE_STATUS_LABEL,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
@@ -1428,7 +1435,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       );
       const secondary = buildThreadPersistenceMenuItems(
         {
-          actions: archiveInDirect ? sections.secondary : withArchive(sections.secondary),
+          actions: [
+            ...(archiveInDirect ? sections.secondary : withArchive(sections.secondary)),
+            ...(archiveFamiliesSupported && canOperateThread
+              ? [{ id: LINKED_ARCHIVE_STATUS_ACTION, title: m(LINKED_ARCHIVE_STATUS_LABEL) }]
+              : []),
+          ],
           persistent,
           supported: false,
         },
@@ -1512,6 +1524,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   }, [
     actionMenuItems,
     archiveFamiliesSupported,
+    canOperateThread,
     cleanupFailed,
     cleanupPending,
     hasManagedProcesses,
@@ -1546,6 +1559,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "move-up") handleMoveUp();
       if (nativeEvent.event === "move-down") handleMoveDown();
       if (nativeEvent.event === "archive") handleArchive();
+      if (nativeEvent.event === LINKED_ARCHIVE_STATUS_ACTION) {
+        void showLastCodeLinkedArchiveStatus({
+          environmentId: thread.environmentId,
+          threadId: thread.id,
+        });
+      }
       if (
         nativeEvent.event.startsWith("dismiss-archive-failure:") ||
         nativeEvent.event.startsWith("retry-archive-failure:")

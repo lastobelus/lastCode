@@ -1,4 +1,8 @@
-import { LinkedArchivePreview } from "./lastCodePeerArchive.ts";
+import {
+  LinkedArchiveOperation,
+  LinkedArchivePreview,
+  LinkedArchiveSelection,
+} from "./lastCodePeerArchive.ts";
 import {
   ThreadArchiveChildDisposition,
   ThreadArchivedWith,
@@ -3518,6 +3522,8 @@ export const OrchestrationV2Command = Schema.Union([
       Schema.Array(ThreadArchiveTemporaryProjectSelection),
     ),
     includeTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    linkedArchiveSelection: Schema.optional(Schema.Array(LinkedArchiveSelection)),
+    expectedLinkedArchiveCommandId: Schema.optional(CommandId),
     /** Retries only this failed archive attempt on its original owner. */
     expectedArchiveCommandId: Schema.optional(CommandId),
     savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
@@ -3537,6 +3543,7 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.unarchive"),
     commandId: CommandId,
     threadId: ThreadId,
+    expectedLinkedArchiveCommandId: Schema.optional(CommandId),
     /** Dismisses this failed archive attempt on its active owner instead of restoring. */
     expectedArchiveCommandId: Schema.optional(CommandId),
   }),
@@ -5156,6 +5163,7 @@ export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   consultationTargets: Schema.optional(Schema.Array(ThreadArchiveConsultationTarget)),
   archivePreview: Schema.optional(Schema.UndefinedOr(ThreadArchivePreview)),
   linkedArchivePreview: Schema.optional(Schema.Array(LinkedArchivePreview)),
+  linkedArchiveOperations: Schema.optional(Schema.Array(LinkedArchiveOperation)),
   threads: Schema.Array(OrchestrationV2ThreadShell),
   childThreadIds: Schema.Array(ThreadId),
   activeChildThreadIds: Schema.Array(ThreadId),
