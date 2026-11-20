@@ -37,7 +37,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { expect } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
@@ -63,6 +63,11 @@ import * as Consumers from "./WorktreeConsumers.ts";
 import * as Mounts from "./DependencyMounts.ts";
 import { withWorkspaceLease, resolveWorkspaceLeaseRoot } from "./workspaceLease.ts";
 import { withProjectRootLease } from "./projectRootLease.ts";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const fs = await importOriginal<typeof NodeFSP>();
+  return { ...fs, lstat: vi.fn(fs.lstat) };
+});
 
 const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 const git = async (cwd: string, ...args: readonly string[]) =>
@@ -1802,6 +1807,7 @@ it.live.each([
   "interrupted",
   "failed",
   "renumbered-device",
+  "separate-device-trial",
   "missing-ref",
   "different-inode",
   "mixed-device",
@@ -1817,6 +1823,7 @@ it.live.each([
         const h = yield* harness(f);
         yield* h.service.previewSuspend({ threadId: firstId });
         const original = (yield* h.registry.list)[0]!;
+        const separateTrialDevice = original.nativeIdentity!.sourceIdentity.dev + 10;
         const id = "interrupted-trial";
         const snapshotDir = NodePath.join(h.registry.root, "snapshots", id);
         const manifestFile = NodePath.join(snapshotDir, "manifest.json");
@@ -1889,7 +1896,10 @@ it.live.each([
           yield* Effect.promise(async () => {
             const journal = await interrupted.readJournal(id);
             const manifest = await interrupted.read(id);
-            const trialIdentity = previous(journal.trialIdentity!);
+            const trialIdentity =
+              outcome === "separate-device-trial"
+                ? { ...journal.trialIdentity!, dev: separateTrialDevice }
+                : previous(journal.trialIdentity!);
             if (outcome === "different-trial") trialIdentity.ino += 1;
             await NodeFSP.writeFile(
               manifestFile,
@@ -1917,6 +1927,16 @@ it.live.each([
             );
           });
         }
+        const { lstat } = yield* Effect.promise(() =>
+          vi.importActual<typeof NodeFSP>("node:fs/promises"),
+        );
+        using _trialMount =
+          outcome === "separate-device-trial"
+            ? vi.spyOn(NodeFSP, "lstat").mockImplementation(async (...args) => {
+                const stat = await lstat(...args);
+                return args[0] === trial ? Object.assign(stat, { dev: separateTrialDevice }) : stat;
+              })
+            : undefined;
         const manifestBefore = yield* Effect.promise(() => NodeFSP.readFile(manifestFile, "utf8"));
         yield* h.service.sweep;
         if (

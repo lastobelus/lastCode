@@ -3023,7 +3023,6 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       expected.commonIdentity.dev !== recordedDevice ||
       trialPath === undefined ||
       trialIdentity === undefined ||
-      trialIdentity.dev !== recordedDevice ||
       NodePath.dirname(trialPath) !== snapshotDirectory(id) ||
       !/^trial-[a-f0-9-]{36}$/u.test(NodePath.basename(trialPath))
     )
@@ -3032,6 +3031,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const current = await gitIdentity(input.sourcePath);
     const trial = await gitIdentity(trialPath);
     const source = await NodeFSP.lstat(input.sourcePath);
+    // A trial on another volume must still match its own recorded device.
+    const trialDevice = trialIdentity.dev === recordedDevice ? source.dev : trialIdentity.dev;
     if (
       source.dev === recordedDevice ||
       source.ino !== expected.sourceIdentity.ino ||
@@ -3046,7 +3047,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       trial.head !== snapshot.head ||
       trial.branch !== null ||
       !sameIdentity(identity(await NodeFSP.lstat(trialPath)), {
-        dev: source.dev,
+        dev: trialDevice,
         ino: trialIdentity.ino,
       })
     )
