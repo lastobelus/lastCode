@@ -63,8 +63,11 @@ export function useLogicalProjectEnvironments(
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
     const seen = new Set<string>();
     // A draft opened through a temporary project's thread still has its exact target.
-    const explicit = isTemporaryProject(activeProject) ? activeProject : temporaryDraftOrigin;
-    if (explicit !== null) {
+    for (const explicit of [
+      isTemporaryProject(activeProject) ? activeProject : null,
+      temporaryDraftOrigin,
+    ]) {
+      if (!explicit || seen.has(explicit.environmentId)) continue;
       seen.add(explicit.environmentId);
       pushEnvironment(explicit.environmentId, explicit.id);
     }

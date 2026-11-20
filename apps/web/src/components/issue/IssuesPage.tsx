@@ -1,3 +1,5 @@
+import { useDiscoverableProjects } from "../../hooks/useDiscoverableProjects";
+import { withContextualProject } from "@t3tools/client-runtime/state/temporary-projects";
 import { useAtomValue } from "@effect/atom-react";
 import {
   continueIssuePage,
@@ -193,6 +195,7 @@ export function IssuesPage() {
   const search = useSearch({ from: "/_chat/issues" });
   const { environments } = useEnvironments();
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects();
   const issuesSupported = useIssuesSupported();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
 
@@ -200,16 +203,21 @@ export function IssuesPage() {
     (environment) => environment.serverConfig?.environment.capabilities.issues === true,
   );
   const environmentLabels = new Map(environments.map((e) => [e.environmentId, e.label] as const));
-  const filterProjects = issueFilterProjects(
-    projects.filter((project) =>
-      capableEnvironments.some((e) => e.environmentId === project.environmentId),
-    ),
-    environmentLabels,
-  );
   const scopedProject =
     search.issueServer && search.issueProject
       ? { environmentId: search.issueServer, projectId: search.issueProject }
       : undefined;
+  const selectedProject = projects.find(
+    (project) =>
+      project.environmentId === scopedProject?.environmentId &&
+      project.id === scopedProject.projectId,
+  );
+  const filterProjects = issueFilterProjects(
+    withContextualProject(discoverable, selectedProject).filter((project) =>
+      capableEnvironments.some((e) => e.environmentId === project.environmentId),
+    ),
+    environmentLabels,
+  );
 
   const debouncedQuery = useDebouncedValue(search.q ?? "", 300);
   const listInput: IssueListInput = {
