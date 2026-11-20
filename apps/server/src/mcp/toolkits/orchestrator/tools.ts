@@ -89,7 +89,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. The child does not see this conversation, but it starts with the same project instructions you have, so the task prompt carries only what it cannot find there. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
+    "Start one owned task with only `task`. Its agent has your project instructions but not this conversation, so include only what it needs from you. For a separate checkout use `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: Schema.Struct({
     ...OrchestratorMcpDelegateTaskResult.fields,
@@ -227,7 +227,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). Your thread owns each new thread. Set `topLevel:true` on a row only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread unless it is a side chat; null leaves the new thread ungrouped. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
+    "Create owned child threads in this checkout. Omit prompt for an empty group thread. Set `topLevel:true` on a row only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread unless it is a side chat; null clears the placement parent without changing ownership. One thread or its own worktree: `t3_thread_launch`.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: Schema.Struct({
     ...OrchestratorMcpCreateThreadsResult.fields,
@@ -244,7 +244,7 @@ const CreateThreadsTool = Tool.make("create_threads", {
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List threads newest first, in one project or with `allProjects`. underThreadId lists direct children: grouped threads and delegated children it still owns, settled ones included unless you filter with settled. archived:true lists archived threads instead of live ones. groupedUnderThreadId is placement; creatorThreadId records origin. parentThreadId and relationshipToParent describe execution lineage; independent:true releases its ownership. Page with `cursor`. In your reply, name a thread as its `link` verbatim; it includes the owning environment.",
+    "List threads newest first, in one project or with `allProjects`. underThreadId lists direct children: grouped threads and delegated children it still owns, settled ones included unless you filter with settled. archived:true lists archived threads instead of live ones. groupedUnderThreadId is placement; creatorThreadId records origin. parentThreadId and relationshipToParent describe execution lineage; independent:true means the thread is unowned. Page with `cursor`. In your reply, name a thread as its `link` verbatim; it includes the owning environment.",
   parameters: OrchestratorMcpThreadListInput,
   success: OrchestratorMcpThreadListResult,
   failure: OrchestratorMcpFailure,

@@ -223,7 +223,7 @@ const McpToolUseExpect = Schema.Struct({
   minCalls: Schema.optional(Schema.Record(Schema.String, Schema.Number)),
   maxCalls: Schema.optional(Schema.Record(Schema.String, Schema.Number)),
   /**
-   * One `args`-style value per new top-level thread the agent asks for, by `t3_thread_launch` or a
+   * One `args`-style value per launched thread the agent asks for, by `t3_thread_launch` or a
    * `create_threads` entry. Each matches a different thread's request; no other thread is asked for.
    */
   newThreads: Schema.optional(Schema.Array(Schema.Unknown)),
@@ -2198,7 +2198,7 @@ const matches = (expected: unknown, actual: unknown): boolean => {
   return Object.entries(expected).every(([path, value]) => matches(value, at(path)));
 };
 
-/** Each new top-level thread request in a run; a failed call created nothing. */
+/** Each launch request that succeeded, including rows of a batch. */
 const newThreadRequests = (calls: ReadonlyArray<Call>) =>
   calls.flatMap((call): ReadonlyArray<{ request: unknown; brief: unknown }> => {
     if (call.failed === true || !isRecord(call.input)) return [];
@@ -3059,7 +3059,7 @@ const main = Effect.gen(function* () {
               : Effect.succeed(built);
           }),
         );
-  // Codex has no native subagents; its cases with that role run as top-level threads.
+  // Codex has no native subagents; its cases with that role run as ordinary interactive threads.
   const baseKey = ({ setup }: McpToolUseCase) =>
     `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.world?.browserAgentAccess !== false}:${setup.linkedEnvironments === true}:${setup.forge !== false}:${setup.role === "delegated-child" && setup.ownedPullRequestWatch === true}`;
   const base = yield* buildFor("top", true, true, false, true, false);
