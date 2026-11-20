@@ -857,9 +857,9 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "finished-thread-alerts",
-    title: "Finished thread alerts",
+    title: msg("Finished thread alerts"),
     to: "/settings/general",
-    searchTerms: ["notification toast completion finished agent mcp delegated eval mine all"],
+    searchTerms: [msg("notification toast completion finished agent mcp delegated eval mine all")],
   },
   {
     id: "time-format",

@@ -157,9 +157,9 @@ const TIMESTAMP_FORMAT_LABELS = {
 };
 
 const FINISHED_THREAD_ALERT_LABELS = {
-  mine: "Your threads",
-  all: "All threads",
-} as const;
+  mine: msg("Your threads"),
+  all: msg("All threads"),
+};
 
 const DIFF_LAYOUT_LABELS: Record<DiffLayout, string> = {
   stacked: msg("Stacked", { $context: "diff layout" }),
@@ -546,7 +546,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? [gt("In-app notifications")]
       : []),
     ...(settings.finishedThreadAlerts !== DEFAULT_UNIFIED_SETTINGS.finishedThreadAlerts
-      ? ["Finished thread alerts"]
+      ? [gt("Finished thread alerts")]
       : []),
     ...(settings.sidebarProjectGroupingMode !== DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
       ? [gt("Project Grouping")]
@@ -883,8 +883,13 @@ export function GeneralSettingsPanel() {
           }
         />
         <SettingsRow
-          {...searchableSetting("finished-thread-alerts")}
-          description="Which threads alert when they finish, fail, or hit a usage limit. Yours are threads you started or have sent a message in. Requests for input or approval always alert."
+          {...setting("finished-thread-alerts")}
+          description={
+            <T>
+              Which threads alert when they finish, fail, or hit a usage limit. Yours are threads
+              you started or have sent a message in. Requests for input or approval always alert.
+            </T>
+          }
           control={
             <Select
               value={settings.finishedThreadAlerts}
@@ -897,18 +902,18 @@ export function GeneralSettingsPanel() {
               <SelectTrigger
                 size="sm"
                 className="w-full sm:w-40"
-                aria-label="Finished thread alerts"
+                aria-label={gt("Finished thread alerts")}
               >
                 <SelectValue>
-                  {FINISHED_THREAD_ALERT_LABELS[settings.finishedThreadAlerts]}
+                  {m(FINISHED_THREAD_ALERT_LABELS[settings.finishedThreadAlerts])}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="mine">
-                  {FINISHED_THREAD_ALERT_LABELS.mine}
+                  {m(FINISHED_THREAD_ALERT_LABELS.mine)}
                 </SelectItem>
                 <SelectItem hideIndicator value="all">
-                  {FINISHED_THREAD_ALERT_LABELS.all}
+                  {m(FINISHED_THREAD_ALERT_LABELS.all)}
                 </SelectItem>
               </SelectPopup>
             </Select>
