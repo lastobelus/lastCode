@@ -503,6 +503,98 @@ const layerFollowups = Layer.merge(layerTest, ProviderContinuationRequests.layer
 );
 
 it.layer(layerFollowups)("delegated background wakes", (it) => {
+  it.effect("refuses a new remote task association while the destination thread is promoted", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projects = yield* ProjectService.ProjectService;
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:remote-promotion");
+      const threadId = ThreadId.make("thread:remote-promotion");
+      const owner = {
+        environmentId: EnvironmentId.make("requester"),
+        threadId: ThreadId.make("owner"),
+        title: "Requester",
+      };
+      yield* projects.create({
+        commandId: CommandId.make("project:remote-promotion"),
+        projectId,
+        title: "Remote promotion",
+        workspaceRoot: "/workspace/remote-promotion",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:remote-promotion"),
+        threadId,
+        projectId,
+        title: "Delegate",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent",
+        creationSource: "mcp",
+        delegatedFrom: owner,
+        linkOrigin: { sessionId: "owner-link", label: "Requester", access: "full-access" },
+      });
+      const before = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      const original = {
+        parentEnvironmentId: owner.environmentId,
+        parentThreadId: owner.threadId,
+        sourceTaskId: NodeId.make("original-task"),
+        delegationId: "original-delegation",
+        linkSessionId: "owner-link",
+        stage: "disposed" as const,
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("seed:disposed-delegation"),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...before, remoteDelegations: [original] },
+          },
+        ],
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.ownership.change",
+        commandId: CommandId.make("promote:remote"),
+        threadId,
+        action: "promote",
+      });
+      const prepare = {
+        type: "remote_delegation.prepare" as const,
+        commandId: CommandId.make("prepare:released"),
+        threadId,
+        association: {
+          ...original,
+          sourceTaskId: NodeId.make("new-task"),
+          delegationId: "new-delegation",
+          stage: "prepared" as const,
+        },
+      };
+      const refusal = yield* Effect.flip(orchestrator.dispatch(prepare));
+      assert.include(refusal.message, "Return to owner");
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.remoteDelegations,
+        [original],
+      );
+
+      yield* orchestrator.dispatch({
+        type: "thread.ownership.change",
+        commandId: CommandId.make("return:remote"),
+        threadId,
+        action: "return_to_owner",
+      });
+      yield* orchestrator.dispatch({ ...prepare, commandId: CommandId.make("prepare:returned") });
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.remoteDelegations,
+        [original, prepare.association],
+      );
+    }),
+  );
   it.effect(
     "promotes a local delegate after its requester observes the result and can return it",
     () =>

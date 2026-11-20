@@ -3,6 +3,8 @@ import { makeLastCodeThreadPromotion } from "./LastCodeThreadPromotion.ts";
 import { planGroupThreadUse } from "./planGroupThreadUse.ts";
 import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import {
+  checkNewRemoteDelegation,
+  RemoteDelegationReleasedThreadError,
   remoteDelegationProgress,
   sameRemoteDelegation,
   remoteDelegationMayStart,
@@ -469,6 +471,7 @@ export class OrchestratorCommandIdConflictError extends Schema.TaggedError<Orche
 }
 
 export const OrchestratorV2Error = Schema.Union([
+  RemoteDelegationReleasedThreadError,
   OrchestratorDispatchError,
   OrchestratorThreadAlreadyExistsError,
   OrchestratorCommandRejectedError,
@@ -12507,6 +12510,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (command.type === "remote_delegation.prepare" && old !== undefined) return;
+      yield* checkNewRemoteDelegation(command.type, thread);
       if (command.type === "remote_delegation.activate" && old?.stage !== "prepared") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,

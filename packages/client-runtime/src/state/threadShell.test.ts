@@ -679,6 +679,21 @@ describe("v2 thread shell lists", () => {
 
     registry.set(snapshotAtom(environmentId), {
       ...v2ShellSnapshot,
+      threads: [
+        root,
+        { ...child, lineage: { ...child.lineage, independent: true } },
+        { ...grandchild, pendingRuntimeRequest: approval },
+      ],
+    });
+    expect(registry.get(parent)?.pendingSubagentRequest).toBeNull();
+    expect(registry.get(inputs)).toEqual([]);
+    const promotedRef = { environmentId, threadId: child.id };
+    expect(registry.get(threads.threadShellAtom(promotedRef))?.pendingSubagentRequest).toBe(
+      "approval",
+    );
+
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
       threads: [root, child, grandchild],
     });
     expect(registry.get(parent)?.pendingSubagentRequest).toBeNull();
@@ -769,6 +784,26 @@ describe("v2 thread shell lists", () => {
     expect(registry.get(threads.threadShellAtom(parentRef))?.pendingSubagentRequest).toBe(
       "user_input",
     );
+
+    // Promotion leaves the requester reference, but the task and its nested approvals belong here.
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [
+        { ...task, lineage: { ...task.lineage, independent: true } },
+        { ...helper, pendingRuntimeRequest: approval },
+      ],
+    });
+    expect(listed()).toEqual([
+      `${environmentId}/${parent.id}`,
+      `${remoteEnvironmentId}/${task.id}`,
+    ]);
+    expect(registry.get(threads.threadShellAtom(parentRef))?.pendingSubagentRequest).toBeNull();
+    expect(registry.get(inputs)).toEqual([]);
+
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [task, helper],
+    });
 
     // A task whose parent is gone there is listed on its own, as is one whose
     // parent's environment is switched off.
