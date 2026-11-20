@@ -1,4 +1,4 @@
-import { EnvironmentId } from "./baseSchemas.ts";
+import { EnvironmentId, ForwardCompatibleArray } from "./baseSchemas.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -55,28 +55,13 @@ export const CapacityVerdict = Schema.Struct({
 });
 export type CapacityVerdict = typeof CapacityVerdict.Type;
 
-// Observation results can carry values introduced by a newer server.
-const ReportedCapacityMeasurements = CapacityMeasurements.mapFields((fields) => ({
-  ...fields,
-  memoryPressure: Schema.String,
-}));
-const ReportedCapacityReason = CapacityReason.mapFields((fields) => ({
-  ...fields,
-  signal: Schema.String,
-  comparison: Schema.String,
-}));
-const ReportedCapacityVerdict = CapacityVerdict.mapFields((fields) => ({
-  ...fields,
-  state: Schema.String,
-  reasons: Schema.Array(ReportedCapacityReason),
-}));
-
 export const CapacitySnapshot = Schema.Struct({
+  // The stored setting, reported verbatim: a newer version's mode is kept, not coerced.
   mode: Schema.String,
   sampledAt: Schema.NullOr(Schema.Number),
   readAt: Schema.Number,
   stale: Schema.Boolean,
-  measurements: Schema.NullOr(ReportedCapacityMeasurements),
+  measurements: Schema.NullOr(CapacityMeasurements),
   smoothed: Schema.Struct({
     windowMs: Schema.Number,
     sampleCount: Schema.Number,
@@ -87,34 +72,63 @@ export const CapacitySnapshot = Schema.Struct({
   activity: Schema.NullOr(CapacityActivity),
   ownerIdleSeconds: Schema.NullOr(Schema.Number),
   verdicts: Schema.Struct({
-    owner: ReportedCapacityVerdict,
-    agent: ReportedCapacityVerdict,
-    background: ReportedCapacityVerdict,
+    owner: CapacityVerdict,
+    agent: CapacityVerdict,
+    background: CapacityVerdict,
   }),
 });
 export type CapacitySnapshot = typeof CapacitySnapshot.Type;
 
-export const EnvironmentCapacitySnapshot = Schema.Struct({
-  ...CapacitySnapshot.fields,
-  linkedObservation: Schema.Literals(["known", "unknown", "not-requested"]),
-  linked: Schema.Array(
-    Schema.Struct({
-      environmentId: EnvironmentId,
-      label: Schema.String,
-      capacity: CapacitySnapshot,
-    }),
+// Results read from another server or CLI can carry values introduced by a newer version.
+const ReportedCapacityReason = CapacityReason.mapFields((fields) => ({
+  ...fields,
+  signal: Schema.String,
+  comparison: Schema.String,
+}));
+const ReportedCapacityVerdict = CapacityVerdict.mapFields((fields) => ({
+  ...fields,
+  state: Schema.String,
+  reasons: Schema.Array(ReportedCapacityReason),
+}));
+export const ReportedCapacitySnapshot = CapacitySnapshot.mapFields((fields) => ({
+  ...fields,
+  measurements: Schema.NullOr(
+    CapacityMeasurements.mapFields((measurements) => ({
+      ...measurements,
+      memoryPressure: Schema.String,
+    })),
   ),
-});
-export type EnvironmentCapacitySnapshot = typeof EnvironmentCapacitySnapshot.Type;
+  verdicts: Schema.Struct({
+    owner: ReportedCapacityVerdict,
+    agent: ReportedCapacityVerdict,
+    background: ReportedCapacityVerdict,
+  }),
+}));
+export type ReportedCapacitySnapshot = typeof ReportedCapacitySnapshot.Type;
 
 function optionalObservation<S extends Schema.Constraint>(schema: S) {
   const optional = Schema.optionalKey(schema);
   return Schema.catchDecoding<typeof optional>(() => Effect.succeedNone)(optional);
 }
 
-export const OptionalCapacitySnapshot = optionalObservation(CapacitySnapshot);
+export const OptionalCapacitySnapshot = optionalObservation(ReportedCapacitySnapshot);
+
+const LinkedCapacity = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  capacity: ReportedCapacitySnapshot,
+});
+
+export const EnvironmentCapacitySnapshot = Schema.Struct({
+  ...ReportedCapacitySnapshot.fields,
+  linkedObservation: Schema.String,
+  // One malformed linked entry or reading drops only itself, not the peer's whole block.
+  linked: ForwardCompatibleArray(LinkedCapacity),
+});
+export type EnvironmentCapacitySnapshot = typeof EnvironmentCapacitySnapshot.Type;
+
 export const OptionalEnvironmentCapacitySnapshot = optionalObservation(EnvironmentCapacitySnapshot);
-export const ReportedCapacityMode = optionalObservation(CapacitySnapshot.fields.mode);
-export const CapacityModeSetting = CapacitySnapshot.fields.mode.pipe(
+export const ReportedCapacityMode = optionalObservation(Schema.String);
+export const CapacityModeSetting = Schema.String.pipe(
   Schema.withDecodingDefault(Effect.succeed("observe")),
 );

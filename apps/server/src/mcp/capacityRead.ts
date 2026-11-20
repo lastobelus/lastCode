@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ReportedCapacitySnapshot } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -8,14 +8,14 @@ import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 
-const unavailableCapacity = Clock.currentTimeMillis.pipe(
-  Effect.map((now) => ({ ...unknownCapacitySnapshot(now), mode: "unknown" })),
+const unavailableCapacity: Effect.Effect<ReportedCapacitySnapshot> = Clock.currentTimeMillis.pipe(
+  Effect.map((now) => unknownCapacitySnapshot(now)),
 );
 
 export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
   scope: McpInvocationScope,
   target: EnvironmentId | undefined,
-) {
+): Effect.fn.Return<ReportedCapacitySnapshot> {
   const remote = PeerForwarding.remoteTarget(scope, target);
   if (remote === undefined) return yield* (yield* Capacity.Capacity).read;
   const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
