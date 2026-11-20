@@ -272,6 +272,26 @@ describe("lastcode-pr-gates", () => {
       ),
     ).toMatchObject({ status: "attention", reason: "merge-blocked" });
     expect(
+      evaluatePullRequestGates({
+        ...observation({ ci: satisfiedCi, review: handledReview, mergeStateStatus: "BLOCKED" }),
+        guardedMergeRequired: true,
+      }),
+    ).toMatchObject({ status: "ready" });
+    expect(
+      evaluatePullRequestGates(
+        {
+          ...observation({
+            ci: satisfiedCi,
+            review: handledReview,
+            mergeStateStatus: "BLOCKED",
+            baseRefName: "lastcode/parent",
+          }),
+          guardedMergeRequired: true,
+        },
+        "lastcode/parent",
+      ),
+    ).toMatchObject({ status: "attention", reason: "merge-blocked" });
+    expect(
       evaluatePullRequestGates(
         observation({ review: { ...pendingReview, requestPresent: false } }),
       ),

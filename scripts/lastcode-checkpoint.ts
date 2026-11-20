@@ -1986,6 +1986,15 @@ function promoteCheckpoint(
       return false;
     }
 
+    let approvedRepository: string | null = null;
+    try {
+      approvedRepository = lock.approvePush(commit);
+    } catch (error) {
+      // Before the ruleset requires the status this is harmless; after, GitHub refuses the push below.
+      console.warn(
+        `[lastcode:checkpoint] Could not approve ${commit} for promotion: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     try {
       lock.push(
         checkpointPromotionPushArgs(
@@ -2004,6 +2013,10 @@ function promoteCheckpoint(
         "rev-parse",
         `refs/remotes/${options.pushRemote}/lastcode/main`,
       ]);
+      // A candidate that is not on main must not stay approved for a later direct push.
+      const revokeFailure =
+        approvedRepository && current !== commit ? lock.revoke(approvedRepository, commit) : null;
+      if (revokeFailure) console.warn(`[lastcode:checkpoint] ${revokeFailure}`);
       if (current === sourceCommit || current === commit) throw error;
       deferPromotion(repoRoot, sourceCommit, current);
       return false;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  awaitCleanAfterGuardStatus,
   postMergeCheckpointArguments,
   parseMergeOptions,
   squashMergeArguments,
@@ -91,6 +92,38 @@ describe("lastcode-merge", () => {
     expect(() =>
       validatePullRequestForMerge({ ...mergeablePullRequest, baseRefName: "main" }, "head-sha"),
     ).toThrow("not 'lastcode/main'");
+    const blocked = { ...mergeablePullRequest, mergeStateStatus: "BLOCKED" };
+    expect(() => validatePullRequestForMerge(blocked, "head-sha")).toThrow("not cleanly mergeable");
+    expect(() => validatePullRequestForMerge(blocked, "head-sha", true)).not.toThrow();
+  });
+
+  it("merges only once GitHub stops blocking after the guard status", () => {
+    const sleeps: number[] = [];
+    const reads = ["BLOCKED", "UNKNOWN", "CLEAN"].map((mergeStateStatus) => ({
+      ...mergeablePullRequest,
+      mergeStateStatus,
+    }));
+    expect(
+      awaitCleanAfterGuardStatus(
+        () => reads.shift()!,
+        "head-sha",
+        (ms) => sleeps.push(ms),
+      ).mergeStateStatus,
+    ).toBe("CLEAN");
+    expect(sleeps).toHaveLength(2);
+
+    let blockedReads = 0;
+    expect(() =>
+      awaitCleanAfterGuardStatus(
+        () => {
+          blockedReads += 1;
+          return { ...mergeablePullRequest, mergeStateStatus: "BLOCKED" };
+        },
+        "head-sha",
+        () => {},
+      ),
+    ).toThrow("another merge requirement is unsatisfied");
+    expect(blockedReads).toBe(10);
   });
 
   it("accepts only a successful exact GitHub CI run", () => {

@@ -179,16 +179,19 @@ current GitHub thread and review-query mechanics.
    only when the user asks you to keep waiting or new actionable work needs it.
 
 5. Merge with `pnpm --config.verify-deps-before-run=false lastcode:merge` from the PR's
-   own checkout; do not bypass the guarded merge in the GitHub UI.
+   own checkout. GitHub refuses every other merge into `lastcode/main`, from the
+   UI, plain `gh pr merge` or old scripts, because a ruleset requires the
+   `lastcode:merge` status that only this command posts, under the main-write
+   lock, just before it merges. Until then the PR shows as blocked on that
+   status. Never post it yourself.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, strict exact-head review readiness with zero
    unresolved review threads, a clean current PR that merges without conflicts
    onto the current tip, carry groups recompiled against that tip, and an
    unchanged fetched base under the shared remote main-write lock immediately
    before its exact-head squash merge. Checkpoint promotion uses the same lock; open PRs and CI waits
-   never hold it. Use the updated guarded command rather than the GitHub UI or
-   old worktree scripts, which do not participate in this coordination. Preserve
-   an uncertain remote lock until its owner and operation outcome are verified.
+   never hold it. Preserve an uncertain remote lock until its owner and
+   operation outcome are verified.
 6. Verify the PR is merged and `origin/lastcode/main` contains the merge commit
    the wrapper prints. Then confirm main's push CI for that commit: a PR merged
    behind main is first tested as merged there. Start the command the wrapper
