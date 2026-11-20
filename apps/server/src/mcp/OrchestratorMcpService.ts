@@ -1904,8 +1904,20 @@ const make = Effect.gen(function* () {
         model: requested.model,
         ...(requested.options === undefined ? {} : { options: requested.options }),
       };
-      const providers = yield* loadProviders;
-      const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+      // Match orchestrator_capabilities, which lists the project folder's own models too.
+      const { workspaceRoot } = yield* requireProject(projectId);
+      const machineProviders = yield* loadProviders;
+      const machineProvider = machineProviders.find(
+        (candidate) => candidate.instanceId === selection.instanceId,
+      );
+      const scanned =
+        machineProvider?.enabled === true &&
+        !machineProvider.workspaceSnapshots?.some((snapshot) => snapshot.cwd === workspaceRoot)
+          ? yield* scanWorkspace(selection.instanceId, workspaceRoot)
+          : machineProviders;
+      const provider = withWorkspaceModels(scanned, workspaceRoot).find(
+        (candidate) => candidate.instanceId === selection.instanceId,
+      );
       if (provider === undefined) {
         return yield* failure(
           "invalid_request",

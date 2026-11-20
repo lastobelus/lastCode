@@ -4542,19 +4542,36 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
       models: [
         {
-          slug: selectedModel.model,
-          name: selectedModel.model,
+          slug: "machine-only-model",
+          name: "machine-only-model",
           isCustom: false,
-          capabilities: {
-            optionDescriptors: [
-              {
-                id: "effort",
-                label: "Effort",
-                type: "select",
-                options: [{ id: "low", label: "Low" }],
+          capabilities: null,
+        },
+      ],
+      // The selected model is only in the project folder's catalog, as orchestrator_capabilities lists it.
+      workspaceSnapshots: [
+        {
+          cwd: workspaceRoot,
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          slashCommands: [],
+          skills: [],
+          models: [
+            {
+              slug: selectedModel.model,
+              name: selectedModel.model,
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "effort",
+                    label: "Effort",
+                    type: "select",
+                    options: [{ id: "low", label: "Low" }],
+                  },
+                ],
               },
-            ],
-          },
+            },
+          ],
         },
       ],
     };
