@@ -23,6 +23,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
+import { matchesTemporaryProjectSelection } from "@t3tools/contracts";
 import type {
   CommandId,
   EnvironmentAuthorizationError,
@@ -177,9 +178,7 @@ export function createLastCodeThreadArchiveActions(ports: {
       familyChoice?: {
         childDisposition: ThreadArchiveChildDisposition;
         expectedChildThreadIds: readonly ThreadId[];
-        expectedArchiveThreadIds?: readonly ThreadId[];
-        includeTypedInThreadIds?: readonly ThreadId[];
-      };
+      } & ReturnType<typeof archivePreviewSelection>;
       familyOwner?: EnvironmentThreadShell;
       familySnapshot?: ArchiveFamily;
     } = {},
@@ -596,11 +595,15 @@ export function createLastCodeThreadArchiveActions(ports: {
               ...family.childThreadIds,
             ];
             const confirmedTypedIn = new Set(selection.includeTypedInThreadIds);
+            const confirmedProjects = selection.expectedTemporaryProjects ?? [];
+            const freshProjects = freshSelection.expectedTemporaryProjects ?? [];
             if (
               !freshOwner ||
               freshIds.length !== remaining.size ||
               freshIds.some((id) => !remaining.has(id)) ||
-              freshSelection.includeTypedInThreadIds?.some((id) => !confirmedTypedIn.has(id))
+              freshSelection.includeTypedInThreadIds?.some((id) => !confirmedTypedIn.has(id)) ||
+              freshProjects.length !== confirmedProjects.length ||
+              !matchesTemporaryProjectSelection(freshProjects, confirmedProjects)
             ) {
               return AsyncResult.failure(
                 Cause.fail(

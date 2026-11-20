@@ -27,6 +27,7 @@ import {
   type ThreadId,
   type ThreadEnvMode,
   type ThreadArchiveChildDisposition,
+  type ThreadArchiveTemporaryProjectSelection,
   type UploadChatAttachment,
   type GuestMessageId,
 } from "@t3tools/contracts";
@@ -129,6 +130,7 @@ export interface ArchiveThreadInput extends ThreadCommandInput {
   readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
   readonly expectedArchiveThreadIds?: ReadonlyArray<ThreadId>;
   readonly includeTypedInThreadIds?: ReadonlyArray<ThreadId>;
+  readonly expectedTemporaryProjects?: ReadonlyArray<ThreadArchiveTemporaryProjectSelection>;
   readonly expectedArchiveCommandId?: CommandId;
 }
 export type UnarchiveThreadInput = ThreadCommandInput & {
@@ -683,6 +685,9 @@ export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(func
     ...(input.includeTypedInThreadIds === undefined
       ? {}
       : { includeTypedInThreadIds: input.includeTypedInThreadIds }),
+    ...(input.expectedTemporaryProjects === undefined
+      ? {}
+      : { expectedTemporaryProjects: input.expectedTemporaryProjects }),
     ...(input.expectedArchiveCommandId === undefined
       ? {}
       : { expectedArchiveCommandId: input.expectedArchiveCommandId }),

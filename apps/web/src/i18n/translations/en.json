@@ -13177,5 +13177,6 @@
   "5cba2c5bf39f6de2": "All threads",
   "6d41d41d8eb64606": "Finished thread alerts",
   "f36fe70ddf163463": "Which threads alert when they finish, fail, or hit a usage limit. Yours are threads you started or have sent a message in. Requests for input or approval always alert.",
-  "fb3e494a31288492": "notification toast completion finished agent mcp delegated eval mine all"
+  "fb3e494a31288492": "notification toast completion finished agent mcp delegated eval mine all",
+  "cb49755a81176f6c": "These temporary projects and their thread histories will be deleted. Their folders and files will stay on disk. Unarchiving won't restore them."
 }

@@ -1,8 +1,10 @@
 import { act, render } from "../../test/render";
-import { ThreadId } from "@t3tools/contracts";
+import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 import { makeThreadFixture } from "../test-fixtures";
 import { requestThreadArchiveDialog, ThreadArchiveDialogHost } from "./ThreadArchiveDialog";
+import "~/index.css";
 
 function button(label: string) {
   const target = [...document.querySelectorAll("button")].find(
@@ -79,6 +81,52 @@ it("confirms unread replies without granting permission to stop work", async () 
   await act(() => button("Archive unread threads").click());
   expect(await result).toBe("archive_after_review");
   expect(submit).toHaveBeenCalledExactlyOnceWith("archive_after_review", undefined);
+});
+
+it("shows temporary projects that match the current archive choice before submitting", async () => {
+  await using _screen = await render(<ThreadArchiveDialogHost />);
+  const request = options();
+  const child = request.family.children[0]!;
+  const submit = vi.fn().mockResolvedValue(null);
+  let result!: ReturnType<typeof requestThreadArchiveDialog>;
+  await act(() => {
+    result = requestThreadArchiveDialog({
+      ...request,
+      family: {
+        ...request.family,
+        keptThreadIds: [child.id],
+        archivePreview: {
+          environmentId: child.environmentId,
+          typedInThreadIds: [child.id],
+          threads: [{ threadId: child.id, title: child.title, projectId: child.projectId }],
+          temporaryProjects: [
+            {
+              projectId: ProjectId.make("scratch"),
+              title: "Scratch",
+              threadIds: [],
+              requiresTypedIn: false,
+            },
+            {
+              projectId: ProjectId.make("opt-in"),
+              title: "Opt-in project",
+              threadIds: [],
+              requiresTypedIn: true,
+            },
+          ],
+        },
+      },
+      submit,
+    });
+  });
+  await expect.element(page.getByText("Scratch", { exact: true })).toBeVisible();
+  await expect.element(page.getByText(/Unarchiving won't restore them/)).toBeVisible();
+  await expect.element(page.getByText("Opt-in project")).not.toBeInTheDocument();
+  await page.getByRole("checkbox", { name: /Also archive threads/ }).click();
+  await expect.element(page.getByText("Opt-in project")).toBeVisible();
+  expect(submit).not.toHaveBeenCalled();
+  await act(() => button("Stop active threads & archive").click());
+  expect(await result).toBe("stop_and_archive");
+  expect(submit).toHaveBeenCalledExactlyOnceWith("stop_and_archive", true);
 });
 
 it.each(["returned", "thrown"] as const)(

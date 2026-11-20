@@ -272,6 +272,45 @@ it.effect("a full-access client discovers the idle recursive family before archi
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("archive only accepts project removal from a caller with environment write access", () =>
+  Effect.gen(function* () {
+    const { store, now } = yield* seedFamily();
+    const thread = yield* store.getThread(forkId);
+    yield* store.apply({
+      id: EventId.make("archive-family:limited-fork"),
+      type: "thread.metadata-updated",
+      threadId: forkId,
+      occurredAt: now,
+      payload: { ...thread, runtimeMode: "approval-required" },
+    });
+    const limited = {
+      ...clientScope,
+      client: { ...clientScope.client!, access: "approval-required" as const },
+    };
+    const archive = { threadId: forkId, action: "archive", expectedArchiveThreadIds: [forkId] };
+    const refused = yield* invoke(
+      "t3_thread_organize",
+      {
+        ...archive,
+        expectedTemporaryProjects: [
+          { projectId: ProjectId.make("archive-family:temporary"), threadIds: [] },
+        ],
+      },
+      limited,
+    );
+    expect(declaredFailure(refused)).toMatchObject({ code: "capability_denied" });
+    expect((yield* store.getThreadShell(forkId))?.archivedAt).toBeNull();
+
+    const ordinary = yield* invoke(
+      "t3_thread_organize",
+      { ...archive, expectedTemporaryProjects: [] },
+      limited,
+    );
+    expect(ordinary.isError, JSON.stringify(ordinary.content)).toBe(false);
+    expect((yield* store.getThreadShell(forkId))?.archivedAt).not.toBeNull();
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("a live provider caller inspects its current family without an explicit target", () =>
   Effect.gen(function* () {
     const { store, runId } = yield* seedLiveCaller();

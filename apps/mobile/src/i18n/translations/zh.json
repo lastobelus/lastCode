@@ -5573,5 +5573,6 @@
   "8afa8cbe18948320": "Enter 1 to 3650 days, then tap Save.",
   "c9b2723ade9155f6": "Save dependency retention days",
   "f3287c4ed3bdb117": "Save",
-  "45d8a48a56da69a3": "Filter settings environments"
+  "45d8a48a56da69a3": "Filter settings environments",
+  "cb49755a81176f6c": "这些临时项目及其会话记录将被删除。文件夹和文件会保留在磁盘上。取消归档无法恢复它们。"
 }

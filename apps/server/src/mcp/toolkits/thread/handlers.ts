@@ -482,6 +482,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       let command: OrchestrationV2Command;
       switch (input.action) {
         case "archive":
+          if (input.expectedTemporaryProjects?.length) yield* McpToolAccess.checkEnvironmentWrite();
           command = {
             ...common,
             type: "thread.archive",
@@ -494,6 +495,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.expectedArchiveThreadIds === undefined
               ? {}
               : { expectedArchiveThreadIds: input.expectedArchiveThreadIds }),
+            ...(input.expectedTemporaryProjects === undefined
+              ? {}
+              : { expectedTemporaryProjects: input.expectedTemporaryProjects }),
             ...(input.includeTypedInThreadIds === undefined
               ? {}
               : { includeTypedInThreadIds: input.includeTypedInThreadIds }),

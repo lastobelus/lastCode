@@ -17,6 +17,7 @@ import {
   RuntimeRequestId,
   RuntimeMode,
   ThreadId,
+  ThreadArchiveTemporaryProjectPlan,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -46,7 +47,11 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     messageId: MessageId,
     delivered: Schema.Boolean,
   }),
-  Schema.Struct({ type: Schema.Literal("thread.archive"), requestId: CommandId }),
+  Schema.Struct({
+    type: Schema.Literal("thread.archive"),
+    requestId: CommandId,
+    temporaryProjectPlan: Schema.optional(ThreadArchiveTemporaryProjectPlan),
+  }),
   Schema.Struct({
     type: Schema.Literal("incoming-message.summarize"),
     messageId: MessageId,

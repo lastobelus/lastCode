@@ -429,14 +429,7 @@ export interface ThreadManagementServiceShape {
   readonly searchThread: (
     input: OrchestrationV2SearchThreadInput,
   ) => Effect.Effect<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
-  readonly executeArchive: (input: {
-    readonly threadId: ThreadId;
-    readonly requestId: CommandId;
-  }) => Effect.Effect<
-    void,
-    Orchestrator.OrchestratorV2Error,
-    ProviderSessionManager.ProviderSessionManagerV2
-  >;
+  readonly executeArchive: LastCodeArchiveRunner.LastCodeArchiveRunner["Service"]["execute"];
   readonly ensureLegacyTranscript: (
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
@@ -957,7 +950,7 @@ const make = Effect.gen(function* () {
     };
   });
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = Effect.fn(
+  const dispatchWithWorkspaceLifecycle: ThreadManagementServiceShape["dispatch"] = Effect.fn(
     "ThreadManagementService.workspaceLifecycle",
   )(function* (command, options) {
     if (command.type !== "thread.archive" && command.type !== "thread.delete") {
@@ -1002,6 +995,15 @@ const make = Effect.gen(function* () {
         ),
       );
   });
+
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command, options) =>
+    dispatchWithWorkspaceLifecycle(command, options).pipe(
+      Effect.tap(() =>
+        command.type === "thread.archive"
+          ? archiveRunner.awaitTemporaryProjectRemoval(command)
+          : Effect.void,
+      ),
+    );
 
   const deleteMany: ThreadManagementServiceShape["deleteMany"] = Effect.fn(
     "ThreadManagementService.deleteMany",

@@ -4,10 +4,12 @@ import {
   MessageId,
   type ScopedThreadRef,
   type ThreadArchiveConsultationTarget,
+  type ThreadArchiveTemporaryProjectSelection,
   type ThreadId,
 } from "@t3tools/contracts";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
+import { scopedProjectKey } from "../environment/scoped.ts";
 import type { StartThreadTurnInput } from "../operations/commands.ts";
 import type { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 import type { EnvironmentThreadShell } from "./models.ts";
@@ -16,15 +18,30 @@ export const THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE = msg(
   "Update this environment's server before archiving thread families safely.",
 );
 
+const TEMPORARY_PROJECT_ARCHIVE_WARNING = msg(
+  "These temporary projects and their thread histories will be deleted. Their folders and files will stay on disk. Unarchiving won't restore them.",
+);
+
+function selectedTemporaryProjects(
+  preview: ThreadArchiveFamily["archivePreview"],
+  includeTypedIn: boolean,
+) {
+  return preview?.temporaryProjects?.filter(
+    ({ requiresTypedIn }) => includeTypedIn || !requiresTypedIn,
+  );
+}
+
 export function archivePreviewSelection(
   family: Pick<ThreadArchiveFamily, "archivePreview" | "keptThreadIds">,
   includeTypedIn = false,
 ): {
   readonly expectedArchiveThreadIds?: readonly ThreadId[];
   readonly includeTypedInThreadIds?: readonly ThreadId[];
+  readonly expectedTemporaryProjects?: readonly ThreadArchiveTemporaryProjectSelection[];
 } {
   if (family.archivePreview === undefined) return {};
   const keptIds = new Set(keptArchivePreviewThreadIds(family, includeTypedIn));
+  const projects = selectedTemporaryProjects(family.archivePreview, includeTypedIn);
   return {
     expectedArchiveThreadIds: family.archivePreview.threads
       .map(({ threadId }) => threadId)
@@ -32,6 +49,14 @@ export function archivePreviewSelection(
     ...(includeTypedIn && family.archivePreview.typedInThreadIds.length > 0
       ? { includeTypedInThreadIds: family.archivePreview.typedInThreadIds }
       : {}),
+    ...(projects === undefined
+      ? {}
+      : {
+          expectedTemporaryProjects: projects.map(({ projectId, threadIds }) => ({
+            projectId,
+            threadIds,
+          })),
+        }),
   };
 }
 
@@ -101,6 +126,20 @@ export function buildThreadArchiveConfirmation<
   const canIncludeTypedIn = typedInChoice.some(
     ({ archivePreview }) => (archivePreview?.typedInThreadIds.length ?? 0) > 0,
   );
+  const temporaryProjects = [
+    ...new Map(
+      previews.flatMap(({ archivePreview }) =>
+        archivePreview === undefined
+          ? []
+          : (selectedTemporaryProjects(archivePreview, includeTypedIn) ?? []).map(
+              ({ projectId, title }) => {
+                const project = { environmentId: archivePreview.environmentId, projectId, title };
+                return [scopedProjectKey(project), project] as const;
+              },
+            ),
+      ),
+    ).values(),
+  ];
   const protectedTitle = protectedThreads[0]?.title;
   const summary = blocked
     ? protectedThreads.length === 1
@@ -141,10 +180,15 @@ export function buildThreadArchiveConfirmation<
               { count: unreadCount },
             ),
           );
+  const preservesAllHistory = !blocked && temporaryProjects.length === 0;
   const description = [
     summary,
-    !blocked && active && unread ? resolve(msg("Unread replies stay in archived history.")) : null,
-    !blocked ? resolve(msg("Unarchiving reopens history. Stopped work won't restart.")) : null,
+    preservesAllHistory && active && unread
+      ? resolve(msg("Unread replies stay in archived history."))
+      : null,
+    preservesAllHistory
+      ? resolve(msg("Unarchiving reopens history. Stopped work won't restart."))
+      : null,
   ]
     .filter(Boolean)
     .join(" ");
@@ -153,6 +197,9 @@ export function buildThreadArchiveConfirmation<
     active,
     canIncludeTypedIn,
     description,
+    temporaryProjects,
+    temporaryProjectsWarning:
+      temporaryProjects.length > 0 ? resolve(TEMPORARY_PROJECT_ARCHIVE_WARNING) : null,
     confirmLabel: active
       ? resolve(msg("Stop active threads & archive"))
       : hasPreview
@@ -296,7 +343,14 @@ export function resolveThreadArchiveFamily(
     confirmLabel: confirmation.confirmLabel,
     disposition: confirmation.disposition,
     blocked: confirmation.blocked,
-    message: [confirmation.description, details.join("\n")].filter(Boolean).join("\n\n"),
+    message: [
+      confirmation.description,
+      details.join("\n"),
+      confirmation.temporaryProjectsWarning,
+      confirmation.temporaryProjects.map(({ title }) => title).join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
   };
 }
 

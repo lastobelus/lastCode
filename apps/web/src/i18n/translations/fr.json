@@ -13168,5 +13168,6 @@
   "5cba2c5bf39f6de2": "Tous les fils",
   "6d41d41d8eb64606": "Alertes des fils terminés",
   "f36fe70ddf163463": "Quels fils déclenchent une alerte lorsqu’ils se terminent, échouent ou atteignent une limite d’utilisation. Vos fils sont ceux que vous avez lancés ou dans lesquels vous avez envoyé un message. Les demandes de saisie ou d’approbation déclenchent toujours une alerte.",
-  "fb3e494a31288492": "notification alerte terminé fini agent mcp délégué eval miens tous toast"
+  "fb3e494a31288492": "notification alerte terminé fini agent mcp délégué eval miens tous toast",
+  "cb49755a81176f6c": "Ces projets temporaires et l’historique de leurs fils seront supprimés. Leurs dossiers et fichiers resteront sur le disque. Le désarchivage ne les restaurera pas."
 }

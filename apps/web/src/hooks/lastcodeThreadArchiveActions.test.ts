@@ -1101,10 +1101,15 @@ describe("archive family confirmation", () => {
 
 describe("bulk archive progress", () => {
   it.each([
-    ["owner first", false],
-    ["group first", false],
-    ["owner first", true],
-  ] as const)("refreshes a shared child after %s (new work added=%s)", async (order, added) => {
+    ["owner first", false, "none"],
+    ["group first", false, "none"],
+    ["owner first", true, "none"],
+    ["group first", false, "same"],
+    ["group first", false, "new"],
+    ["group first", false, "history"],
+    ["group first", false, "fewer"],
+    ["group first", false, "gone"],
+  ] as const)("refreshes after %s (%s, %s)", async (order, added, projectChange) => {
     const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
     const group = makeThreadFixture({
       id: ThreadId.make("group"),
@@ -1119,6 +1124,21 @@ describe("bulk archive progress", () => {
     });
     const sibling = { ...child, id: ThreadId.make("group-sibling") };
     const newMember = { ...child, id: ThreadId.make("new-member") };
+    const scratch = {
+      projectId: ProjectId.make("scratch"),
+      title: "Scratch",
+      threadIds: [child.id],
+      requiresTypedIn: false,
+    };
+    const keptScratch = { ...scratch, projectId: ProjectId.make("another-scratch") };
+    const projectPreviews = {
+      none: [[], []],
+      same: [[scratch], [scratch]],
+      history: [[scratch], [{ ...scratch, threadIds: [child.id, newMember.id] }]],
+      new: [[], [scratch]],
+      fewer: [[scratch, keptScratch], [keptScratch]],
+      gone: [[scratch], []],
+    } as const;
     const roots = order === "owner first" ? [owner, group] : [group, owner];
     const archived = new Set<ThreadId>();
     familyState.threads = [owner, group, child, sibling, newMember];
@@ -1131,7 +1151,10 @@ describe("bulk archive progress", () => {
       const root = request.input.threadId === owner.id ? owner : group;
       const children = childrenFor(root.id);
       const threads = [root, ...children];
-      const expanded = root === owner && !archived.has(child.id);
+      const refreshed = archived.has(child.id);
+      const temporaryProjects =
+        root === owner ? projectPreviews[projectChange][refreshed ? 1 : 0] : [];
+      const expanded = root === owner && (!refreshed || temporaryProjects.length > 0);
       return {
         _tag: "Success",
         value: {
@@ -1144,6 +1167,7 @@ describe("bulk archive progress", () => {
                 archivePreview: {
                   environmentId: owner.environmentId,
                   typedInThreadIds: [],
+                  ...(temporaryProjects.length > 0 ? { temporaryProjects } : {}),
                   threads: threads.map(({ id, projectId, title }) => ({
                     threadId: id,
                     projectId,
@@ -1175,15 +1199,20 @@ describe("bulk archive progress", () => {
       threadRef: { threadId: id, environmentId },
     }));
     const outcome = await useThreadActions().archiveThreads(entries);
+    const rejected = added || (projectChange !== "none" && projectChange !== "same");
     expect(outcome?.archivedThreadKeys).toEqual(
-      (added ? entries.slice(0, 1) : entries).map(({ threadKey }) => threadKey),
+      (rejected ? entries.slice(0, 1) : entries).map(({ threadKey }) => threadKey),
     );
-    expect(outcome?.mutationFailure?._tag ?? null).toBe(added ? "Failure" : null);
+    expect(outcome?.mutationFailure?._tag ?? null).toBe(rejected ? "Failure" : null);
     expect(archiveFamilyLoad).toHaveBeenCalledTimes(3);
-    expect(commands.archive).toHaveBeenCalledTimes(added ? 1 : 2);
-    if (order === "group first")
+    expect(commands.archive).toHaveBeenCalledTimes(rejected ? 1 : 2);
+    if (order === "group first" && !rejected)
       expect(commands.archive.mock.lastCall?.[0].input.expectedArchiveThreadIds).toEqual([
         owner.id,
+      ]);
+    if (projectChange === "same")
+      expect(commands.archive.mock.lastCall?.[0].input.expectedTemporaryProjects).toEqual([
+        { projectId: scratch.projectId, threadIds: scratch.threadIds },
       ]);
     expect(archived.has(newMember.id)).toBe(false);
   });

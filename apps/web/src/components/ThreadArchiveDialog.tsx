@@ -14,6 +14,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { readProject } from "../state/entities";
 import { m } from "../i18n/messages";
+import { LastCodeArchiveTemporaryProjects } from "./LastCodeArchiveTemporaryProjects";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import {
@@ -194,6 +195,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
               <T>Also archive threads you’ve written in, and the threads under them</T>
             </label>
           )}
+          <LastCodeArchiveTemporaryProjects {...confirmation} />
           {request.reviewFamilies ? (
             <ul
               aria-label={gt("Families to review")}

@@ -13167,5 +13167,6 @@
   "5cba2c5bf39f6de2": "Todas as threads",
   "6d41d41d8eb64606": "Alertas de threads concluídas",
   "f36fe70ddf163463": "Quais threads alertam quando terminam, falham ou atingem um limite de uso. Suas threads são as que você iniciou ou nas quais enviou uma mensagem. Pedidos de entrada ou aprovação sempre alertam.",
-  "fb3e494a31288492": "notificação alerta concluída terminada agente mcp delegada eval minhas todas notification toast"
+  "fb3e494a31288492": "notificação alerta concluída terminada agente mcp delegada eval minhas todas notification toast",
+  "cb49755a81176f6c": "Esses projetos temporários e o histórico de suas threads serão excluídos. As pastas e os arquivos permanecerão no disco. O desarquivamento não os restaurará."
 }

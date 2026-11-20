@@ -4,6 +4,7 @@ import {
   ThreadArchivePending,
   ThreadArchiveConsultationTarget,
   ThreadArchivePreview,
+  ThreadArchiveTemporaryProjectSelection,
 } from "./threadArchive.ts";
 export {
   ThreadArchiveChildDisposition,
@@ -3512,6 +3513,9 @@ export const OrchestrationV2Command = Schema.Union([
     childDisposition: Schema.optional(ThreadArchiveChildDisposition),
     expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
     expectedArchiveThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    expectedTemporaryProjects: Schema.optional(
+      Schema.Array(ThreadArchiveTemporaryProjectSelection),
+    ),
     includeTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
     /** Retries only this failed archive attempt on its original owner. */
     expectedArchiveCommandId: Schema.optional(CommandId),

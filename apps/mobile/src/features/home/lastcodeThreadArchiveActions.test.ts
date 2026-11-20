@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import type { ThreadArchiveFamily } from "@t3tools/client-runtime/state/thread-archive";
 import { AsyncResult } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
@@ -123,8 +123,9 @@ it("keeps newly busy-owner feedback visible without sending or granting archive 
   expect(test.review).not.toHaveBeenCalled();
 });
 
-it("keeps typed-in branches open and offers Review in the same prompt", async () => {
+it("keeps typed-in branches open and confirms only default projects", async () => {
   const test = setup();
+  const scratch = ProjectId.make("scratch");
   test.loadArchiveFamily.mockResolvedValue(
     AsyncResult.success({
       ...test.family,
@@ -132,6 +133,15 @@ it("keeps typed-in branches open and offers Review in the same prompt", async ()
       archivePreview: {
         environmentId: test.owner.environmentId,
         typedInThreadIds: [test.child.id],
+        temporaryProjects: [
+          { projectId: scratch, title: "Scratch", threadIds: [], requiresTypedIn: false },
+          {
+            projectId: ProjectId.make("opt-in"),
+            title: "Opt-in project",
+            threadIds: [],
+            requiresTypedIn: true,
+          },
+        ],
         threads: [test.owner, test.child].map(({ id, projectId, title }) => ({
           threadId: id,
           projectId,
@@ -143,6 +153,8 @@ it("keeps typed-in branches open and offers Review in the same prompt", async ()
   const pending = prepareLastCodeMobileThreadArchive(test.owner, test);
   await vi.waitFor(() => expect(state.alerts).toHaveLength(1));
   expect(state.alerts[0]?.message).toContain("Keep open");
+  expect(state.alerts[0]?.message).toContain("Unarchiving won't restore them.\n\nScratch");
+  expect(state.alerts[0]?.message).not.toContain("Opt-in project");
   expect(state.alerts[0]?.buttons.map(({ text }) => text)).toEqual([
     "Cancel",
     "Review",
@@ -154,6 +166,7 @@ it("keeps typed-in branches open and offers Review in the same prompt", async ()
     input: {
       expectedArchiveThreadIds: [test.owner.id],
       expectedChildThreadIds: [test.child.id],
+      expectedTemporaryProjects: [{ projectId: scratch, threadIds: [] }],
       childDisposition: "archive_after_review",
     },
   });

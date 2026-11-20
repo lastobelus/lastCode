@@ -35,6 +35,7 @@ import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import { ArchiveTemporaryProjects } from "./LastCodeArchiveTemporaryProjects.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
@@ -315,6 +316,7 @@ const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImp
   Layer.provide(
     Layer.mergeAll(
       ProjectionStore.layer,
+      EffectOutbox.layer,
       layerOrchestratorProvided,
       layerLegacyV1ThreadImporterProvided,
       layerCommandReceiptStoreProvided,
@@ -566,6 +568,7 @@ export const layerProduction = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(layerUpdateDrainAdmission),
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
+  Layer.provide(Layer.effect(ArchiveTemporaryProjects, ProjectService.ProjectService)),
   Layer.provideMerge(layerProjectService),
   Layer.provide(Scheduler.layer),
   Layer.provideMerge(EnvironmentPauseStore.layer),
