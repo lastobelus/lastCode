@@ -16,9 +16,45 @@ export const THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE = msg(
   "Update this environment's server before archiving thread families safely.",
 );
 
+export function archivePreviewSelection(
+  family: Pick<ThreadArchiveFamily, "archivePreview" | "keptThreadIds">,
+  includeTypedIn = false,
+): {
+  readonly expectedArchiveThreadIds?: readonly ThreadId[];
+  readonly includeTypedInThreadIds?: readonly ThreadId[];
+} {
+  if (family.archivePreview === undefined) return {};
+  const keptIds = new Set(keptArchivePreviewThreadIds(family, includeTypedIn));
+  return {
+    expectedArchiveThreadIds: family.archivePreview.threads
+      .map(({ threadId }) => threadId)
+      .filter((id) => !keptIds.has(id)),
+    ...(includeTypedIn && family.archivePreview.typedInThreadIds.length > 0
+      ? { includeTypedInThreadIds: family.archivePreview.typedInThreadIds }
+      : {}),
+  };
+}
+
+type ArchivePreviewFamily = {
+  readonly archivePreview?: ThreadArchiveFamily["archivePreview"];
+  readonly keptThreadIds?: readonly ThreadId[];
+  readonly threads: ReadonlyArray<{
+    readonly id: ThreadId;
+    readonly environmentId?: EnvironmentThreadShell["environmentId"];
+  }>;
+};
+
+function keptArchivePreviewThreadIds(
+  family: Pick<ArchivePreviewFamily, "archivePreview" | "keptThreadIds">,
+  includeTypedIn: boolean,
+) {
+  return includeTypedIn ? family.archivePreview?.keptWithTypedInThreadIds : family.keptThreadIds;
+}
+
 /** One shared presentation for web and mobile; family membership and activity come from the server. */
 export function buildThreadArchiveConfirmation<
-  T extends Pick<EnvironmentThreadShell, "id" | "title" | "persistent">,
+  T extends Pick<EnvironmentThreadShell, "id" | "title" | "persistent"> &
+    Partial<Pick<EnvironmentThreadShell, "projectId" | "environmentId">>,
 >(
   family: {
     readonly threads: readonly T[];
@@ -27,15 +63,44 @@ export function buildThreadArchiveConfirmation<
     readonly unreadThreadIds: readonly string[];
     readonly protectedChildThreadIds: readonly string[];
     readonly canStopAndArchive: boolean;
+    readonly archivePreview?: ThreadArchiveFamily["archivePreview"];
+    readonly keptThreadIds?: readonly ThreadId[];
+    readonly bulkPreviews?: readonly ArchivePreviewFamily[];
+    readonly bulkPreviewsIncludingTypedIn?: readonly ArchivePreviewFamily[];
   },
   resolve: MFunctionType = mFallback,
+  includeTypedIn = false,
 ) {
+  const typedInChoice = family.bulkPreviews ?? [family];
+  const previews = includeTypedIn
+    ? (family.bulkPreviewsIncludingTypedIn ?? typedInChoice)
+    : typedInChoice;
+  const hasPreview = previews.some(({ archivePreview }) => archivePreview !== undefined);
+  const keyOf = (thread: T | ArchivePreviewFamily["threads"][number]) =>
+    `${thread.environmentId}:${thread.id}`;
+  const previewKeys = new Set(
+    hasPreview ? previews.flatMap(({ threads }) => threads.map(keyOf)) : [],
+  );
+  const selectedKeys = new Set(
+    previews.flatMap((preview) => {
+      const kept = new Set(keptArchivePreviewThreadIds(preview, includeTypedIn));
+      return preview.threads.filter(({ id }) => !kept.has(id)).map(keyOf);
+    }),
+  );
+  const keep = (thread: T) => previewKeys.has(keyOf(thread)) && !selectedKeys.has(keyOf(thread));
+  const inScope = (thread: T) => !hasPreview || previewKeys.has(keyOf(thread));
+  const participants = family.threads.filter((thread) => inScope(thread) && !keep(thread));
   const activeIds = new Set(family.activeThreadIds);
   const unreadIds = new Set(family.unreadThreadIds);
-  const active = activeIds.size > 0;
-  const unread = unreadIds.size > 0;
-  const blocked = !family.canStopAndArchive;
-  const protectedThreads = family.threads.filter((thread) => thread.persistent);
+  const activeCount = participants.filter(({ id }) => activeIds.has(id)).length;
+  const unreadCount = participants.filter(({ id }) => unreadIds.has(id)).length;
+  const active = activeCount > 0;
+  const unread = unreadCount > 0;
+  const protectedThreads = participants.filter((thread) => thread.persistent);
+  const blocked = !family.canStopAndArchive || protectedThreads.length > 0;
+  const canIncludeTypedIn = typedInChoice.some(
+    ({ archivePreview }) => (archivePreview?.typedInThreadIds.length ?? 0) > 0,
+  );
   const protectedTitle = protectedThreads[0]?.title;
   const summary = blocked
     ? protectedThreads.length === 1
@@ -57,19 +122,25 @@ export function buildThreadArchiveConfirmation<
             { count: protectedThreads.length },
           ),
         )
-    : active
+    : hasPreview
       ? resolve(
           msg(
-            "{count, plural, one {{count} thread is still working. Archiving stops it, cancels pending approvals and queued messages, and archives the whole family.} other {{count} threads are still working. Archiving stops them, cancels pending approvals and queued messages, and archives the whole family.}}",
-            { count: activeIds.size },
+            "Threads marked Archive will be archived. Any still working will stop, and their pending approvals and queued messages will be canceled.",
           ),
         )
-      : resolve(
-          msg(
-            "{count, plural, one {{count} thread has replies you haven't read.} other {{count} threads have replies you haven't read.}} Archiving closes the whole family. Replies stay in archived history.",
-            { count: unreadIds.size },
-          ),
-        );
+      : active
+        ? resolve(
+            msg(
+              "{count, plural, one {{count} thread is still working. Archiving stops it, cancels pending approvals and queued messages, and archives the whole family.} other {{count} threads are still working. Archiving stops them, cancels pending approvals and queued messages, and archives the whole family.}}",
+              { count: activeCount },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {{count} thread has replies you haven't read.} other {{count} threads have replies you haven't read.}} Archiving closes the whole family. Replies stay in archived history.",
+              { count: unreadCount },
+            ),
+          );
   const description = [
     summary,
     !blocked && active && unread ? resolve(msg("Unread replies stay in archived history.")) : null,
@@ -80,29 +151,39 @@ export function buildThreadArchiveConfirmation<
   return {
     blocked,
     active,
+    canIncludeTypedIn,
     description,
     confirmLabel: active
       ? resolve(msg("Stop active threads & archive"))
-      : resolve(msg("Archive unread threads")),
+      : hasPreview
+        ? resolve(msg("Archive threads"))
+        : resolve(msg("Archive unread threads")),
     disposition: active ? ("stop_and_archive" as const) : ("archive_after_review" as const),
     threads: family.threads
-      .filter((thread) =>
-        blocked ? thread.persistent : activeIds.has(thread.id) || unreadIds.has(thread.id),
+      .filter(
+        (thread) =>
+          inScope(thread) &&
+          (previewKeys.has(keyOf(thread)) ||
+            (blocked ? thread.persistent : activeIds.has(thread.id) || unreadIds.has(thread.id))),
       )
       .map((thread) => ({
         thread,
-        label: blocked
-          ? resolve(msg("Persistent", { $context: "thread protected from archiving" }))
-          : [
-              activeIds.has(thread.id)
-                ? resolve(msg("Working", { $context: "thread status" }))
-                : null,
-              unreadIds.has(thread.id)
-                ? resolve(msg("Unread", { $context: "thread status" }))
-                : null,
-            ]
-              .filter(Boolean)
-              .join(" · "),
+        ...(previewKeys.has(keyOf(thread)) ? { showLocation: true } : {}),
+        label: keep(thread)
+          ? resolve(msg("Keep open"))
+          : thread.persistent
+            ? resolve(msg("Persistent", { $context: "thread protected from archiving" }))
+            : [
+                previewKeys.has(keyOf(thread)) ? resolve(msg("Archive")) : null,
+                activeIds.has(thread.id)
+                  ? resolve(msg("Working", { $context: "thread status" }))
+                  : null,
+                unreadIds.has(thread.id)
+                  ? resolve(msg("Unread", { $context: "thread status" }))
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · "),
       })),
   };
 }
@@ -200,10 +281,15 @@ export type ThreadArchiveFamily = Extract<
 export function resolveThreadArchiveFamily(
   family: ThreadArchiveFamily,
   resolve: MFunctionType = mFallback,
+  projectName: (thread: EnvironmentThreadShell) => string = ({ projectId }) => projectId,
 ) {
   const confirmation = buildThreadArchiveConfirmation(family, resolve);
-  const details = confirmation.threads.map(
-    ({ thread, label }) => `${thread.title || resolve(msg("Untitled thread"))} · ${label}`,
+  const details = confirmation.threads.map(({ thread, label, showLocation }) =>
+    [
+      thread.title || resolve(msg("Untitled thread")),
+      ...(showLocation ? [projectName(thread)] : []),
+      label,
+    ].join(" · "),
   );
   return {
     ...family,

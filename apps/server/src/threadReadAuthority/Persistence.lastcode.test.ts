@@ -127,6 +127,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
           assert.deepEqual(yield* runDatabaseMigrations(), [
             [21, "ThreadReadAuthority"],
             [22, "ProjectRegistration"],
+            [23, "OrchestrationV2ArchiveRecordedOwnerIndexes"],
           ]);
           const store = yield* Store.make;
           assert.isDefined(yield* store.captureAuthenticatedSessionAuthority("existing"));

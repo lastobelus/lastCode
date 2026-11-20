@@ -6,6 +6,7 @@ import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { RegistryContext } from "@effect/atom-react";
 import { useContext } from "react";
 import { m } from "../i18n/messages";
+import { archivePreviewSelection } from "@t3tools/client-runtime/state/thread-archive";
 import type {
   EnvironmentId,
   SavedWorkspaceDisposition,
@@ -41,13 +42,7 @@ export function useWorkspaceLifecycleConfirmation() {
   const supported = (environmentId: EnvironmentId) =>
     registry.get(serverEnvironment.configValueAtom(environmentId))?.environment.capabilities
       .worktreeSuspension === true;
-  const confirm = async (
-    targets: readonly Target[],
-    options: Omit<
-      Parameters<typeof requestWorkspaceLifecycleDialog>[0],
-      "snapshots" | "retainedSnapshots" | "canDiscard"
-    >,
-  ) => {
+  const loadSelection = async (targets: readonly Target[]) => {
     const previews: (WorkspaceLifecyclePreview | null)[] = [];
     for (const target of targets) {
       if (!supported(target.environmentId)) {
@@ -82,9 +77,11 @@ export function useWorkspaceLifecycleConfirmation() {
         ),
       ).values(),
     ];
-    const snapshots = unique("snapshots");
-    const retainedSnapshots = unique("retainedSnapshots");
-    if (snapshots.length + retainedSnapshots.length > 100) {
+    const copies = {
+      snapshots: unique("snapshots"),
+      retainedSnapshots: unique("retainedSnapshots"),
+    };
+    if (copies.snapshots.length + copies.retainedSnapshots.length > 100) {
       toastManager.add(
         stackedThreadToast({
           type: "error",
@@ -96,12 +93,47 @@ export function useWorkspaceLifecycleConfirmation() {
       );
       return null;
     }
+    return { targets, previews, copies };
+  };
+  const confirm = async (
+    targets: readonly Target[],
+    options: Omit<
+      Parameters<typeof requestWorkspaceLifecycleDialog>[0],
+      "snapshots" | "retainedSnapshots" | "copiesIncludingTypedIn" | "canDiscard"
+    >,
+  ) => {
+    const targetsFor = (includeTypedIn: boolean) => {
+      const archiveThreadIds =
+        options.archiveFamily === undefined
+          ? undefined
+          : archivePreviewSelection(options.archiveFamily, includeTypedIn).expectedArchiveThreadIds;
+      return archiveThreadIds === undefined
+        ? targets
+        : targets.map((target) =>
+            target.input.operation === "archive" && target.input.target.kind === "threads"
+              ? {
+                  ...target,
+                  input: { ...target.input, target: { ...target.input.target, archiveThreadIds } },
+                }
+              : target,
+          );
+    };
+    const defaultSelection = await loadSelection(targetsFor(false));
+    if (defaultSelection === null) return null;
+    let includingTypedIn: typeof defaultSelection | undefined;
+    if ((options.archiveFamily?.archivePreview?.typedInThreadIds.length ?? 0) > 0) {
+      const selection = await loadSelection(targetsFor(true));
+      if (selection === null) return null;
+      includingTypedIn = selection;
+    }
     const choice = await requestWorkspaceLifecycleDialog({
       ...options,
-      snapshots,
-      retainedSnapshots,
+      ...defaultSelection.copies,
+      ...(includingTypedIn === undefined
+        ? {}
+        : { copiesIncludingTypedIn: includingTypedIn.copies }),
       canDiscard: targets.every((target, index) => {
-        const reviewed = previews[index];
+        const reviewed = defaultSelection.previews[index];
         if (reviewed === null || reviewed === undefined) return true;
         return registry.get(
           target.input.operation === "delete" && target.input.target.kind === "threads"
@@ -115,15 +147,18 @@ export function useWorkspaceLifecycleConfirmation() {
       }),
     });
     if (choice === null) return null;
-    const dispositions = previews.map((value): SavedWorkspaceDisposition =>
+    const selected =
+      choice.includeTypedIn && includingTypedIn !== undefined ? includingTypedIn : defaultSelection;
+    const dispositions = selected.previews.map((value): SavedWorkspaceDisposition =>
       choice.discard && value !== null
         ? { mode: "discard", previewToken: value.token }
         : { mode: "retain" },
     );
     return {
       childDisposition: choice.childDisposition,
+      includeTypedIn: choice.includeTypedIn,
       dispositions,
-      batches: targets.map((target, index) => ({
+      batches: selected.targets.map((target, index) => ({
         ...target,
         savedWorkspace: dispositions[index]!,
       })),

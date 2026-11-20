@@ -59,6 +59,7 @@ it.effect.each([
         },
         ownedThreadFamily: () => Effect.sync(() => family),
         archiveFamilyShells: unexpected,
+        readArchiveFamilyShells: unexpected,
         readArchiveFamilyParentThreadId: () => Effect.succeed(null),
         archiveThreadPolicy: unexpected,
         liveSideChatIds: () => Effect.succeed([]),

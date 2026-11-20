@@ -11,8 +11,11 @@ import {
   threadArchiveConsultationUnavailableReason,
 } from "@t3tools/client-runtime/state/thread-archive";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { readProject } from "../state/entities";
 import { m } from "../i18n/messages";
 import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
 import {
   AlertDialog,
   AlertDialogDescription,
@@ -27,7 +30,10 @@ type Request = {
   readonly title: string;
   readonly family: Parameters<typeof buildThreadArchiveConfirmation<EnvironmentThreadShell>>[0];
   /** A failed attempt closes; the caller reports its original error. */
-  readonly submit: (choice: ArchiveChildDisposition) => Promise<string | null>;
+  readonly submit: (
+    choice: ArchiveChildDisposition,
+    includeTypedIn?: boolean,
+  ) => Promise<string | null>;
   readonly review?: (ref: ScopedThreadRef) => Promise<unknown>;
   readonly reviewFamilies?: readonly { readonly ref: ScopedThreadRef; readonly title: string }[];
   readonly consultation?: {
@@ -72,6 +78,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
   const messages = useMessages();
   const cancelRef = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
+  const [includeTypedIn, setIncludeTypedIn] = useState(false);
   const [choice, setChoice] = useState<ArchiveChildDisposition | null>(null);
   const [asking, setAsking] = useState<ThreadId | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -110,13 +117,13 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
     }
     submitting.current = false;
   };
-  const confirmation = buildThreadArchiveConfirmation(request.family, messages);
+  const confirmation = buildThreadArchiveConfirmation(request.family, messages, includeTypedIn);
   const submit = async (next: ArchiveChildDisposition) => {
     if (submitting.current) return;
     submitting.current = true;
     setChoice(next);
     await (async () => {
-      const failure = await request.submit(next);
+      const failure = await request.submit(next, includeTypedIn || undefined);
       if (failure === null) finish(next);
       else finish(null);
     })()
@@ -140,15 +147,27 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
           <AlertDialogTitle>{request.title}</AlertDialogTitle>
           <AlertDialogDescription>{confirmation.description}</AlertDialogDescription>
           <ul
-            aria-label={gt("Threads needing attention")}
+            aria-label={
+              request.family.archivePreview || request.family.bulkPreviews
+                ? gt("Threads to archive or keep open")
+                : gt("Threads needing attention")
+            }
             className="max-h-64 space-y-1 overflow-y-auto text-sm"
           >
-            {confirmation.threads.map(({ thread, label }) => (
+            {confirmation.threads.map(({ thread, label, showLocation }) => (
               <li
                 key={`${thread.environmentId}:${thread.id}`}
                 className="flex justify-between gap-3"
               >
-                <span className="min-w-0 break-words">{thread.title || gt("Untitled thread")}</span>
+                <span className="min-w-0 break-words">
+                  {thread.title || gt("Untitled thread")}
+                  {showLocation && (
+                    <span className="block text-xs text-muted-foreground">
+                      {readProject(scopeProjectRef(thread.environmentId, thread.projectId))
+                        ?.title ?? thread.projectId}
+                    </span>
+                  )}
+                </span>
                 <span className="shrink-0 text-muted-foreground">{label}</span>
                 {request.review && !request.reviewFamilies ? (
                   <Button
@@ -165,6 +184,16 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
               </li>
             ))}
           </ul>
+          {confirmation.canIncludeTypedIn && (
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={includeTypedIn}
+                disabled={busy}
+                onCheckedChange={(checked) => setIncludeTypedIn(checked === true)}
+              />
+              <T>Also archive threads you’ve written in, and the threads under them</T>
+            </label>
+          )}
           {request.reviewFamilies ? (
             <ul
               aria-label={gt("Families to review")}

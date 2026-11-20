@@ -2,10 +2,12 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { ThreadId } from "@t3tools/contracts";
 import { runDatabaseMigrations } from "../../DatabaseMigrations.ts";
 import { runLastCodeMigrations } from "../../LastCodeMigrations.ts";
 import { runMigrations } from "../../Migrations.ts";
 import { interactiveThreadParentSql } from "../../../orchestration-v2/InteractiveThreadParentSql.ts";
+import { archiveFamilyThreadIdsQuery } from "../../../orchestration-v2/ThreadArchiveReader.ts";
 
 it.effect("upgrades existing v2 databases and indexes every step of owned-thread traversal", () =>
   Effect.gen(function* () {
@@ -23,6 +25,7 @@ it.effect("upgrades existing v2 databases and indexes every step of owned-thread
       [20, "OrchestrationV2RetiredNativePromotion"],
       [21, "ThreadReadAuthority"],
       [22, "ProjectRegistration"],
+      [23, "OrchestrationV2ArchiveRecordedOwnerIndexes"],
     ]);
     assert.deepEqual(yield* runDatabaseMigrations(), []);
     const plan = yield* sql<{ readonly detail: string }>`
@@ -44,33 +47,34 @@ it.effect("upgrades existing v2 databases and indexes every step of owned-thread
       ),
     );
     assert.isFalse(plan.some((step) => /^SCAN child\b/.test(step.detail)));
-    const archivePlan = yield* sql<{ readonly detail: string }>`
-      EXPLAIN QUERY PLAN
-      WITH RECURSIVE family(thread_id) AS (
-        SELECT 'example-root'
-        UNION
-        SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
-        JOIN family ON CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT) = family.thread_id
-        WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
-          AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
-        UNION
-        SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
-        JOIN family ON ${interactiveThreadParentSql(sql, "child")} = family.thread_id
-        JOIN orchestration_v2_projection_threads AS parent ON parent.thread_id = family.thread_id
-        WHERE child.deleted_at IS NULL AND child.project_id = parent.project_id
-      )
-      SELECT thread_id FROM family
-    `;
-    for (const index of ["owned_parent", "interactive_parent"])
-      assert.isTrue(
-        archivePlan.some((step) =>
+    const [archiveSql, params] = archiveFamilyThreadIdsQuery(
+      sql,
+      ThreadId.make("example-root"),
+    ).compile();
+    const archivePlan = yield* sql.unsafe<{ readonly detail: string }>(
+      `EXPLAIN QUERY PLAN ${archiveSql}`,
+      params,
+    );
+    for (const index of [
+      "owned_parent",
+      "interactive_parent",
+      "archive_creator_owner",
+      "archive_delegated_owner",
+    ])
+      assert.equal(
+        archivePlan.filter((step) =>
           step.detail.includes(
             `SEARCH child USING INDEX orchestration_v2_projection_threads_${index}_idx`,
           ),
-        ),
+        ).length,
+        2,
         JSON.stringify(archivePlan),
       );
-    assert.isFalse(archivePlan.some((step) => /^SCAN child\b/.test(step.detail)));
+    // Only the restore branch may scan the thread table, after finding a root with a cohort.
+    assert.lengthOf(
+      archivePlan.filter((step) => /^SCAN child\b/.test(step.detail)),
+      1,
+    );
     const groupedPlan = yield* sql<{ readonly detail: string }>`
       EXPLAIN QUERY PLAN
       SELECT child.thread_id FROM orchestration_v2_projection_threads AS child

@@ -1,9 +1,8 @@
 import {
   CommandId,
   ThreadId,
-  ProjectId,
   hasOpenActionableDashboardItems,
-  type WorkspaceLifecyclePreviewInput,
+  WorkspaceLifecyclePreviewInput,
   type WorkspaceLifecycleRunInput,
   type WorkspaceLifecyclePreview,
   WorktreeSuspensionRequestError,
@@ -2849,6 +2848,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     input: WorkspaceLifecyclePreviewInput,
     access?: SavedWorkspaceAccess,
   ) {
+    const archiveThreadIds =
+      input.target.kind === "threads" ? input.target.archiveThreadIds : undefined;
+    if (
+      archiveThreadIds !== undefined &&
+      (input.operation !== "archive" ||
+        input.target.kind !== "threads" ||
+        input.target.threadIds.length !== 1 ||
+        !archiveThreadIds.includes(input.target.threadIds[0]!) ||
+        new Set(archiveThreadIds).size !== archiveThreadIds.length)
+    )
+      return yield* failure("invalid-preview", "The saved-workspace archive selection is invalid.");
     const roots =
       input.target.kind === "threads"
         ? input.target.threadIds
@@ -2859,11 +2869,11 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             )
             .filter((thread) => thread.deletedAt === null)
             .map((thread) => thread.id);
-    const threadIds = [
+    const threadIds = archiveThreadIds ?? [
       ...new Set(
         (yield* Effect.forEach(roots, (id) =>
           input.operation === "archive"
-            ? projections.getArchiveFamilyThreadIds(id)
+            ? projections.getArchiveFamilyThreadIds(id, { legacyOnly: true })
             : projections.getOwnedThreadIds(id),
         )).flat(),
       ),
@@ -2958,15 +2968,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         "Discard only the listed saved copies after this operation succeeds. Copies shared outside this selection or protected by a hold remain available.",
     } satisfies WorkspaceLifecyclePreview;
   }, Effect.mapError(safeFailure));
-  const sameLifecycleInput = Schema.toEquivalence(
-    Schema.Struct({
-      operation: Schema.Literals(["archive", "delete"]),
-      target: Schema.Union([
-        Schema.Struct({ kind: Schema.Literal("threads"), threadIds: Schema.Array(ThreadId) }),
-        Schema.Struct({ kind: Schema.Literal("project"), projectId: ProjectId }),
-      ]),
-    }),
-  );
+  const sameLifecycleInput = Schema.toEquivalence(WorkspaceLifecyclePreviewInput);
   const sameDeleteReceipts = Schema.toEquivalence(
     Schema.Array(Schema.Struct({ threadId: ThreadId, commandId: CommandId })),
   );

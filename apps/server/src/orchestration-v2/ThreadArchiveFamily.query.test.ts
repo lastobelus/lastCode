@@ -2,6 +2,8 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EventId,
+  getThreadArchivePlan,
+  EnvironmentId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -13,9 +15,13 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
+import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
@@ -444,4 +450,314 @@ it.effect.each([
       assert.equal(result.requiresConfirmation, visit !== "after");
       assert.isTrue(result.canStopAndArchive);
     }).pipe(Effect.provide(testLayer)),
+);
+
+const archiveEnvironment = EnvironmentId.make("archive-query:environment");
+
+const ownedArchiveCases = [
+  { includeTypedIn: false, groupIsOwned: false },
+  { includeTypedIn: false, groupIsOwned: true },
+  { includeTypedIn: true, groupIsOwned: true },
+  { includeTypedIn: true, groupIsOwned: true, groupIsUsed: true },
+  { includeTypedIn: false, groupIsOwned: false, typedIsArchived: true },
+  { includeTypedIn: true, groupIsOwned: false, typedIsArchived: true },
+  { includeTypedIn: false, groupIsOwned: false, legacyBelowOwned: true },
+  { includeTypedIn: true, groupIsOwned: true, groupRanAction: true },
+];
+
+it.effect.each(ownedArchiveCases)(
+  "archives the observed cross-project targets (%j)",
+  ({
+    includeTypedIn,
+    groupIsOwned,
+    groupIsUsed,
+    typedIsArchived,
+    legacyBelowOwned,
+    groupRanAction,
+  }) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      const now = yield* DateTime.now;
+      const rootId = ThreadId.make("owned-archive:root");
+      const childId = ThreadId.make("owned-archive:child");
+      const groupId = ThreadId.make("owned-archive:group");
+      const typedId = ThreadId.make("owned-archive:typed");
+      const grandchildId = ThreadId.make("owned-archive:grandchild");
+      const root = makeThread(rootId, now);
+      const legacyOwner = ThreadId.make("owned-archive:archived-intermediate");
+      const legacyChild = ThreadId.make("owned-archive:legacy-child");
+      const legacyCohort = {
+        threadId: legacyOwner,
+        commandId: CommandId.make("independent-archive"),
+      };
+      const launch = (id: ThreadId, parent: ThreadId): OrchestrationV2AppThread => ({
+        ...root,
+        id,
+        projectId: ProjectId.make("owned-archive:another-project"),
+        createdBy: "agent",
+        creationSource: "mcp",
+        lineage: { ...root.lineage, rootThreadId: id },
+        creatorOrigin: {
+          kind: "thread_launch",
+          environmentId: archiveEnvironment,
+          threadId: parent,
+          owned: true,
+        },
+      });
+      const crossProjectId = launch(childId, rootId).projectId;
+      const legacyProjectId = legacyBelowOwned ? crossProjectId : root.projectId;
+      const groupStaysOpen = groupIsUsed || groupRanAction;
+      const historical = launch(ThreadId.make("owned-archive:historical"), rootId);
+      const remote = launch(ThreadId.make("owned-archive:wrong-environment"), rootId);
+      const released = launch(ThreadId.make("owned-archive:released"), rootId);
+      for (const thread of [
+        root,
+        {
+          ...(groupIsOwned ? launch(groupId, rootId) : { ...root, id: groupId }),
+          projectId: crossProjectId,
+          groupThread: true as const,
+          ...(groupIsUsed ? { workspaceUserAdopted: true } : {}),
+          ...(groupRanAction
+            ? {
+                actionResume: {
+                  runId: "group-action",
+                  threadId: groupId,
+                  projectId: crossProjectId,
+                  actionId: "group-action",
+                  actionName: "Group action",
+                  terminalId: "group-action-terminal",
+                  outcome: "succeeded" as const,
+                  delivery: "delivered" as const,
+                  startedAt: DateTime.formatIso(now),
+                  finishedAt: DateTime.formatIso(now),
+                  exitCode: 0,
+                  exitSignal: null,
+                },
+              }
+            : {}),
+        },
+        { ...launch(childId, rootId), workspaceUserAdopted: true, groupedUnderThreadId: groupId },
+        {
+          ...launch(typedId, childId),
+          ...(typedIsArchived ? { archivedAt: now } : {}),
+          ...(groupIsOwned ? { groupedUnderThreadId: groupId } : {}),
+        },
+        {
+          ...root,
+          id: legacyOwner,
+          projectId: legacyProjectId,
+          groupedUnderThreadId: legacyBelowOwned ? childId : rootId,
+          archivedAt: now,
+          archivedWith: legacyCohort,
+        },
+        { ...root, id: legacyChild, projectId: legacyProjectId, groupedUnderThreadId: legacyOwner },
+        launch(grandchildId, typedId),
+        {
+          ...historical,
+          creatorOrigin: {
+            kind: "thread_launch" as const,
+            environmentId: archiveEnvironment,
+            threadId: rootId,
+          },
+        },
+        {
+          ...remote,
+          creatorOrigin: {
+            kind: "thread_launch" as const,
+            environmentId: EnvironmentId.make("other"),
+            threadId: rootId,
+            owned: true,
+          },
+        },
+        { ...released, lineage: { ...released.lineage, independent: true as const } },
+      ]) {
+        yield* store.apply({
+          id: EventId.make(`create:${thread.id}`),
+          type: "thread.created",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: thread,
+        });
+      }
+      for (const [threadId, createdBy] of [
+        [childId, "agent"],
+        [typedId, "user"],
+      ] as const) {
+        yield* store.apply({
+          id: EventId.make(`message:${threadId}`),
+          type: "message.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: MessageId.make(`message:${threadId}`),
+            threadId,
+            runId: null,
+            nodeId: null,
+            role: "user",
+            text: "Follow up",
+            attachments: [],
+            streaming: false,
+            createdBy,
+            creationSource: createdBy === "user" ? "web" : "mcp",
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+      const family = yield* service.getThreadArchiveFamily(rootId);
+      const allIds = [
+        rootId,
+        childId,
+        groupId,
+        grandchildId,
+        legacyChild,
+        ...(typedIsArchived ? [] : [typedId]),
+      ];
+      const kept = allIds.filter(
+        (id) => id === typedId || id === grandchildId || (groupIsOwned && id === groupId),
+      );
+      const selected = includeTypedIn
+        ? allIds.filter((id) => !groupStaysOpen || id !== groupId)
+        : allIds.filter((id) => !kept.includes(id));
+      assert.sameMembers([...family.childThreadIds], allIds.slice(1));
+      assert.sameMembers([...family.keptThreadIds], kept);
+      assert.deepEqual(family.archivePreview?.typedInThreadIds, [typedId]);
+      assert.deepEqual(
+        family.archivePreview?.keptWithTypedInThreadIds,
+        groupStaysOpen ? [groupId] : undefined,
+      );
+      assert.isTrue(family.requiresConfirmation);
+
+      const request = {
+        type: "thread.archive" as const,
+        threadId: rootId,
+        childDisposition: "archive_after_review" as const,
+        expectedChildThreadIds: family.childThreadIds,
+      };
+      for (const [suffix, fields] of [
+        ["old-client", {}],
+        ["missing-typed-consent", { expectedArchiveThreadIds: allIds }],
+        [
+          "stale-typed-consent",
+          { expectedArchiveThreadIds: allIds, includeTypedInThreadIds: [grandchildId] },
+        ],
+      ] as const) {
+        const result = yield* Effect.exit(
+          orchestrator.dispatch({
+            ...request,
+            ...fields,
+            commandId: CommandId.make(suffix),
+          }),
+        );
+        assert.isTrue(Exit.isFailure(result));
+      }
+      const begin = {
+        ...request,
+        commandId: CommandId.make("owned-archive:begin"),
+        expectedArchiveThreadIds: selected,
+        ...(includeTypedIn ? { includeTypedInThreadIds: [typedId] } : {}),
+      };
+      yield* orchestrator.dispatch(begin);
+      assert.sameMembers(
+        [
+          ...getThreadArchivePlan((yield* store.getThread(rootId)).archivePending)!
+            .archiveThreadIds,
+        ],
+        selected,
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.archive.fail",
+        commandId: CommandId.make("owned-archive:failure"),
+        threadId: rootId,
+        requestId: begin.commandId,
+        error: "Provider shutdown failed",
+      });
+      for (const id of selected)
+        assert.equal((yield* store.getThread(id)).archivePending?.status, "failed");
+      const retryId = CommandId.make("owned-archive:retry");
+      const beforeRetry = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+      const retry = yield* service
+        .dispatch({
+          ...begin,
+          commandId: retryId,
+          expectedArchiveCommandId: begin.commandId,
+        })
+        .pipe(Effect.forkChild);
+      yield* orchestrator
+        .streamStoredEventsFrom({ threadId: rootId, afterSequence: beforeRetry })
+        .pipe(
+          Stream.filter(
+            ({ commandId, event }) =>
+              commandId === retryId &&
+              event.type === "thread.metadata-updated" &&
+              event.payload.archivePending?.status === "stopping",
+          ),
+          Stream.runHead,
+        );
+      assert.isUndefined(retry.pollUnsafe());
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make(`${retryId}:complete`),
+        threadId: rootId,
+        requestId: retryId,
+      });
+      const receipt = yield* Fiber.join(retry);
+      assert.deepEqual(
+        receipt.storedEvents.map(({ event }) => event.type),
+        ["thread.archived"],
+      );
+      for (const id of selected) {
+        assert.deepEqual(
+          (yield* store.getThread(id)).archivedWith,
+          id === legacyChild ? legacyCohort : { threadId: rootId, commandId: retryId },
+        );
+      }
+      for (const id of [
+        ...allIds.filter((id) => !selected.includes(id)),
+        historical.id,
+        remote.id,
+        released.id,
+      ]) {
+        const thread = yield* store.getThread(id);
+        assert.isNull(thread.archivedAt);
+        assert.notExists(thread.archivePending);
+      }
+      const { creatorOrigin: _formerOwner, ...child } = yield* store.getThread(childId);
+      yield* store.apply({
+        id: EventId.make("owned-archive:placement-changed"),
+        type: "thread.metadata-updated",
+        threadId: childId,
+        occurredAt: now,
+        payload: { ...child, groupedUnderThreadId: null },
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("owned-archive:restore"),
+        threadId: rootId,
+      });
+      for (const id of selected.filter((id) => id !== legacyChild))
+        assert.isNull((yield* store.getThread(id)).archivedAt);
+      assert.isNotNull((yield* store.getThread(legacyChild)).archivedAt);
+      if (typedIsArchived) assert.isNotNull((yield* store.getThread(typedId)).archivedAt);
+      assert.deepEqual(
+        (yield* store.getThread(typedId)).creatorOrigin,
+        launch(typedId, childId).creatorOrigin,
+      );
+    }).pipe(
+      Effect.provide(
+        ThreadManagementService.layer.pipe(
+          Layer.provideMerge(
+            baseLayer.pipe(
+              Layer.provide(
+                Layer.succeed(ServerEnvironmentIdentity, {
+                  getEnvironmentId: Effect.succeed(archiveEnvironment),
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
 );

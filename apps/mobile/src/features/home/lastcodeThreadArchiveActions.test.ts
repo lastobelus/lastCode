@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   alerts: [] as { message: string; buttons: { text: string; onPress?: () => void }[] }[],
 }));
 vi.mock("../../state/threads", () => ({ environmentThreadShells: { threadShellsAtom: "shells" } }));
+vi.mock("../../state/projects", () => ({ environmentProjects: { projectAtom: () => "project" } }));
 vi.mock("../../state/server", () => ({ environmentServerConfigsAtom: "configs" }));
 vi.mock("../../state/atom-registry", () => ({
   appAtomRegistry: {
@@ -120,4 +121,40 @@ it("keeps newly busy-owner feedback visible without sending or granting archive 
   test.click("Cancel");
   expect(await pending).toBeNull();
   expect(test.review).not.toHaveBeenCalled();
+});
+
+it("keeps typed-in branches open and offers Review in the same prompt", async () => {
+  const test = setup();
+  test.loadArchiveFamily.mockResolvedValue(
+    AsyncResult.success({
+      ...test.family,
+      keptThreadIds: [test.child.id],
+      archivePreview: {
+        environmentId: test.owner.environmentId,
+        typedInThreadIds: [test.child.id],
+        threads: [test.owner, test.child].map(({ id, projectId, title }) => ({
+          threadId: id,
+          projectId,
+          title,
+        })),
+      },
+    }),
+  );
+  const pending = prepareLastCodeMobileThreadArchive(test.owner, test);
+  await vi.waitFor(() => expect(state.alerts).toHaveLength(1));
+  expect(state.alerts[0]?.message).toContain("Keep open");
+  expect(state.alerts[0]?.buttons.map(({ text }) => text)).toEqual([
+    "Cancel",
+    "Review",
+    "Archive threads",
+  ]);
+  test.click("Archive threads");
+  expect(await pending).toMatchObject({
+    participantIds: [test.owner.id],
+    input: {
+      expectedArchiveThreadIds: [test.owner.id],
+      expectedChildThreadIds: [test.child.id],
+      childDisposition: "archive_after_review",
+    },
+  });
 });

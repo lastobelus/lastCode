@@ -33,6 +33,9 @@ export const WorkspaceLifecycleTarget = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("threads"),
     threadIds: Schema.Array(ThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(100)),
+    archiveThreadIds: Schema.optionalKey(
+      Schema.Array(ThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(1000)),
+    ),
   }),
   Schema.Struct({ kind: Schema.Literal("project"), projectId: ProjectId }),
 ]);

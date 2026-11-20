@@ -1,6 +1,8 @@
 import type { AtomCommand, AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
+  archivePreviewSelection,
   consultThreadArchiveAgent,
   resolveThreadArchiveFamily,
   threadArchiveConsultationUnavailableReason,
@@ -17,6 +19,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { m } from "../../i18n/messages";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentProjects } from "../../state/projects";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { environmentThreadShells, type threadEnvironment } from "../../state/threads";
 
@@ -226,7 +229,16 @@ export async function prepareLastCodeMobileThreadArchive(
           selectOwner(0);
         };
         const showFamily = () => {
-          const confirmation = resolveThreadArchiveFamily(family, m);
+          const confirmation = resolveThreadArchiveFamily(
+            family,
+            m,
+            (candidate) =>
+              appAtomRegistry.get(
+                environmentProjects.projectAtom(
+                  scopeProjectRef(candidate.environmentId, candidate.projectId),
+                ),
+              )?.title ?? candidate.projectId,
+          );
           Dialog.alert(
             m(msg('Archive "{title}"?', { title: thread.title || m(msg("Untitled thread")) })),
             confirmation.message,
@@ -259,14 +271,16 @@ export async function prepareLastCodeMobileThreadArchive(
       })
     : "archive_if_idle";
   if (childDisposition === null) return null;
+  const selection = archivePreviewSelection(family);
   return {
     owner: thread,
-    participantIds: [thread.id, ...family.childThreadIds],
+    participantIds: selection.expectedArchiveThreadIds ?? [thread.id, ...family.childThreadIds],
     input: {
       threadId: thread.id,
       ...(failedAttempt === undefined ? {} : { expectedArchiveCommandId: failedAttempt.commandId }),
       childDisposition,
       expectedChildThreadIds: family.childThreadIds,
+      ...selection,
     },
   };
 }

@@ -28,6 +28,7 @@ import RetiredNativePromotionMigration from "./Migrations/OrchestrationV2/Retire
 import ProjectRegistrationMigration from "./Migrations/ProjectRegistration.ts";
 
 import { createAuthoritySchema } from "../threadReadAuthority/Schema.ts";
+import ArchiveRecordedOwnerIndexesMigration from "./Migrations/OrchestrationV2/ArchiveRecordedOwnerIndexes.ts";
 
 export const lastcodeMigrationEntries = [
   [1, "ProjectionThreadAnnotation", Migration0048],
@@ -52,6 +53,7 @@ export const lastcodeMigrationEntries = [
   [20, "OrchestrationV2RetiredNativePromotion", RetiredNativePromotionMigration],
   [21, "ThreadReadAuthority", createAuthoritySchema],
   [22, "ProjectRegistration", ProjectRegistrationMigration],
+  [23, "OrchestrationV2ArchiveRecordedOwnerIndexes", ArchiveRecordedOwnerIndexesMigration],
 ] as const;
 
 export const lastcodeMigrationManifest = lastcodeMigrationEntries.map(

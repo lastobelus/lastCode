@@ -3,6 +3,8 @@ import {
   buildThreadArchiveConfirmation,
   type ThreadArchiveFamily,
 } from "@t3tools/client-runtime/state/thread-archive";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { readProject } from "../state/entities";
 import { useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import type { SavedWorkspace, ThreadArchiveChildDisposition } from "@t3tools/contracts";
@@ -21,16 +23,20 @@ import {
 export type WorkspaceLifecycleChoice = {
   readonly discard: boolean;
   readonly childDisposition?: ThreadArchiveChildDisposition;
+  readonly includeTypedIn?: boolean;
+};
+type SavedCopies = {
+  readonly snapshots: readonly SavedWorkspace[];
+  readonly retainedSnapshots: readonly SavedWorkspace[];
 };
 type Request = {
   readonly title: string;
   readonly description: string;
-  readonly snapshots: readonly SavedWorkspace[];
-  readonly retainedSnapshots: readonly SavedWorkspace[];
+  readonly copiesIncludingTypedIn?: SavedCopies;
   readonly canDiscard: boolean;
   readonly archiveFamily?: ThreadArchiveFamily;
   readonly resolve: (choice: WorkspaceLifecycleChoice | null) => void;
-};
+} & SavedCopies;
 const useRequest = create<{ request: Request | null }>(() => ({ request: null }));
 let hostMounted = false;
 
@@ -60,14 +66,17 @@ export function WorkspaceLifecycleDialogHost() {
 function WorkspaceLifecycleDialog({ request }: { request: Request }) {
   const gt = useGT();
   const messages = useMessages();
+  const [includeTypedIn, setIncludeTypedIn] = useState(false);
   const archiveFamily = request.archiveFamily
-    ? buildThreadArchiveConfirmation(request.archiveFamily, messages)
+    ? buildThreadArchiveConfirmation(request.archiveFamily, messages, includeTypedIn)
     : undefined;
   const cancelRef = useRef<HTMLButtonElement>(null);
   const [discard, setDiscard] = useState(true);
-  const count = request.snapshots.length;
-  const bytes = request.snapshots.reduce((sum, snapshot) => sum + snapshot.bytes, 0);
-  const current = request.snapshots.filter((snapshot) => snapshot.current).length;
+  const { snapshots, retainedSnapshots } =
+    (includeTypedIn && request.copiesIncludingTypedIn) || request;
+  const count = snapshots.length;
+  const bytes = snapshots.reduce((sum, snapshot) => sum + snapshot.bytes, 0);
+  const current = snapshots.filter((snapshot) => snapshot.current).length;
   return (
     <AlertDialog
       open
@@ -80,6 +89,30 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
           <AlertDialogTitle>{request.title}</AlertDialogTitle>
           <AlertDialogDescription>{request.description}</AlertDialogDescription>
           {archiveFamily && <p className="text-sm">{archiveFamily.description}</p>}
+          {request.archiveFamily?.archivePreview && archiveFamily && (
+            <ul
+              className="max-h-48 space-y-1 overflow-y-auto text-sm"
+              aria-label={gt("Threads to archive or keep open")}
+            >
+              {archiveFamily.threads.map(({ thread, label }) => (
+                <li key={thread.id}>
+                  {thread.title || gt("Untitled thread")} ·{" "}
+                  {readProject(scopeProjectRef(thread.environmentId, thread.projectId))?.title ??
+                    thread.projectId}{" "}
+                  · {label}
+                </li>
+              ))}
+            </ul>
+          )}
+          {archiveFamily?.canIncludeTypedIn && (
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={includeTypedIn}
+                onCheckedChange={(checked) => setIncludeTypedIn(checked === true)}
+              />
+              <T>Also archive threads you’ve written in, and the threads under them</T>
+            </label>
+          )}
           <p className="text-sm">
             {gt(
               "{count, plural, one {{count} saved copy} other {{count} saved copies}} · {current} current · {historical} historical · {bytes}",
@@ -91,7 +124,7 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
               aria-label={gt("Saved copies to discard")}
               className="max-h-48 space-y-2 overflow-y-auto text-xs select-text"
             >
-              {request.snapshots.map((snapshot) => (
+              {snapshots.map((snapshot) => (
                 <li key={`${snapshot.checkoutId}:${snapshot.snapshotId}`}>
                   <p>
                     {snapshot.title} ·{" "}
@@ -125,19 +158,19 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
                   "Keep these saved copies for recovery in Settings → Storage → Saved workspaces.",
                 )}
           </p>
-          {request.retainedSnapshots.length > 0 && (
+          {retainedSnapshots.length > 0 && (
             <div className="space-y-2 text-sm">
               <p>
                 {gt(
                   "{count, plural, one {{count} shared or protected saved copy will be retained.} other {{count} shared or protected saved copies will be retained.}}",
-                  { count: request.retainedSnapshots.length },
+                  { count: retainedSnapshots.length },
                 )}
               </p>
               <ul
                 aria-label={gt("Saved copies retained")}
                 className="max-h-32 space-y-1 overflow-y-auto text-xs select-text"
               >
-                {request.retainedSnapshots.map((snapshot) => (
+                {retainedSnapshots.map((snapshot) => (
                   <li
                     key={`${snapshot.checkoutId}:${snapshot.snapshotId}`}
                     className="wrap-anywhere"
@@ -171,6 +204,7 @@ function WorkspaceLifecycleDialog({ request }: { request: Request }) {
             onClick={() =>
               finish({
                 discard,
+                ...(includeTypedIn ? { includeTypedIn } : {}),
                 ...(archiveFamily ? { childDisposition: archiveFamily.disposition } : {}),
               })
             }

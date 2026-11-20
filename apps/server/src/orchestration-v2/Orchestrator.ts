@@ -74,7 +74,6 @@ import {
   isProviderNativeSubagentThread,
   isOwnedSubagentThread,
   getInteractiveThreadParentThreadId,
-  getOwnedThreadFamily,
   getArchiveFamilyParentThreadId,
   getThreadArchivePlan,
   MessageId,
@@ -18352,39 +18351,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     };
   });
 
-  const getThreadArchiveFamily = Effect.fn("Orchestrator.getThreadArchiveFamily")(
-    function* (threadId: ThreadId) {
-      const shells = yield* readArchiveFamilyShells(threadId);
-      const family = getOwnedThreadFamily(shells, threadId);
-      const owner = shells.find((thread) => thread.id === threadId);
-      const threads = owner === undefined ? family.children : [owner, ...family.children];
-      const activity = yield* Effect.forEach(threads, (thread) =>
-        archiveThreadPolicy(thread).pipe(Effect.map((policy) => ({ id: thread.id, ...policy }))),
-      );
-      const activeThreadIds = activity.filter((entry) => entry.unfinished).map((entry) => entry.id);
-      const unreadThreadIds = activity.filter((entry) => entry.unread).map((entry) => entry.id);
-      return {
-        threads,
-        childThreadIds: family.children.map((thread) => thread.id),
-        activeThreadIds,
-        unreadThreadIds,
-        activeChildThreadIds: activeThreadIds.filter((id) => id !== threadId),
-        promotableChildThreadIds: [],
-        keptThreadIds: [],
-        protectedChildThreadIds: family.protectedChildren.map((thread) => thread.id),
-        nativeStopCount: family.children.filter((thread) => thread.creationSource === "provider")
-          .length,
-        requiresConfirmation:
-          activity.some((entry) => entry.requiresConfirmation) ||
-          family.protectedChildren.length > 0,
-        canPromote: false,
-        canStopAndArchive: owner?.persistent !== true && family.protectedChildren.length === 0,
-      };
-    },
-    (effect, threadId) =>
-      effect.pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
-  );
-
   const dispatchOnce = Effect.fn("orchestrationV2.dispatch.once")(function* (
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId>,
@@ -20513,10 +20479,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   const archivePlanner = makeLastCodeArchivePlanner({
+    ...(Option.isSome(actionEnvironmentIdentity)
+      ? { environmentId: yield* actionEnvironmentIdentity.value.getEnvironmentId }
+      : {}),
+
     reader: {
       store: projectionStore,
       ownedThreadFamily,
       archiveFamilyShells,
+      readArchiveFamilyShells,
       readArchiveFamilyParentThreadId,
       archiveThreadPolicy,
       liveSideChatIds,
@@ -22024,7 +21995,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     getThreadTitles: Effect.fn("OrchestratorV2.getThreadTitles")(function (threadIds) {
       return projectionStore.getThreadTitles(threadIds).pipe(Effect.mapError(shellProjectionError));
     }),
-    getThreadArchiveFamily,
+    getThreadArchiveFamily: archivePlanner.getThreadArchiveFamily,
     getThreadEventSequence: Effect.fn("OrchestratorV2.getThreadEventSequence")(function (threadId) {
       return eventSink
         .latestSequence({ threadId })

@@ -1,4 +1,5 @@
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { threadWorkspaceLifecycleTarget } from "./LastCodeArchivePlanner.ts";
 import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
 import type { DeleteThreadsInput, DeleteThreadsResult, NodeId } from "@t3tools/contracts";
 import type {
@@ -998,7 +999,7 @@ const make = Effect.gen(function* () {
       .run(
         {
           operation: command.type === "thread.archive" ? "archive" : "delete",
-          target: { kind: "threads", threadIds: [command.threadId] },
+          target: threadWorkspaceLifecycleTarget(command),
           commandId: command.commandId,
           ...(command.savedWorkspace === undefined
             ? {}
