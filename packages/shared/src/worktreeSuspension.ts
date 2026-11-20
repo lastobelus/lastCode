@@ -3019,8 +3019,6 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       !sameIdentity(snapshot.gitDirectoryIdentity, expected.gitDirectoryIdentity) ||
       snapshot.commonDirectory !== expected.commonDirectory ||
       !sameIdentity(snapshot.commonIdentity, expected.commonIdentity) ||
-      expected.gitDirectoryIdentity.dev !== recordedDevice ||
-      expected.commonIdentity.dev !== recordedDevice ||
       trialPath === undefined ||
       trialIdentity === undefined ||
       NodePath.dirname(trialPath) !== snapshotDirectory(id) ||
@@ -3031,11 +3029,14 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const current = await gitIdentity(input.sourcePath);
     const trial = await gitIdentity(trialPath);
     const source = await NodeFSP.lstat(input.sourcePath);
-    // A trial on another volume must still match its own recorded device.
-    const trialDevice = trialIdentity.dev === recordedDevice ? source.dev : trialIdentity.dev;
+    // Only the original workspace's volume can have a new device number.
+    const matchesDeviceChange = (actual: FileIdentity, previous: FileIdentity) =>
+      actual.ino === previous.ino &&
+      (previous.dev === recordedDevice
+        ? actual.dev === source.dev
+        : actual.dev === previous.dev && actual.dev !== source.dev);
     if (
       source.dev === recordedDevice ||
-      source.ino !== expected.sourceIdentity.ino ||
       current.gitDirectory !== expected.gitDirectory ||
       current.commonDirectory !== expected.commonDirectory ||
       current.head !== snapshot.head ||
@@ -3046,10 +3047,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       !sameIdentity(trial.commonIdentity, current.commonIdentity) ||
       trial.head !== snapshot.head ||
       trial.branch !== null ||
-      !sameIdentity(identity(await NodeFSP.lstat(trialPath)), {
-        dev: trialDevice,
-        ino: trialIdentity.ino,
-      })
+      !matchesDeviceChange(identity(await NodeFSP.lstat(trialPath)), trialIdentity)
     )
       refuse("the original or retained trial identity changed");
 
@@ -3063,8 +3061,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       if (
         !stat.isDirectory() ||
         !sameIdentity(identity(stat), inspected) ||
-        inspected.dev !== source.dev ||
-        inspected.ino !== previous.ino ||
+        !matchesDeviceChange(inspected, previous) ||
         !(stat.birthtimeMs > 0 && Math.floor(stat.birthtimeMs) <= capturedAt)
       )
         refuse("the original workspace directories could not be verified");

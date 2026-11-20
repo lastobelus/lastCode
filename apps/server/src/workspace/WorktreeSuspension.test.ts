@@ -1808,6 +1808,7 @@ it.live.each([
   "failed",
   "renumbered-device",
   "separate-device-trial",
+  "separate-device-repository",
   "missing-ref",
   "different-inode",
   "mixed-device",
@@ -1823,7 +1824,9 @@ it.live.each([
         const h = yield* harness(f);
         yield* h.service.previewSuspend({ threadId: firstId });
         const original = (yield* h.registry.list)[0]!;
-        const separateTrialDevice = original.nativeIdentity!.sourceIdentity.dev + 10;
+        const separateTrial = outcome === "separate-device-trial";
+        const separateRepository = outcome === "separate-device-repository";
+        const separateDevice = original.nativeIdentity!.sourceIdentity.dev + 10;
         const id = "interrupted-trial";
         const snapshotDir = NodePath.join(h.registry.root, "snapshots", id);
         const manifestFile = NodePath.join(snapshotDir, "manifest.json");
@@ -1887,8 +1890,12 @@ it.live.each([
           const nativeIdentity = {
             ...expected,
             sourceIdentity: previous(expected.sourceIdentity),
-            gitDirectoryIdentity: previous(expected.gitDirectoryIdentity),
-            commonIdentity: previous(expected.commonIdentity),
+            gitDirectoryIdentity: separateRepository
+              ? { ...expected.gitDirectoryIdentity }
+              : previous(expected.gitDirectoryIdentity),
+            commonIdentity: separateRepository
+              ? { ...expected.commonIdentity }
+              : previous(expected.commonIdentity),
           };
           if (outcome === "different-inode") nativeIdentity.sourceIdentity.ino += 1;
           if (outcome === "mixed-device") nativeIdentity.gitDirectoryIdentity.dev += 1;
@@ -1896,9 +1903,10 @@ it.live.each([
           yield* Effect.promise(async () => {
             const journal = await interrupted.readJournal(id);
             const manifest = await interrupted.read(id);
-            const trialIdentity =
-              outcome === "separate-device-trial"
-                ? { ...journal.trialIdentity!, dev: separateTrialDevice }
+            const trialIdentity = separateTrial
+              ? { ...journal.trialIdentity!, dev: separateDevice }
+              : separateRepository
+                ? { ...journal.trialIdentity! }
                 : previous(journal.trialIdentity!);
             if (outcome === "different-trial") trialIdentity.ino += 1;
             await NodeFSP.writeFile(
@@ -1930,11 +1938,14 @@ it.live.each([
         const { lstat } = yield* Effect.promise(() =>
           vi.importActual<typeof NodeFSP>("node:fs/promises"),
         );
-        using _trialMount =
-          outcome === "separate-device-trial"
+        const separateMount = separateTrial ? trial : f.workspace;
+        using _separateMount =
+          separateTrial || separateRepository
             ? vi.spyOn(NodeFSP, "lstat").mockImplementation(async (...args) => {
                 const stat = await lstat(...args);
-                return args[0] === trial ? Object.assign(stat, { dev: separateTrialDevice }) : stat;
+                return args[0] === separateMount
+                  ? Object.assign(stat, { dev: separateDevice })
+                  : stat;
               })
             : undefined;
         const manifestBefore = yield* Effect.promise(() => NodeFSP.readFile(manifestFile, "utf8"));
@@ -2001,7 +2012,15 @@ it.live.each([
             ]);
           });
           if (remounted) {
-            expect(active.nativeIdentity).toEqual(original.nativeIdentity);
+            expect(active.nativeIdentity).toEqual({
+              ...original.nativeIdentity,
+              sourceIdentity: {
+                ...original.nativeIdentity!.sourceIdentity,
+                dev: separateRepository
+                  ? separateDevice
+                  : original.nativeIdentity!.sourceIdentity.dev,
+              },
+            });
             expect(active.summary.keepWorkspace).toBe(true);
             expect(
               yield* Effect.promise(() =>
