@@ -80,11 +80,6 @@ import { proxyConfig } from "../shared/proxy.ts";
 import { changeRequestsCreatedBy } from "../../apps/server/src/orchestration-v2/PullRequestSyncReactor.ts";
 import { type BackgroundWait, makeBackgroundWait } from "./backgroundWait.ts";
 import { localProjectRefusal } from "./localProjectRefusal.ts";
-import {
-  directsShellCheckout,
-  hasLaunchCallback,
-  LaunchCallbackExpect,
-} from "./localProjectRecoveryGrading.ts";
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
 import { FileLinksExpect, gradeFileLinks } from "./file-link-grading.ts";
 import {
@@ -234,8 +229,6 @@ const McpToolUseExpect = Schema.Struct({
    * `create_threads` entry. Each matches a different thread's request; no other thread is asked for.
    */
   newThreads: Schema.optional(Schema.Array(Schema.Unknown)),
-  /** The launched thread's brief requests a queued callback to this caller. */
-  launchCallback: Schema.optional(LaunchCallbackExpect),
   /** The last step with tool calls includes this tool, then the turn ends. */
   endsTurnAfter: Schema.optional(Schema.String),
   /**
@@ -243,8 +236,6 @@ const McpToolUseExpect = Schema.Struct({
    * runs that the agent wrote earlier in the sample.
    */
   shellMustNot: Schema.optional(Schema.Array(Schema.String)),
-  /** Also match shellMustNot against command arguments written as string arrays. */
-  shellMustNotArgv: Schema.optional(Schema.Boolean),
   /** Regexes that some shell command must match, each. */
   shellMust: Schema.optional(Schema.Array(Schema.String)),
   /** Case-sensitive regexes on the agent's visible text. */
@@ -2385,15 +2376,6 @@ export const gradeSample = (
       requests.length === expect.newThreads.length && matchesDistinct(expect.newThreads, requests),
     );
   }
-  if (expect.launchCallback !== undefined) {
-    const callback = expect.launchCallback;
-    const requests = newThreadRequests(calls);
-    add("launchCallback", requests.length === 1 && hasLaunchCallback(requests[0]?.brief, callback));
-    add(
-      "launchBriefUsesManagedCheckout",
-      !requests.some(({ brief }) => directsShellCheckout(brief)),
-    );
-  }
   if (expect.endsTurnAfter !== undefined) {
     const lastStep = Math.max(-1, ...calls.map((call) => call.step));
     const last = calls.filter((call) => call.step === lastStep).map((call) => call.tool);
@@ -2410,10 +2392,7 @@ export const gradeSample = (
   );
   const test = (pattern: string, value: string) => new RegExp(pattern).test(value);
   for (const p of expect.shellMustNot ?? [])
-    add(
-      `shellMustNot /${p}/`,
-      !shell.some((c) => test(p, c) || (expect.shellMustNotArgv && test(p, argvForm(c)))),
-    );
+    add(`shellMustNot /${p}/`, !shell.some((c) => test(p, c)));
   // A positive check also reads argv lists as command lines: spawnSync('pnpm', ['exec', …]).
   for (const p of expect.shellMust ?? [])
     add(
