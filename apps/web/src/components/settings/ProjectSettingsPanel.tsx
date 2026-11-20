@@ -184,7 +184,11 @@ export function ProjectSettingsPanel({
   unavailable?: ReactNode;
 }) {
   const gt = useGT();
-  const groups = useSettingsProjectGroups();
+  const groups = useSettingsProjectGroups({
+    project: projectKey,
+    machine: environmentId ?? undefined,
+    checkout: checkoutKey ?? undefined,
+  });
   const pathname = useLocation({ select: (location) => location.pathname });
 
   const selected = groups.find((group) => group.projectKey === projectKey) ?? null;

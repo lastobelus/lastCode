@@ -406,7 +406,7 @@ function CheckoutScopeMenu({ value, groups, onChange }: SettingsScopeMenuProps) 
 function ProjectScopeMenu({ value, groups, environments, onChange }: SettingsScopeMenuProps) {
   const gt = useGT();
   const selected = groups.find((group) => group.projectKey === value.project);
-  const discoverableGroups = useSettingsProjectGroups({ discovery: true });
+  const discoverableGroups = useSettingsProjectGroups();
   const projects = projectScopeMenuGroups(discoverableGroups, value).map((group) => ({
     group,
     machines: settingsScopeProjectMachines(group, environments, true).join(", "),

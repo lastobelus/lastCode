@@ -92,7 +92,8 @@ import {
   resolveNewTaskBranchWorktreePath,
   resolveNewTaskLocalWorkspaceSelection,
 } from "./new-task-context-presentation";
-import { isSameRepository, resolveEnvironmentProjectMatch } from "./new-task-project-selection";
+import { isSameRepository } from "./new-task-project-selection";
+import { useTemporaryDraftProject } from "./useTemporaryDraftProject";
 import { useNewTaskProjectDefaults } from "./use-new-task-project-defaults";
 import { resolveNewThreadRuntimeMode } from "./thread-settings-options";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
@@ -347,6 +348,8 @@ export function NewTaskFlowProvider(
         projectsForEnvironment.find((project) => !isTemporaryProject(project)) ??
         null);
 
+  const draftProjects = useTemporaryDraftProject(flowKey, projects, discoverable, selectedProject);
+
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const modelSelectionNow = useNowMinuteMs();
   const projectDefaults = useNewTaskProjectDefaults(selectedProject);
@@ -576,6 +579,7 @@ export function NewTaskFlowProvider(
   };
 
   const setProject = (project: EnvironmentProject) => {
+    draftProjects.clearOrigin();
     updateFlow({
       draftKey: carryDraftContentTo(project),
       environmentId: project.environmentId,
@@ -584,10 +588,7 @@ export function NewTaskFlowProvider(
   };
 
   const selectEnvironment = (environmentId: EnvironmentId) => {
-    const match = resolveEnvironmentProjectMatch(
-      discoverable.filter((project) => project.environmentId === environmentId),
-      selectedProject,
-    );
+    const match = draftProjects.selectEnvironment(environmentId);
     updateFlow({
       // A name or title match may be another repository, which must not receive the PR checkout.
       draftKey: match
@@ -830,7 +831,7 @@ export function NewTaskFlowProvider(
         (selectedProjectTitle !== null && project.title === selectedProjectTitle)
       );
     };
-    for (const project of discoverable) {
+    for (const project of draftProjects.environmentProjects) {
       if (!hostsSelectedRepository(project)) {
         continue;
       }

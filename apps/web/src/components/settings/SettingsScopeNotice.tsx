@@ -70,7 +70,7 @@ export function SettingsScopeNoticeContent({
     target === "checkout"
       ? groups.filter((group) => !search.project || group.projectKey === search.project)
       : [null];
-  const discoverableGroups = useSettingsProjectGroups({ discovery: true });
+  const discoverableGroups = useSettingsProjectGroups();
   const projectGroups = projectScopeMenuGroups(discoverableGroups, search);
   const renderChoices = (group: SidebarProjectSnapshot | null) => {
     const choices: ScopeChoice[] = group

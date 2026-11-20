@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { buildProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
+import { projectsForSettingsScope } from "@t3tools/client-runtime/state/temporary-projects";
 import { useLocale, useMessages } from "gt-react-native";
 import {
   createContext,
@@ -131,7 +132,20 @@ export function useSettingsEnvironmentFilter() {
   const groupingMode = groupingSettings.sidebarProjectGroupingMode;
   const messages = useMessages();
   const locale = useLocale();
-  const projectGroups = settingsProjectGroups(projects, groupingMode, messages, locale);
+  const scopedProjects = useMemo(
+    () =>
+      projectsForSettingsScope(
+        projects,
+        discoverable,
+        {
+          sidebarProjectGroupingMode: groupingMode,
+          sidebarProjectGroupingOverrides: {},
+        },
+        { project: selectedProjectKey },
+      ),
+    [projects, discoverable, groupingMode, selectedProjectKey],
+  );
+  const projectGroups = settingsProjectGroups(scopedProjects, groupingMode, messages, locale);
   const availableTargets = connectedSettingsTargets(environments);
   const selectedTargets = useMemo(
     () =>
