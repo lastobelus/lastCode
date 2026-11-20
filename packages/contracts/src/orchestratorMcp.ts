@@ -800,12 +800,20 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
 
+export const OrchestratorMcpScheduledTaskModel = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+});
+export type OrchestratorMcpScheduledTaskModel = typeof OrchestratorMcpScheduledTaskModel.Type;
+
 export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   projectId: OrchestratorMcpProjectTarget,
   prompt: OrchestratorMcpPrompt,
   schedule: OrchestratorMcpSchedule,
   title: Schema.optional(OrchestratorMcpTitle),
+  modelSelection: Schema.optional(OrchestratorMcpScheduledTaskModel),
   enabled: Schema.optional(Schema.Boolean.annotate({ description: "Default true." })),
   bindToCurrentThread: Schema.optional(
     Schema.Boolean.annotate({
@@ -839,6 +847,11 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   prompt: Schema.String,
   enabled: Schema.Boolean,
   projectId: ProjectId,
+  modelSelection: Schema.Struct({
+    providerInstanceId: ProviderInstanceId,
+    model: Schema.String,
+    options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+  }),
   boundThreadId: Schema.NullOr(ThreadId),
   freshSession: Schema.Boolean,
   schedule: ScheduledTaskSchedule,
@@ -881,6 +894,7 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
   scheduledTaskId: ScheduledTaskId,
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
+  modelSelection: Schema.optional(OrchestratorMcpScheduledTaskModel),
   schedule: Schema.optional(OrchestratorMcpSchedule),
   enabled: Schema.optional(Schema.Boolean),
   bindToCurrentThread: Schema.optional(Schema.Boolean),

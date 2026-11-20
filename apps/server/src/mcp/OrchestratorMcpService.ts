@@ -25,6 +25,7 @@ import {
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
+  type OrchestratorMcpScheduledTaskModel,
   type OrchestratorMcpModelOption,
   type OrchestratorMcpCreateThreadsInput,
   type OrchestratorMcpCreateThreadsResult,
@@ -301,6 +302,12 @@ function agentStopReason(reason: string | undefined): string {
   return reason === undefined ? "Stopped by an agent" : `Stopped by an agent: ${reason}`;
 }
 
+const bindingRejectsScheduledModel = () =>
+  failure(
+    "invalid_request",
+    "Omit bindToCurrentThread or set it to false when choosing modelSelection. An existing thread runs on its own model.",
+  );
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -312,6 +319,13 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     prompt: task.prompt,
     enabled: task.enabled,
     projectId: task.projectId,
+    modelSelection: {
+      providerInstanceId: task.modelSelection.instanceId,
+      model: task.modelSelection.model,
+      ...(task.modelSelection.options === undefined
+        ? {}
+        : { options: task.modelSelection.options }),
+    },
     boundThreadId: task.threadId,
     freshSession: scheduledTaskThreadMode(task) === "fresh_session",
     schedule: task.schedule,
@@ -455,7 +469,10 @@ export const withWorkspaceModels = (
 const withV = (version: string) => (version.startsWith("v") ? version : `v${version}`);
 
 /** A provider that lists no models accepts any slug. */
-export const requireAdvertisedModel = (provider: ServerProvider, model: string) => {
+export const requireAdvertisedModel = (
+  provider: ServerProvider,
+  model: string,
+): Effect.Effect<void, OrchestratorMcpFailure> => {
   if (provider.models.length === 0 || advertisedModel(provider, model) !== undefined) {
     return Effect.void;
   }
@@ -1880,6 +1897,57 @@ const make = Effect.gen(function* () {
     };
   });
 
+  const validateScheduledTaskModel = Effect.fn("OrchestratorMcpService.validateScheduledTaskModel")(
+    function* (projectId: ProjectId, requested: OrchestratorMcpScheduledTaskModel) {
+      const selection: ModelSelection = {
+        instanceId: requested.providerInstanceId,
+        model: requested.model,
+        ...(requested.options === undefined ? {} : { options: requested.options }),
+      };
+      const providers = yield* loadProviders;
+      const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+      if (provider === undefined) {
+        return yield* failure(
+          "invalid_request",
+          `Provider instance ${selection.instanceId} is not registered.`,
+        );
+      }
+      const adapters = yield* loadOrchestrationCapableInstanceIds();
+      const constraints = providerConstraints(provider, adapters.has(selection.instanceId));
+      if (constraints.length > 0) {
+        return yield* failure(
+          "invalid_request",
+          `Provider ${selection.instanceId} cannot run scheduled tasks: ${constraints.join(" ")}`,
+        );
+      }
+      if (
+        !(yield* threadManagement.isProviderInstanceEnabledForProject({
+          projectId,
+          instanceId: selection.instanceId,
+        }))
+      ) {
+        return yield* failure(
+          "invalid_request",
+          `Provider instance ${selection.instanceId} is disabled for project ${projectId}.`,
+        );
+      }
+      yield* requireAdvertisedModel(provider, selection.model).pipe(
+        Effect.mapError((error) => failure("invalid_request", error.message)),
+      );
+      const descriptors = advertisedModel(provider, selection.model)?.capabilities
+        ?.optionDescriptors;
+      const options = withLegacyUltracodeEffort(descriptors, selection.options);
+      const invalid = invalidOptionSelections(options ?? [], descriptors);
+      if (invalid.length > 0) {
+        return yield* failure(
+          "invalid_request",
+          `Model ${selection.model} on provider ${selection.instanceId} rejected options: ${invalid.join(" ")}`,
+        );
+      }
+      return { ...selection, ...(options === undefined ? {} : { options }) };
+    },
+  );
+
   const requestKey = (clientRequestId: string | undefined): Effect.Effect<string> =>
     clientRequestId === undefined ? random.uuidV4() : Effect.succeed(clientRequestId);
 
@@ -2619,9 +2687,13 @@ const make = Effect.gen(function* () {
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
       yield* assertLiveCallerForOtherProject(scope, parent, projectId);
       const project = yield* requireProject(projectId);
+      const explicitModel = input.modelSelection !== undefined;
+      if (explicitModel && input.bindToCurrentThread === true) {
+        return yield* bindingRejectsScheduledModel();
+      }
       const bindToCurrentThread =
         input.bindToCurrentThread ??
-        (parent !== undefined && parent.thread.projectId === projectId);
+        (!explicitModel && parent !== undefined && parent.thread.projectId === projectId);
       if (bindToCurrentThread && (parent === undefined || parent.thread.projectId !== projectId)) {
         return yield* failure(
           "invalid_request",
@@ -2631,7 +2703,9 @@ const make = Effect.gen(function* () {
         );
       }
       const modelSelection =
-        parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project));
+        input.modelSelection === undefined
+          ? (parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project)))
+          : yield* validateScheduledTaskModel(projectId, input.modelSelection);
       // Never end on a lone high surrogate, which renders as a broken character.
       const derivedTitle = (input.prompt.split("\n")[0]?.trim() ?? "")
         .slice(0, 80)
@@ -2644,11 +2718,12 @@ const make = Effect.gen(function* () {
         schedule: input.schedule,
         projectId,
         threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
-        threadMode: input.freshSession
-          ? "fresh_session"
-          : bindToCurrentThread
-            ? "continue"
-            : "new_thread",
+        threadMode:
+          (input.freshSession ?? explicitModel)
+            ? "fresh_session"
+            : bindToCurrentThread
+              ? "continue"
+              : "new_thread",
         workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(bindToCurrentThread, projectId),
         modelSelection,
         runtimeMode: limits.runtimeMode,
@@ -2703,6 +2778,10 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope, ["runs"]);
         const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
+        const explicitModel = input.modelSelection !== undefined;
+        if (explicitModel && input.bindToCurrentThread === true) {
+          return yield* bindingRejectsScheduledModel();
+        }
         if (
           input.bindToCurrentThread === true &&
           (parent === undefined || parent.thread.projectId !== existing.projectId)
@@ -2717,6 +2796,7 @@ const make = Effect.gen(function* () {
         // A save keeps a bound thread unless the task goes back to new threads, so this pair
         // would leave runs in the old thread.
         if (
+          !explicitModel &&
           input.bindToCurrentThread === false &&
           input.freshSession === true &&
           existing.threadId !== null
@@ -2726,8 +2806,9 @@ const make = Effect.gen(function* () {
             "To move this task to a new thread with fresh sessions, first unbind it with bindToCurrentThread: false, then set freshSession: true in a second call.",
           );
         }
-        const threadId =
-          input.bindToCurrentThread === undefined
+        const threadId = explicitModel
+          ? null
+          : input.bindToCurrentThread === undefined
             ? existing.threadId
             : input.bindToCurrentThread && parent !== undefined
               ? parent.thread.id
@@ -2739,14 +2820,18 @@ const make = Effect.gen(function* () {
             : yield* scheduledTaskWorkspaceStrategy(threadId !== null, existing.projectId);
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
+          requireExisting: true,
           title: input.title ?? existing.title,
           prompt: input.prompt ?? existing.prompt,
           enabled: input.enabled ?? existing.enabled,
           schedule: input.schedule ?? existing.schedule,
           projectId: existing.projectId,
           threadId,
-          threadMode:
-            input.freshSession === undefined && input.bindToCurrentThread === undefined
+          threadMode: explicitModel
+            ? input.freshSession === false
+              ? "new_thread"
+              : "fresh_session"
+            : input.freshSession === undefined && input.bindToCurrentThread === undefined
               ? scheduledTaskThreadMode(existing)
               : (input.freshSession ??
                   (input.bindToCurrentThread !== false &&
@@ -2758,14 +2843,17 @@ const make = Effect.gen(function* () {
                   ? "new_thread"
                   : "continue",
           workspaceStrategy,
-          modelSelection: existing.modelSelection,
+          modelSelection:
+            input.modelSelection === undefined
+              ? existing.modelSelection
+              : yield* validateScheduledTaskModel(existing.projectId, input.modelSelection),
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
         };
         const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+          .upsert(upsertInput, { resetThread: explicitModel })
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not update scheduled task: ${error.message}`),

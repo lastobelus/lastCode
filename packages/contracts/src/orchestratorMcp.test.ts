@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import {
+  OrchestratorMcpSaveScheduledTaskInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadWaitResult,
@@ -71,6 +72,22 @@ describe("orchestrator MCP contracts", () => {
         pendingApproval: { ...pendingApproval, kind: "user_input" },
       }),
     ).toThrow();
+  });
+
+  it("keeps scheduled-task model selections through MCP JSON decoding", () => {
+    const decode = Schema.decodeUnknownSync(
+      Schema.toCodecJson(OrchestratorMcpSaveScheduledTaskInput),
+    );
+    const model = { providerInstanceId: "claudeAgent", model: "claude-haiku-4-5" };
+    for (const input of [
+      { prompt: "Check the build", schedule: { type: "interval", everyMs: 60_000 } },
+      { scheduledTaskId: "scheduled-task:1" },
+    ]) {
+      const modelSelection = { ...model, options: [{ id: "effort", value: "low" }] };
+      expect(decode({ ...input, modelSelection }).modelSelection).toEqual(modelSelection);
+      expect(decode(input).modelSelection).toBeUndefined();
+    }
+    expect(() => decode({ modelSelection: { providerInstanceId: "claudeAgent" } })).toThrow();
   });
 
   it("decodes a running-task next written by another version", () => {
