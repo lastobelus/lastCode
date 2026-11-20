@@ -687,13 +687,10 @@ function buildOwnerGroup(
         ? owner.unavailable || visibility.selectedPath.has(key)
         : !preference,
     status: resolveProjectStatusIndicator(
-      children.flatMap((childKey) => {
-        const row = index.byKey.get(childKey)!;
-        return [
-          lastcodeSidebarInheritedStatus(row.thread, index.statusByKey.get(childKey) ?? null),
-          row.descendantsStatus,
-        ];
-      }),
+      children.flatMap((childKey) => [
+        index.statusByKey.get(childKey) ?? null,
+        index.byKey.get(childKey)!.descendantsStatus,
+      ]),
     ),
   };
 }

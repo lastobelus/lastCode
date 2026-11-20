@@ -121,7 +121,7 @@ export function LastCodeThreadList({
           item.type === "subagents" ? (
             <LastCodeSubagentGroup key={item.key} item={item} navigateToThread={navigateToThread} />
           ) : item.type === "owner" ? (
-            <LastCodeOwnerGroup key={item.key} item={item} />
+            <LastCodeOwnerGroup key={item.key} item={item} navigateToThread={navigateToThread} />
           ) : (
             <Fragment key={item.row.key}>
               <LastCodeThreadGroupHeading family={item.row} />

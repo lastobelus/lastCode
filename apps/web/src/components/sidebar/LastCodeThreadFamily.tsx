@@ -185,11 +185,17 @@ export function LastCodeSubagentGroup({
     </SidebarMenuSubItem>
   );
 }
-export function LastCodeOwnerGroup({ item }: { item: LastCodeSidebarOwnerGroup }) {
+export function LastCodeOwnerGroup({
+  item,
+  navigateToThread,
+}: {
+  item: LastCodeSidebarOwnerGroup;
+  navigateToThread: Navigate;
+}) {
   const gt = useGT();
   const setCollapsed = useLastCodeSidebarFamiliesStore((state) => state.setCollapsed);
   const compact = useClientSetting("compactLegacySidebarStatuses");
-  const { title } = item;
+  const { title, ownerRef } = item;
   return (
     <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
       <div className="flex items-center gap-1 pr-2">
@@ -215,11 +221,24 @@ export function LastCodeOwnerGroup({ item }: { item: LastCodeSidebarOwnerGroup }
             <LastCodeThreadStatusLabel status={item.status} compact={compact} />
           )}
         </button>
-        {item.ownerRef && (
+        {ownerRef && (
           <Link
             to="/$environmentId/$threadId"
-            params={buildThreadRouteParams(item.ownerRef)}
+            params={buildThreadRouteParams(ownerRef)}
             aria-label={gt("Open creator thread")}
+            onClick={(event) => {
+              if (
+                event.defaultPrevented ||
+                event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey
+              )
+                return;
+              event.preventDefault();
+              void navigateToThread(ownerRef);
+            }}
             className="shrink-0 rounded-md p-1 text-sidebar-muted-foreground hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
           >
             <ArrowUpRightIcon aria-hidden className="size-3" />

@@ -1041,6 +1041,22 @@ describe("sidebar ownership", () => {
     ).toEqual(["second"]);
   });
 
+  it("shows a failed subagent on the collapsed owner group", () => {
+    const failed = thread("failed", owner.id, {
+      latestRun: {
+        runId: RunId.make("failed-run"),
+        status: "failed",
+        requestedAt: null,
+        startedAt: null,
+        completedAt: "2026-01-01T00:01:00Z",
+        assistantMessageId: null,
+      },
+    });
+    expect(project([failed], { ownership }).renderedItems).toMatchObject([
+      { type: "owner", expanded: false, status: { label: "Failed" } },
+    ]);
+  });
+
   it("keeps a missing owner interpretable and reattaches when its shell appears", () => {
     const child = owned("child");
     const missing = project([child], {
