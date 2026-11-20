@@ -104,6 +104,7 @@ const MODELS = {
   "claude-sonnet-5-5": "Sonnet 5.5",
   "claude-opus-5-5": "Opus 5.5",
   "claude-fable-5-2": "Fable 5.2",
+  "gpt-6.2-sol": "GPT-6.2 Sol",
   "gpt-6.1-sol": "GPT-6.1 Sol",
   "gpt-6.1-terra": "GPT-6.1 Terra",
   "gpt-6.2-astra": "GPT-6.2 Astra",
