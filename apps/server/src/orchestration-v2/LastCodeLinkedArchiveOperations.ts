@@ -52,6 +52,7 @@ type ArchiveCommand = Extract<
   OrchestrationV2ServerCommand,
   { type: "thread.archive" | "thread.unarchive" }
 >;
+type DispatchOptions = { readonly requireSavedStopConsent?: boolean };
 const readState = Schema.decodeUnknownSync(Schema.fromJsonString(State));
 const writeState = Schema.encodeSync(Schema.fromJsonString(State));
 
@@ -158,6 +159,17 @@ const make = Effect.gen(function* () {
   const needsReview = (machine: StoredMachine) =>
     machine.selection.status !== "ready" || machine.reason === "selection_changed";
 
+  const retryMayStopWork = (state: State) =>
+    state.machines.some(
+      (machine) =>
+        machine.status !== "committed" &&
+        !needsReview(machine) &&
+        machine.selection.status === "ready" &&
+        machine.selection.cohorts.some(
+          ({ childDisposition }) => childDisposition === "stop_and_archive",
+        ),
+    );
+
   const status = (threadId: ThreadId) =>
     generations(threadId).pipe(
       Effect.map((entries) =>
@@ -167,6 +179,9 @@ const make = Effect.gen(function* () {
             sourceArchiveCommandId: entry.row.sourceArchiveCommandId,
             archivedAt: entry.archivedAt,
             operation: entry.localArchived ? "archive" : "restore",
+            ...(entry.localArchived && retryMayStopWork(entry.state)
+              ? { retryMayStopWork: true }
+              : {}),
             machines: entry.state.machines.map((machine) => ({
               environmentId: machine.selection.environmentId,
               label: machine.selection.label,
@@ -312,6 +327,7 @@ const make = Effect.gen(function* () {
   const dispatchLocked = Effect.fn("LastCodeLinkedArchive.dispatch")(function* <E, R>(
     command: ArchiveCommand,
     local: Effect.Effect<OrchestratorV2DispatchResult, E, R>,
+    options: DispatchOptions,
   ) {
     const entries = yield* generations(command.threadId);
     const archivedLocally = entries.find(({ localArchived }) => localArchived);
@@ -371,6 +387,16 @@ const make = Effect.gen(function* () {
     const { row, state, localArchived, sequence } = previous;
     if (command.type === "thread.archive" && state.restoreCommandId !== undefined)
       return yield* local;
+    if (
+      command.type === "thread.archive" &&
+      options.requireSavedStopConsent === true &&
+      command.childDisposition !== "stop_and_archive" &&
+      retryMayStopWork(state)
+    ) {
+      return yield* Effect.fail(
+        "The saved archive retry can stop linked work. Get consent to stop it and use retryArgsAfterStopConsent from t3_thread_archive_family.",
+      );
+    }
     if (command.type === "thread.unarchive" && localArchived) {
       yield* revise(row, (state) => ({
         ...state,
@@ -422,6 +448,7 @@ const make = Effect.gen(function* () {
   const dispatch = <E, R>(
     command: ArchiveCommand,
     local: Effect.Effect<OrchestratorV2DispatchResult, E, R>,
+    options: DispatchOptions = {},
   ): Effect.Effect<OrchestratorV2DispatchResult, E | OrchestratorDispatchError, R> =>
     (command.type === "thread.archive" &&
       command.expectedLinkedArchiveCommandId === undefined &&
@@ -430,7 +457,7 @@ const make = Effect.gen(function* () {
       )) ||
     (command.type === "thread.unarchive" && command.expectedArchiveCommandId !== undefined)
       ? local
-      : locks.withLock(command.threadId, dispatchLocked(command, local)).pipe(
+      : locks.withLock(command.threadId, dispatchLocked(command, local, options)).pipe(
           Effect.mapError(
             (cause) =>
               new OrchestratorDispatchError({
@@ -455,10 +482,11 @@ const archiveOperations = (service?: LastCodeLinkedArchiveOperations["Service"])
   dispatch: <E, R>(
     command: OrchestrationV2ServerCommand,
     local: Effect.Effect<OrchestratorV2DispatchResult, E, R>,
+    options?: DispatchOptions,
   ): Effect.Effect<OrchestratorV2DispatchResult, E | OrchestratorDispatchError, R> =>
     service !== undefined &&
     (command.type === "thread.archive" || command.type === "thread.unarchive")
-      ? service.dispatch(command, local)
+      ? service.dispatch(command, local, options)
       : local,
   status: (threadId: ThreadId) => service?.status(threadId) ?? Effect.succeed([]),
   selectedOwnerThreadIds: (threadId: ThreadId) =>

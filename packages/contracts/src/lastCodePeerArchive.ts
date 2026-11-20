@@ -122,6 +122,7 @@ export const LinkedArchiveOperation = Schema.Struct({
   sourceArchiveCommandId: CommandId,
   archivedAt: IsoDateTime,
   operation: Schema.Literals(["archive", "restore"]),
+  retryMayStopWork: Schema.optional(Schema.Literal(true)),
   machines: Schema.Array(
     Schema.Struct({
       ...LinkedArchiveMachine,

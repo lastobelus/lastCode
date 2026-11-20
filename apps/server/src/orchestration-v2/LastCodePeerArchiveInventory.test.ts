@@ -189,7 +189,7 @@ it.effect("retries linked archive and restore independently of later local archi
                   anchorThreadId: direct,
                   selectedThreadIds: [direct],
                   typedIn: [],
-                  childDisposition: "archive_if_idle",
+                  childDisposition: "stop_and_archive",
                 },
               ],
             },
@@ -202,15 +202,27 @@ it.effect("retries linked archive and restore independently of later local archi
       // The source journal still identifies the generation after event retention prunes it.
       committed = false;
       assert.equal((yield* operations.status(orchestrator))[0]?.machines[0]?.status, "pending");
+      assert.isTrue((yield* operations.status(orchestrator))[0]?.retryMayStopWork);
+      const retryCommand = {
+        type: "thread.archive",
+        threadId: orchestrator,
+        commandId: CommandId.make("explicit-retry"),
+        linkedArchiveSelection: [],
+        expectedLinkedArchiveCommandId: archiveId,
+      } as const;
+      const refused = yield* operations
+        .dispatch(
+          retryCommand,
+          Effect.die("A linked retry must not archive the local thread again"),
+          { requireSavedStopConsent: true },
+        )
+        .pipe(Effect.flip);
+      assert.match(String(refused.cause), /can stop linked work/);
+      assert.equal(calls, 1);
       const retry = yield* operations.dispatch(
-        {
-          type: "thread.archive",
-          threadId: orchestrator,
-          commandId: CommandId.make("explicit-retry"),
-          linkedArchiveSelection: [],
-          expectedLinkedArchiveCommandId: archiveId,
-        },
+        { ...retryCommand, childDisposition: "stop_and_archive" },
         Effect.die("A linked retry must not archive the local thread again"),
+        { requireSavedStopConsent: true },
       );
       assert.equal(retry.sequence, 4);
       assert.equal(yield* Deferred.await(outcomes[1]!), archiveId);
@@ -238,6 +250,7 @@ it.effect("retries linked archive and restore independently of later local archi
         }),
       );
       assert.equal((yield* operations.status(orchestrator))[0]?.machines[0]?.requiresReview, true);
+      assert.isUndefined((yield* operations.status(orchestrator))[0]?.retryMayStopWork);
       yield* operations.dispatch(
         {
           type: "thread.archive",

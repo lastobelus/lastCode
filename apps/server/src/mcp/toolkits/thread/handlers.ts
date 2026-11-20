@@ -11,7 +11,6 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Struct from "effect/Struct";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
 import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
@@ -374,11 +373,10 @@ const handlers = (archive: LinkedArchiveTools.LinkedArchiveTools): ThreadHandler
     Effect.gen(function* () {
       const context = yield* readArchiveThread(input.threadId);
       const { threads, projection } = context;
-      const family = yield* threads.getThreadArchiveFamily(projection.thread.id).pipe(
+      return yield* threads.getThreadArchiveFamily(projection.thread.id).pipe(
         Effect.flatMap((family) => archive.preview(projection.thread.id, family, context)),
         Effect.mapError(unavailable),
       );
-      return Struct.omit(family, ["threads", "canPromote", "promotableChildThreadIds"]);
     }),
   ),
   t3_queue: McpToolAccess.either(
