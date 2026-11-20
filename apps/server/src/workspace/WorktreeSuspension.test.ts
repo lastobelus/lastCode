@@ -1798,15 +1798,28 @@ it.live("cancels every exact deletion intent if preparation fails before dispatc
   ),
 );
 
-it.live.each([false, true])(
-  "retains an interrupted owned trial without trapping a verified original (failed: %s)",
-  (failed) =>
+it.live.each([
+  "interrupted",
+  "failed",
+  "renumbered-device",
+  "missing-ref",
+  "different-inode",
+  "mixed-device",
+  "different-trial",
+  "after-journal-write",
+] as const)(
+  "retains an interrupted owned trial without trapping a verified original (%s)",
+  (outcome) =>
     realGit((f) =>
       Effect.gen(function* () {
+        const failed = outcome !== "interrupted";
+        const remounted = failed && outcome !== "failed";
         const h = yield* harness(f);
         yield* h.service.previewSuspend({ threadId: firstId });
         const original = (yield* h.registry.list)[0]!;
         const id = "interrupted-trial";
+        const snapshotDir = NodePath.join(h.registry.root, "snapshots", id);
+        const manifestFile = NodePath.join(snapshotDir, "manifest.json");
         const summary = {
           ...original.summary,
           generation: 1,
@@ -1854,7 +1867,80 @@ it.live.each([false, true])(
           );
           return trial;
         });
+        if (remounted) {
+          // The fixture runs on one mounted volume. Record the device the previous
+          // process would have seen in all three durable records.
+          const expected = original.nativeIdentity!;
+          if ("kind" in expected) throw new Error("expected a Git worktree");
+          const oldDevice = expected.sourceIdentity.dev + 1;
+          const previous = (identity: { dev: number; ino: number }) => ({
+            ...identity,
+            dev: oldDevice,
+          });
+          const nativeIdentity = {
+            ...expected,
+            sourceIdentity: previous(expected.sourceIdentity),
+            gitDirectoryIdentity: previous(expected.gitDirectoryIdentity),
+            commonIdentity: previous(expected.commonIdentity),
+          };
+          if (outcome === "different-inode") nativeIdentity.sourceIdentity.ino += 1;
+          if (outcome === "mixed-device") nativeIdentity.gitDirectoryIdentity.dev += 1;
+          yield* h.registry.put({ ...capturing, nativeIdentity }, capturing);
+          yield* Effect.promise(async () => {
+            const journal = await interrupted.readJournal(id);
+            const manifest = await interrupted.read(id);
+            const trialIdentity = previous(journal.trialIdentity!);
+            if (outcome === "different-trial") trialIdentity.ino += 1;
+            await NodeFSP.writeFile(
+              manifestFile,
+              JSON.stringify({ ...manifest, ...nativeIdentity }),
+            );
+            await NodeFSP.writeFile(
+              NodePath.join(snapshotDir, "journal.json"),
+              JSON.stringify({
+                ...journal,
+                phase: outcome === "after-journal-write" ? "active" : journal.phase,
+                sourceIdentity: nativeIdentity.sourceIdentity,
+                captureRefs: {
+                  ...journal.captureRefs,
+                  commonIdentity: nativeIdentity.commonIdentity,
+                },
+                trialIdentity,
+              }),
+            );
+            if (manifest.version === 4) throw new Error("expected a Git snapshot");
+            if (outcome === "missing-ref")
+              await git(f.repository, "update-ref", "-d", manifest.headRef);
+            await NodeFSP.writeFile(
+              NodePath.join(f.workspace, "tracked"),
+              "edited after capture\n",
+            );
+          });
+        }
+        const manifestBefore = yield* Effect.promise(() => NodeFSP.readFile(manifestFile, "utf8"));
         yield* h.service.sweep;
+        if (
+          outcome === "missing-ref" ||
+          outcome === "different-inode" ||
+          outcome === "mixed-device" ||
+          outcome === "different-trial"
+        ) {
+          const blocked = (yield* h.registry.list)[0]!;
+          expect(blocked.summary.state).toBe("capturing");
+          expect(blocked.operation?.id).toBe(id);
+          expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe("verifying");
+          expect(
+            yield* Effect.promise(() =>
+              NodeFSP.readFile(NodePath.join(trial, ".DS_Store"), "utf8"),
+            ),
+          ).toBe("keep trial addition\n");
+          expect(
+            yield* Effect.promise(() =>
+              NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+            ),
+          ).toBe("edited after capture\n");
+          return;
+        }
         if (failed) {
           const active = (yield* h.registry.list)[0]!;
           expect(active.summary.state).toBe("active");
@@ -1894,6 +1980,22 @@ it.live.each([false, true])(
               id,
             ]);
           });
+          if (remounted) {
+            expect(active.nativeIdentity).toEqual(original.nativeIdentity);
+            expect(active.summary.keepWorkspace).toBe(true);
+            expect(
+              yield* Effect.promise(() =>
+                NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+              ),
+            ).toBe("edited after capture\n");
+            expect(yield* Effect.promise(() => NodeFSP.readFile(manifestFile, "utf8"))).toBe(
+              manifestBefore,
+            );
+            expect(yield* Effect.promise(() => git(trial, "rev-parse", "--verify", "HEAD"))).toBe(
+              (yield* Effect.promise(() => h.store.read(id))).head,
+            );
+            return;
+          }
           const saved = yield* restarted.suspend;
           expect(saved.summary.state).toBe("suspended");
           expect(saved.summary.snapshotId).not.toBe(id);

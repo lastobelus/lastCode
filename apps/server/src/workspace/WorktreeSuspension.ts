@@ -2095,7 +2095,48 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       });
     }
     if (["capturing", "verifying", "ready", "active"].includes(journal.phase)) {
-      yield* originalStillOwned(record);
+      const operation = record.operation;
+      const rebound = yield* originalStillOwned(record).pipe(
+        Effect.as(null),
+        Effect.catch((error) => {
+          const expected = record.nativeIdentity;
+          if (
+            error.reason !== "changed" ||
+            expected === undefined ||
+            "kind" in expected ||
+            record.summary.state !== "capturing" ||
+            record.summary.snapshotId !== id ||
+            record.captureFailure?.operationId !== operation.id ||
+            journal.trialPath === undefined ||
+            (journal.phase !== "verifying" && journal.phase !== "active")
+          )
+            return Effect.fail(error);
+          return assertFresh(record).pipe(
+            Effect.andThen(
+              native(() =>
+                store.keepOriginalAfterDeviceChange(id, {
+                  operationId: operation.id,
+                  ownerBinding: record.checkoutId,
+                  sourcePath: record.path,
+                  expected,
+                }),
+              ),
+            ),
+          );
+        }),
+      );
+      if (rebound !== null) {
+        if (!record.history.includes(id)) record = yield* remember(record, rebound.snapshot);
+        const kept = { ...settledCapture(record, false), nativeIdentity: rebound.nativeIdentity };
+        yield* originalStillOwned(kept);
+        yield* assertFresh(record);
+        return yield* publish(record, kept, {
+          ...record.summary,
+          state: "active",
+          snapshotId: null,
+          keepWorkspace: true,
+        });
+      }
       let retainedTrial = false;
       if (journal.trialPath !== undefined) {
         if (record.captureFailure?.operationId === record.operation.id) {
