@@ -673,6 +673,7 @@ const metadataCheck = async (
   recursive = true,
   attributeLimits?: WorktreeSuspensionLimits,
   pruned = false,
+  scratch = false,
 ): Promise<SuspensionMetadata> => {
   // Inspect exactly the retained inventory when generated trees were pruned;
   // recursive platform tools would otherwise walk the discarded install again.
@@ -731,7 +732,7 @@ const metadataCheck = async (
         path.startsWith(`..${NodePath.sep}`)
       )
         refuse("extended attribute paths could not be verified", root);
-      if (disposableAttribute(name)) continue;
+      if (name === "com.apple.provenance" || (!scratch && disposableAttribute(name))) continue;
       if (attributeLimits === undefined || !paths.has(path) || !supportedAttribute(name))
         refuse(`extended attributes are unsupported (${name})`, absolute);
       if (captured.length >= MAX_ATTRIBUTES)
@@ -933,8 +934,17 @@ const inventory = async (
     if (trackedDirectories.has(relative)) return false;
     // A Git query failure preserves the directory, just like a nonignored path.
     try {
-      await git(root, ["check-ignore", "--quiet", "--", `${relative}/`]);
-      return true;
+      const parent = NodePath.posix.dirname(relative);
+      const candidate = `${relative}/\0`;
+      // Match Git's ignored roots: an ignored retained parent protects its contents.
+      // Check both paths in the same process rather than querying every directory.
+      const ignored = await git(
+        root,
+        ["check-ignore", "-z", "--stdin"],
+        undefined,
+        candidate + (parent === "." ? "" : `${parent}/\0`),
+      );
+      return ignored.equals(Buffer.from(candidate));
     } catch {
       return false;
     }
@@ -959,14 +969,15 @@ const inventory = async (
       }
       const relative = prefix === "" ? name : `${prefix}/${name}`;
       if (selected !== undefined && !selected.has(relative)) continue;
-      if (name === ".git") refuse("nested repositories are unsupported");
-      validRelativePath(relative, root);
       const absolute = NodePath.join(directory, name);
+      if (name === ".git") refuse("nested repositories are unsupported", absolute);
+      validRelativePath(relative, root);
       const before = await NodeFSP.lstat(absolute);
-      if (before.dev !== rootStat.dev) refuse("a filesystem boundary crosses the workspace");
+      if (before.dev !== rootStat.dev)
+        refuse("a filesystem boundary crosses the workspace", absolute);
       if (before.uid !== rootStat.uid || before.gid !== rootStat.gid)
-        refuse("mixed ownership is unsupported");
-      if ((before.mode & 0o7000) !== 0) refuse("special permission bits are unsupported");
+        refuse("mixed ownership is unsupported", absolute);
+      if ((before.mode & 0o7000) !== 0) refuse("special permission bits are unsupported", absolute);
       if (before.isDirectory() && (await canOmit(relative))) {
         pruned = true;
         continue;
@@ -980,7 +991,7 @@ const inventory = async (
           (await exists(NodePath.join(absolute, "objects"))) &&
           (await exists(NodePath.join(absolute, "refs")))
         )
-          refuse("nested bare repositories are unsupported");
+          refuse("nested bare repositories are unsupported", absolute);
         entries.push({ path: relative, kind: "directory", mode: before.mode & 0o777 });
         await inspect(absolute, relative);
       } else if (before.isSymbolicLink()) {
@@ -1110,6 +1121,7 @@ const inventory = async (
       true,
       selected === undefined ? limits : undefined,
       pruned,
+      scratch,
     );
     attributes = metadata.attributes;
     hiddenPaths = metadata.hiddenPaths;
@@ -1135,6 +1147,7 @@ const inventory = async (
       true,
       selected === undefined ? limits : undefined,
       pruned,
+      scratch,
     );
     if (JSON.stringify(attributes) !== JSON.stringify(afterMetadata.attributes))
       refuse("extended attributes changed during capture");
@@ -1828,7 +1841,9 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
         JSON.stringify(snapshot.hiddenPaths ?? []) ||
       JSON.stringify(currentInventory.attributes ?? []) !==
         JSON.stringify(
-          (snapshot.attributes ?? []).filter((item) => !disposableAttribute(item.name)),
+          (snapshot.attributes ?? []).filter(
+            (item) => snapshot.version === 4 || !disposableAttribute(item.name),
+          ),
         ) ||
       JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries) ||
       JSON.stringify(currentInventory.hardlinks ?? []) !== JSON.stringify(snapshot.hardlinks ?? [])

@@ -2666,7 +2666,17 @@ it.live(
     ),
 );
 
-it.live.each(["removed", "regenerable", "regenerable-metadata", "regenerable-acl"] as const)(
+it.live.each([
+  "removed",
+  "regenerable",
+  "regenerable-metadata",
+  "regenerable-acl",
+  "regenerable-nested",
+  "regenerable-bare",
+  "regenerable-ownership",
+  "regenerable-permissions",
+  "regenerable-boundary",
+] as const)(
   "automatically saves retained source after an oversized local artifact is %s",
   (resolution) =>
     realGit((f) =>
@@ -2710,7 +2720,17 @@ it.live.each(["removed", "regenerable", "regenerable-metadata", "regenerable-acl
               ? "extended attributes exceed the record limit"
               : resolution === "regenerable-acl"
                 ? "ACLs or filesystem flags are unsupported"
-                : "a file exceeds the preservation limit";
+                : resolution === "regenerable-nested"
+                  ? "nested repositories are unsupported"
+                  : resolution === "regenerable-bare"
+                    ? "nested bare repositories are unsupported"
+                    : resolution === "regenerable-ownership"
+                      ? "mixed ownership is unsupported"
+                      : resolution === "regenerable-permissions"
+                        ? "special permission bits are unsupported"
+                        : resolution === "regenerable-boundary"
+                          ? "a filesystem boundary crosses the workspace"
+                          : "a file exceeds the preservation limit";
           const legacyReason = `Workspace kept: ${legacyFailure}. Existing files and recovery data have been retained.`;
           yield* h.registry.put(
             {
@@ -2771,7 +2791,7 @@ it.live.each(["removed", "regenerable", "regenerable-metadata", "regenerable-acl
     ),
 );
 
-it.live.each(["manual", "activity", "policy", "policy-metadata"] as const)(
+it.live.each(["manual", "activity", "policy", "policy-metadata", "policy-nested"] as const)(
   "settles unsupported captures and allows %s retry after restart",
   (retry) =>
     realGit((f) =>
@@ -2809,12 +2829,17 @@ it.live.each(["manual", "activity", "policy", "policy-metadata"] as const)(
         expect(
           yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
         ).toEqual(journals);
-        if (retry === "policy" || retry === "policy-metadata") {
+        if (retry === "policy" || retry === "policy-metadata" || retry === "policy-nested") {
           const blocked = (yield* restarted.registry.list)[0]!;
           const metadata = retry === "policy-metadata";
-          if (metadata) {
+          const nested = retry === "policy-nested";
+          if (metadata || nested) {
             yield* Effect.promise(async () => {
               await NodeFSP.unlink(NodePath.join(f.root, "external-hardlink"));
+              if (nested) {
+                await NodeFSP.mkdir(NodePath.join(f.workspace, "source/.git"), { recursive: true });
+                return;
+              }
               const file = NodePath.join(f.workspace, "tracked");
               if (platform === "darwin")
                 await execute("/usr/bin/xattr", ["-sw", "com.example.review-note", "retain", file]);
@@ -2823,7 +2848,9 @@ it.live.each(["manual", "activity", "policy", "policy-metadata"] as const)(
           }
           const legacyReason = metadata
             ? "Workspace kept: extended attributes are unsupported. Existing files and recovery data have been retained."
-            : "Workspace kept: hardlinked files extend outside the workspace. Existing files and recovery data have been retained.";
+            : nested
+              ? "Workspace kept: nested repositories are unsupported. Existing files and recovery data have been retained."
+              : "Workspace kept: hardlinked files extend outside the workspace. Existing files and recovery data have been retained.";
           yield* restarted.registry.put(
             {
               ...blocked,
@@ -2837,7 +2864,9 @@ it.live.each(["manual", "activity", "policy", "policy-metadata"] as const)(
           expect(reviewed.captureFailure?.reason).toContain(
             metadata
               ? "Workspace needs review: extended attributes are unsupported"
-              : `Workspace needs review: hardlinked files extend outside the retained workspace (${JSON.stringify(NodePath.join(f.workspace, "tracked"))})`,
+              : nested
+                ? `Workspace needs review: nested repositories are unsupported (${JSON.stringify(NodePath.join(f.workspace, "source/.git"))})`
+                : `Workspace needs review: hardlinked files extend outside the retained workspace (${JSON.stringify(NodePath.join(f.workspace, "tracked"))})`,
           );
           if (metadata)
             expect(reviewed.captureFailure?.reason).toContain(

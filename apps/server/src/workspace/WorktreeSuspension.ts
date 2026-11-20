@@ -153,6 +153,11 @@ const needsCapturePolicyRetry = (record: CheckoutAuthority) => {
     "the Git-backed payloads exceed preservation limits",
     "the Git pack inventory exceeds preservation limits",
     "private Git history exceeds preservation limits",
+    "nested repositories are unsupported",
+    "nested bare repositories are unsupported",
+    "mixed ownership is unsupported",
+    "special permission bits are unsupported",
+    "a filesystem boundary crosses the workspace",
     "hardlinked files are unsupported",
     "hardlinked files extend outside the workspace",
     // Dropping system attributes or pruning a generated tree can clear any of

@@ -123,8 +123,22 @@ const scratchFixture = async () => {
 
 it("round-trips a complete native scratch folder without Git identity or payload shortcuts", async () => {
   await using test = await scratchFixture();
+  const finderInfo = "0123456789abcdef".repeat(4);
+  if (HostProcess.Platform.defaultValue() === "darwin")
+    await execute("/usr/bin/xattr", [
+      "-swx",
+      "com.apple.FinderInfo",
+      finderInfo,
+      NodePath.join(test.workspace, "empty"),
+    ]);
   const original = await test.store.inspectScratchSource(test.workspace);
   const snapshot = await test.capture();
+  if (HostProcess.Platform.defaultValue() === "darwin")
+    expect(snapshot.attributes).toContainEqual({
+      path: "empty",
+      name: "com.apple.FinderInfo",
+      hex: finderInfo,
+    });
   expect(snapshot).toMatchObject({
     version: 4,
     kind: "scratch",
@@ -164,6 +178,18 @@ it("round-trips a complete native scratch folder without Git identity or payload
     branch: null,
   });
   expect(await restarted.verifyRestored(snapshot.id)).toMatchObject({ head: null, branch: null });
+  if (HostProcess.Platform.defaultValue() === "darwin")
+    expect(
+      (
+        await execute("/usr/bin/xattr", [
+          "-spx",
+          "com.apple.FinderInfo",
+          NodePath.join(test.workspace, "empty"),
+        ])
+      ).stdout
+        .replace(/\s/gu, "")
+        .toLowerCase(),
+    ).toBe(finderInfo);
   expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
     "all scratch bytes\n",
   );
@@ -1437,17 +1463,25 @@ it.each([false, true])(
   },
 );
 
-it.each(["ignored", "unignored", "tracked", "removed-from-index"] as const)(
+it.each(["ignored", "unignored", "tracked", "removed-from-index", "ignored-parent"] as const)(
   "excludes only ignored untracked generated directories (%s)",
   async (kind) => {
     await using test = await fixture();
-    const relative = "apps/web/node_modules";
+    const protectedParent = kind === "ignored-parent";
+    const relative = protectedParent ? "tmp/node_modules" : "apps/web/node_modules";
     const directory = NodePath.join(test.workspace, relative);
     await NodeFSP.mkdir(directory, { recursive: true });
     const file = NodePath.join(directory, "payload");
     await NodeFSP.writeFile(file, "x".repeat(8192));
+    if (protectedParent) {
+      await NodeFSP.mkdir(NodePath.join(test.workspace, "tmp/build"));
+      await NodeFSP.writeFile(NodePath.join(test.workspace, "tmp/build/notes.txt"), "user notes");
+    }
     if (kind !== "unignored")
-      await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
+      await NodeFSP.appendFile(
+        NodePath.join(test.workspace, ".gitignore"),
+        protectedParent ? "tmp/\n" : "node_modules/\n",
+      );
     if (kind === "tracked" || kind === "removed-from-index")
       await git(test.workspace, "add", "--force", `${relative}/payload`);
     if (kind === "removed-from-index") {
@@ -1464,7 +1498,9 @@ it.each(["ignored", "unignored", "tracked", "removed-from-index"] as const)(
     }
     const store = createWorktreeSuspensionStore({
       storeRoot: NodePath.join(test.root, "bounded"),
-      limits: { maxBytes: 4096, maxFileBytes: 4096 },
+      limits: protectedParent
+        ? { maxBytes: 16384, maxFileBytes: 16384 }
+        : { maxBytes: 4096, maxFileBytes: 4096 },
     });
     using reads = vi.spyOn(NodeFSP, "readdir");
     const capture = store.capture({
@@ -1472,12 +1508,14 @@ it.each(["ignored", "unignored", "tracked", "removed-from-index"] as const)(
       operationId: "generated",
       ownerBinding: "fixture-owner",
     });
-    if (kind === "ignored") {
+    if (kind === "ignored" || protectedParent) {
       const snapshot = await capture;
-      expect(snapshot.entries.some((entry) => entry.path.startsWith(`${relative}/`))).toBe(false);
-      expect(reads.mock.calls.some(([name]) => name === directory)).toBe(false);
+      expect(snapshot.entries.some((entry) => entry.path.startsWith(`${relative}/`))).toBe(
+        protectedParent,
+      );
+      expect(reads.mock.calls.some(([name]) => name === directory)).toBe(protectedParent);
       // Unknown metadata in an excluded tree must not be recursively inspected.
-      if (HostProcess.Platform.defaultValue() === "darwin")
+      if (!protectedParent && HostProcess.Platform.defaultValue() === "darwin")
         await execute("/usr/bin/xattr", [
           "-sw",
           "com.example.user-note",
@@ -1490,7 +1528,12 @@ it.each(["ignored", "unignored", "tracked", "removed-from-index"] as const)(
         guard: async () => {},
       });
       await store.restore(snapshot.id, { destinationPath: test.workspace });
-      await expect(NodeFSP.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+      if (protectedParent) {
+        expect(await NodeFSP.readFile(file, "utf8")).toBe("x".repeat(8192));
+        expect(
+          await NodeFSP.readFile(NodePath.join(test.workspace, "tmp/build/notes.txt"), "utf8"),
+        ).toBe("user notes");
+      } else await expect(NodeFSP.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
       expect(await NodeFSP.readFile(NodePath.join(test.workspace, "notes/private"), "utf8")).toBe(
         "ignored note\n",
       );
