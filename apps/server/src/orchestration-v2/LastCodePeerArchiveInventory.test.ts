@@ -201,7 +201,7 @@ it.effect("retries linked archive and restore independently of later local archi
       assert.equal(yield* Deferred.await(outcomes[0]!), archiveId);
       // The source journal still identifies the generation after event retention prunes it.
       committed = false;
-      assert.equal((yield* operations.status(orchestrator))?.machines[0]?.status, "pending");
+      assert.equal((yield* operations.status(orchestrator))[0]?.machines[0]?.status, "pending");
       const retry = yield* operations.dispatch(
         {
           type: "thread.archive",
@@ -237,7 +237,7 @@ it.effect("retries linked archive and restore independently of later local archi
           })),
         }),
       );
-      assert.equal((yield* operations.status(orchestrator))?.machines[0]?.requiresReview, true);
+      assert.equal((yield* operations.status(orchestrator))[0]?.machines[0]?.requiresReview, true);
       yield* operations.dispatch(
         {
           type: "thread.archive",
@@ -302,10 +302,17 @@ it.effect("retries linked archive and restore independently of later local archi
           .apply(nextArchive.event)
           .pipe(Effect.as({ sequence: 6, storedEvents: [nextArchive] })),
       );
-      assert.include(yield* operations.status(orchestrator), {
-        operation: "restore",
-        sourceArchiveCommandId: archiveId,
-      });
+      const status = yield* operations.status(orchestrator);
+      assert.deepEqual(
+        status.map(({ operation, sourceArchiveCommandId }) => ({
+          operation,
+          sourceArchiveCommandId,
+        })),
+        [
+          { operation: "archive", sourceArchiveCommandId: nextId },
+          { operation: "restore", sourceArchiveCommandId: archiveId },
+        ],
+      );
       yield* operations.dispatch(
         {
           type: "thread.unarchive",
@@ -412,11 +419,14 @@ it.effect("shares the linked preview deadline between owner lookup and peer inve
               }),
               Layer.mock(LinkedOperations.LastCodeLinkedArchiveOperations)({
                 status: () =>
-                  Effect.succeed({
-                    sourceArchiveCommandId: CommandId.make("prior-archive"),
-                    operation: "restore",
-                    machines: [],
-                  }),
+                  Effect.succeed([
+                    {
+                      sourceArchiveCommandId: CommandId.make("prior-archive"),
+                      archivedAt: DateTime.formatIso(now),
+                      operation: "restore",
+                      machines: [],
+                    },
+                  ]),
               }),
               Layer.succeed(ProjectionStore.ProjectionStoreV2, {
                 ...store,
@@ -454,7 +464,7 @@ it.effect("shares the linked preview deadline between owner lookup and peer inve
     yield* TestClock.adjust("400 millis");
     assert.isDefined(preview.pollUnsafe());
     const result = yield* Fiber.join(preview);
-    assert.equal(result.linkedArchiveOperation?.operation, "restore");
+    assert.equal(result.linkedArchiveOperations?.[0]?.operation, "restore");
     assert.deepEqual(
       result.linkedArchivePreview?.map(({ label, status }) => ({ label, status })),
       [

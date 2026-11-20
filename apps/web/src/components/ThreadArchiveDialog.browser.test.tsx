@@ -1,5 +1,6 @@
 import { act, render } from "../../test/render";
-import { ProjectId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import { buildLinkedArchiveRecoveries } from "@t3tools/client-runtime/state/thread-archive";
 import { expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { makeThreadFixture } from "../test-fixtures";
@@ -28,6 +29,46 @@ function options(title = "Original child") {
     },
   };
 }
+
+it("shows a pending restore alongside a newer archive and submits only the selected generation", async () => {
+  await using _screen = await render(<ThreadArchiveDialogHost />);
+  const recoveries = buildLinkedArchiveRecoveries({
+    linkedArchiveOperations: (["archive", "restore"] as const).map((operation, index) => ({
+      operation,
+      sourceArchiveCommandId: CommandId.make(operation),
+      archivedAt: index === 0 ? "2026-01-02T00:00:00.000Z" : "2026-01-01T00:00:00.000Z",
+      machines: [
+        {
+          environmentId: EnvironmentId.make(operation),
+          label: index === 0 ? "New machine" : "Older machine",
+          status: "pending",
+        },
+      ],
+    })),
+  });
+  const submit = vi.fn().mockResolvedValue(null);
+  let result!: ReturnType<typeof requestThreadArchiveDialog>;
+  await act(() => {
+    result = requestThreadArchiveDialog({
+      title: "Linked archive status",
+      family: { ...options().family, threads: [], children: [], activeThreadIds: [] },
+      recoveries,
+      submit,
+    });
+  });
+  expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("New machine");
+  await act(() => {
+    const select = document.querySelector<HTMLSelectElement>("select")!;
+    select.value = "1";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const dialog = document.querySelector('[role="alertdialog"]');
+  expect(dialog?.textContent).toContain("Older machine");
+  expect(dialog?.textContent).not.toContain("New machine");
+  await act(() => button("Retry restore").click());
+  await result;
+  expect(submit).toHaveBeenCalledExactlyOnceWith("archive_after_review", undefined, recoveries[1]);
+});
 
 it("closes a failed action and requires a new confirmation for the fresh family", async () => {
   await using _screen = await render(<ThreadArchiveDialogHost />);

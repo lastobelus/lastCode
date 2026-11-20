@@ -51,12 +51,12 @@ export const capture = Effect.gen(function* () {
       const { sequence } = yield* operations
         .dispatch(command, local)
         .pipe(Effect.mapError(dispatchFailure));
-      const linkedArchiveOperation = yield* operations
+      const linkedArchiveOperations = yield* operations
         .status(command.threadId)
-        .pipe(Effect.orElseSucceed(() => undefined));
+        .pipe(Effect.orElseSucceed(() => []));
       return {
         sequence,
-        ...(linkedArchiveOperation === undefined ? {} : { linkedArchiveOperation }),
+        ...(linkedArchiveOperations.length === 0 ? {} : { linkedArchiveOperations }),
       };
     }),
   };

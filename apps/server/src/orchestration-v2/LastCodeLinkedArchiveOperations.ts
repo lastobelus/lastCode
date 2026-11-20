@@ -140,6 +140,7 @@ const make = Effect.gen(function* () {
             row,
             state,
             sequence: committed.sequence,
+            archivedAt: committed.archivedAt,
             localArchived: !localRestored && localArchived,
           };
         }
@@ -159,24 +160,22 @@ const make = Effect.gen(function* () {
 
   const status = (threadId: ThreadId) =>
     generations(threadId).pipe(
-      Effect.map((entries) => entries.find(pendingRestore) ?? entries[0]),
-      Effect.map((entry): LinkedArchiveOperation | undefined =>
-        entry === undefined
-          ? undefined
-          : {
-              sourceArchiveCommandId: entry.row.sourceArchiveCommandId,
-              operation: entry.localArchived ? "archive" : "restore",
-              machines: entry.state.machines.map((machine) => ({
-                environmentId: machine.selection.environmentId,
-                label: machine.selection.label,
-                status:
-                  !entry.localArchived && machine.status === "committed"
-                    ? "pending"
-                    : machine.status,
-                ...(entry.localArchived && needsReview(machine) ? { requiresReview: true } : {}),
-                reason: machine.reason,
-              })),
-            },
+      Effect.map((entries) =>
+        entries
+          .filter((entry, index) => index === 0 || pendingRestore(entry))
+          .map((entry): LinkedArchiveOperation => ({
+            sourceArchiveCommandId: entry.row.sourceArchiveCommandId,
+            archivedAt: entry.archivedAt,
+            operation: entry.localArchived ? "archive" : "restore",
+            machines: entry.state.machines.map((machine) => ({
+              environmentId: machine.selection.environmentId,
+              label: machine.selection.label,
+              status:
+                !entry.localArchived && machine.status === "committed" ? "pending" : machine.status,
+              ...(entry.localArchived && needsReview(machine) ? { requiresReview: true } : {}),
+              reason: machine.reason,
+            })),
+          })),
       ),
     );
 
@@ -461,7 +460,7 @@ const archiveOperations = (service?: LastCodeLinkedArchiveOperations["Service"])
     (command.type === "thread.archive" || command.type === "thread.unarchive")
       ? service.dispatch(command, local)
       : local,
-  status: (threadId: ThreadId) => service?.status(threadId) ?? Effect.undefined,
+  status: (threadId: ThreadId) => service?.status(threadId) ?? Effect.succeed([]),
   selectedOwnerThreadIds: (threadId: ThreadId) =>
     service?.selectedOwnerThreadIds(threadId) ?? Effect.undefined,
 });

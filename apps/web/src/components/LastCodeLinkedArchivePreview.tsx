@@ -1,5 +1,5 @@
 import {
-  type buildLinkedArchiveRecovery,
+  type LinkedArchiveRecovery,
   type buildThreadArchiveConfirmation,
   LINKED_ARCHIVE_EMPTY_MESSAGE,
 } from "@t3tools/client-runtime/state/thread-archive";
@@ -12,9 +12,7 @@ export function LastCodeLinkedArchivePreview({
   statuses,
 }: {
   readonly machines: ReturnType<typeof buildThreadArchiveConfirmation>["linkedMachines"];
-  readonly statuses?:
-    | NonNullable<ReturnType<typeof buildLinkedArchiveRecovery>>["machines"]
-    | undefined;
+  readonly statuses?: LinkedArchiveRecovery["machines"] | undefined;
 }) {
   const gt = useGT();
   const messages = useMessages();

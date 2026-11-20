@@ -20,7 +20,7 @@ import {
   getArchiveRecoveryRows,
   presentThreadArchive,
   buildThreadArchiveConfirmation,
-  buildLinkedArchiveRecovery,
+  buildLinkedArchiveRecoveries,
   requiresThreadArchiveConfirmation,
 } from "./threadArchive.ts";
 import { presentThreadShell } from "./models.ts";
@@ -316,24 +316,37 @@ describe("archive confirmation", () => {
 
     const operation = {
       sourceArchiveCommandId: CommandId.make("first-archive"),
+      archivedAt: "2026-01-01T00:00:00.000Z",
       operation: "archive",
       machines: [{ environmentId, label: peer.label, status: "pending", reason: "offline" }],
     } as const;
-    const retry = buildLinkedArchiveRecovery({ ...linked, linkedArchiveOperation: operation });
+    const [retry] = buildLinkedArchiveRecoveries({
+      ...linked,
+      linkedArchiveOperations: [operation],
+    });
     expect(retry?.machines[0]?.status).toBe("Pending · Offline");
     expect(retry?.canRetry).toBe(true);
     expect(retry?.selection(true)).toEqual([]);
-    const review = buildLinkedArchiveRecovery({
+    const [review, restore] = buildLinkedArchiveRecoveries({
       ...linked,
-      linkedArchiveOperation: {
-        ...operation,
-        machines: [{ environmentId, label: peer.label, status: "review" }],
-      },
+      linkedArchiveOperations: [
+        {
+          ...operation,
+          machines: [{ environmentId, label: peer.label, status: "review" }],
+        },
+        {
+          ...operation,
+          operation: "restore",
+          sourceArchiveCommandId: CommandId.make("prior-archive"),
+        },
+      ],
     });
     expect(review?.canRetry).toBe(true);
     expect(review?.selection(false)).toEqual([
       { environmentId, label: peer.label, status: "ready", cohorts: defaultCohorts },
     ]);
+    expect(restore?.sourceArchiveCommandId).toBe("prior-archive");
+    expect(restore?.selection(true)).toEqual([]);
   });
 });
 const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShellJson);

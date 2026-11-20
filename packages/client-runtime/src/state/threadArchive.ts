@@ -28,7 +28,8 @@ export {
   LINKED_ARCHIVE_RETRY_ARCHIVE,
   LINKED_ARCHIVE_RETRY_RESTORE,
   LINKED_ARCHIVE_STATUS_LABEL,
-  buildLinkedArchiveRecovery,
+  buildLinkedArchiveRecoveries,
+  type LinkedArchiveRecovery,
 } from "./lastCodeLinkedArchive.ts";
 
 export const THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE = msg(

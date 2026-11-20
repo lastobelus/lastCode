@@ -107,9 +107,10 @@ export const layer = Layer.effect(
         limits?: ClientModes,
       ) {
         if (!family.threads.some((thread) => thread.id === threadId)) return family;
-        const linkedArchiveOperation = yield* operations.status(threadId);
+        const linkedArchiveOperations = yield* operations.status(threadId);
+        const hasArchive = linkedArchiveOperations.some(({ operation }) => operation === "archive");
         const preview =
-          linkedArchiveOperation === undefined ? family : { ...family, linkedArchiveOperation };
+          linkedArchiveOperations.length === 0 ? family : { ...family, linkedArchiveOperations };
         const deadline = (yield* Clock.currentTimeMillis) + PEER_ARCHIVE_PREVIEW_TIMEOUT_MS;
         const peers = yield* links.listStored ?? Effect.succeed([]);
         if (peers.length === 0 || !(yield* links.enabled)) return preview;
@@ -123,7 +124,7 @@ export const layer = Layer.effect(
           );
         const input = yield* beforeDeadline(
           Effect.gen(function* () {
-            if (linkedArchiveOperation?.operation === "archive") {
+            if (hasArchive) {
               const ownerThreadIds = yield* operations.selectedOwnerThreadIds(threadId);
               if (ownerThreadIds !== undefined)
                 return {
@@ -160,26 +161,28 @@ export const layer = Layer.effect(
           },
           { concurrency: "unbounded" },
         );
-        if (linkedArchiveOperation?.operation !== "archive")
-          return { ...preview, linkedArchivePreview };
+        if (!hasArchive) return { ...preview, linkedArchivePreview };
         const availability = new Map(
           linkedArchivePreview.map((peer) => [peer.environmentId, peer]),
         );
         return {
           ...preview,
           linkedArchivePreview,
-          linkedArchiveOperation: {
-            ...linkedArchiveOperation,
-            machines: linkedArchiveOperation.machines.map((machine) => {
-              if (machine.requiresReview !== true) return machine;
-              const peer = availability.get(machine.environmentId);
-              return peer?.status === "ready"
-                ? { ...machine, status: "review" as const, reason: undefined }
-                : peer === undefined
-                  ? { ...machine, status: "blocked" as const, reason: "unlinked" as const }
-                  : { ...machine, status: peer.status, reason: peer.reason };
-            }),
-          },
+          linkedArchiveOperations: linkedArchiveOperations.map((operation) => {
+            if (operation.operation !== "archive") return operation;
+            return {
+              ...operation,
+              machines: operation.machines.map((machine) => {
+                if (machine.requiresReview !== true) return machine;
+                const peer = availability.get(machine.environmentId);
+                return peer?.status === "ready"
+                  ? { ...machine, status: "review" as const, reason: undefined }
+                  : peer === undefined
+                    ? { ...machine, status: "blocked" as const, reason: "unlinked" as const }
+                    : { ...machine, status: peer.status, reason: peer.reason };
+              }),
+            };
+          }),
         };
       },
       (effect, threadId) =>

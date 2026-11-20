@@ -5163,7 +5163,7 @@ export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   consultationTargets: Schema.optional(Schema.Array(ThreadArchiveConsultationTarget)),
   archivePreview: Schema.optional(Schema.UndefinedOr(ThreadArchivePreview)),
   linkedArchivePreview: Schema.optional(Schema.Array(LinkedArchivePreview)),
-  linkedArchiveOperation: Schema.optional(LinkedArchiveOperation),
+  linkedArchiveOperations: Schema.optional(Schema.Array(LinkedArchiveOperation)),
   threads: Schema.Array(OrchestrationV2ThreadShell),
   childThreadIds: Schema.Array(ThreadId),
   activeChildThreadIds: Schema.Array(ThreadId),

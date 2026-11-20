@@ -76,16 +76,11 @@ export function canIncludeLinkedTypedIn(peers: readonly LinkedArchivePreview[] |
   });
 }
 
-/** Previously reviewed cohorts stay on the server. Only machines asking for review get new consent. */
-export function buildLinkedArchiveRecovery(
-  family: {
-    readonly linkedArchiveOperation?: LinkedArchiveOperation | undefined;
-    readonly linkedArchivePreview?: readonly LinkedArchivePreview[] | undefined;
-  },
-  resolve: MFunctionType = mFallback,
+function buildRecovery(
+  operation: LinkedArchiveOperation,
+  preview: readonly LinkedArchivePreview[],
+  resolve: MFunctionType,
 ) {
-  const operation = family.linkedArchiveOperation;
-  if (operation === undefined) return null;
   const needingReview = new Set(
     operation.operation === "archive"
       ? operation.machines
@@ -93,9 +88,7 @@ export function buildLinkedArchiveRecovery(
           .map(({ environmentId }) => environmentId)
       : [],
   );
-  const reviewPreviews = (family.linkedArchivePreview ?? []).filter(({ environmentId }) =>
-    needingReview.has(environmentId),
-  );
+  const reviewPreviews = preview.filter(({ environmentId }) => needingReview.has(environmentId));
   const reviewable = reviewPreviews.filter(
     (peer) => peer.status === "ready" && peer.inventory.archiveChoices !== undefined,
   );
@@ -105,6 +98,19 @@ export function buildLinkedArchiveRecovery(
   );
   return {
     operation: operation.operation,
+    label: [
+      resolve(
+        operation.operation === "archive"
+          ? msg("Archive")
+          : canRetry
+            ? LINKED_ARCHIVE_RETRY_RESTORE
+            : statuses.restored,
+      ),
+      new Date(operation.archivedAt).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "medium",
+      }),
+    ].join(" · "),
     sourceArchiveCommandId: operation.sourceArchiveCommandId,
     machines: operation.machines.map((machine) => ({
       environmentId: machine.environmentId,
@@ -118,4 +124,19 @@ export function buildLinkedArchiveRecovery(
     canRetry: canRetry || reviewable.length > 0,
     selection: (includeTypedIn: boolean) => linkedArchiveSelection(reviewable, includeTypedIn),
   };
+}
+
+export type LinkedArchiveRecovery = ReturnType<typeof buildRecovery>;
+
+/** Previously reviewed cohorts stay on the server. Only machines asking for review get new consent. */
+export function buildLinkedArchiveRecoveries(
+  family: {
+    readonly linkedArchiveOperations?: readonly LinkedArchiveOperation[] | undefined;
+    readonly linkedArchivePreview?: readonly LinkedArchivePreview[] | undefined;
+  },
+  resolve: MFunctionType = mFallback,
+) {
+  return (family.linkedArchiveOperations ?? []).map((operation) =>
+    buildRecovery(operation, family.linkedArchivePreview ?? [], resolve),
+  );
 }

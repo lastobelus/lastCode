@@ -788,9 +788,10 @@ describe("archive family confirmation", () => {
         _tag: "Success",
         value: {
           ...archiveDecisionFixture([owner], { ...target, input: { threadId: owner.id } }),
-          linkedArchiveOperation: {
-            operation,
-            sourceArchiveCommandId: CommandId.make("stable-plan"),
+          linkedArchiveOperations: (["archive", "restore"] as const).map((kind) => ({
+            operation: kind,
+            sourceArchiveCommandId: CommandId.make(kind),
+            archivedAt: "2026-01-01T00:00:00.000Z",
             machines: [
               {
                 environmentId: EnvironmentId.make("peer"),
@@ -799,21 +800,24 @@ describe("archive family confirmation", () => {
                 reason: "offline",
               },
             ],
-          },
+          })),
         },
       });
       archiveDialog.mockImplementation(async (request) => {
-        expect(request.recovery.machines[0]).toMatchObject({
+        const recovery = request.recoveries.find(
+          (entry: { operation: string }) => entry.operation === operation,
+        );
+        expect(recovery.machines[0]).toMatchObject({
           label: "Build machine",
           status: "Pending · Offline",
         });
-        expect(await request.submit("archive_if_idle")).toBeNull();
+        expect(await request.submit("archive_if_idle", undefined, recovery)).toBeNull();
         return "archive_if_idle";
       });
       await useLastCodeLinkedArchiveRecovery()(target);
       const input = {
         threadId: target.threadId,
-        expectedLinkedArchiveCommandId: CommandId.make("stable-plan"),
+        expectedLinkedArchiveCommandId: CommandId.make(operation),
       };
       if (operation === "archive") {
         expect(commands.archive).toHaveBeenCalledExactlyOnceWith({

@@ -26,33 +26,57 @@ function ArchiveDialog({ request }: { readonly request: MobileArchiveDialogReque
   const gt = useGT();
   const messages = useMessages();
   const [includeTypedIn, setIncludeTypedIn] = useState(false);
-  const confirmation = request.confirm(includeTypedIn);
+  const [recoveryIndex, setRecoveryIndex] = useState(0);
+  const confirmation = request.confirm(includeTypedIn, recoveryIndex);
   return (
     <Sheet title={request.title} onClose={() => finish(request, null)}>
       <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerClassName="gap-4 p-4">
-        <AppText>{confirmation.message}</AppText>
-        <Pressable
-          accessibilityRole="checkbox"
-          accessibilityState={{ checked: includeTypedIn }}
-          onPress={() => setIncludeTypedIn(!includeTypedIn)}
-          className="min-h-12 flex-row items-center gap-3"
-        >
-          <View
-            className={cn(
-              "size-5 items-center justify-center rounded",
-              includeTypedIn ? "bg-primary" : "border border-input-border",
-            )}
+        {request.recoveries?.map((recovery, index) => (
+          <Pressable
+            key={recovery.sourceArchiveCommandId}
+            accessibilityRole="radio"
+            accessibilityState={{ checked: recoveryIndex === index }}
+            onPress={() => {
+              if (recoveryIndex === index) return;
+              setRecoveryIndex(index);
+              setIncludeTypedIn(false);
+            }}
+            className="min-h-11 flex-row items-center gap-2"
           >
-            {includeTypedIn && (
-              <SymbolView
-                name="checkmark"
-                size={13}
-                tintColorClassName="accent-primary-foreground"
-              />
-            )}
-          </View>
-          <AppText className="flex-1">{messages(ARCHIVE_TYPED_IN_LABEL)}</AppText>
-        </Pressable>
+            <View
+              className={cn(
+                "size-4 rounded-full border border-input-border",
+                recoveryIndex === index && "border-4 border-primary",
+              )}
+            />
+            <AppText className="flex-1">{recovery.label}</AppText>
+          </Pressable>
+        ))}
+        <AppText>{confirmation.message}</AppText>
+        {confirmation.canIncludeTypedIn !== false && (
+          <Pressable
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: includeTypedIn }}
+            onPress={() => setIncludeTypedIn(!includeTypedIn)}
+            className="min-h-12 flex-row items-center gap-3"
+          >
+            <View
+              className={cn(
+                "size-5 items-center justify-center rounded",
+                includeTypedIn ? "bg-primary" : "border border-input-border",
+              )}
+            >
+              {includeTypedIn && (
+                <SymbolView
+                  name="checkmark"
+                  size={13}
+                  tintColorClassName="accent-primary-foreground"
+                />
+              )}
+            </View>
+            <AppText className="flex-1">{messages(ARCHIVE_TYPED_IN_LABEL)}</AppText>
+          </Pressable>
+        )}
         <View className="flex-row flex-wrap gap-2">
           <Button label={gt("Cancel")} onPress={() => finish(request, null)} />
           {request.canReview && (
@@ -65,7 +89,12 @@ function ArchiveDialog({ request }: { readonly request: MobileArchiveDialogReque
             <Button
               label={confirmation.confirmLabel}
               tone="danger"
-              onPress={() => finish(request, { includeTypedIn })}
+              onPress={() =>
+                finish(request, {
+                  includeTypedIn,
+                  ...(request.recoveries === undefined ? {} : { recoveryIndex }),
+                })
+              }
             />
           )}
         </View>

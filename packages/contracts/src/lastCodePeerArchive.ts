@@ -120,6 +120,7 @@ export type LinkedArchiveSelection = typeof LinkedArchiveSelection.Type;
 
 export const LinkedArchiveOperation = Schema.Struct({
   sourceArchiveCommandId: CommandId,
+  archivedAt: IsoDateTime,
   operation: Schema.Literals(["archive", "restore"]),
   machines: Schema.Array(
     Schema.Struct({

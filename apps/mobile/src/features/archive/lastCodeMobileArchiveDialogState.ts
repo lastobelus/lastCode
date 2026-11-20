@@ -1,14 +1,28 @@
 import { Atom } from "effect/reactivity";
 import { appAtomRegistry } from "../../state/atom-registry";
 
-type Choice = { readonly includeTypedIn: boolean } | "review" | null;
+type Choice =
+  | {
+      readonly includeTypedIn: boolean;
+      readonly recoveryIndex?: number;
+    }
+  | "review"
+  | null;
 export type MobileArchiveDialogRequest = {
   readonly title: string;
-  readonly confirm: (includeTypedIn: boolean) => {
+  readonly confirm: (
+    includeTypedIn: boolean,
+    recoveryIndex: number,
+  ) => {
     readonly message: string;
     readonly confirmLabel: string;
     readonly blocked: boolean;
+    readonly canIncludeTypedIn?: boolean;
   };
+  readonly recoveries?: readonly {
+    readonly sourceArchiveCommandId: string;
+    readonly label: string;
+  }[];
   readonly canReview?: boolean;
   readonly resolve: (choice: Choice) => void;
 };

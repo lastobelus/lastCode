@@ -1,5 +1,5 @@
 import {
-  buildLinkedArchiveRecovery,
+  buildLinkedArchiveRecoveries,
   LINKED_ARCHIVE_STATUS_LABEL,
 } from "@t3tools/client-runtime/state/thread-archive";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -53,7 +53,7 @@ export function useLastCodeLinkedArchiveRecovery() {
       reportLinkedArchiveFailure(squashAtomCommandFailure(result));
       return;
     }
-    const recovery = buildLinkedArchiveRecovery(result.value, m);
+    const recoveries = buildLinkedArchiveRecoveries(result.value, m);
     await requestThreadArchiveDialog({
       title: m(LINKED_ARCHIVE_STATUS_LABEL),
       family: {
@@ -63,19 +63,20 @@ export function useLastCodeLinkedArchiveRecovery() {
         unreadThreadIds: [],
         protectedChildThreadIds: [],
         canStopAndArchive: true,
-        ...(recovery ? { linkedArchivePreview: recovery.reviewPreviews } : {}),
       },
-      recovery,
-      submit: async (childDisposition, includeTypedIn) => {
+      recoveries,
+      submit: async (childDisposition, includeTypedIn, recovery) => {
         if (!recovery?.canRetry) return m(msg("An error occurred."));
         const latest = await load(target);
         if (latest._tag === "Failure") {
           return reportLinkedArchiveFailure(squashAtomCommandFailure(latest));
         }
-        const operation = latest.value.linkedArchiveOperation;
         if (
-          operation?.sourceArchiveCommandId !== recovery.sourceArchiveCommandId ||
-          operation.operation !== recovery.operation
+          !latest.value.linkedArchiveOperations?.some(
+            (operation) =>
+              operation.sourceArchiveCommandId === recovery.sourceArchiveCommandId &&
+              operation.operation === recovery.operation,
+          )
         ) {
           return reportLinkedArchiveFailure(
             new Error(

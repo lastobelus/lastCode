@@ -9,11 +9,12 @@ import type {
 } from "@t3tools/contracts";
 import {
   ARCHIVE_TYPED_IN_LABEL,
-  buildLinkedArchiveRecovery,
   buildThreadArchiveConfirmation,
   LINKED_ARCHIVE_NO_ACTIVITY,
   LINKED_ARCHIVE_RETRY_ARCHIVE,
   LINKED_ARCHIVE_RETRY_RESTORE,
+  LINKED_ARCHIVE_STATUS_LABEL,
+  type LinkedArchiveRecovery,
   threadArchiveConsultationUnavailableReason,
 } from "@t3tools/client-runtime/state/thread-archive";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
@@ -41,10 +42,11 @@ type Request = {
   readonly submit: (
     choice: ArchiveChildDisposition,
     includeTypedIn?: boolean,
+    recovery?: LinkedArchiveRecovery,
   ) => Promise<string | null>;
   readonly review?: (ref: ScopedThreadRef) => Promise<unknown>;
   readonly reviewFamilies?: readonly { readonly ref: ScopedThreadRef; readonly title: string }[];
-  readonly recovery?: ReturnType<typeof buildLinkedArchiveRecovery>;
+  readonly recoveries?: readonly LinkedArchiveRecovery[];
   readonly consultation?: {
     readonly targets: readonly ThreadArchiveConsultationTarget[];
     readonly ask: (ownerThreadId: ThreadId) => Promise<string | null>;
@@ -88,6 +90,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
   const [includeTypedIn, setIncludeTypedIn] = useState(false);
+  const [recoveryIndex, setRecoveryIndex] = useState(0);
   const [choice, setChoice] = useState<ArchiveChildDisposition | null>(null);
   const [asking, setAsking] = useState<ThreadId | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -126,15 +129,22 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
     }
     submitting.current = false;
   };
-  const confirmation = buildThreadArchiveConfirmation(request.family, messages, includeTypedIn);
-  const isRecovery = request.recovery !== undefined;
+  const recovery = request.recoveries?.[recoveryIndex];
+  const confirmation = buildThreadArchiveConfirmation(
+    recovery
+      ? { ...request.family, linkedArchivePreview: recovery.reviewPreviews }
+      : request.family,
+    messages,
+    includeTypedIn,
+  );
+  const isRecovery = request.recoveries !== undefined;
   const hasReview = confirmation.linkedMachines.length > 0;
-  const canSubmit = !confirmation.blocked && (!isRecovery || request.recovery?.canRetry === true);
+  const canSubmit = !confirmation.blocked && (!isRecovery || recovery?.canRetry === true);
   const confirmLabel =
     !isRecovery || confirmation.active
       ? confirmation.confirmLabel
       : messages(
-          request.recovery?.operation === "restore"
+          recovery?.operation === "restore"
             ? LINKED_ARCHIVE_RETRY_RESTORE
             : LINKED_ARCHIVE_RETRY_ARCHIVE,
         );
@@ -143,7 +153,9 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
     submitting.current = true;
     setChoice(next);
     await (async () => {
-      const failure = await request.submit(next, includeTypedIn || undefined);
+      const failure = await (recovery
+        ? request.submit(next, includeTypedIn || undefined, recovery)
+        : request.submit(next, includeTypedIn || undefined));
       if (failure === null) finish(next);
       else finish(null);
     })()
@@ -166,12 +178,30 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
         <AlertDialogHeader>
           <AlertDialogTitle>{request.title}</AlertDialogTitle>
           <AlertDialogDescription>
-            {request.recovery === null
+            {isRecovery && recovery === undefined
               ? messages(LINKED_ARCHIVE_NO_ACTIVITY)
               : !isRecovery || hasReview
                 ? confirmation.description
                 : null}
           </AlertDialogDescription>
+          {(request.recoveries?.length ?? 0) > 1 && (
+            <select
+              aria-label={messages(LINKED_ARCHIVE_STATUS_LABEL)}
+              className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+              disabled={busy}
+              value={recoveryIndex}
+              onChange={(event) => {
+                setRecoveryIndex(Number(event.currentTarget.value));
+                setIncludeTypedIn(false);
+              }}
+            >
+              {request.recoveries?.map((operation, index) => (
+                <option key={operation.sourceArchiveCommandId} value={index}>
+                  {operation.label}
+                </option>
+              ))}
+            </select>
+          )}
           {!isRecovery && (
             <ul
               aria-label={
@@ -214,7 +244,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
           )}
           <LastCodeLinkedArchivePreview
             machines={confirmation.linkedMachines}
-            statuses={request.recovery?.machines}
+            statuses={recovery?.machines}
           />
           {confirmation.canIncludeTypedIn && (
             <label className="flex items-center gap-2 text-sm">
@@ -322,7 +352,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
               disabled={busy}
               onClick={() => void submit(confirmation.disposition)}
             >
-              {choice !== null && request.recovery?.operation !== "restore"
+              {choice !== null && recovery?.operation !== "restore"
                 ? gt("Archiving…")
                 : confirmLabel}
             </Button>

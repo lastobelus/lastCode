@@ -1,5 +1,5 @@
 import {
-  buildLinkedArchiveRecovery,
+  buildLinkedArchiveRecoveries,
   LINKED_ARCHIVE_NO_ACTIVITY,
   LINKED_ARCHIVE_RETRY_ARCHIVE,
   LINKED_ARCHIVE_RETRY_RESTORE,
@@ -40,13 +40,17 @@ export async function showLastCodeLinkedArchiveStatus({
   try {
     const result = await load();
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-    const recovery = buildLinkedArchiveRecovery(result.value, m);
-    if (!recovery) {
+    const recoveries = buildLinkedArchiveRecoveries(result.value, m);
+    const primary = recoveries[0];
+    if (!primary) {
       Dialog.alert(title, m(LINKED_ARCHIVE_NO_ACTIVITY));
       return;
     }
-    const status = recovery.machines.map(({ label, status }) => `${label} · ${status}`).join("\n");
-    const confirm = (includeTypedIn: boolean) => {
+    const confirm = (includeTypedIn: boolean, recoveryIndex: number) => {
+      const recovery = recoveries[recoveryIndex] ?? primary;
+      const status = recovery.machines
+        .map(({ label, status }) => `${label} · ${status}`)
+        .join("\n");
       const review = resolveThreadArchiveFamily(
         {
           ...result.value,
@@ -79,14 +83,17 @@ export async function showLastCodeLinkedArchiveStatus({
               ),
       };
     };
-    const retry = async (includeTypedIn: boolean) => {
+    const retry = async (includeTypedIn: boolean, recoveryIndex: number) => {
+      const recovery = recoveries[recoveryIndex] ?? primary;
       try {
         const latest = await load();
         if (latest._tag === "Failure") throw squashAtomCommandFailure(latest);
-        const operation = latest.value.linkedArchiveOperation;
         if (
-          operation?.sourceArchiveCommandId !== recovery.sourceArchiveCommandId ||
-          operation.operation !== recovery.operation
+          !latest.value.linkedArchiveOperations?.some(
+            (operation) =>
+              operation.sourceArchiveCommandId === recovery.sourceArchiveCommandId &&
+              operation.operation === recovery.operation,
+          )
         ) {
           throw new Error(
             m(msg("The conversation family changed. Review the archive confirmation again.")),
@@ -112,7 +119,7 @@ export async function showLastCodeLinkedArchiveStatus({
                 environmentId,
                 input: {
                   threadId,
-                  childDisposition: confirm(includeTypedIn).disposition,
+                  childDisposition: confirm(includeTypedIn, recoveryIndex).disposition,
                   linkedArchiveSelection: recovery.selection(includeTypedIn),
                   expectedLinkedArchiveCommandId: recovery.sourceArchiveCommandId,
                 },
@@ -125,18 +132,23 @@ export async function showLastCodeLinkedArchiveStatus({
         reportFailure(error);
       }
     };
-    const initial = confirm(false);
-    if (initial.canIncludeTypedIn && recovery.canRetry) {
-      const choice = await requestLastCodeMobileArchiveDialog({ title, confirm });
-      if (choice !== null && choice !== "review") await retry(choice.includeTypedIn);
+    const initial = confirm(false, 0);
+    if (recoveries.length > 1 || (initial.canIncludeTypedIn && primary.canRetry)) {
+      const choice = await requestLastCodeMobileArchiveDialog({
+        title,
+        confirm,
+        ...(recoveries.length > 1 ? { recoveries } : {}),
+      });
+      if (choice !== null && choice !== "review")
+        await retry(choice.includeTypedIn, choice.recoveryIndex ?? 0);
     } else {
       Dialog.alert(
         title,
         initial.message,
-        recovery.canRetry
+        primary.canRetry
           ? [
               { text: m(msg("Cancel")), style: "cancel" },
-              { text: initial.confirmLabel, onPress: () => void retry(false) },
+              { text: initial.confirmLabel, onPress: () => void retry(false, 0) },
             ]
           : undefined,
       );
