@@ -40,6 +40,7 @@ import type {
 } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
+import { WORKSPACE_REVIEW_REQUIRED_PREFIX } from "@t3tools/shared/worktreeSuspension";
 import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -3358,7 +3359,11 @@ const make = Effect.gen(function* () {
       };
       const keep = (reason: string) => {
         if (deleted && settings.worktreeOnDelete) kept.push(worktreePath);
-        entries.push({ ...entry, reason: sentence(reason) });
+        entries.push({
+          ...entry,
+          outcome: reason.startsWith(WORKSPACE_REVIEW_REQUIRED_PREFIX) ? "failed" : "kept",
+          reason: sentence(reason),
+        });
       };
       // Reasons a provider session stop or finished deletion work can clear.
       const waitForStop = (reason: string) => {

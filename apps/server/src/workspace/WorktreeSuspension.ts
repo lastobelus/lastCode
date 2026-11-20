@@ -134,6 +134,47 @@ const failure = (reason: WorktreeSuspensionRequestError["reason"], message: stri
   new WorktreeSuspensionRequestError({ reason, message });
 const isRequestError = Schema.is(WorktreeSuspensionRequestError);
 const isWorkspaceUnavailable = Schema.is(WorkspaceUnavailableError);
+const needsCapturePolicyRetry = (record: CheckoutAuthority) => {
+  const reason = record.captureFailure?.reason;
+  if (reason === undefined) return false;
+  // Recheck saves blocked by the former capture policy once. A new permanent
+  // refusal has a path-bearing review prefix, so it cannot enter this retry again.
+  return [
+    "a file exceeds the preservation limit",
+    "the workspace exceeds the byte limit",
+    "the workspace exceeds the path limit",
+    "a filename cannot be represented safely",
+    "a filename is not UTF-8",
+    "the staged tree contains unsupported entries",
+    "the staging area exceeds preservation limits",
+    "this Git index format is unsupported",
+    "conflicted or extended Git index entries are unsupported",
+    "the Git index has unsupported extensions",
+    "the Git-backed payloads exceed preservation limits",
+    "the Git pack inventory exceeds preservation limits",
+    "private Git history exceeds preservation limits",
+    "nested repositories are unsupported",
+    "nested bare repositories are unsupported",
+    "mixed ownership is unsupported",
+    "special permission bits are unsupported",
+    "a filesystem boundary crosses the workspace",
+    "hardlinked files are unsupported",
+    "hardlinked files extend outside the workspace",
+    // Dropping system attributes or pruning a generated tree can clear any of
+    // these metadata refusals, including unknown attributes inside that tree.
+    "extended attribute names are unsupported",
+    "extended attribute paths could not be verified",
+    "extended attributes are unsupported",
+    "extended attributes exceed the record limit",
+    "extended attributes exceed the value limit or are invalid",
+    "extended attributes exceed the byte limit",
+    "workspace metadata exceeds the byte limit",
+    "ACLs or filesystem flags are unsupported",
+    "ACLs are unsupported",
+    "filesystem flags are unsupported",
+    "filesystem flags could not be verified",
+  ].some((legacy) => reason.startsWith(`Workspace kept: ${legacy}`));
+};
 const safeFailure = (cause: unknown) =>
   isRequestError(cause)
     ? cause
@@ -1342,7 +1383,11 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     record: CheckoutAuthority,
   ) {
     if (record.kind === "scratch") return false;
-    if (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true)
+    if (
+      record.captureFailure !== undefined &&
+      record.captureFailure.retryOnce !== true &&
+      !needsCapturePolicyRetry(record)
+    )
       return false;
     const currentSettings = yield* settings.getSettings;
     const timestamp = yield* milliseconds;
@@ -3258,7 +3303,9 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           record.summary.state !== "active" ||
           record.operation !== undefined ||
           record.pendingProjection !== undefined ||
-          (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true) ||
+          (record.captureFailure !== undefined &&
+            record.captureFailure.retryOnce !== true &&
+            !needsCapturePolicyRetry(record)) ||
           liveOperations.has(record.checkoutId))
       )
         continue;
