@@ -1402,7 +1402,7 @@ it.each([false, true])(
         ownerBinding: "fixture-owner",
       }),
     ).rejects.toThrow(
-      `hardlinked files extend outside the workspace (${JSON.stringify(NodePath.join(test.workspace, mixed ? "notes/installed" : "tracked.txt"))})`,
+      `hardlinked files extend outside the retained workspace (${JSON.stringify(NodePath.join(test.workspace, mixed ? "notes/installed" : "tracked.txt"))})`,
     );
     expect(
       reads.mock.calls.filter(
@@ -1537,33 +1537,82 @@ it.each([
   expect(await NodeFSP.readFile(path, "utf8")).toBe("a".repeat(64));
 });
 
-it("reports an invalid tracked filename before pruning generated directories", async () => {
+it.each(["generated", "index-only", "HEAD-only", "newline-index"] as const)(
+  "reports unsafe tracked filenames (%s)",
+  async (kind) => {
+    await using test = await fixture();
+    if (kind === "generated") {
+      await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
+      await NodeFSP.mkdir(NodePath.join(test.workspace, "node_modules"));
+    }
+    const rawPath =
+      kind === "newline-index"
+        ? Buffer.from("z/unsafe\nname")
+        : Buffer.concat([Buffer.from("z/"), Buffer.from([255])]);
+    const blob = await git(test.workspace, "rev-parse", ":tracked.txt");
+    const updateIndex = (input: Buffer) =>
+      new Promise<void>((resolve, reject) => {
+        const child = NodeChildProcess.execFile(
+          "git",
+          ["-c", "core.hooksPath=/dev/null", "update-index", "-z", "--index-info"],
+          { cwd: test.workspace },
+          (error) => (error ? reject(error) : resolve()),
+        );
+        child.stdin!.end(input);
+      });
+    await updateIndex(Buffer.concat([Buffer.from(`100644 ${blob}\t`), rawPath, Buffer.from([0])]));
+    if (kind === "HEAD-only") {
+      await git(test.workspace, "commit", "-m", "tracked raw name");
+      await updateIndex(
+        Buffer.concat([Buffer.from(`0 ${"0".repeat(blob.length)}\t`), rawPath, Buffer.from([0])]),
+      );
+    }
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "tracked-name",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow(
+      `Workspace needs review: ${
+        kind === "newline-index"
+          ? "a filename cannot be represented safely"
+          : `${kind === "generated" ? "a tracked filename" : "a filename"} is not UTF-8 (name bytes: ${rawPath.toString("hex")})`
+      } (${JSON.stringify(NodePath.join(test.workspace, rawPath.toString("utf8")))})`,
+    );
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+      "unstaged\n",
+    );
+  },
+);
+
+it("batches retained metadata by argument bytes", async () => {
   await using test = await fixture();
   await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
   await NodeFSP.mkdir(NodePath.join(test.workspace, "node_modules"));
-  const rawPath = Buffer.concat([Buffer.from("z/"), Buffer.from([255])]);
-  const blob = await git(test.workspace, "rev-parse", ":tracked.txt");
-  await new Promise<void>((resolve, reject) => {
-    const child = NodeChildProcess.execFile(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "update-index", "-z", "--index-info"],
-      { cwd: test.workspace },
-      (error) => (error ? reject(error) : resolve()),
-    );
-    child.stdin!.end(Buffer.concat([Buffer.from(`100644 ${blob}\t`), rawPath, Buffer.from([0])]));
+  const retained = NodePath.join(test.workspace, "retained");
+  await NodeFSP.mkdir(retained);
+  for (let index = 0; index < 500; index++)
+    await NodeFSP.writeFile(NodePath.join(retained, `file-${index}`), "x");
+  using commands = vi.spyOn(NodeChildProcess, "execFile");
+  await test.store.capture({
+    sourcePath: test.workspace,
+    operationId: "metadata-batch",
+    ownerBinding: "fixture-owner",
   });
-  await expect(
-    test.store.capture({
-      sourcePath: test.workspace,
-      operationId: "tracked-name",
-      ownerBinding: "fixture-owner",
-    }),
-  ).rejects.toThrow(
-    `Workspace needs review: a tracked filename is not UTF-8 (name bytes: ${rawPath.toString("hex")}) (${JSON.stringify(NodePath.join(test.workspace, rawPath.toString("utf8")))})`,
+  const utility = HostProcess.Platform.defaultValue() === "darwin" ? "/usr/bin/xattr" : "getfattr";
+  const inspections = commands.mock.calls.filter(
+    ([program, args]) =>
+      program === utility &&
+      Array.isArray(args) &&
+      args.filter(
+        (name) =>
+          typeof name === "string" &&
+          (name === test.workspace || name.startsWith(`${test.workspace}/`)),
+      ).length > 1,
   );
-  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
-    "unstaged\n",
-  );
+  // Two metadata checks for each before, captured and final comparison inventory.
+  expect(inspections).toHaveLength(6);
 });
 
 it("reports the private index path and unsupported extension without removing source", async () => {

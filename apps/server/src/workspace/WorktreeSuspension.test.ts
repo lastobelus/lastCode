@@ -25,6 +25,7 @@ import {
   createWorktreeSuspensionStore,
   type WorktreeSuspensionStoreOptions,
 } from "@t3tools/shared/worktreeSuspension";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -2665,7 +2666,7 @@ it.live(
     ),
 );
 
-it.live.each(["removed", "regenerable"] as const)(
+it.live.each(["removed", "regenerable", "regenerable-metadata", "regenerable-acl"] as const)(
   "automatically saves retained source after an oversized local artifact is %s",
   (resolution) =>
     realGit((f) =>
@@ -2699,13 +2700,18 @@ it.live.each(["removed", "regenerable"] as const)(
         expect(
           yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
         ).toEqual(journals);
-        if (resolution === "regenerable") {
+        if (resolution !== "removed") {
           yield* Effect.promise(async () => {
             await NodeFSP.rename(dependencyPath, NodePath.join(f.workspace, "node_modules"));
             await NodeFSP.appendFile(NodePath.join(f.workspace, ".gitignore"), "node_modules/\n");
           });
-          const legacyReason =
-            "Workspace kept: a file exceeds the preservation limit. Existing files and recovery data have been retained.";
+          const legacyFailure =
+            resolution === "regenerable-metadata"
+              ? "extended attributes exceed the record limit"
+              : resolution === "regenerable-acl"
+                ? "ACLs or filesystem flags are unsupported"
+                : "a file exceeds the preservation limit";
+          const legacyReason = `Workspace kept: ${legacyFailure}. Existing files and recovery data have been retained.`;
           yield* h.registry.put(
             {
               ...failed,
@@ -2765,11 +2771,12 @@ it.live.each(["removed", "regenerable"] as const)(
     ),
 );
 
-it.live.each(["manual", "activity", "policy"] as const)(
+it.live.each(["manual", "activity", "policy", "policy-metadata"] as const)(
   "settles unsupported captures and allows %s retry after restart",
   (retry) =>
     realGit((f) =>
       Effect.gen(function* () {
+        const platform = yield* HostProcess.Platform;
         const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
         untouchedOwners(h.threads);
         yield* h.service.previewSuspend({ threadId: firstId });
@@ -2802,10 +2809,21 @@ it.live.each(["manual", "activity", "policy"] as const)(
         expect(
           yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
         ).toEqual(journals);
-        if (retry === "policy") {
+        if (retry === "policy" || retry === "policy-metadata") {
           const blocked = (yield* restarted.registry.list)[0]!;
-          const legacyReason =
-            "Workspace kept: hardlinked files extend outside the workspace. Existing files and recovery data have been retained.";
+          const metadata = retry === "policy-metadata";
+          if (metadata) {
+            yield* Effect.promise(async () => {
+              await NodeFSP.unlink(NodePath.join(f.root, "external-hardlink"));
+              const file = NodePath.join(f.workspace, "tracked");
+              if (platform === "darwin")
+                await execute("/usr/bin/xattr", ["-sw", "com.example.review-note", "retain", file]);
+              else await execute("setfattr", ["-n", "user.review-note", "-v", "retain", file]);
+            });
+          }
+          const legacyReason = metadata
+            ? "Workspace kept: extended attributes are unsupported. Existing files and recovery data have been retained."
+            : "Workspace kept: hardlinked files extend outside the workspace. Existing files and recovery data have been retained.";
           yield* restarted.registry.put(
             {
               ...blocked,
@@ -2817,8 +2835,16 @@ it.live.each(["manual", "activity", "policy"] as const)(
           yield* restarted.service.sweep;
           const reviewed = (yield* restarted.registry.list)[0]!;
           expect(reviewed.captureFailure?.reason).toContain(
-            `Workspace needs review: hardlinked files extend outside the workspace (${JSON.stringify(NodePath.join(f.workspace, "tracked"))})`,
+            metadata
+              ? "Workspace needs review: extended attributes are unsupported"
+              : `Workspace needs review: hardlinked files extend outside the retained workspace (${JSON.stringify(NodePath.join(f.workspace, "tracked"))})`,
           );
+          if (metadata)
+            expect(reviewed.captureFailure?.reason).toContain(
+              JSON.stringify(
+                platform === "darwin" ? NodePath.join(f.workspace, "tracked") : f.workspace,
+              ),
+            );
           const retriedJournals = yield* Effect.promise(() =>
             NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots")),
           );

@@ -145,12 +145,29 @@ const needsCapturePolicyRetry = (record: CheckoutAuthority) => {
     "the workspace exceeds the path limit",
     "a filename cannot be represented safely",
     "a filename is not UTF-8",
+    "the staged tree contains unsupported entries",
+    "the staging area exceeds preservation limits",
+    "this Git index format is unsupported",
+    "conflicted or extended Git index entries are unsupported",
     "the Git index has unsupported extensions",
+    "the Git-backed payloads exceed preservation limits",
+    "the Git pack inventory exceeds preservation limits",
+    "private Git history exceeds preservation limits",
     "hardlinked files are unsupported",
     "hardlinked files extend outside the workspace",
-    "extended attributes are unsupported (com.apple.FinderInfo at ",
-    "extended attributes are unsupported (com.apple.lastuseddate#PS at ",
-    "extended attributes are unsupported (com.apple.fileprovider.ignore#P at ",
+    // Dropping system attributes or pruning a generated tree can clear any of
+    // these metadata refusals, including unknown attributes inside that tree.
+    "extended attribute names are unsupported",
+    "extended attribute paths could not be verified",
+    "extended attributes are unsupported",
+    "extended attributes exceed the record limit",
+    "extended attributes exceed the value limit or are invalid",
+    "extended attributes exceed the byte limit",
+    "workspace metadata exceeds the byte limit",
+    "ACLs or filesystem flags are unsupported",
+    "ACLs are unsupported",
+    "filesystem flags are unsupported",
+    "filesystem flags could not be verified",
   ].some((legacy) => reason.startsWith(`Workspace kept: ${legacy}`));
 };
 const safeFailure = (cause: unknown) =>

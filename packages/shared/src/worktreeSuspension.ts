@@ -374,11 +374,24 @@ const verifyGitObjects = async (
     ]);
     let stagedBytes = 0;
     let entryCount = 0;
-    for (const line of listing.toString("utf8").split("\0")) {
-      if (line === "") continue;
-      const match = /^(\d+) (blob|tree|commit) ([a-f0-9]+) +([\d-]+)\t(.+)$/u.exec(line);
-      if (match === null) refuse("the staged tree contains unsupported entries");
-      validRelativePath(match![5]!);
+    for (let offset = 0; offset < listing.length;) {
+      const end = listing.indexOf(0, offset);
+      if (end < 0) refuse("the staged tree contains unsupported entries", snapshot.sourcePath);
+      const record = listing.subarray(offset, end);
+      offset = end + 1;
+      const separator = record.indexOf(9);
+      if (separator < 0)
+        refuse("the staged tree contains unsupported entries", snapshot.sourcePath);
+      const rawName = record.subarray(separator + 1);
+      const name = rawName.toString("utf8");
+      const absolute = NodePath.join(snapshot.sourcePath, name);
+      if (!Buffer.from(name).equals(rawName))
+        refuse(`a filename is not UTF-8 (name bytes: ${rawName.toString("hex")})`, absolute);
+      validRelativePath(name, snapshot.sourcePath);
+      const match = /^(\d+) (blob|tree|commit) ([a-f0-9]+) +([\d-]+)$/u.exec(
+        record.subarray(0, separator).toString("ascii"),
+      );
+      if (match === null) refuse("the staged tree contains unsupported entries", absolute);
       const size = match![4] === "-" ? 0 : Number(match![4]);
       stagedBytes += size;
       entryCount += 1;
@@ -387,15 +400,13 @@ const verifyGitObjects = async (
         stagedBytes > limits.maxBytes ||
         entryCount > limits.maxEntries
       )
-        refuse(
-          "the staging area exceeds preservation limits",
-          NodePath.join(snapshot.sourcePath, match![5]!),
-        );
+        refuse("the staging area exceeds preservation limits", absolute);
       if (match![2] === "commit") {
-        if (match![1] !== "160000") refuse("the staged tree contains unsupported entries");
+        if (match![1] !== "160000")
+          refuse("the staged tree contains unsupported entries", absolute);
       } else {
         objects.set(match![3]!, match![2]!);
-        const expected = expectedFiles.get(match![5]!);
+        const expected = expectedFiles.get(name);
         if (tree === snapshot.indexTree && match![2] === "blob" && expected?.size === size) {
           const entries = indexBlobs.get(match![3]!) ?? [];
           entries.push(expected);
@@ -682,7 +693,8 @@ const metadataCheck = async (
     for (const name of retainedPaths) {
       const size = Buffer.byteLength(name) + 1;
       if (size > 32 * 1024) refuse("a metadata path exceeds inspection limits", name);
-      if (batch.length === 128 || bytes + size > 32 * 1024) {
+      // Leave argument/environment headroom without a per-file process cap.
+      if (bytes + size > 128 * 1024) {
         await inspectBatch(batch);
         batch = [];
         bytes = 0;
@@ -701,7 +713,8 @@ const metadataCheck = async (
     const paths = new Set(["", ...entries.map((entry) => entry.path)]);
     let metadataBytes = 0;
     const text = attributes.toString("utf8");
-    if (!Buffer.from(text).equals(attributes)) refuse("extended attribute names are unsupported");
+    if (!Buffer.from(text).equals(attributes))
+      refuse("extended attribute names are unsupported", root);
     for (const line of text.split("\n").filter(Boolean).sort()) {
       const separator = recursive ? line.lastIndexOf(": ") : -1;
       const absolute = recursive ? line.slice(0, separator) : root;
@@ -714,10 +727,10 @@ const metadataCheck = async (
         path === ".." ||
         path.startsWith(`..${NodePath.sep}`)
       )
-        refuse("extended attribute paths could not be verified");
+        refuse("extended attribute paths could not be verified", root);
       if (disposableAttribute(name)) continue;
       if (attributeLimits === undefined || !paths.has(path) || !supportedAttribute(name))
-        refuse(`extended attributes are unsupported (${name} at ${absolute})`);
+        refuse(`extended attributes are unsupported (${name})`, absolute);
       if (captured.length >= MAX_ATTRIBUTES)
         refuse("extended attributes exceed the record limit", absolute);
       const value = await command(
@@ -750,7 +763,7 @@ const metadataCheck = async (
         fields[0]?.includes("+") ||
         (fields[4] !== "-" && !(attributeLimits !== undefined && fields[4] === "hidden"))
       ) {
-        refuse("ACLs or filesystem flags are unsupported");
+        refuse("ACLs or filesystem flags are unsupported", root);
       }
       hasHidden ||= fields[4] === "hidden";
     }
@@ -771,17 +784,19 @@ const metadataCheck = async (
         const text = values.toString("utf8");
         const flags = text.trimEnd().split("\n");
         if (!/^(?:[0-9]+\n)+$/u.test(text) || flags.length !== batch.length)
-          refuse("filesystem flags could not be verified");
+          refuse("filesystem flags could not be verified", root);
         for (let index = 0; index < batch.length; index++) {
           if (flags[index] === "32768" && batch[index] !== ".git") hiddenPaths.push(batch[index]!);
-          else if (flags[index] !== "0") refuse("ACLs or filesystem flags are unsupported");
+          else if (flags[index] !== "0")
+            refuse("ACLs or filesystem flags are unsupported", NodePath.join(root, batch[index]!));
         }
         batch = [];
         argumentBytes = 0;
       };
       for (const name of flagPaths) {
         const bytes = Buffer.byteLength(NodePath.join(root, name)) + 1;
-        if (bytes > 32 * 1024) refuse("a metadata path exceeds inspection limits");
+        if (bytes > 32 * 1024)
+          refuse("a metadata path exceeds inspection limits", NodePath.join(root, name));
         if (batch.length === 128 || argumentBytes + bytes > 32 * 1024) await inspectFlags();
         batch.push(name);
         argumentBytes += bytes;
@@ -804,7 +819,7 @@ const metadataCheck = async (
           "--",
           root,
         ]);
-    if (attributes.length !== 0) refuse("extended attributes are unsupported");
+    if (attributes.length !== 0) refuse("extended attributes are unsupported", root);
     const acls = pruned
       ? await inspectRetained("getfacl", ["-P", "-c", "-p", "-n", "--"])
       : await command("getfacl", [
@@ -822,7 +837,7 @@ const metadataCheck = async (
         .split("\n")
         .some((line) => line !== "" && !/^(user|group|other)::[rwx-]{3}$/u.test(line))
     ) {
-      refuse("ACLs are unsupported");
+      refuse("ACLs are unsupported", root);
     }
     // lsattr fails closed on filesystems that cannot report persistent flags.
     const names = [
@@ -839,7 +854,7 @@ const metadataCheck = async (
           .split("\n")
           .some((line) => /^[a-zA-Z-]+\s/u.test(line) && /[^e-]/u.test(line.split(/\s/u)[0] ?? ""))
       ) {
-        refuse("filesystem flags are unsupported");
+        refuse("filesystem flags are unsupported", root);
       }
     }
     return { attributes: [], hiddenPaths: [] };
@@ -1079,7 +1094,7 @@ const inventory = async (
     for (const group of linkGroups.values())
       if (group.paths.length !== group.count)
         refuse(
-          "hardlinked files extend outside the workspace",
+          "hardlinked files extend outside the retained workspace",
           NodePath.join(root, group.paths[0]!),
         );
     const metadata = await metadataCheck(
