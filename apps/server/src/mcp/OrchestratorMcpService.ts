@@ -1756,7 +1756,12 @@ const make = Effect.gen(function* () {
   };
 
   const resolveTarget = Effect.fn("OrchestratorMcpService.resolveTarget")(function* (input: {
-    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    readonly parent: {
+      readonly thread: Pick<
+        OrchestrationV2ThreadProjection["thread"],
+        "modelSelection" | "projectId"
+      >;
+    };
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
     /** Receipt replays bypass current settings because they start no work. Dispatch must reuse the checked command ID. */
@@ -1899,64 +1904,37 @@ const make = Effect.gen(function* () {
 
   const validateScheduledTaskModel = Effect.fn("OrchestratorMcpService.validateScheduledTaskModel")(
     function* (projectId: ProjectId, requested: OrchestratorMcpScheduledTaskModel) {
-      const selection: ModelSelection = {
-        instanceId: requested.providerInstanceId,
-        model: requested.model,
-        ...(requested.options === undefined ? {} : { options: requested.options }),
-      };
-      // Match orchestrator_capabilities, which lists the project folder's own models too.
       const { workspaceRoot } = yield* requireProject(projectId);
-      const machineProviders = yield* loadProviders;
-      const machineProvider = machineProviders.find(
-        (candidate) => candidate.instanceId === selection.instanceId,
+      const { modelSelection } = yield* resolveTargetRechecking({
+        // Resolve exactly as delegate_task does, without inheriting the caller's options.
+        parent: {
+          thread: {
+            projectId,
+            modelSelection: { instanceId: requested.providerInstanceId, model: requested.model },
+          },
+        },
+        target: requested,
+        providers: yield* loadProviders,
+        cwd: workspaceRoot,
+      }).pipe(
+        Effect.mapError((error) =>
+          error.code === "provider_unavailable" || error.code === "model_unavailable"
+            ? failure("invalid_request", error.message)
+            : error,
+        ),
       );
-      const scanned =
-        machineProvider?.enabled === true &&
-        !machineProvider.workspaceSnapshots?.some((snapshot) => snapshot.cwd === workspaceRoot)
-          ? yield* scanWorkspace(selection.instanceId, workspaceRoot)
-          : machineProviders;
-      const provider = withWorkspaceModels(scanned, workspaceRoot).find(
-        (candidate) => candidate.instanceId === selection.instanceId,
-      );
-      if (provider === undefined) {
-        return yield* failure(
-          "invalid_request",
-          `Provider instance ${selection.instanceId} is not registered.`,
-        );
-      }
-      const adapters = yield* loadOrchestrationCapableInstanceIds();
-      const constraints = providerConstraints(provider, adapters.has(selection.instanceId));
-      if (constraints.length > 0) {
-        return yield* failure(
-          "invalid_request",
-          `Provider ${selection.instanceId} cannot run scheduled tasks: ${constraints.join(" ")}`,
-        );
-      }
       if (
         !(yield* threadManagement.isProviderInstanceEnabledForProject({
           projectId,
-          instanceId: selection.instanceId,
+          instanceId: modelSelection.instanceId,
         }))
       ) {
         return yield* failure(
           "invalid_request",
-          `Provider instance ${selection.instanceId} is disabled for project ${projectId}.`,
+          `Provider instance ${modelSelection.instanceId} is disabled for project ${projectId}.`,
         );
       }
-      yield* requireAdvertisedModel(provider, selection.model).pipe(
-        Effect.mapError((error) => failure("invalid_request", error.message)),
-      );
-      const descriptors = advertisedModel(provider, selection.model)?.capabilities
-        ?.optionDescriptors;
-      const options = withLegacyUltracodeEffort(descriptors, selection.options);
-      const invalid = invalidOptionSelections(options ?? [], descriptors);
-      if (invalid.length > 0) {
-        return yield* failure(
-          "invalid_request",
-          `Model ${selection.model} on provider ${selection.instanceId} rejected options: ${invalid.join(" ")}`,
-        );
-      }
-      return { ...selection, ...(options === undefined ? {} : { options }) };
+      return modelSelection;
     },
   );
 

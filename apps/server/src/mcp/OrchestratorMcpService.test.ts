@@ -1845,6 +1845,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed(providers),
       refreshInstance: () => Effect.succeed(providers),
+      refreshWorkspaceSnapshot: () => Effect.succeed(providers),
     });
 
   const adapterRegistryLayer = (instanceIds: ReadonlyArray<ProviderInstanceId>) =>
@@ -4497,6 +4498,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   workspaceRoot,
                   defaultModelSelection: defaults.project,
                 } as never),
+              workspaceScanDirectory: (cwd) => Effect.succeed(cwd),
             }),
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(RemoteDelegation.RemoteDelegation)({}),
@@ -4685,6 +4687,64 @@ describe("OrchestratorMcpService provider resolution", () => {
             [existing.modelSelection, selectedModel, existing.modelSelection],
           );
         }),
+    );
+
+    it.effect("accepts an Antigravity suffixed model as delegate_task does", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const instanceId = ProviderInstanceId.make("antigravity");
+        const antigravity: ServerProvider = {
+          ...providerSnapshot({
+            instanceId,
+            driver: ProviderDriverKind.make("antigravity"),
+            model: "gemini-4-neon",
+          }),
+          models: [
+            {
+              slug: "gemini-4-neon",
+              name: "Gemini 4 Neon",
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "thinking",
+                    label: "Thinking",
+                    type: "select",
+                    role: "reasoning",
+                    options: [
+                      { id: "low", label: "Low" },
+                      { id: "high", label: "High" },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        };
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            service(
+              masterRepository,
+              yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+              existing,
+              saved,
+              undefined,
+              { providers: [antigravity] },
+            ),
+          ),
+        );
+        yield* mcp.scheduleTask(client, {
+          projectId,
+          prompt: "Check the build",
+          schedule,
+          modelSelection: { providerInstanceId: instanceId, model: "gemini-4-neon-high" },
+        });
+        assert.deepEqual((yield* Ref.get(saved)).at(0)?.modelSelection, {
+          instanceId,
+          model: "gemini-4-neon",
+          options: [{ id: "thinking", value: "high" }],
+        });
+      }),
     );
 
     it.effect("refuses to bind an explicit task model to the caller's thread", () =>
