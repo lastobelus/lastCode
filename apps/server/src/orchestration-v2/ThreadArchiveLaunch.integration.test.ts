@@ -190,6 +190,7 @@ function makeHarness(options: HarnessOptions = {}) {
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
       listPage: () => Effect.die("unused"),
+      listTemporaryOwnedBy: () => Effect.die("unused"),
       reconcileScripts: () => Effect.die("unused reconcileScripts"),
       getById: (id) =>
         Effect.succeed(
