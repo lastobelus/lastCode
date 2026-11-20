@@ -1380,6 +1380,7 @@ interface TrackedRunningCommandItem {
   readonly command: string;
   readonly aggregatedOutput?: string;
   readonly processId?: string;
+  readonly awaited?: boolean;
 }
 
 function isPersistentCodexDynamicTool(item: CodexDynamicToolItem): boolean {
@@ -2463,12 +2464,26 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           });
         });
 
+        // The awaited roster is adapter-owned; a caller's snapshot can predate a completion.
+        const withCurrentAwaitedTasks = (
+          nativeThreadId: string,
+          providerThread: OrchestrationV2ProviderThread,
+        ): OrchestrationV2ProviderThread => {
+          const current = rootProviderThreads.get(nativeThreadId)?.pendingBackgroundTasks;
+          return current === undefined
+            ? providerThread
+            : { ...providerThread, pendingBackgroundTasks: current };
+        };
+
         const rememberRootProviderThread = Effect.fnUntraced(function* (
           providerThread: OrchestrationV2ProviderThread,
         ) {
           const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
           if (nativeThreadId == null) return;
-          rootProviderThreads.set(nativeThreadId, providerThread);
+          rootProviderThreads.set(
+            nativeThreadId,
+            withCurrentAwaitedTasks(nativeThreadId, providerThread),
+          );
           yield* emitGoalUpdate(nativeThreadId);
         });
 
@@ -2712,6 +2727,40 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             return [remaining.size === 0, updated] as const;
           });
 
+        const emitAwaitedCommands = Effect.fn("CodexAdapterV2.emitAwaitedCommands")(function* (
+          providerThread: OrchestrationV2ProviderThread,
+        ) {
+          const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+          if (nativeThreadId == null) return;
+          const commands = yield* Ref.get(runningCommandItemsByTurn);
+          const contexts = [
+            ...(yield* Ref.get(activeTurns)).values(),
+            ...(yield* Ref.get(settledTurns)).values(),
+          ];
+          const pendingBackgroundTasks = contexts
+            .filter((context) => context.providerThread.id === providerThread.id)
+            .flatMap((context) => [...(commands.get(context.nativeTurnId)?.values() ?? [])])
+            .filter((item) => item.awaited === true)
+            .map((item) => ({
+              taskId: item.id,
+              kind: "command" as const,
+              description: item.command,
+              awaited: true as const,
+            }));
+          const updated = {
+            ...(rootProviderThreads.get(nativeThreadId) ?? providerThread),
+            pendingBackgroundTasks,
+            updatedAt: yield* DateTime.now,
+          };
+          rootProviderThreads.set(nativeThreadId, updated);
+          yield* emitGoalUpdate(nativeThreadId);
+          yield* emitProviderEvent({
+            type: "provider_thread.updated",
+            driver: CODEX_PROVIDER,
+            providerThread: updated,
+          });
+        });
+
         interface PendingMcpAppCapture {
           readonly item: Extract<CodexDynamicToolItem, { readonly type: "mcpToolCall" }>;
           readonly fiber: Fiber.Fiber<void>;
@@ -2842,6 +2891,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           const items = (yield* Ref.get(runningCommandItemsByTurn)).get(nativeTurnId);
           if (items === undefined || items.size === 0) {
             return;
+          }
+          if ([...items.values()].some((item) => item.awaited === true)) {
+            yield* Ref.update(runningCommandItemsByTurn, (current) => {
+              const updated = new Map(current);
+              updated.set(
+                nativeTurnId,
+                new Map([...items].map(([id, item]) => [id, { ...item, awaited: false }])),
+              );
+              return updated;
+            });
+            yield* emitAwaitedCommands(context.providerThread);
           }
           for (const tracked of items.values()) {
             const nodeId = idAllocator.derive.nodeFromProviderItem({
@@ -5466,6 +5526,31 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           });
         });
 
+        const clearSettledCommands = Effect.fn("CodexAdapterV2.clearSettledCommands")(function* (
+          nativeThreadId: string,
+        ) {
+          const completedAt = yield* DateTime.now;
+          for (const context of (yield* Ref.get(settledTurns)).values()) {
+            if (context.providerThread.nativeThreadRef?.nativeId !== nativeThreadId) continue;
+            const commands = (yield* Ref.get(runningCommandItemsByTurn)).get(context.nativeTurnId);
+            if (commands !== undefined) {
+              context.closedCommandItemIds = new Set(commands.keys());
+            }
+            yield* terminalizeRunningCommandItems(
+              context,
+              context.nativeTurnId,
+              "interrupted",
+              completedAt,
+            );
+            yield* Ref.update(runningCommandItemsByTurn, (current) => {
+              const updated = new Map(current);
+              updated.delete(context.nativeTurnId);
+              return updated;
+            });
+            yield* releaseSettledTurnIfIdle(context.nativeTurnId);
+          }
+        });
+
         // Unloading an idle thread kills its terminals without completing
         // their command items, while the shared provider session stays alive.
         yield* client.handleServerNotification("thread/closed", (payload) =>
@@ -5473,28 +5558,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const closing = threadClosings.get(payload.threadId);
             threadClosings.delete(payload.threadId);
             if (closing !== undefined) yield* Deferred.succeed(closing, undefined);
-            const completedAt = yield* DateTime.now;
-            for (const context of (yield* Ref.get(settledTurns)).values()) {
-              if (context.providerThread.nativeThreadRef?.nativeId !== payload.threadId) continue;
-              const commands = (yield* Ref.get(runningCommandItemsByTurn)).get(
-                context.nativeTurnId,
-              );
-              if (commands !== undefined) {
-                context.closedCommandItemIds = new Set(commands.keys());
-              }
-              yield* terminalizeRunningCommandItems(
-                context,
-                context.nativeTurnId,
-                "interrupted",
-                completedAt,
-              );
-              yield* Ref.update(runningCommandItemsByTurn, (current) => {
-                const updated = new Map(current);
-                updated.delete(context.nativeTurnId);
-                return updated;
-              });
-              yield* releaseSettledTurnIfIdle(context.nativeTurnId);
-            }
+            yield* clearSettledCommands(payload.threadId);
           }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1)),
         );
 
@@ -5704,7 +5768,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (payload.item.type === "commandExecution") {
               // Other tools can retain the context after thread closure.
               if (context.closedCommandItemIds?.has(payload.item.id)) return;
+              const awaited =
+                (yield* Ref.get(runningCommandItemsByTurn))
+                  .get(payload.turnId)
+                  ?.get(payload.item.id)?.awaited === true;
               const turnDrained = yield* clearRunningCommandItem(payload.turnId, payload.item.id);
+              // Ingestion can close on the last terminal command item, so clear its roster first.
+              if (awaited) yield* emitAwaitedCommands(context.providerThread);
               const userStopped = yield* Ref.modify(userStoppedCommandItemIds, (current) => {
                 const updated = new Set(current);
                 return [updated.delete(payload.item.id), updated] as const;
@@ -7858,7 +7928,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ) {
             if (command.type === "set") yield* validateCodexGoalObjective(command.objective);
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
-            rootProviderThreads.set(threadId, turnInput.providerThread);
+            rootProviderThreads.set(
+              threadId,
+              withCurrentAwaitedTasks(threadId, turnInput.providerThread),
+            );
             const readGoal = client
               .request("thread/goal/get", { threadId })
               .pipe(
@@ -8194,6 +8267,46 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }),
           canReuseContextUsage: canReuseCodexContextUsage,
           normalizeThreadLoadModelSelection: normalizeCodexThreadLoadModelSelection,
+          awaitBackgroundTasks: Effect.fn("CodexAdapterV2.awaitBackgroundTasks")(
+            function* ({ providerThread, taskIds, awaited }) {
+              const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+              if (nativeThreadId == null) return { matched: [] };
+              const contexts = [
+                ...(yield* Ref.get(activeTurns)).values(),
+                ...(yield* Ref.get(settledTurns)).values(),
+              ].filter(
+                (context) =>
+                  context.subagent === null &&
+                  context.providerThread.id === providerThread.id &&
+                  context.providerThread.nativeThreadRef?.nativeId === nativeThreadId,
+              );
+              const running = yield* Ref.get(runningCommandItemsByTurn);
+              const commands = contexts.flatMap((context) => [
+                ...(running.get(context.nativeTurnId)?.values() ?? []),
+              ]);
+              const matches = (item: TrackedRunningCommandItem, taskId: string) =>
+                item.processId === taskId || item.id === taskId;
+              const matched = [...new Set(taskIds)].filter((taskId) =>
+                commands.some((item) => matches(item, taskId)),
+              );
+              if (matched.length === 0) return { matched };
+              yield* Ref.update(runningCommandItemsByTurn, (current) => {
+                const updated = new Map(current);
+                for (const context of contexts) {
+                  const items = new Map(current.get(context.nativeTurnId));
+                  for (const [id, item] of items) {
+                    if (matched.some((taskId) => matches(item, taskId)))
+                      items.set(id, { ...item, awaited });
+                  }
+                  updated.set(context.nativeTurnId, items);
+                }
+                return updated;
+              });
+              yield* emitAwaitedCommands(providerThread);
+              return { matched };
+            },
+            (effect) => turnTerminalizationPermit.withPermits(1)(effect),
+          ),
           // Idle release can beat delayed subagent resumes: Codex reports them completed between turns with no resume-expected signal.
           hasPendingBackgroundWork: Effect.gen(function* () {
             for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
@@ -8302,7 +8415,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               });
               // Codex resumes an active goal's turns right after the response; own them before it.
               const previousRoot = rootProviderThreads.get(nativeThreadId);
-              rootProviderThreads.set(nativeThreadId, threadInput.providerThread);
+              rootProviderThreads.set(
+                nativeThreadId,
+                withCurrentAwaitedTasks(nativeThreadId, threadInput.providerThread),
+              );
               goalUpdatesHeld.add(nativeThreadId);
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(resume),
@@ -8311,7 +8427,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 Effect.onError(() =>
                   Effect.suspend(() => {
                     if (previousRoot !== undefined) {
-                      rootProviderThreads.set(nativeThreadId, previousRoot);
+                      rootProviderThreads.set(
+                        nativeThreadId,
+                        withCurrentAwaitedTasks(nativeThreadId, previousRoot),
+                      );
                     }
                     return releaseGoalUpdates(nativeThreadId);
                   }),
@@ -8330,7 +8449,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 nativeConversationHeadRef: threadInput.providerThread.nativeConversationHeadRef,
                 updatedAt: codexTimestamp(response.thread.updatedAt),
               } satisfies OrchestrationV2ProviderThread;
-              rootProviderThreads.set(nativeThreadId, resumed);
+              rootProviderThreads.set(
+                nativeThreadId,
+                withCurrentAwaitedTasks(nativeThreadId, resumed),
+              );
               yield* releaseGoalUpdates(nativeThreadId);
               return rootProviderThreads.get(nativeThreadId) ?? resumed;
             },
@@ -8545,6 +8667,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               // unarchives it on the next turn.
               if (unloadInput.archive === true) {
                 yield* client.request("thread/archive", { threadId: nativeThreadId });
+                yield* turnTerminalizationPermit.withPermits(1)(
+                  clearSettledCommands(nativeThreadId),
+                );
               } else {
                 // A resume may already wait on the pending entry; replacing it would strand that wait.
                 if (!threadClosings.has(nativeThreadId)) {
