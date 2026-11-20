@@ -141,17 +141,36 @@ The guarded merge command and checkpoint publisher use
 They acquire it only after preparation and validation, then verify the current
 source/base before writing main. An open PR never owns this lock; an actively
 executing merge owns it only through the final checks and merge request. A busy
-lock fails promptly so a later invocation can retry. Existing GitHub account and
-checkpoint push permissions remain unchanged.
+lock fails promptly so a later invocation can retry.
 
-Use the updated `pnpm --config.verify-deps-before-run=false lastcode:merge`
-command for all PR merges after deploying this change, and refresh the
-coordinator before resuming checkpoint runs.
-Direct GitHub UI merges, plain `gh pr merge`, old scripts, and manual pushes do
-not participate in this coordination. The checkpoint source lease still protects
-commits written outside it, but those writes can invalidate PR validation during
-a merge request. GitHub's merge API only conditions on the PR head, so the guarded
-command is required for the final base-validation guarantee.
+While holding the lock, each writer posts a successful `lastcode:merge` commit
+status on the commit it is about to write: the guarded merge on the PR head, and
+the checkpoint publisher on the promoted commit after pushing it to
+`refs/lastcode/main-write-candidate` so GitHub has it. The "Require guarded
+merge" ruleset on `lastcode/main` requires that status and has no bypass actors,
+so GitHub refuses a UI merge, plain `gh pr merge`, an old script, or a manual push
+even from an account that bypasses "Protect lastcode/main". This matters because
+only the guarded merge writes the carry trailers and retained source ref that
+checkpoints replay. A guarded merge that fails after posting resets the status to
+failure. Never post the status to get a merge through.
+
+To repair main by hand, set `repo` (`owner/name`), `old` (current remote main)
+and `fixed` (the repaired commit). Take the lock, stage and approve the commit,
+and push it; each step runs only if the one before succeeded:
+
+```sh
+owner=$(git commit-tree "$old^{tree}" -p "$old" -m "LastCode main write: repair") &&
+git push --no-verify --force-with-lease=refs/lastcode/main-write-lock: origin "$owner:refs/lastcode/main-write-lock" &&
+git push --no-verify --force origin "$fixed:refs/lastcode/main-write-candidate" &&
+gh api --method POST "repos/$repo/statuses/$fixed" -f state=success -f context=lastcode:merge &&
+git push --no-verify --force-with-lease="refs/heads/lastcode/main:$old" origin "$fixed:refs/heads/lastcode/main"
+```
+
+Then check `git ls-remote origin refs/heads/lastcode/main`. If main is `$fixed`,
+or the push was clearly rejected and you have posted `state=failure` on `$fixed`,
+release the lock with
+`git push --no-verify --force-with-lease="refs/lastcode/main-write-lock:$owner" origin :refs/lastcode/main-write-lock`.
+If the outcome is unclear, keep the lock as described below.
 
 If a network failure leaves a main update's outcome uncertain, retain the remote
 lock rather than allow a competing write while GitHub may still finish it.
@@ -160,7 +179,8 @@ originating process before releasing it. Never infer abandonment from age or
 steal a live lock. After confirming the operation cannot still write main, remove
 only the exact observed owner with
 `git push --no-verify --force-with-lease=refs/lastcode/main-write-lock:<owner-sha> origin :refs/lastcode/main-write-lock`.
-Then rerun the ordinary command to recheck the current source and validation.
+If an interrupted merge left its PR open, first post `state=failure` for
+`lastcode:merge` on the PR head so a later plain merge stays refused. Then rerun the ordinary command to recheck the current source and validation.
 
 That source snapshot is stored as `Source-Commit` in every annotated checkpoint
 and revision tag. Besides making publication idempotent, it lets the packaged

@@ -5,8 +5,14 @@ import * as NodeChildProcess from "node:child_process";
 import { DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES } from "../packages/contracts/src/lastcodePullRequestWatchQuietMinutes.ts";
 
 import { readPullRequestWatchQuietMinutes } from "./lib/lastcode-pr-watch-settings.ts";
+import { LASTCODE_GUARDED_MERGE_CONTEXT } from "./lastcode-main-write-lock.ts";
 
-import { type GithubCiEvidence, type RunGithubJson, readGithubCi } from "./lastcode-github-ci.ts";
+import {
+  type GithubCiEvidence,
+  type RunGithubJson,
+  readGithubCi,
+  readGuardedMergeRequired,
+} from "./lastcode-github-ci.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const LASTCODE_BASE_BRANCH = "lastcode/main";
@@ -90,6 +96,8 @@ export interface GateObservation {
   readonly review: ReviewState;
   readonly unresolvedReviewThreads: number;
   readonly local: LocalState | null;
+  // The base requires the status the guarded merge posts, so GitHub reports BLOCKED until then.
+  readonly guardedMergeRequired?: boolean;
 }
 
 export interface PinnedPullRequestIdentity {
@@ -734,13 +742,18 @@ export function evaluatePullRequestGates(
         "mergeability-unknown",
         `GitHub has not computed mergeability for pull request #${pr.number}; CI and review are complete. Rerun the check once, then report the blocker if it persists.`,
       );
-    if (pr.mergeStateStatus === "BLOCKED")
+    // Only lastcode:merge posts the guard, and it merges only into the main branch.
+    const awaitingGuard = current.guardedMergeRequired && expectedBase === LASTCODE_BASE_BRANCH;
+    if (pr.mergeStateStatus === "BLOCKED" && !awaitingGuard)
       return attention("merge-blocked", "A repository merge requirement remains unsatisfied.");
     const status = expectedBase === LASTCODE_BASE_BRANCH ? "ready" : "stacked-ready";
     return {
       status,
       reason: status,
-      detail: "Exact GitHub CI and the handled current-head Codex review are complete.",
+      detail:
+        awaitingGuard && pr.mergeStateStatus === "BLOCKED"
+          ? `Exact GitHub CI and the handled current-head Codex review are complete. GitHub blocks the merge until pnpm lastcode:merge posts ${LASTCODE_GUARDED_MERGE_CONTEXT}; it refuses if anything else still blocks it.`
+          : "Exact GitHub CI and the handled current-head Codex review are complete.",
     };
   }
   if (current.ci.state === "pending" && current.ci.reason === "run-registration") {
@@ -810,6 +823,7 @@ export function readPullRequestGates(
   const selected = chain(initial);
   const reviewData = readReviewData(repository, initial, execute);
   const ci = requireExactGithubCi(readGithubCi(repository, initial, execute));
+  const guardedMergeRequired = readGuardedMergeRequired(repository, initial.baseRefName, execute);
   const confirmed = read();
   const confirmedChain = chain(confirmed);
   const confirmedLocal = trackLocalState ? readLocalState() : null;
@@ -836,6 +850,7 @@ export function readPullRequestGates(
     review: reviewData.review,
     unresolvedReviewThreads: reviewData.unresolvedReviewThreads,
     local: confirmedLocal,
+    guardedMergeRequired,
   };
   if (terminalReady(observation)) {
     const finalReview = readReviewData(repository, confirmed, execute);
@@ -852,6 +867,7 @@ export function readPullRequestGates(
       review: finalReview.review,
       unresolvedReviewThreads: finalReview.unresolvedReviewThreads,
       local: finalLocal,
+      guardedMergeRequired,
     };
   }
   const decision = evaluatePullRequestGates(observation, selected.pullRequest.baseRefName, options);

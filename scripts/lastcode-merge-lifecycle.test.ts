@@ -40,46 +40,81 @@ function fixtureNodeExecutable(): string {
 
 describe("guarded merge lifecycle", () => {
   it.each([
-    { scenario: "base advances", advanceBase: true, carryGroup: undefined, behind: undefined },
+    {
+      scenario: "base advances",
+      advanceBase: true,
+      carryGroup: undefined,
+      behind: undefined,
+      guard: false,
+      statusFails: false,
+    },
     {
       scenario: "base stays unchanged",
       advanceBase: false,
       carryGroup: undefined,
       behind: undefined,
+      guard: false,
+      statusFails: false,
     },
     {
       scenario: "carry regrouping conflicts",
       advanceBase: false,
       carryGroup: "build-ci",
       behind: undefined,
+      guard: false,
+      statusFails: false,
     },
     {
       scenario: "carry compiles successfully",
       advanceBase: false,
       carryGroup: "resumable-actions",
       behind: undefined,
+      guard: false,
+      statusFails: false,
     },
     {
       scenario: "PR is behind main",
       advanceBase: false,
       carryGroup: undefined,
       behind: "unrelated",
+      guard: false,
+      statusFails: false,
     },
     {
       scenario: "PR conflicts with newer main",
       advanceBase: false,
       carryGroup: undefined,
       behind: "conflict",
+      guard: false,
+      statusFails: false,
     },
     {
       scenario: "checkpoint rewrote the tested base",
       advanceBase: false,
       carryGroup: undefined,
       behind: "rewritten",
+      guard: false,
+      statusFails: false,
+    },
+    {
+      scenario: "a ruleset requires the guarded-merge status",
+      advanceBase: false,
+      carryGroup: undefined,
+      behind: undefined,
+      guard: true,
+      statusFails: false,
+    },
+    {
+      scenario: "the status cannot be posted before a ruleset requires it",
+      advanceBase: false,
+      carryGroup: undefined,
+      behind: undefined,
+      guard: false,
+      statusFails: true,
     },
   ] as const)(
     "guards the final write without requesting a checkpoint: $scenario",
-    ({ advanceBase, carryGroup, behind }) => {
+    ({ advanceBase, carryGroup, behind, guard, statusFails }) => {
       const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-merge-lifecycle-"));
       try {
         const repo = NodePath.join(root, "repo");
@@ -89,6 +124,7 @@ describe("guarded merge lifecycle", () => {
         const lockMarker = NodePath.join(root, "lock-requested");
         const sourceMarker = NodePath.join(root, "source-published");
         const checkpointMarker = NodePath.join(root, "checkpoint-requested");
+        const statusLog = NodePath.join(root, "guard-statuses");
         const home = NodePath.join(root, "home");
         NodeFS.mkdirSync(bin);
         NodeFS.mkdirSync(home);
@@ -224,10 +260,17 @@ done
             mergeStateStatus: "CLEAN",
           },
           workflow: { state: "active" },
+          guard,
+          statusFails,
           rules: [
             {
               type: "required_status_checks",
-              parameters: { required_status_checks: [{ context: "CI Gate" }] },
+              parameters: {
+                required_status_checks: [
+                  { context: "CI Gate" },
+                  ...(guard ? [{ context: "lastcode:merge" }] : []),
+                ],
+              },
             },
           ],
           runs: {
@@ -281,8 +324,23 @@ const cp = require('node:child_process');
 const responses = JSON.parse(fs.readFileSync(process.env.TEST_RESPONSES, 'utf8'));
 const args = process.argv.slice(2);
 const endpoint = args.find(arg => arg.startsWith('repos/'));
+const statuses = fs.existsSync(process.env.TEST_STATUS_LOG) ? fs.readFileSync(process.env.TEST_STATUS_LOG, 'utf8') : '';
+const approved = statuses.endsWith('success ' + responses.pr.headRefOid + '\\n');
 let result;
-if (args[0] === 'pr' && args[1] === 'merge') {
+if (endpoint?.includes('/statuses/')) {
+  if (responses.statusFails) {
+    process.stderr.write('Resource not accessible by personal access token\\n');
+    process.exit(1);
+  }
+  if (!args.includes('context=lastcode:merge')) throw new Error('Unexpected status: ' + args.join(' '));
+  const state = args.find(arg => arg.startsWith('state=')).slice('state='.length);
+  fs.appendFileSync(process.env.TEST_STATUS_LOG, state + ' ' + endpoint.split('/').pop() + '\\n');
+  result = {};
+} else if (args[0] === 'pr' && args[1] === 'merge') {
+  if (responses.guard && !approved) {
+    process.stderr.write('Required status check "lastcode:merge" is expected.\\n');
+    process.exit(1);
+  }
   const git = (...gitArgs) => cp.execFileSync('git', gitArgs, { encoding: 'utf8' }).trim();
   git('fetch', 'origin', 'lastcode/main');
   const parent = git('rev-parse', 'FETCH_HEAD');
@@ -293,7 +351,8 @@ if (args[0] === 'pr' && args[1] === 'merge') {
   process.exit(0);
 } else if (args[0] === 'pr' && args[1] === 'view') {
   const merged = fs.existsSync(process.env.TEST_MERGE_MARKER);
-  result = {...responses.pr, state: merged ? 'MERGED' : 'OPEN', mergeCommit: merged ? { oid: fs.readFileSync(process.env.TEST_MERGE_MARKER, 'utf8') } : null};
+  const mergeStateStatus = responses.guard && !approved ? 'BLOCKED' : responses.pr.mergeStateStatus;
+  result = {...responses.pr, mergeStateStatus, state: merged ? 'MERGED' : 'OPEN', mergeCommit: merged ? { oid: fs.readFileSync(process.env.TEST_MERGE_MARKER, 'utf8') } : null};
 }
 else if (args[0] === 'api' && args[1] === 'graphql') result = responses.reviewThreads;
 else if (endpoint?.endsWith('/pulls/1/reviews?per_page=100')) result = responses.reviews;
@@ -327,6 +386,7 @@ process.stdout.write(JSON.stringify(result));
               TEST_LOCK_MARKER: lockMarker,
               TEST_SOURCE_MARKER: sourceMarker,
               TEST_CHECKPOINT_MARKER: checkpointMarker,
+              TEST_STATUS_LOG: statusLog,
             },
           },
         );
@@ -350,6 +410,10 @@ process.stdout.write(JSON.stringify(result));
         expect(NodeFS.existsSync(lockMarker)).toBe(!compilationConflict && !refused);
         expect(NodeFS.existsSync(sourceMarker)).toBe(Boolean(source) && merged);
         expect(NodeFS.existsSync(checkpointMarker)).toBe(false);
+        // The guard is posted on the exact head only after every check, just before the merge.
+        expect(NodeFS.existsSync(statusLog) ? NodeFS.readFileSync(statusLog, "utf8") : "").toBe(
+          merged && !statusFails ? `success ${head}\n` : "",
+        );
         const landed = git(root, ["--git-dir", origin, "rev-parse", "refs/heads/lastcode/main"]);
         if (merged) {
           const squash = NodeFS.readFileSync(marker, "utf8");

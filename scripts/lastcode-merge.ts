@@ -16,9 +16,17 @@ import {
   resolveRepoRoot,
   runGit,
 } from "./lib/lastcode-git.ts";
-import { type GithubCiEvidence, LASTCODE_CI_WORKFLOW, readGithubCi } from "./lastcode-github-ci.ts";
+import {
+  type GithubCiEvidence,
+  LASTCODE_CI_WORKFLOW,
+  readGithubCi,
+  readGuardedMergeRequired,
+} from "./lastcode-github-ci.ts";
 import { readReviewData, validateReviewForMerge } from "./lastcode-pr-gates.ts";
-import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
+import {
+  acquireMainWriteLock,
+  LASTCODE_GUARDED_MERGE_CONTEXT,
+} from "./lastcode-main-write-lock.ts";
 import { carrySquashBody, preserveCarrySource } from "./lastcode-carry-delivery.ts";
 
 import { validateCarryPullRequest } from "./lastcode-carry-ci.ts";
@@ -47,9 +55,11 @@ function writeSquashBody(body: string): { readonly cleanup: () => void; readonly
 
 // With strict status checks off, GitHub reports a PR that is behind its base as CLEAN, so
 // CLEAN is the only state that can merge. BEHIND means the up-to-date rule is back on.
+// While the guarded-merge status is required but not yet posted, GitHub reports BLOCKED.
 export function validatePullRequestForMerge(
   pullRequest: PullRequestForMerge,
   expectedHead: string,
+  awaitingGuardStatus = false,
 ): void {
   if (pullRequest.state !== "OPEN") {
     throw new Error(`Pull request #${pullRequest.number} is not open.`);
@@ -67,10 +77,45 @@ export function validatePullRequestForMerge(
       `Pull request #${pullRequest.number} points to ${pullRequest.headRefOid}, not local HEAD ${expectedHead}.`,
     );
   }
-  if (pullRequest.mergeable !== "MERGEABLE" || pullRequest.mergeStateStatus !== "CLEAN") {
+  const mergeState =
+    pullRequest.mergeStateStatus === "CLEAN" ||
+    (awaitingGuardStatus && pullRequest.mergeStateStatus === "BLOCKED");
+  if (pullRequest.mergeable !== "MERGEABLE" || !mergeState) {
     throw new Error(
       `Pull request #${pullRequest.number} is not cleanly mergeable (${pullRequest.mergeable}/${pullRequest.mergeStateStatus}).`,
     );
+  }
+}
+
+const GUARD_STATUS_SETTLE_ATTEMPTS = 10;
+const GUARD_STATUS_SETTLE_DELAY_MS = 3_000;
+
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+// GitHub recomputes mergeability asynchronously after a status arrives.
+export function awaitCleanAfterGuardStatus(
+  readPullRequest: () => PullRequestForMerge,
+  expectedHead: string,
+  sleep: (milliseconds: number) => void = sleepSync,
+): PullRequestForMerge {
+  for (let attempt = 1; ; attempt += 1) {
+    const pullRequest = readPullRequest();
+    const settling =
+      pullRequest.mergeable === "UNKNOWN" ||
+      pullRequest.mergeStateStatus === "UNKNOWN" ||
+      pullRequest.mergeStateStatus === "BLOCKED";
+    if (!settling || attempt >= GUARD_STATUS_SETTLE_ATTEMPTS) {
+      if (pullRequest.mergeStateStatus === "BLOCKED") {
+        throw new Error(
+          `GitHub still blocks pull request #${pullRequest.number} after the ${LASTCODE_GUARDED_MERGE_CONTEXT} status was posted, so another merge requirement is unsatisfied. Check the merge box (for example a CI Gate it still shows as expected).`,
+        );
+      }
+      validatePullRequestForMerge(pullRequest, expectedHead);
+      return pullRequest;
+    }
+    sleep(GUARD_STATUS_SETTLE_DELAY_MS);
   }
 }
 
@@ -259,7 +304,12 @@ function main(argv: ReadonlyArray<string>): void {
   ]);
 
   const pullRequest = readPullRequest(repoRoot, branch);
-  validatePullRequestForMerge(pullRequest, commit);
+  const guardRequired = readGuardedMergeRequired(
+    LASTCODE_GITHUB_REPOSITORY,
+    pullRequest.baseRefName,
+    <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
+  );
+  validatePullRequestForMerge(pullRequest, commit, guardRequired);
   assertMergesOntoBase(repoRoot, pullRequest, baseCommit, commit);
   const githubCi = readGithubCi(
     LASTCODE_GITHUB_REPOSITORY,
@@ -281,7 +331,7 @@ function main(argv: ReadonlyArray<string>): void {
       `Checked-out branch now resolves to pull request #${confirmedPullRequest.number}, not #${pullRequest.number}.`,
     );
   }
-  validatePullRequestForMerge(confirmedPullRequest, commit);
+  validatePullRequestForMerge(confirmedPullRequest, commit, guardRequired);
   assertMergesOntoBase(repoRoot, confirmedPullRequest, baseCommit, commit);
   runCommand(repoRoot, "git", [
     "fetch",
@@ -303,6 +353,7 @@ function main(argv: ReadonlyArray<string>): void {
   }
 
   const lock = acquireMainWriteLock(repoRoot, LASTCODE_ORIGIN_REMOTE, baseCommit, "merge");
+  let approved = false;
   try {
     // Check again after acquiring the cross-machine main-write lock. No CI or
     // review wait holds it; a checkpoint that won the race invalidates this run.
@@ -312,7 +363,7 @@ function main(argv: ReadonlyArray<string>): void {
     if (lockedPullRequest.number !== pullRequest.number) {
       throw new Error("The current branch resolves to a different pull request.");
     }
-    validatePullRequestForMerge(lockedPullRequest, commit);
+    validatePullRequestForMerge(lockedPullRequest, commit, guardRequired);
     assertMergesOntoBase(repoRoot, lockedPullRequest, baseCommit, commit);
     validateGithubCiForMerge(
       readGithubCi(
@@ -333,11 +384,27 @@ function main(argv: ReadonlyArray<string>): void {
       carrySource ? carrySquashBody(lockedPullRequest.body, carrySource) : lockedPullRequest.body,
     );
     try {
+      approved = true;
+      try {
+        lock.approve(LASTCODE_GITHUB_REPOSITORY, commit);
+      } catch (error) {
+        // Status write permission is separate from merge permission; it only matters once required.
+        if (guardRequired) throw error;
+        console.warn(`[lastcode:merge] ${error instanceof Error ? error.message : String(error)}`);
+      }
+      awaitCleanAfterGuardStatus(() => readPullRequest(repoRoot, branch), commit);
       lock.merge(squashMergeArguments(pullRequest.number, commit, squashBody.path));
     } finally {
       squashBody.cleanup();
     }
-  } catch (error) {
+  } catch (caught) {
+    const revokeFailure = approved ? lock.revoke(LASTCODE_GITHUB_REPOSITORY, commit) : null;
+    const error = revokeFailure
+      ? new Error(
+          `${caught instanceof Error ? caught.message : String(caught)}\n${revokeFailure}`,
+          { cause: caught },
+        )
+      : caught;
     try {
       lock.release();
     } catch (cleanupError) {
