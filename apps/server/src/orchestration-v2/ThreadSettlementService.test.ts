@@ -138,42 +138,6 @@ function persistedLink(
 }
 
 describe("isAutoSettlementCandidate", () => {
-  it("blocks open questions, reviews, and QA while allowing resolved and informational dashboard items", () => {
-    const item = {
-      id: "request-1",
-      title: "Request",
-      body: "Details",
-      status: "open" as const,
-      priority: "normal" as const,
-      effort: "quick" as const,
-      requiresComputer: false,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-    };
-    for (const kind of ["question", "review", "qa"] as const) {
-      expect(
-        ThreadSettlementService.isAutoSettlementCandidate(
-          shell({ dashboardItems: [{ ...item, kind }] }),
-          NOW_MS,
-        ),
-      ).toBe(false);
-      expect(
-        ThreadSettlementService.isAutoSettlementCandidate(
-          shell({ dashboardItems: [{ ...item, kind, status: "resolved" }] }),
-          NOW_MS,
-        ),
-      ).toBe(true);
-    }
-    for (const kind of ["metric", "progress", "summary"] as const) {
-      expect(
-        ThreadSettlementService.isAutoSettlementCandidate(
-          shell({ dashboardItems: [{ ...item, kind }] }),
-          NOW_MS,
-        ),
-      ).toBe(true);
-    }
-  });
-
   it("settles a thread whose only background work is a command left running", () => {
     expect(
       ThreadSettlementService.isAutoSettlementCandidate(

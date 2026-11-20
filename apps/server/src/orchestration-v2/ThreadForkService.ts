@@ -123,7 +123,6 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
         titleRegeneration: null,
         titleRenamed: false,
         activeProviderThreadId: null,
-        dashboardItems: [],
         actionResume: null,
         lineage: {
           parentThreadId: input.sourceProjection.thread.id,

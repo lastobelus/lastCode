@@ -156,7 +156,6 @@ describe("LastCode thread context menu", () => {
       "copy-thread-id",
       "new-thread-on-branch",
       "project-settings",
-      "open-dashboard",
       "handoff:handoff-1",
       "handoff-show-all",
     ]) {
@@ -177,7 +176,6 @@ describe("LastCode thread context menu", () => {
       "stop-thread-processes",
       "copy-path",
       "copy-thread-id",
-      "open-dashboard",
       "project-settings",
       "handoffs-heading",
       "handoff:handoff-1",
@@ -206,7 +204,6 @@ describe("LastCode thread context menu", () => {
       "mark-read",
       "open-creator",
       "copy-path",
-      "open-dashboard",
       "handoff:handoff-1",
     ]) {
       expect(menu.find((item) => item.id === id)?.disabled, id).not.toBe(true);

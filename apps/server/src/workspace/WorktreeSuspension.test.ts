@@ -1235,41 +1235,6 @@ it.live.each([
   ),
 );
 
-it.live("keeps a workspace with an actionable dashboard request until it is resolved", () =>
-  realGit((f) =>
-    Effect.gen(function* () {
-      const h = yield* harness(f);
-      const owner = h.threads.get(firstId)!;
-      const request = {
-        id: "review-request",
-        title: "Review the result",
-        body: "Review is still needed.",
-        kind: "review" as const,
-        status: "open" as const,
-        priority: "normal" as const,
-        effort: "quick" as const,
-        requiresComputer: false,
-        createdAt: DateTime.formatIso(at),
-        updatedAt: DateTime.formatIso(at),
-      };
-      h.threads.set(firstId, { ...owner, dashboardItems: [request] });
-      expect(
-        (yield* h.service.previewSuspend({ threadId: firstId }).pipe(Effect.flip)).reason,
-      ).toBe("protected");
-      expect(
-        yield* Effect.promise(() =>
-          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
-        ),
-      ).toBe("working\n");
-      h.threads.set(firstId, {
-        ...owner,
-        dashboardItems: [{ ...request, status: "resolved" }],
-      });
-      expect((yield* h.service.previewSuspend({ threadId: firstId })).token).toBeTruthy();
-    }),
-  ),
-);
-
 it.live(
   "saves two real owners, survives GC, and restores the exact index and ignored notes before acquisition",
   () =>

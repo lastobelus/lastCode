@@ -90,7 +90,6 @@ export function makeSubagentChildThread(input: {
     providerInstanceId: input.providerInstanceId,
     modelSelection: input.modelSelection,
     activeProviderThreadId: input.activeProviderThreadId,
-    dashboardItems: [],
     actionResume: null,
     persistent: false,
     annotation: null,

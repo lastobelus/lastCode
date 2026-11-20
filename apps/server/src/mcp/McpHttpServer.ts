@@ -107,8 +107,6 @@ import * as ActionResumeHandlers from "./toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
 import * as WorktreeSuspensionHandlers from "./toolkits/worktreeSuspension/handlers.ts";
 import { WorktreeSuspensionToolkit } from "./toolkits/worktreeSuspension/tools.ts";
-import * as ThreadDashboardHandlers from "./toolkits/threadDashboard/handlers.ts";
-import { ThreadDashboardToolkit } from "./toolkits/threadDashboard/tools.ts";
 
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
   requestUrl(request).pipe(
@@ -1502,11 +1500,6 @@ export const layerWorktreeSuspensionToolkit = toolkitRegistration(
   WorktreeSuspensionHandlers.layer,
 );
 
-const layerThreadDashboardToolkit = toolkitRegistration(
-  ThreadDashboardToolkit,
-  ThreadDashboardHandlers.layer,
-);
-
 const makeMcpTransport = <RA, RE, RR>(
   path: McpEndpointPath,
   registrations: Layer.Layer<RA, RE, RR>,
@@ -1541,7 +1534,6 @@ export const layerTools = Layer.mergeAll(
   layerMessageToolkit,
   layerActionResumeToolkit,
   layerWorktreeSuspensionToolkit,
-  layerThreadDashboardToolkit,
 );
 
 const layerToolExposure = Layer.effect(
@@ -1586,8 +1578,6 @@ export const layerToolSearch = Layer.mergeAll(
 
 const layerFullToolkit = layerMcpTransport(Layer.mergeAll(layerTools, layerToolSearch));
 
-// Sessions created while agent browser access is disabled still receive the
-// dashboard tools, but preview tools stay absent from discovery entirely.
 const layerThreadOnlyToolkit = makeMcpTransport(
   "/mcp/thread",
   Layer.mergeAll(
@@ -1599,7 +1589,6 @@ const layerThreadOnlyToolkit = makeMcpTransport(
     layerEnvironmentToolkit,
     layerWorktreeToolkitRegistration,
     layerWorktreeSuspensionToolkit,
-    layerThreadDashboardToolkit,
     layerPullRequestsToolkit,
     layerToolSearch,
   ),

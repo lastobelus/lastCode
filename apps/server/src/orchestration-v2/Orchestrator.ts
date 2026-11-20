@@ -68,9 +68,6 @@ import {
   isCompactionCommandMessage,
   isOrchestrationV2WorkActive,
   EventId,
-  hasOpenActionableDashboardItems,
-  isActionableDashboardItem,
-  THREAD_DASHBOARD_MAX_ITEMS,
   isProviderNativeSubagentThread,
   isOwnedSubagentThread,
   getInteractiveThreadParentThreadId,
@@ -862,8 +859,6 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.annotation.upsert":
     case "thread.annotation.resolve":
     case "thread.annotation.reopen":
-    case "thread.dashboard-item.upsert":
-    case "thread.dashboard-item.remove":
     case "thread.create":
     case "thread.archive.complete":
     case "thread.archive.fail":
@@ -4396,7 +4391,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             owner.worktreeSuspension?.keepWorkspace === true ||
             owner.pendingRuntimeRequest !== null ||
             (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-            hasOpenActionableDashboardItems(owner.dashboardItems) ||
             owner.archivePending != null ||
             (owner.actionResume != null &&
               owner.actionResume.delivery !== "delivered" &&
@@ -4801,9 +4795,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.persistence.set"
           | "thread.annotation.upsert"
           | "thread.annotation.resolve"
-          | "thread.annotation.reopen"
-          | "thread.dashboard-item.upsert"
-          | "thread.dashboard-item.remove";
+          | "thread.annotation.reopen";
       }
     >,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -4859,50 +4851,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...thread,
         persistent: command.persistent,
         updatedAt: now,
-      });
-      return;
-    }
-    if (
-      command.type === "thread.dashboard-item.upsert" ||
-      command.type === "thread.dashboard-item.remove"
-    ) {
-      const items = thread.dashboardItems ?? [];
-      let dashboardItems;
-      if (command.type === "thread.dashboard-item.upsert") {
-        const previous = items.find((item) => item.id === command.item.id);
-        if (previous === undefined && items.length >= THREAD_DASHBOARD_MAX_ITEMS) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: `Thread ${command.threadId} already has ${THREAD_DASHBOARD_MAX_ITEMS} dashboard items.`,
-          });
-        }
-        const item = {
-          ...command.item,
-          createdAt: previous?.createdAt ?? nowIso,
-          updatedAt: nowIso,
-        };
-        dashboardItems =
-          previous === undefined
-            ? [...items, item]
-            : items.map((existing) => (existing.id === item.id ? item : existing));
-      } else {
-        dashboardItems = items.filter((item) => item.id !== command.itemId);
-      }
-      yield* emitThread("thread.metadata-updated", {
-        ...thread,
-        dashboardItems,
-        updatedAt: now,
-        ...(command.type === "thread.dashboard-item.upsert" &&
-        isActionableDashboardItem(command.item)
-          ? {
-              settledOverride: null,
-              settledAt: null,
-              unsettledAt: null,
-              snoozedUntil: null,
-              snoozedAt: null,
-            }
-          : {}),
       });
       return;
     }
@@ -18440,8 +18388,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.annotation.upsert":
       case "thread.annotation.resolve":
       case "thread.annotation.reopen":
-      case "thread.dashboard-item.upsert":
-      case "thread.dashboard-item.remove":
         yield* dispatchThreadMetadata(command, events);
         break;
       case "thread.create": {
@@ -18469,7 +18415,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ),
           );
         if (
-          hasOpenActionableDashboardItems(thread.dashboardItems) ||
           thread.settledOverride !== null ||
           DateTime.toEpochMillis(thread.updatedAt) > DateTime.toEpochMillis(command.snapshotAt) ||
           (yield* projectionStore

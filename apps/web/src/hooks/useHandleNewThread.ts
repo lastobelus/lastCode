@@ -4,7 +4,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@t3tools/contracts";
-import { type AnyRouter, useLocation, useRouter } from "@tanstack/react-router";
+import { type AnyRouter, useRouter } from "@tanstack/react-router";
 import {
   composerDraftHasUserContent,
   markPromotedDraftThreadByRef,
@@ -43,7 +43,6 @@ import { environmentSummaries } from "../state/presentation";
 import { useThreadRouteTarget } from "./useThreadRouteTarget";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
-import { resolveDashboardProjectRef } from "../dashboardProjectScope";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { getClientSettings } from "./useSettings";
 import { getLocalStorageItem, useLocalStorage } from "./useLocalStorage";
@@ -529,7 +528,6 @@ export function resolveDefaultProjectRef(
 }
 
 export function useHandleNewThread() {
-  const location = useLocation();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const [lastUsedProjectKey] = useLocalStorage(
     LAST_USED_PROJECT_STORAGE_KEY,
@@ -563,7 +561,7 @@ export function useHandleNewThread() {
   return {
     activeDraftThread,
     activeThread,
-    defaultProjectRef: resolveDashboardProjectRef(location, projects) ?? defaultProjectRef,
+    defaultProjectRef,
     defaultProjectFallbackReady,
     handleNewThread,
     routeDraftId,

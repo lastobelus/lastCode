@@ -117,16 +117,6 @@ export function useLastCodeProjectMenu(
     const clicked = await api.contextMenu.show(items, position);
     const actionHandlers = new Map<string, () => Promise<void> | void>([
       [
-        "open-dashboard",
-        () => {
-          if (isMobile) setOpenMobile(false);
-          void router.navigate({
-            to: "/dashboard",
-            search: { environmentId: project.environmentId, projectId: project.id },
-          });
-        },
-      ],
-      [
         "project-settings",
         () => {
           if (isMobile) setOpenMobile(false);

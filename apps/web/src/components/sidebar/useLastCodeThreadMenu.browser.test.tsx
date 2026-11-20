@@ -266,10 +266,10 @@ describe("thread menu binding and scoped targets", () => {
       await fixture.pending;
     });
     expect(mocks.persistence).not.toHaveBeenCalled();
-    await select(screen.container, "open-dashboard");
+    await select(screen.container, "project-settings");
     expect(mocks.navigate).toHaveBeenCalledWith({
-      to: "/dashboard",
-      search: { environmentId: env, projectId: id },
+      to: "/projects/$projectKey",
+      params: { projectKey: project.projectKey },
     });
     const items = mocks.menu.mock.calls.at(-1)![0];
     expect(items.find((item) => item.id === "mark-unread")?.disabled).toBe(true);

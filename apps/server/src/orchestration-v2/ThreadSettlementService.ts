@@ -9,7 +9,6 @@ import {
   CommandId,
   isOrchestrationV2WorkActive,
   isOwnedSubagentThread,
-  hasOpenActionableDashboardItems,
   type ThreadId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
@@ -171,7 +170,6 @@ export function isAutoSettlementCandidate(
   if (thread.pendingRuntimeRequest !== null) return false;
   // A guest is waiting on the owner; settling would hide the Request.
   if ((thread.pendingGuestMessageCount ?? 0) > 0) return false;
-  if (hasOpenActionableDashboardItems(thread.dashboardItems)) return false;
   // A live run, or background work that will wake the agent, is not
   // staleness. A dev server left running is: the agent is done.
   if (thread.activityRunStatus != null) return false;

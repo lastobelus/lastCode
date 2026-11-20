@@ -240,8 +240,6 @@ const makeTestRelay = Effect.fnUntraced(function* (
     ensureLegacyTranscript: unused,
     dispatch: unused,
     setThreadParents: unused,
-    upsertDashboardItem: unused,
-    removeDashboardItem: unused,
     deleteMany: unused,
     dispatchLaunch: unused,
     searchThread: () => Effect.die("unused"),

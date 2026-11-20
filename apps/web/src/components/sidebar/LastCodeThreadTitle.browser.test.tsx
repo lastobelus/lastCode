@@ -50,7 +50,6 @@ vi.mock("../ThreadStatusIndicators", () => ({
   ChangeRequestStatusIcon: () => null,
   PrStatusTooltipContent: () => null,
 }));
-vi.mock("../dashboard/ThreadDashboardIndicator", () => ({ ThreadDashboardIndicator: () => null }));
 const presentation = {
   isAgentCreated: false,
   creatorDescription: null,

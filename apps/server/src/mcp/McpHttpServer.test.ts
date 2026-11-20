@@ -296,11 +296,12 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
           expect.arrayContaining([
             "html_preview",
             "html_render",
-            "upsert_dashboard_item",
             "delegate_task",
             "t3_thread_launch",
           ]),
         );
+        expect(names).not.toContain("upsert_dashboard_item");
+        expect(names).not.toContain("remove_dashboard_item");
         expect(names).not.toContain("set_thread_attention");
         expect(names).not.toContain("clear_thread_attention");
         expect(new Set(names).size).toBe(names.length);
