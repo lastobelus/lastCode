@@ -11,7 +11,9 @@ permissions:
 # No concurrency group: label events arrive in bursts, and a cancelled run reports as a failed check.
 jobs:
   budget:
-    name: Agent context budget
+    # A retarget needs a new comparison. Title and body edits keep the last result.
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'Agent context budget (metadata edit)' || 'Agent context budget' }}
+    if: ${{ github.event.action != 'edited' || github.event.changes.base }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
