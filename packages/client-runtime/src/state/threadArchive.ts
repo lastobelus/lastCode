@@ -281,10 +281,9 @@ export type ThreadArchiveFamily = Extract<
 export function resolveThreadArchiveFamily(
   family: ThreadArchiveFamily,
   resolve: MFunctionType = mFallback,
-  includeTypedIn = false,
   projectName: (thread: EnvironmentThreadShell) => string = ({ projectId }) => projectId,
 ) {
-  const confirmation = buildThreadArchiveConfirmation(family, resolve, includeTypedIn);
+  const confirmation = buildThreadArchiveConfirmation(family, resolve);
   const details = confirmation.threads.map(({ thread, label, showLocation }) =>
     [
       thread.title || resolve(msg("Untitled thread")),
@@ -297,7 +296,6 @@ export function resolveThreadArchiveFamily(
     confirmLabel: confirmation.confirmLabel,
     disposition: confirmation.disposition,
     blocked: confirmation.blocked,
-    canIncludeTypedIn: confirmation.canIncludeTypedIn,
     message: [confirmation.description, details.join("\n")].filter(Boolean).join("\n\n"),
   };
 }

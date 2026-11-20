@@ -279,7 +279,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           group.lineage.independent !== true &&
           group.persistent !== true &&
           group.workspaceUserAdopted !== true &&
-          group.actionResume?.outcome !== "running" &&
+          group.actionResume == null &&
           (group.archivePending?.status !== "failed" || group.archivePending.threadId === rootId) &&
           group.latestRunId === null &&
           group.latestUserMessageAt === null &&
@@ -417,6 +417,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     family: ReadonlyMap<ThreadId, OrchestrationV2AppThread>,
     owner: NonNullable<OrchestrationV2AppThread["archivedWith"]>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    reachableFamily?: ReadonlySet<ThreadId>,
   ) {
     const visited = new Set<ThreadId>();
     const parentOf = (thread: OrchestrationV2AppThread) =>
@@ -428,7 +429,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     while (ancestorId !== null && ancestorId !== owner.threadId && !visited.has(ancestorId)) {
       visited.add(ancestorId);
       const ancestor = family.get(ancestorId);
-      if (ancestor === undefined) break;
+      if (ancestor === undefined || reachableFamily?.has(ancestorId) === false) break;
       if (ancestor.archivedAt !== null) {
         const archivedWith = ancestor.archivedWith ?? {
           threadId: ancestor.id,
@@ -1014,31 +1015,17 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       (pending.familyVersion === undefined || pending.childDisposition === "promote")
         ? yield* projectionStore.getOwnedThreadIds(root.id).pipe(mapDispatchError(command))
         : null;
-    const legacyParticipants = new Set<ThreadId>();
+    let reachableFamily: ReadonlySet<ThreadId> | undefined;
     if (command.type === "thread.archive.complete") {
       const shells = yield* archiveFamilyShells(command);
-      if (pending.familyVersion === 2)
-        for (const { id } of getOwnedThreadFamily(shells, root.id).children)
-          legacyParticipants.add(id);
       const legacyOwnedIds = legacyOwnedThreadIds === null ? null : new Set(legacyOwnedThreadIds);
-      if (
-        pending.includeTypedInThreadIds !== undefined &&
-        !sameThreadIds(
-          pending.includeTypedInThreadIds,
-          selectArchiveFamily(shells, root.id).typedInThreadIds,
-        )
-      )
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: "Human participation changed while stopping. Review the archive choices again.",
-        });
       const current = archiveParticipants(
         legacyOwnedIds === null ? shells : shells.filter((thread) => legacyOwnedIds.has(thread.id)),
         root.id,
         pending.childDisposition,
         pending.familyVersion === 2 ? pending : undefined,
       );
+      if (pending.familyVersion === 2) reachableFamily = current.family.reachableThreadIds;
       const explicitIds = new Set([root.id, ...pending.childThreadIds]);
       const selectedSideChatIds = new Set(
         pending.archiveThreadIds.filter((id) => !explicitIds.has(id)),
@@ -1170,9 +1157,9 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       const current = (yield* getProjectionWithPendingEvents(id, events)).thread;
       const owner = root.archivedWith ?? { threadId: root.id, commandId: command.requestId };
       const archivedWith =
-        pending.familyVersion === 2 && !legacyParticipants.has(id)
+        reachableFamily !== undefined && (id === root.id || !reachableFamily.has(id))
           ? owner
-          : yield* archiveOwnerFor(command, current, familyThreads, owner, events);
+          : yield* archiveOwnerFor(command, current, familyThreads, owner, events, reachableFamily);
       yield* emit(
         events,
         command,

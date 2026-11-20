@@ -461,11 +461,20 @@ const ownedArchiveCases = [
   { includeTypedIn: true, groupIsOwned: true, groupIsUsed: true },
   { includeTypedIn: false, groupIsOwned: false, typedIsArchived: true },
   { includeTypedIn: true, groupIsOwned: false, typedIsArchived: true },
+  { includeTypedIn: false, groupIsOwned: false, legacyBelowOwned: true },
+  { includeTypedIn: true, groupIsOwned: true, groupRanAction: true },
 ];
 
 it.effect.each(ownedArchiveCases)(
   "archives the observed cross-project targets (%j)",
-  ({ includeTypedIn, groupIsOwned, groupIsUsed, typedIsArchived }) =>
+  ({
+    includeTypedIn,
+    groupIsOwned,
+    groupIsUsed,
+    typedIsArchived,
+    legacyBelowOwned,
+    groupRanAction,
+  }) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -497,6 +506,9 @@ it.effect.each(ownedArchiveCases)(
           owned: true,
         },
       });
+      const crossProjectId = launch(childId, rootId).projectId;
+      const legacyProjectId = legacyBelowOwned ? crossProjectId : root.projectId;
+      const groupStaysOpen = groupIsUsed || groupRanAction;
       const historical = launch(ThreadId.make("owned-archive:historical"), rootId);
       const remote = launch(ThreadId.make("owned-archive:wrong-environment"), rootId);
       const released = launch(ThreadId.make("owned-archive:released"), rootId);
@@ -504,9 +516,27 @@ it.effect.each(ownedArchiveCases)(
         root,
         {
           ...(groupIsOwned ? launch(groupId, rootId) : { ...root, id: groupId }),
-          projectId: launch(childId, rootId).projectId,
+          projectId: crossProjectId,
           groupThread: true as const,
           ...(groupIsUsed ? { workspaceUserAdopted: true } : {}),
+          ...(groupRanAction
+            ? {
+                actionResume: {
+                  runId: "group-action",
+                  threadId: groupId,
+                  projectId: crossProjectId,
+                  actionId: "group-action",
+                  actionName: "Group action",
+                  terminalId: "group-action-terminal",
+                  outcome: "succeeded" as const,
+                  delivery: "delivered" as const,
+                  startedAt: DateTime.formatIso(now),
+                  finishedAt: DateTime.formatIso(now),
+                  exitCode: 0,
+                  exitSignal: null,
+                },
+              }
+            : {}),
         },
         { ...launch(childId, rootId), workspaceUserAdopted: true, groupedUnderThreadId: groupId },
         {
@@ -517,11 +547,12 @@ it.effect.each(ownedArchiveCases)(
         {
           ...root,
           id: legacyOwner,
-          groupedUnderThreadId: rootId,
+          projectId: legacyProjectId,
+          groupedUnderThreadId: legacyBelowOwned ? childId : rootId,
           archivedAt: now,
           archivedWith: legacyCohort,
         },
-        { ...root, id: legacyChild, groupedUnderThreadId: legacyOwner },
+        { ...root, id: legacyChild, projectId: legacyProjectId, groupedUnderThreadId: legacyOwner },
         launch(grandchildId, typedId),
         {
           ...historical,
@@ -588,14 +619,14 @@ it.effect.each(ownedArchiveCases)(
         (id) => id === typedId || id === grandchildId || (groupIsOwned && id === groupId),
       );
       const selected = includeTypedIn
-        ? allIds.filter((id) => !groupIsUsed || id !== groupId)
+        ? allIds.filter((id) => !groupStaysOpen || id !== groupId)
         : allIds.filter((id) => !kept.includes(id));
       assert.sameMembers([...family.childThreadIds], allIds.slice(1));
       assert.sameMembers([...family.keptThreadIds], kept);
       assert.deepEqual(family.archivePreview?.typedInThreadIds, [typedId]);
       assert.deepEqual(
         family.archivePreview?.keptWithTypedInThreadIds,
-        groupIsUsed ? [groupId] : undefined,
+        groupStaysOpen ? [groupId] : undefined,
       );
       assert.isTrue(family.requiresConfirmation);
 

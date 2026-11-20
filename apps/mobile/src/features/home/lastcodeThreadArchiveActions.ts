@@ -90,11 +90,8 @@ export async function prepareLastCodeMobileThreadArchive(
   }
 
   const family = familyResult.value;
-  const choice = family.requiresConfirmation
-    ? await new Promise<{
-        childDisposition: ThreadArchiveChildDisposition;
-        includeTypedIn?: boolean;
-      } | null>((resolve) => {
+  const childDisposition = family.requiresConfirmation
+    ? await new Promise<ThreadArchiveChildDisposition | null>((resolve) => {
         const reviewFamily = () => {
           resolve(null);
           ports.review({ environmentId: thread.environmentId, threadId: thread.id });
@@ -231,11 +228,10 @@ export async function prepareLastCodeMobileThreadArchive(
           };
           selectOwner(0);
         };
-        const showFamily = (includeTypedIn = false) => {
+        const showFamily = () => {
           const confirmation = resolveThreadArchiveFamily(
             family,
             m,
-            includeTypedIn,
             (candidate) =>
               appAtomRegistry.get(
                 environmentProjects.projectAtom(
@@ -254,24 +250,16 @@ export async function prepareLastCodeMobileThreadArchive(
                 style: "cancel",
                 onPress: () => resolve(null),
               },
-              confirmation.canIncludeTypedIn
-                ? {
-                    text: includeTypedIn
-                      ? m(msg("Keep threads you’ve written in open"))
-                      : m(msg("Also archive threads you’ve written in")),
-                    onPress: () => showFamily(!includeTypedIn),
-                  }
-                : {
-                    text: m(msg("Review", { $context: "verb, inspect a thread before archiving" })),
-                    onPress: review,
-                  },
+              {
+                text: m(msg("Review", { $context: "verb, inspect a thread before archiving" })),
+                onPress: review,
+              },
               ...(!confirmation.blocked
                 ? [
                     {
                       text: confirmation.confirmLabel,
                       style: "destructive" as const,
-                      onPress: () =>
-                        resolve({ childDisposition: confirmation.disposition, includeTypedIn }),
+                      onPress: () => resolve(confirmation.disposition),
                     },
                   ]
                 : []),
@@ -281,16 +269,16 @@ export async function prepareLastCodeMobileThreadArchive(
         };
         showFamily();
       })
-    : { childDisposition: "archive_if_idle" as const };
-  if (choice === null) return null;
-  const selection = archivePreviewSelection(family, choice.includeTypedIn);
+    : "archive_if_idle";
+  if (childDisposition === null) return null;
+  const selection = archivePreviewSelection(family);
   return {
     owner: thread,
     participantIds: selection.expectedArchiveThreadIds ?? [thread.id, ...family.childThreadIds],
     input: {
       threadId: thread.id,
       ...(failedAttempt === undefined ? {} : { expectedArchiveCommandId: failedAttempt.commandId }),
-      childDisposition: choice.childDisposition,
+      childDisposition,
       expectedChildThreadIds: family.childThreadIds,
       ...selection,
     },
