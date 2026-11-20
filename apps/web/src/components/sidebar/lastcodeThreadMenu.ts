@@ -37,7 +37,6 @@ export const LASTCODE_THREAD_ACTION_POLICY = {
   "stop-thread-processes": true,
   "copy-path": false,
   "copy-thread-id": false,
-  "open-dashboard": false,
   "project-settings": false,
   "handoffs-heading": false,
   "handoffs-empty": false,
@@ -166,7 +165,6 @@ export function buildLastCodeThreadMenu(input: ThreadMenuInput): ContextMenuItem
     ...processItems(input),
     { id: "copy-path", label: m(msg("Copy Path")) },
     { id: "copy-thread-id", label: m(msg("Copy Thread ID")) },
-    { id: "open-dashboard", label: m(msg("Open dashboard")), icon: "layout-dashboard" as const },
     {
       id: "project-settings",
       label: m(msg("Project settings")),

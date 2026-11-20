@@ -12161,7 +12161,6 @@
   "a0c314d7aea2b1cb": "Could not open the link in the browser",
   "680a4268b45aeefa": "{path} · Unavailable",
   "8a358e5e3362ef17": "An agent investigates a LastCode problem and helps file an issue",
-  "c03042b89b94c039": "Open project dashboard",
   "e7c3ae35c13afe0b": "The request failed. Try again.",
   "1d9e4b495a97cf45": "Resume {label}",
   "db1f87a5e586b7c1": "Pause {label}",
@@ -12201,10 +12200,8 @@
   "bb5a6f0ce6b7176b": "Cleanup failed",
   "0aa96d2160a2298d": "Deleting (Queued)",
   "5c8772e727c04218": "Question",
-  "44bc74773e7e46cb": "Open dashboard",
   "9ccf43e18772faca": "Failed to update persistent thread",
   "927e9c0750171a63": "Couldn't dismiss archive failure",
-  "7e86e4eb9a6237e7": "Open dashboard for {project}",
   "aafda05799548960": "The question could not be sent. Try again.",
   "c45135e8f31a16f2": "The conversation could not be opened. Try again.",
   "67bbd51effddb141": "Threads zum Archivieren oder Offenlassen",
@@ -12434,132 +12431,6 @@
   "961708e4d2dc347f": "Loading account…",
   "72853db0c9ed7026": "If loading does not finish, check your connection and reload the page.",
   "b40217dc5989ea0e": "Manage account",
-  "9a64b12a4fcc78f3": "Quick",
-  "98e6a8d06389c4a3": "Focused",
-  "9b6b323b06c17dd1": "Computer",
-  "cf3ec11017a5ab9f": "All requests",
-  "482bca3989dea181": "On my phone",
-  "7d0cf3cfd8325ac6": "Review",
-  "1604cfd18cccc02e": "Metric",
-  "bdbc3800fcc2daab": "Progress",
-  "cd3bf273c74438c2": "Approval",
-  "d53edac4e36ca571": "Input",
-  "986af257c6a33f30": "Needs a check",
-  "5bf23f4700cc418f": "Unknown time",
-  "db332062547bea3c": "Message",
-  "67038496001011d3": "Active threads",
-  "4ca8e2f57fdeeaab": "Waiting threads",
-  "bc9915a425b82021": "Need you",
-  "8d919ed9a9b5d395": "Dashboard project",
-  "ddbbe3b7198d7e7c": "Loading projects…",
-  "72147be60e116d15": "Your project at a glance",
-  "aa472c4648c09ebd": "No projects yet",
-  "43025b1d8ae04fab": "This project is no longer available in the selected environment. Choose another project or check Connections.",
-  "6a8ed26829fee8e9": "Choose a project to see its live activity and outstanding requests.",
-  "982ae77ea2922315": "{requests} requests · {threads} threads",
-  "df679dd623ed2f0a": "Filter requests",
-  "527846e05c769f52": "Nothing needs your attention",
-  "d5c4a8205904579a": "No requests in the last known state",
-  "e625ca27dfa0fdb8": "No requests match this filter",
-  "cb6ee608db4b12e7": "Questions, reviews, and QA reported by your threads appear here.",
-  "31384061b9450d42": "Try All requests to see the rest of the project.",
-  "370aa80e162adbf6": "Active",
-  "668e353261860b41": "Background work",
-  "68f55a32be30741f": "Snoozed",
-  "6e67ab167cd02e15": "Settled",
-  "4d301c3070af39ad": "High priority",
-  "428b60ca43edf62a": [
-    "Raised",
-    " ",
-    {
-      "t": "time",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
-    " ",
-    "· Updated",
-    " ",
-    {
-      "t": "time",
-      "i": 3,
-      "c": {
-        "i": 4,
-        "k": "_gt_value_4",
-        "v": "v"
-      }
-    }
-  ],
-  "df09c146c63bf614": [
-    "Raised",
-    " ",
-    {
-      "t": "time",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
-  "f2b4af56025672c8": "Dashboard",
-  "5851be92e658d299": "Project dashboard",
-  "59c1c7dc8561959b": "What’s moving, what needs you, and what you’ve parked.",
-  "cdc7703d7c1d3af8": "Open Connections",
-  "c35a1cfdf9059aa5": [
-    "Latest thread update",
-    " ",
-    {
-      "t": "time",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
-  "10d803caf7a59871": "Needs your attention",
-  "ecfa6738221ea81a": "Effort and computer requirements overlap. Opening a request leaves it open.",
-  "6538f5f2f6dae56a": "Work in motion",
-  "0bbca3ba88d36884": "Progress & updates",
-  "b805c027ed6d0a25": [
-    "Parked contexts",
-    " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
-  "6666792677c5db6b": "Settled and snoozed threads remain available. Their open requests stay in the attention list.",
-  "a423e5f2c5814fa3": "Reconnect to this environment before sending.",
-  "a4ad0cd363c1cad2": "This thread is no longer available.",
-  "aa40ce7f7713d5f0": "Open and restore this archived thread to send a message.",
-  "af4dafa83f086f2d": "This conversation is managed by its parent agent. Open the thread to continue.",
-  "612ec8a61dc3dc69": "Open the thread to respond to its approval request.",
-  "ca73059de8f7121e": "Open the thread to answer its question.",
-  "8fcaaeed456b2632": "The send was interrupted. Retry to confirm delivery.",
-  "0bb53f660a279077": "Could not confirm delivery. Retry this message.",
-  "136c6c19e8d2f67a": "Message accepted",
-  "673ef7fab77bd5ac": "Thread",
-  "4b1513d2538f5858": "Thread unavailable",
-  "8fa7b956faa0396f": "Your message will run after the current turn.",
-  "4a15c186a0ece5fe": "Your message will start a new turn.",
-  "d45054e28959a662": "Message",
-  "f7d4dbe5d17d2188": "Send a quick follow-up…",
-  "03998d7f82eb371d": "Retry send",
-  "2576898390660bcd": "Message thread",
-  "fbb0675999843255": "Retry confirms the same message without sending it twice. Delivery was not confirmed. Check the thread before sending a new version.",
-  "27b465ade7002f30": "Edit as a new message",
   "414160b550c33903": "Reload preview",
   "344eccea09415dec": "Unable to load file preview. Reload to try again.",
   "f102a0c98355596c": "Handoffs",

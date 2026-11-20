@@ -87,28 +87,6 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
-## See a project dashboard
-
-On web and desktop, choose **Open dashboard** from a project or thread menu, or
-**Open project dashboard** in the command palette. Choose the project's environment
-in the dashboard's project picker when it exists on several machines.
-
-The dashboard shows active and waiting threads alongside questions, reviews, QA,
-and progress reported by your agents. Threads with reported items have a small
-dashboard indicator in the sidebar. Each item links to its source thread and shows
-when it was raised or updated. Expand an item for context. Choose **Message** to
-send a text follow-up without leaving the dashboard; messages queue after any
-current turn. Drafts remain if delivery fails, and **Retry send** confirms the same
-message. Use **Open thread** for approvals, structured questions, full reviews,
-and QA. Sending a message does not resolve a reported dashboard item.
-
-**Quick** and **Focused** describe effort; **Computer** describes a requirement.
-These filters can overlap. **On my phone** hides requests marked as requiring a
-computer. Opening a request does not resolve it or clear another request. Open
-items remain visible after their thread settles, and settled or snoozed contexts
-remain available under **Parked contexts**. A disconnected environment shows its
-last known state until it reconnects.
-
 ## Organize related threads
 
 Ask an agent to create empty parent threads and move existing conversations under them.

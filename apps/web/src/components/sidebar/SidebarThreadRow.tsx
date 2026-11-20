@@ -1,6 +1,5 @@
 import { useAtomMount } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
-import { ThreadDashboardIndicator } from "../dashboard/ThreadDashboardIndicator";
 import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
 import {
   usePreviewProcessControlsSupported,
@@ -1469,7 +1468,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {title}
             {multiline ? titleLineIcons : null}
             {pinIndicator}
-            <ThreadDashboardIndicator items={thread.dashboardItems} />
             {multiline ? null : terminalStatusIcon}
             {multiline ? null : issueBadge}
             {!multiline && props.providerBadgePreferences.enabled ? (
@@ -1716,7 +1714,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             ) : (
               <span className="flex-1" />
             )}
-            <ThreadDashboardIndicator items={thread.dashboardItems} />
             {sortable?.isDragging ? (
               dragDestination
             ) : (
@@ -2197,7 +2194,6 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
                 settled={props.isSettled}
               />
             </span>
-            <ThreadDashboardIndicator items={thread.dashboardItems} />
             {props.providerBadgePreferences.enabled ? (
               <ConnectedSidebarEnvironmentIcon
                 aria-hidden

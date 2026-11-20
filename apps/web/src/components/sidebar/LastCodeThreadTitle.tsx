@@ -6,7 +6,6 @@ import { useClientSetting } from "~/hooks/useSettings";
 import { LastCodeThreadStatusLabel } from "./LastCodeThreadStatusLabel";
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { ThreadDashboardIndicator } from "../dashboard/ThreadDashboardIndicator";
 import {
   lastcodeSidebarSubagentStatusLabel,
   type LastCodeSidebarFamilyRow,
@@ -218,12 +217,7 @@ export function LastCodeThreadTitle({
           finishRename={editing.finishRename}
         />
       ) : (
-        <>
-          <TitleText family={family} presentation={presentation} threadStatus={threadStatus} />
-          <span className="contents">
-            <ThreadDashboardIndicator items={thread.dashboardItems} />
-          </span>
-        </>
+        <TitleText family={family} presentation={presentation} threadStatus={threadStatus} />
       )}
     </>
   );

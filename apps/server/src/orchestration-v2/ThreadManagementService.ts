@@ -45,7 +45,6 @@ import {
   resolveProjectProviderInstanceEnabled,
   RunId,
   type ScheduledTaskId,
-  type ThreadDashboardItemInput,
   ThreadId,
   WorktreeSuspensionRequestError,
   type TurnItemId,
@@ -452,22 +451,6 @@ export interface ThreadManagementServiceShape {
     options?: Orchestrator.OrchestratorV2DispatchOptions,
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
-    Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
-  >;
-  readonly upsertDashboardItem: (input: {
-    readonly commandId: CommandId;
-    readonly threadId: ThreadId;
-    readonly item: ThreadDashboardItemInput;
-  }) => Effect.Effect<
-    Pick<OrchestrationV2ThreadProjection, "thread">,
-    Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
-  >;
-  readonly removeDashboardItem: (input: {
-    readonly commandId: CommandId;
-    readonly threadId: ThreadId;
-    readonly itemId: string;
-  }) => Effect.Effect<
-    Pick<OrchestrationV2ThreadProjection, "thread">,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
   >;
   readonly dispatchLaunch: (
@@ -2165,16 +2148,6 @@ const make = Effect.gen(function* () {
     reserveActionObligation: orchestrator.reserveActionObligation,
     disposeActionObligation: orchestrator.disposeActionObligation,
     dispatch,
-    upsertDashboardItem: Effect.fn("ThreadLifecycleService.upsertDashboardItem")((input) =>
-      dispatch({ type: "thread.dashboard-item.upsert", ...input }).pipe(
-        Effect.andThen(getThreadRecords(input.threadId, [])),
-      ),
-    ),
-    removeDashboardItem: Effect.fn("ThreadLifecycleService.removeDashboardItem")((input) =>
-      dispatch({ type: "thread.dashboard-item.remove", ...input }).pipe(
-        Effect.andThen(getThreadRecords(input.threadId, [])),
-      ),
-    ),
     deleteMany,
     dispatchLaunch,
     getThreadHistoryPage: Effect.fn("ThreadManagementService.getThreadHistoryPage")(

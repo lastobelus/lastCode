@@ -19,12 +19,7 @@ import {
   WorktreeSuspensionTransitionInput,
 } from "./worktreeSuspension.ts";
 import { SavedWorkspaceDisposition } from "./workspaceLifecycle.ts";
-import {
-  ThreadAnnotation,
-  ThreadDashboardItemInput,
-  ThreadDashboardItems,
-  ThreadWorktreeCleanup,
-} from "./threadMetadata.ts";
+import { ThreadAnnotation, ThreadWorktreeCleanup } from "./threadMetadata.ts";
 export * from "./threadMetadata.ts";
 import {
   COMPOSER_CONTEXT_MAX_RECORDS,
@@ -664,7 +659,6 @@ export const OrchestrationV2AppThread = Schema.Struct({
   groupThread: Schema.optional(Schema.Literal(true)),
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
-  dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   worktreeSuspension: Schema.optional(WorktreeSuspensionSummary),
@@ -2512,7 +2506,6 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   groupThread: OrchestrationV2AppThread.fields.groupThread,
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
-  dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   worktreeSuspension: Schema.optional(WorktreeSuspensionSummary),
@@ -3511,18 +3504,6 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     annotationId: Schema.optional(TrimmedNonEmptyString),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("thread.dashboard-item.upsert"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    item: ThreadDashboardItemInput,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("thread.dashboard-item.remove"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    itemId: ThreadDashboardItemInput.fields.id,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.archive"),

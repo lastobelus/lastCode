@@ -242,7 +242,6 @@ export type ProjectionSettlementCandidate = Pick<
   | "settledOverride"
   | "pinnedAt"
   | "autoSettleDisabledAt"
-  | "dashboardItems"
   | "snoozedUntil"
   | "snoozedAt"
   | "latestRunId"
@@ -2034,7 +2033,6 @@ export function threadShellFromProjection(
     ...(projection.thread.groupThread ? { groupThread: true } : {}),
     persistent: projection.thread.persistent ?? false,
     annotation: projection.thread.annotation ?? null,
-    dashboardItems: projection.thread.dashboardItems ?? [],
     actionResume: projection.thread.actionResume ?? null,
     worktreeCleanup: projection.thread.worktreeCleanup ?? null,
     ...(projection.thread.worktreeSuspension === undefined
@@ -2396,7 +2394,6 @@ function shellFromState(input: {
     ...(input.state.thread.groupThread ? { groupThread: true } : {}),
     persistent: input.state.thread.persistent ?? false,
     annotation: input.state.thread.annotation ?? null,
-    dashboardItems: input.state.thread.dashboardItems ?? [],
     actionResume: input.state.thread.actionResume ?? null,
     worktreeCleanup: input.state.thread.worktreeCleanup ?? null,
     ...(input.state.thread.worktreeSuspension === undefined
@@ -9189,11 +9186,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND json_extract(parent.payload_json, '$.settledOverride') IS NOT 'settled'
               )
               AND NOT ${outstandingOwnedWork(sql`t.thread_id`)}
-              AND NOT EXISTS (
-                SELECT 1 FROM json_each(t.payload_json, '$.dashboardItems') item
-                WHERE json_extract(item.value, '$.status') = 'open'
-                  AND json_extract(item.value, '$.kind') IN ('question', 'review', 'qa')
-              )
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active
                 WHERE active.thread_id = t.thread_id

@@ -85,7 +85,6 @@ import {
   SquarePenIcon,
   TextSearchIcon,
   UserPlusIcon,
-  LayoutDashboardIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
 import { dispatchPreviewAction } from "./preview/previewActionBus";
@@ -1905,24 +1904,6 @@ function OpenCommandPaletteDialog(props: {
   }
   const contextualProjectGroup = currentProjectGroup ?? pickerGroups[0] ?? null;
   if (contextualProjectGroup) {
-    actionItems.push({
-      kind: "action",
-      value: "action:project-dashboard",
-      searchTerms: ["dashboard", "project", "attention", "questions", "reviews", "qa", "progress"],
-      title: gt("Open project dashboard"),
-      description: contextualProjectGroup.displayName,
-      icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
-      run: async () => {
-        await navigate({
-          to: "/dashboard",
-          search: {
-            environmentId:
-              contextualProjectRef?.environmentId ?? contextualProjectGroup.environmentId,
-            projectId: contextualProjectRef?.projectId ?? contextualProjectGroup.id,
-          },
-        });
-      },
-    });
     actionItems.push({
       kind: "action",
       value: "action:project-settings",

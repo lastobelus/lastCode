@@ -76,7 +76,6 @@ import {
   CheckIcon,
   ChevronDownIcon,
   FolderIcon,
-  LayoutDashboardIcon,
   ListFilterIcon,
   PlusIcon,
   SettingsIcon,
@@ -1281,13 +1280,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     setProjectGroupPinned,
     toggleProjectGroupPin,
   } = useProjectPin();
-  const openProjectDashboard = useStableCallback((projectGroup: SidebarProjectSnapshot) => {
-    if (isMobile) setOpenMobile(false);
-    void router.navigate({
-      to: "/dashboard",
-      search: { environmentId: projectGroup.environmentId, projectId: projectGroup.id },
-    });
-  });
   const handleProjectSettings = useStableCallback(
     (
       event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLInputElement>,
@@ -1317,7 +1309,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           api.contextMenu.show(
             [
               { id: "new-thread", label: gt("New thread") },
-              { id: "open-dashboard", label: gt("Open dashboard"), icon: "layout-dashboard" },
               { id: "copy-path", label: gt("Copy path") },
               ...(canPinProject(group)
                 ? [
@@ -1334,9 +1325,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
         if (clicked._tag === "Failure") return;
         switch (clicked.value) {
-          case "open-dashboard":
-            openProjectDashboard(group);
-            return;
           case "new-thread":
             startThreadInProjectFolder(group);
             return;
@@ -2737,61 +2725,54 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
-            [
-              {
-                id: "open-dashboard" as const,
-                label: gt("Open dashboard"),
-                icon: "layout-dashboard",
-              },
-              ...withThreadReadPermissions(
-                mergeWorktreeSuspensionMenuItems(
-                  buildThreadActionMenuItems({
-                    canOperate: readEnvironmentScope(
-                      threadRef.environmentId,
-                      AuthOrchestrationOperateScope,
-                    ),
-                    branch: thread.branch ?? null,
-                    projectFilter:
-                      threadProjectGroup && !threadProjectGroup.archived
-                        ? {
-                            label: threadProjectGroup.displayName,
-                            isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
-                          }
-                        : null,
-                    isPinned,
-                    isPersistent: thread.persistent === true,
-                    archiveFailed: thread.archivePending?.status === "failed",
-                    isSettled,
-                    autoSettleEnabled: thread.autoSettleDisabledAt == null,
-                    isSnoozed,
-                    canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-                    isRegeneratingTitle,
-                    isRunning: threadRuntimeIsActive(thread.runtime),
-                    canShareWithGuest: appAtomRegistry.get(
-                      canShareWithGuestAtom(threadRef.environmentId),
-                    ),
-                    canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-                    hasRunningAction: thread.actionResume?.outcome === "running",
-                    hasStoppableProcesses,
-                    supports: {
-                      settlement: configLoaded,
-                      autoSettleOptOut: supportsAutoSettleOptOut,
-                      snooze: configLoaded,
-                      pinning: configLoaded,
-                      persistence:
-                        serverConfigs.get(thread.environmentId)?.environment.capabilities
-                          .threadPersistence === true,
-                      titleRegeneration: configLoaded,
-                    },
-                    snoozePresets,
-                    handoffs: handoffDescriptors,
-                    handoffsOverflow: handoffs.length > handoffDescriptors.length,
-                  }),
-                  workspaceActions.menuItems(thread),
-                ),
-                [threadRef],
+            withThreadReadPermissions(
+              mergeWorktreeSuspensionMenuItems(
+                buildThreadActionMenuItems({
+                  canOperate: readEnvironmentScope(
+                    threadRef.environmentId,
+                    AuthOrchestrationOperateScope,
+                  ),
+                  branch: thread.branch ?? null,
+                  projectFilter:
+                    threadProjectGroup && !threadProjectGroup.archived
+                      ? {
+                          label: threadProjectGroup.displayName,
+                          isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
+                        }
+                      : null,
+                  isPinned,
+                  isPersistent: thread.persistent === true,
+                  archiveFailed: thread.archivePending?.status === "failed",
+                  isSettled,
+                  autoSettleEnabled: thread.autoSettleDisabledAt == null,
+                  isSnoozed,
+                  canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                  isRegeneratingTitle,
+                  isRunning: threadRuntimeIsActive(thread.runtime),
+                  canShareWithGuest: appAtomRegistry.get(
+                    canShareWithGuestAtom(threadRef.environmentId),
+                  ),
+                  canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+                  hasRunningAction: thread.actionResume?.outcome === "running",
+                  hasStoppableProcesses,
+                  supports: {
+                    settlement: configLoaded,
+                    autoSettleOptOut: supportsAutoSettleOptOut,
+                    snooze: configLoaded,
+                    pinning: configLoaded,
+                    persistence:
+                      serverConfigs.get(thread.environmentId)?.environment.capabilities
+                        .threadPersistence === true,
+                    titleRegeneration: configLoaded,
+                  },
+                  snoozePresets,
+                  handoffs: handoffDescriptors,
+                  handoffsOverflow: handoffs.length > handoffDescriptors.length,
+                }),
+                workspaceActions.menuItems(thread),
               ),
-            ],
+              [threadRef],
+            ),
             position,
             source,
           ),
@@ -2816,12 +2797,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           await openHandoff(threadRef, entry);
           return;
         }
-        if (
-          clicked.value !== "open-dashboard" &&
-          threadActionRequiresOperate(clicked.value) &&
-          !checkThreadOperations([thread])
-        )
-          return;
+        if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
@@ -2836,13 +2812,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           return;
         }
         switch (clicked.value) {
-          case "open-dashboard":
-            if (isMobile) setOpenMobile(false);
-            await router.navigate({
-              to: "/dashboard",
-              search: { environmentId: thread.environmentId, projectId: thread.projectId },
-            });
-            return;
           case "filter-by-project":
             if (threadProjectGroup) {
               setProjectScopeKeys(
@@ -3348,44 +3317,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                   ) : null
                                 }
                                 settings={
-                                  <>
-                                    <Button
-                                      size="icon-xs"
-                                      variant="ghost-muted"
-                                      tabIndex={-1}
-                                      aria-hidden="true"
-                                      title={gt("Open dashboard for {project}", {
-                                        project: project.displayName,
-                                      })}
-                                      onPointerDown={(event) => event.stopPropagation()}
-                                      onClick={(event) => {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                        suppressNextScopeChangeRef.current = true;
-                                        dispatchProjectScopeMenu({
-                                          type: "project-settings-opened",
-                                        });
-                                        openProjectDashboard(project);
-                                      }}
-                                    >
-                                      <LayoutDashboardIcon className="size-3.5" />
-                                    </Button>
-                                    <Button
-                                      size="icon-xs"
-                                      variant="ghost-muted"
-                                      tabIndex={-1}
-                                      aria-hidden="true"
-                                      title={gt("Project settings for {project}", {
-                                        project: project.displayName,
-                                      })}
-                                      onPointerDown={(event) => event.stopPropagation()}
-                                      onClick={(event) => {
-                                        void handleProjectSettings(event, project);
-                                      }}
-                                    >
-                                      <SettingsIcon className="size-3.5" />
-                                    </Button>
-                                  </>
+                                  <Button
+                                    size="icon-xs"
+                                    variant="ghost-muted"
+                                    tabIndex={-1}
+                                    aria-hidden="true"
+                                    title={gt("Project settings for {project}", {
+                                      project: project.displayName,
+                                    })}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                      void handleProjectSettings(event, project);
+                                    }}
+                                  >
+                                    <SettingsIcon className="size-3.5" />
+                                  </Button>
                                 }
                               />
                             ) : (

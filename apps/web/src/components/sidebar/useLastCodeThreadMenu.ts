@@ -188,13 +188,6 @@ export function useLastCodeThreadMenu(
         if (target.creator.ref && target.creator.canOpen)
           await navigateToThread(target.creator.ref);
       },
-      "open-dashboard": () => {
-        if (isMobile) setOpenMobile(false);
-        void router.navigate({
-          to: "/dashboard",
-          search: { environmentId: thread.environmentId, projectId: thread.projectId },
-        });
-      },
       "project-settings": () => {
         if (target.projectSettingsKey === null) return;
         if (isMobile) setOpenMobile(false);

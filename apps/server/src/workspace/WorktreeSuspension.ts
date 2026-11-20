@@ -1,7 +1,6 @@
 import {
   CommandId,
   ThreadId,
-  hasOpenActionableDashboardItems,
   WorkspaceLifecyclePreviewInput,
   type WorkspaceLifecycleRunInput,
   type WorkspaceLifecyclePreview,
@@ -642,7 +641,6 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     owner.activeRunId !== null ||
     owner.pendingRuntimeRequest !== null ||
     (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-    hasOpenActionableDashboardItems(owner.dashboardItems) ||
     owner.archivePending != null ||
     (owner.actionResume != null &&
       !["delivered", "disposed"].includes(owner.actionResume.delivery));

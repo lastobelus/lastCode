@@ -84,7 +84,6 @@ export function buildLastCodeProjectMenu(input: {
   }
   items.push(
     targeted("copy-path", m(msg("Copy Path"))),
-    { id: "open-dashboard", label: m(msg("Open dashboard")), icon: "layout-dashboard" },
     { id: "project-settings", label: m(msg("Project settings")), icon: "settings" },
     targeted(
       "delete",
