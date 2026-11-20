@@ -7182,6 +7182,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("keeps a completed background wait cleared when a native resume returns", () =>
+    Effect.gen(function* () {
+      const commandFinished = yield* Deferred.make<void>();
+      const lateCompletion = backgroundExecTranscript.entries.at(-1);
+      assert(lateCompletion?.type === "emit_inbound");
+      const harness = yield* makeCodexReplayHarness(
+        {
+          ...backgroundExecTranscript,
+          entries: [
+            ...backgroundExecTranscript.entries.slice(0, -1),
+            {
+              type: "expect_outbound",
+              label: "resume background thread",
+              frame: {
+                id: 4,
+                method: "thread/resume",
+                params: {
+                  threadId: BG_NATIVE_THREAD,
+                  excludeTurns: true,
+                  config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                },
+              },
+            },
+            { ...lateCompletion, afterMs: 0 },
+            {
+              type: "emit_inbound",
+              label: "resume background thread",
+              frame: { id: 4, result: { thread: { id: BG_NATIVE_THREAD, updatedAt: 1782622450 } } },
+            },
+          ],
+        },
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "command_execution" &&
+          event.turnItem.status === "completed"
+            ? Deferred.succeed(commandFinished, undefined)
+            : Effect.void,
+        undefined,
+        undefined,
+        (entry) =>
+          entry.label === "resume background thread"
+            ? Deferred.await(commandFinished)
+            : Effect.void,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-command-resume"),
+          text: BG_PROMPT,
+        }),
+      );
+      yield* harness.firstTerminal;
+      yield* harness.runtime.awaitBackgroundTasks!({
+        providerThread: harness.providerThread,
+        taskIds: [BG_COMMAND_ITEM],
+        awaited: true,
+      });
+      yield* harness.until(() => harness.pendingBackgroundTasks().length === 1);
+
+      const resumed = yield* harness.runtime.resumeThread({
+        providerThread: {
+          ...harness.providerThread,
+          pendingBackgroundTasks: harness.pendingBackgroundTasks(),
+        },
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      assert.deepEqual(harness.pendingBackgroundTasks(), []);
+      assert.deepEqual(resumed.pendingBackgroundTasks, []);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect.each([
     { stop: "onStop", woken: ["CODEX_BG_OTHER_DONE"] },
     { stop: "onStopAbandoned", woken: ["CODEX_BG_OTHER_DONE", "CODEX_BG_WAKE_DONE"] },
