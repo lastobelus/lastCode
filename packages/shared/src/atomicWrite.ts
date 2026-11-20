@@ -37,6 +37,7 @@ const isUnsupportedSync = (error: PlatformError.PlatformError) => {
 export const writeFileStringAtomically = (input: {
   readonly filePath: string;
   readonly contents: string | Iterable<string>;
+  readonly mode?: number;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -62,7 +63,7 @@ export const writeFileStringAtomically = (input: {
       // Closed before the rename, which Windows refuses for open files.
       yield* Effect.scoped(
         Effect.gen(function* () {
-          const file = yield* fs.open(tempPath, { flag: "w" });
+          const file = yield* fs.open(tempPath, { flag: "w", mode: input.mode });
           const encoder = new TextEncoder();
           const contents = input.contents;
           if (typeof contents === "string") {
@@ -80,7 +81,9 @@ export const writeFileStringAtomically = (input: {
             }
             if (batchLength > 0) yield* file.writeAll(encoder.encode(batch.join("")));
           }
-          if (platform !== "win32") {
+          if (input.mode !== undefined) {
+            yield* fs.chmod(tempPath, input.mode);
+          } else if (platform !== "win32") {
             yield* fs.chmod(tempPath, yield* replacedMode(fs, targetPath));
           }
           yield* file.sync;

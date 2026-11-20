@@ -11,7 +11,8 @@ import {
   validateHistoricalBootstrapSourceTag,
   type CarryBootstrap,
 } from "./lastcode-carry-checkpoint.ts";
-import { cleanGitEnvironment, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
+import { cleanGitEnvironment } from "./lib/lastcode-git.ts";
+import { parseLastCodeInstallableTag } from "./lib/lastcode-installable-tag.ts";
 
 import {
   carrySquashBody,
@@ -74,7 +75,7 @@ function exactCommit(value: string, name: string): string {
   return value;
 }
 
-function manifestAtCommit(repoRoot: string, commit: string): CarryReplayManifest | undefined {
+function assertCommitAvailable(repoRoot: string, commit: string): void {
   if (
     git(repoRoot, ["rev-parse", "--verify", `${commit}^{commit}`], { allowFailure: true }) !==
     commit
@@ -83,15 +84,34 @@ function manifestAtCommit(repoRoot: string, commit: string): CarryReplayManifest
       `Pull-request commit ${commit} is unavailable. Fetch the complete base-to-head history before validating carry groups.`,
     );
   }
-  const contents = git(repoRoot, ["show", `${commit}:${CARRY_MANIFEST_PATH}`], {
+}
+
+function manifestAt(repoRoot: string, treeish: string): CarryReplayManifest | undefined {
+  const contents = git(repoRoot, ["show", `${treeish}:${CARRY_MANIFEST_PATH}`], {
     allowFailure: true,
   });
   if (contents === undefined) return undefined;
   const manifest: unknown = JSON.parse(contents);
   if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
-    throw new Error(`${CARRY_MANIFEST_PATH} at ${commit} must contain a JSON object.`);
+    throw new Error(`${CARRY_MANIFEST_PATH} at ${treeish} must contain a JSON object.`);
   }
   return manifest as CarryReplayManifest;
+}
+
+// The squash GitHub publishes for a PR behind its base: the PR's changes since its fork point,
+// merged onto the current base tip.
+function landingTree(repoRoot: string, mergeBase: string, target: string, head: string): string {
+  const tree = git(
+    repoRoot,
+    ["merge-tree", "--write-tree", "--no-messages", `--merge-base=${mergeBase}`, target, head],
+    { allowFailure: true },
+  );
+  if (tree === undefined || !/^[0-9a-f]{40}$/u.test(tree)) {
+    throw new Error(
+      `Head ${head} conflicts with base ${target}. Rebase onto the current base and push.`,
+    );
+  }
+  return tree;
 }
 
 function compactBase(repoRoot: string, sourceBase: string) {
@@ -119,8 +139,9 @@ function compactBase(repoRoot: string, sourceBase: string) {
   return undefined;
 }
 
-function includeTopicBase(repoRoot: string, source: CarrySourceDelivery, stop: string) {
-  let base = source.base;
+// Walks back over a topic branch's unsquashed parent contributions to where they start.
+function topicBase(repoRoot: string, start: string, stop: string): string {
+  let base = start;
   while (base !== stop) {
     const trailers = parseCarryTrailers(git(repoRoot, ["show", "-s", "--format=%B", base])!);
     if (!trailers.group || trailers.sourceRef || trailers.sourceBase || trailers.sourceHead) break;
@@ -128,7 +149,41 @@ function includeTopicBase(repoRoot: string, source: CarrySourceDelivery, stop: s
     if (parents.length !== 2) throw new Error(`Topic carry source ${base} must be single-parent.`);
     base = parents[1]!;
   }
-  return { ...source, base };
+  return base;
+}
+
+// A child retargeted after its parent squash-merged still holds the parent's original commits,
+// which the base already carries. Returns the newest such commit in the PR's range.
+function landedParentHead(
+  repoRoot: string,
+  base: string,
+  target: string,
+  head: string,
+): string | undefined {
+  if (base === target) return undefined;
+  const landed = new Set<string>();
+  const messages = git(repoRoot, [
+    "log",
+    "--format=%B%x00",
+    "-E",
+    "--grep=^Carry-(Source-Head|Contribution):",
+    `${base}..${target}`,
+  ])!;
+  for (const message of messages.split("\0")) {
+    const trailers = parseCarryTrailers(message);
+    if (trailers.sourceHead) landed.add(trailers.sourceHead);
+    if (trailers.sourceBase && trailers.sourceHead) {
+      const range = `${exactCommit(trailers.sourceBase, "source base")}..${exactCommit(trailers.sourceHead, "source head")}`;
+      for (const commit of git(repoRoot, ["rev-list", range])!.split("\n").filter(Boolean)) {
+        landed.add(commit);
+      }
+    }
+    for (const contribution of trailers.contributions) landed.add(contribution.sourceCommit);
+  }
+  if (landed.size === 0) return undefined;
+  return git(repoRoot, ["rev-list", `${base}..${head}`])!
+    .split("\n")
+    .find((commit) => landed.has(commit));
 }
 
 function fetchBootstrapObjects(repoRoot: string, bootstrap: CarryBootstrap): void {
@@ -163,8 +218,9 @@ function compilePullRequest(
   repoRoot: string,
   source: CarrySourceDelivery,
   manifest: CarryReplayManifest,
+  target: string,
 ): NonNullable<CarryCiResult["compilation"]> {
-  const compact = compactBase(repoRoot, source.base);
+  const compact = compactBase(repoRoot, target);
   const bootstrap = parseManifestReplayConfiguration(manifest)?.bootstrap;
   if (!compact && !bootstrap) {
     throw new Error("No compact carry chain or prepared bootstrap is available at the PR base.");
@@ -189,11 +245,9 @@ function compilePullRequest(
   }
   // A topic base can end in unsquashed parent contributions. Model the whole
   // unpublished tail together, while retaining the child's actual delivery range.
-  const compilationSource = includeTopicBase(
-    repoRoot,
-    source,
-    compact?.head ?? representedSource ?? bootstrap!.source,
-  );
+  const stop = compact?.head ?? representedSource ?? bootstrap!.source;
+  const compilationSource = { ...source, base: topicBase(repoRoot, source.base, stop) };
+  const behind = source.base !== target;
   const temporaryRoot = NodeFS.mkdtempSync(
     NodePath.join(NodeOS.tmpdir(), "lastcode-carry-admission-"),
   );
@@ -222,17 +276,20 @@ function compilePullRequest(
     ]);
     if (retained) git(isolated, ["update-ref", "--stdin"], { input: `${retained}\n` });
     git(isolated, ["update-ref", source.ref, source.head]);
-    const sourceTree = git(repoRoot, ["rev-parse", `${source.head}^{tree}`])!;
     // Model the exact squash that guarded merge will publish, without publishing its source ref.
+    // Behind its base, that squash lands on the current tip, whose tail replays on its own.
+    const sourceTree = behind
+      ? landingTree(isolated, source.base, target, source.head)
+      : git(repoRoot, ["rev-parse", `${source.head}^{tree}`])!;
     const squash = git(isolated, [
       "-c",
       "commit.gpgSign=false",
       "commit-tree",
       sourceTree,
       "-p",
-      compilationSource.base,
+      behind ? target : compilationSource.base,
       "-m",
-      carrySquashBody("Carry admission candidate", compilationSource),
+      carrySquashBody("Carry admission candidate", behind ? source : compilationSource),
     ])!;
     // Materialize every tracked file even when an existing index already matches this tree.
     git(isolated, ["checkout", "--quiet", "--force", "--detach", squash]);
@@ -264,12 +321,45 @@ export function validateCarryPullRequest(
   repoRoot: string,
   pullRequest: CarryCiPullRequest,
 ): CarryCiResult {
-  const base = exactCommit(pullRequest.base, "base");
+  const target = exactCommit(pullRequest.base, "base");
   const head = exactCommit(pullRequest.head, "head");
   if (!Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
     throw new Error("Carry CI requires a positive pull-request number.");
   }
-  const manifests = [manifestAtCommit(repoRoot, base), manifestAtCommit(repoRoot, head)];
+  assertCommitAvailable(repoRoot, target);
+  assertCommitAvailable(repoRoot, head);
+  // A PR may be behind its base; its own source range starts where it forked.
+  const base = git(repoRoot, ["merge-base", target, head])!;
+  const targetManifest = manifestAt(repoRoot, target);
+  // Before the landing merge, which a merged parent's stale commits can make conflict.
+  const landed =
+    targetManifest && shouldRetainCarrySources(targetManifest)
+      ? landedParentHead(repoRoot, base, target, head)
+      : undefined;
+  if (landed) {
+    throw new Error(
+      `PR #${pullRequest.number} still contains commits through ${landed} that already landed in base ${target} through a merged parent PR. Restack only its own commits with \`git rebase --onto ${target} ${landed}\` and push.`,
+    );
+  }
+  if (base !== target) {
+    const carryManifest = [targetManifest, manifestAt(repoRoot, head)].find(
+      (manifest) => manifest && shouldRetainCarrySources(manifest),
+    );
+    if (carryManifest) {
+      const stop =
+        compactBase(repoRoot, target)?.head ??
+        parseManifestReplayConfiguration(carryManifest)?.bootstrap?.source;
+      if (stop && topicBase(repoRoot, target, stop) !== target) {
+        throw new Error(
+          `PR #${pullRequest.number} forked from ${base}, behind its topic base ${target}, whose parent commits have not squash-merged yet. Rebase onto the topic base with \`git rebase --onto ${target} ${base}\` and push.`,
+        );
+      }
+    }
+  }
+  const manifests = [
+    targetManifest,
+    manifestAt(repoRoot, base === target ? head : landingTree(repoRoot, base, target, head)),
+  ];
   const active = manifests.some(
     (manifest) => manifest !== undefined && shouldRetainCarrySources(manifest),
   );
@@ -293,7 +383,7 @@ export function validateCarryPullRequest(
     return {
       active: true,
       source,
-      compilation: compilePullRequest(repoRoot, source, manifest),
+      compilation: compilePullRequest(repoRoot, source, manifest, target),
     };
   } catch (error) {
     const detail =

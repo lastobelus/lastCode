@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import { ThreadId } from "@t3tools/contracts";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -8,7 +10,7 @@ export function useLastCodeThreadClipboard() {
     onCopy: (ctx) => {
       toastManager.add({
         type: "success",
-        title: "Thread ID copied",
+        title: m(msg("Thread ID copied")),
         description: ctx.threadId,
       });
     },
@@ -16,8 +18,8 @@ export function useLastCodeThreadClipboard() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to copy thread ID",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: m(msg("Failed to copy thread ID")),
+          description: error instanceof Error ? error.message : m(msg("An error occurred.")),
         }),
       );
     },
@@ -28,7 +30,7 @@ export function useLastCodeThreadClipboard() {
     onCopy: (ctx) => {
       toastManager.add({
         type: "success",
-        title: "Path copied",
+        title: m(msg("Path copied")),
         description: ctx.path,
       });
     },
@@ -36,8 +38,8 @@ export function useLastCodeThreadClipboard() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to copy path",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: m(msg("Failed to copy path")),
+          description: error instanceof Error ? error.message : m(msg("An error occurred.")),
         }),
       );
     },

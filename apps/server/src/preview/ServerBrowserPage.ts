@@ -22,7 +22,7 @@ import {
 } from "@t3tools/contracts";
 import { constVoid } from "effect/Function";
 import * as Schema from "effect/Schema";
-import type { CDPSession, ConsoleMessage, Frame, Locator, Page } from "playwright-core";
+import type { CDPSession, ConsoleMessage, Frame, Locator, Page, Route } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
@@ -48,6 +48,60 @@ export class ServerBrowserOperationError extends Schema.TaggedError<ServerBrowse
 ) {}
 
 const isServerBrowserOperationError = Schema.is(ServerBrowserOperationError);
+
+/** Install access in this page's cookie context before navigating; never put credentials in URLs. */
+export async function prepareBrowserCredential(
+  page: Page,
+  destination: string,
+  credential: string,
+  timeoutMs: number,
+): Promise<void> {
+  // Playwright cannot abort this request with our signal. Drain it before handing off
+  // control so a cancelled operation cannot write cookies into later work.
+  let status: number | undefined;
+  try {
+    const response = await page
+      .context()
+      .request.post(new URL("/api/auth/browser-session", destination).href, {
+        data: { credential },
+        maxRedirects: 0,
+        timeout: Math.max(1, Math.min(timeoutMs, 5_000)),
+      });
+    try {
+      status = response.status();
+      if (!response.ok()) throw new Error("Browser session exchange was rejected.");
+    } finally {
+      await response.dispose();
+    }
+  } catch (cause) {
+    const failure = cause instanceof Error ? cause.message : "";
+    const category =
+      status !== undefined && (status < 200 || status >= 300)
+        ? "http"
+        : /Storage\.(getCookies|setCookies)/.test(failure)
+          ? "cookie-context"
+          : /timeout|timed out|ETIMEDOUT/i.test(failure)
+            ? "timeout"
+            : /certificate|TLS|SSL|ERR_CERT|CERT_|UNABLE_TO_VERIFY/i.test(failure)
+              ? "TLS error"
+              : "network error";
+    const message =
+      category === "http"
+        ? `Couldn't sign this browser in to the development server: the server answered with HTTP ${status}. Check that this address is the app's development server and that it was launched with the same development credential.`
+        : category === "cookie-context"
+          ? "Couldn't sign this browser in to the development server: this browser couldn't set up its sign-in cookies. This browser connection doesn't support development sign-in."
+          : `Couldn't sign this browser in to the development server: the server couldn't be reached (${category}). If this browser runs on a different machine than the app, use the HTTPS address published by --share.`;
+    throw new ServerBrowserOperationError({
+      tag: "PreviewAutomationExecutionError",
+      message: message,
+      detail: {
+        boundary: "browser-credential",
+        category,
+        ...(status === undefined ? {} : { status }),
+      },
+    });
+  }
+}
 
 export const toOperationError = (
   cause: unknown,
@@ -108,6 +162,65 @@ const MAX_TARGET_CHARS = 200;
 const DEFAULT_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 3_000;
 
+/** Redirect an existing navigation without appending a new history entry. */
+export const navigateWithRedirect = async (
+  page: Page,
+  storedUrl: string,
+  destination: string,
+  navigate: (redirected: boolean) => Promise<unknown>,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
+  if (destination === storedUrl) {
+    await navigate(false);
+    return;
+  }
+  const requestUrl = new URL(storedUrl);
+  requestUrl.hash = "";
+  const matches = (url: URL) => url.href === requestUrl.href;
+  const pending = new Set<Promise<void>>();
+  const redirect = (route: Route) => {
+    const work = (async () => {
+      const request = route.request();
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) {
+        await route.fallback();
+      } else if (signal?.aborted) {
+        await route.abort("aborted");
+      } else {
+        await route.fulfill({ status: 302, headers: { location: destination } });
+      }
+    })();
+    pending.add(work);
+    void work.then(
+      () => pending.delete(work),
+      () => pending.delete(work),
+    );
+    return work;
+  };
+  await page.route(matches, redirect);
+  try {
+    signal?.throwIfAborted();
+    await navigate(true);
+    signal?.throwIfAborted();
+    // Cached and same-document history traversal can commit without a request to redirect.
+    if (page.url() === storedUrl) {
+      const committed = page.waitForURL((url) => url.href !== storedUrl, {
+        waitUntil: "commit",
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
+      void committed.catch(constVoid);
+      await page.evaluate(`location.replace(${JSON.stringify(destination)})`);
+      await committed;
+    }
+  } finally {
+    try {
+      await page.unroute(matches, redirect);
+    } finally {
+      await Promise.allSettled(pending);
+    }
+  }
+};
+
 type ReadOptions = {
   readonly timeoutMs?: number | undefined;
   readonly signal?: AbortSignal | undefined;
@@ -120,13 +233,15 @@ export const withReadBudget = async <T>(
   operation: (read: ReadStage) => Promise<T>,
   maximumTimeoutMs = DEFAULT_READ_TIMEOUT_MS,
 ): Promise<T> => {
+  const signal = options.signal;
   const timeoutMs =
     options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs)
       ? Math.max(1, Math.min(options.timeoutMs, maximumTimeoutMs))
       : DEFAULT_READ_TIMEOUT_MS;
-  const interrupted = (stage?: string) =>
-    isBrowserControlInterrupted(options.signal?.reason)
-      ? options.signal.reason
+  const interrupted = (stage?: string) => {
+    const reason: unknown = signal?.reason;
+    return isBrowserControlInterrupted(reason)
+      ? reason
       : new ServerBrowserOperationError({
           tag: "PreviewAutomationControlInterruptedError",
           message:
@@ -135,8 +250,9 @@ export const withReadBudget = async <T>(
               : `Browser read was interrupted during ${stage}.`,
           detail: stage === undefined ? undefined : { stage },
         });
+  };
   // Reject before snapshot setup can revoke the last usable element refs.
-  if (options.signal?.aborted) throw interrupted();
+  if (signal?.aborted) throw interrupted();
   const deadline = Date.now() + timeoutMs;
   const pending = new Set<() => void>();
   let closed = false;
@@ -158,12 +274,12 @@ export const withReadBudget = async <T>(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        options.signal?.removeEventListener("abort", onAbort);
+        signal?.removeEventListener("abort", onAbort);
         pending.delete(onAbort);
         complete();
       };
       const onAbort = () => finish(() => reject(interrupted(stage)));
-      if (closed || options.signal?.aborted) {
+      if (closed || signal?.aborted) {
         onAbort();
         return;
       }
@@ -173,7 +289,7 @@ export const withReadBudget = async <T>(
         return;
       }
       pending.add(onAbort);
-      options.signal?.addEventListener("abort", onAbort, { once: true });
+      signal?.addEventListener("abort", onAbort, { once: true });
       timer = setTimeout(() => finish(() => reject(timedOut())), remainingMs);
       const fail = (cause: unknown) =>
         finish(() =>
@@ -819,8 +935,19 @@ type SnapshotInput = ReadOptions & {
 /** The scale a page renders at and its viewport in device-independent pixels. */
 const renderingOf = async (input: SnapshotInput, read: ReadStage) => {
   if (input.renderScale !== "display") {
-    const viewport = await viewportSizeWithinBudget(input.page, input.cdp, read);
-    return { renderScale: input.renderScale, viewport };
+    const viewport = input.page.viewportSize();
+    if (viewport) return { renderScale: input.renderScale, viewport };
+    const { cssVisualViewport } = await read("Page.getLayoutMetrics", () =>
+      input.cdp.send("Page.getLayoutMetrics"),
+    );
+    const zoom = cssVisualViewport.zoom ?? 1;
+    return {
+      renderScale: input.renderScale / zoom,
+      viewport: {
+        width: Math.max(1, Math.round(cssVisualViewport.clientWidth * zoom)),
+        height: Math.max(1, Math.round(cssVisualViewport.clientHeight * zoom)),
+      },
+    };
   }
   // The display ratio a desktop page reports includes its page zoom, and its sizes are CSS pixels.
   const page = await readPageMetricsWithinBudget(input.cdp, read);
@@ -950,7 +1077,10 @@ const capture = async (
     return { tree, dotted };
   };
   // A metadata or capture failure also releases a stalled tree's budget immediately.
-  const [[page, screenshot], { tree, dotted }] = await Promise.all([pageAndScreenshot, maskedTree()]);
+  const [[page, screenshot], { tree, dotted }] = await Promise.all([
+    pageAndScreenshot,
+    maskedTree(),
+  ]);
   const { data, full } = screenshot ?? {};
   if (Date.now() >= deadline) throw snapshotTimedOut(stages);
   if (state.generation !== generation) throw pageChanged();
@@ -1040,22 +1170,67 @@ export const snapshot = (input: SnapshotInput) =>
 export const snapshotMetadata = (input: SnapshotInput) =>
   runSnapshot({ ...input, includeImage: true }, true) as Promise<PreviewAutomationSnapshotMetadata>;
 
+export type ClickTimeoutDiagnostic = () => Promise<ServerBrowserOperationError>;
+
 /** Return when a dialog opens; waiting for the action to finish would block until dialog resolution. */
 export const click = async (
   page: Page,
   input: PreviewAutomationClickInput,
   pointer: PointerReporter = noPointer,
   signal?: AbortSignal,
+  onTimeout?: (diagnose: ClickTimeoutDiagnostic) => void,
 ): Promise<{ readonly x: number; readonly y: number }> => {
   signal?.throwIfAborted();
   // One deadline across steps keeps the reply inside the broker's grace; Playwright reads 0 as none.
   const deadline = Date.now() + (input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const remaining = () => Math.max(1, deadline - Date.now());
   const locator = targetLocator(page, input);
+  let stage: "target layout" | "pointer reporting" | "click" = "target layout";
+  const layoutTimeoutMs = Math.min(remaining(), DEFAULT_READ_TIMEOUT_MS);
+  if (locator !== null) {
+    // The host may cancel at the shared deadline before this promise can report its failure.
+    // It can still describe the reached stage, without extending the action or retrying it.
+    onTimeout?.(async () => {
+      const cause = new ServerBrowserOperationError({
+        tag: "PreviewAutomationTimeoutError",
+        message: "The browser operation exceeded its execution deadline.",
+        detail: {
+          stage,
+          timeoutMs:
+            stage === "target layout" ? layoutTimeoutMs : (input.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+        },
+      });
+      cause.name = "TimeoutError";
+      return toOperationError(await namedTargetTimeout(locator, input, cause, stage));
+    });
+  }
   try {
-    return await clickTarget(page, locator, input, remaining, pointer, signal);
+    const point = await withReadBudget({ timeoutMs: layoutTimeoutMs, signal }, (read) =>
+      read("target layout", () => targetPoint(page, locator, input, remaining, signal)),
+    );
+    stage = "pointer reporting";
+    await pointer(point, "click");
+    signal?.throwIfAborted();
+    const options = { button: input.button ?? "left", clickCount: input.clickCount ?? 1 } as const;
+    // API entry is an attempt, not proof that a DOM click was dispatched.
+    stage = "click";
+    const clicked =
+      locator === null
+        ? page.mouse.click(point.x, point.y, options)
+        : locator.click({ ...options, timeout: remaining() });
+    let onDialog = constVoid;
+    const dialogOpened = new Promise<"dialog">((resolve) => {
+      onDialog = () => resolve("dialog");
+      page.once("dialog", onDialog);
+    });
+    try {
+      if ((await Promise.race([clicked, dialogOpened])) === "dialog") void clicked.catch(constVoid);
+    } finally {
+      page.off("dialog", onDialog);
+    }
+    return point;
   } catch (cause) {
-    throw locator === null ? cause : await namedTargetTimeout(locator, input, cause);
+    throw locator === null ? cause : await namedTargetTimeout(locator, input, cause, stage);
   }
 };
 
@@ -1069,12 +1244,13 @@ const namedTargetTimeout = async (
   locator: Locator,
   input: { readonly locator?: string | undefined; readonly selector?: string | undefined },
   cause: unknown,
+  stage: "target layout" | "pointer reporting" | "click",
 ) => {
   if (!(cause instanceof Error && cause.name === "TimeoutError")) return cause;
   const selector = JSON.stringify(input.locator ?? input.selector);
+  const targetLimit = stage === "click" ? MAX_TARGET_CHARS : 100;
   // The warning leads and the target is capped, so a reply cut short still carries the warning.
-  const target =
-    selector.length > MAX_TARGET_CHARS ? `${selector.slice(0, MAX_TARGET_CHARS)}...` : selector;
+  const target = selector.length > targetLimit ? `${selector.slice(0, targetLimit)}...` : selector;
   // The host's reply must still beat the broker's short grace after the operation timeout.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const matches = await Promise.race([
@@ -1083,6 +1259,40 @@ const namedTargetTimeout = async (
       timer = setTimeout(() => resolve(undefined), TARGET_COUNT_MS);
     }),
   ]).finally(() => clearTimeout(timer));
+  const detail =
+    isServerBrowserOperationError(cause) &&
+    typeof cause.detail === "object" &&
+    cause.detail !== null
+      ? cause.detail
+      : {};
+  if (stage !== "click") {
+    const timeoutMs = "timeoutMs" in detail ? detail.timeoutMs : undefined;
+    const layout = stage === "target layout" && typeof timeoutMs === "number";
+    const lead = layout
+      ? `Click not attempted: target layout did not finish within its ${timeoutMs}ms budget.`
+      : "Click not attempted: timed out during pointer reporting.";
+    const budget = layout
+      ? timeoutMs === DEFAULT_READ_TIMEOUT_MS
+        ? ` Target layout is capped at ${DEFAULT_READ_TIMEOUT_MS}ms; a longer action timeout will not extend it.`
+        : ` The action timeout set this budget; a longer one allows target layout up to ${DEFAULT_READ_TIMEOUT_MS}ms.`
+      : "";
+    const scroll = layout
+      ? "The page may have scrolled, and may still scroll as layout settles."
+      : "The page may have scrolled.";
+    const match =
+      matches === undefined
+        ? `Could not check whether ${target} matches an element; take a fresh snapshot before retrying.`
+        : matches === 0
+          ? `${target} matches no element now; take a fresh snapshot and use a locator from it.`
+          : `${target} matches an element now; take a fresh snapshot before retrying.`;
+    const message = `${lead}${budget} ${scroll} ${match}`;
+    return new ServerBrowserOperationError({
+      tag: "PreviewAutomationTimeoutError",
+      message,
+      detail: { ...detail, stage, reason: message },
+      cause,
+    });
+  }
   const reason =
     matches === undefined
       ? `The click may have happened; check the page before retrying. Whether ${target} still matches an element is unknown.`
@@ -1093,40 +1303,9 @@ const namedTargetTimeout = async (
   return new ServerBrowserOperationError({
     tag: "PreviewAutomationTimeoutError",
     message,
-    detail: { reason: message },
+    detail: { ...detail, reason: message },
     cause,
   });
-};
-
-const clickTarget = async (
-  page: Page,
-  locator: Locator | null,
-  input: PreviewAutomationClickInput,
-  timeout: () => number,
-  pointer: PointerReporter,
-  signal?: AbortSignal,
-) => {
-  const point = await withReadBudget({ timeoutMs: timeout(), signal }, (read) =>
-    read("target layout", () => targetPoint(page, locator, input, timeout, signal)),
-  );
-  await pointer(point, "click");
-  signal?.throwIfAborted();
-  const options = { button: input.button ?? "left", clickCount: input.clickCount ?? 1 } as const;
-  const clicked =
-    locator === null
-      ? page.mouse.click(point.x, point.y, options)
-      : locator.click({ ...options, timeout: timeout() });
-  let onDialog = constVoid;
-  const dialogOpened = new Promise<"dialog">((resolve) => {
-    onDialog = () => resolve("dialog");
-    page.once("dialog", onDialog);
-  });
-  try {
-    if ((await Promise.race([clicked, dialogOpened])) === "dialog") void clicked.catch(constVoid);
-  } finally {
-    page.off("dialog", onDialog);
-  }
-  return point;
 };
 
 type FocusCandidate = {
@@ -1399,10 +1578,7 @@ export const evaluate = async (
     // awaitPromise is deliberate user work; honor the broker's explicit remaining budget.
     Number.POSITIVE_INFINITY,
   ).catch((cause: unknown) => {
-    if (
-      isServerBrowserOperationError(cause) &&
-      cause.tag === "PreviewAutomationTimeoutError"
-    )
+    if (isServerBrowserOperationError(cause) && cause.tag === "PreviewAutomationTimeoutError")
       void cdp.send("Runtime.terminateExecution").catch(constVoid);
     throw cause;
   });

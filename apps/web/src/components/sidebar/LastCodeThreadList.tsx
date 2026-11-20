@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import { useLastCodeSidebarListAnimation } from "./useLastCodeSidebarListAnimation";
 import { Fragment, type ReactNode } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -7,7 +8,11 @@ import type { useLastCodeProjectThreads } from "./useLastCodeProjectThreads";
 import { lastcodeSidebarScaleStyle } from "../../lastcodeSidebarScale";
 import { SidebarMenuSubItem, SidebarMenuSubButton } from "../ui/sidebar";
 import { LastCodeThreadStatusLabel } from "./LastCodeThreadStatusLabel";
-import { LastCodeSubagentGroup, LastCodeThreadGroupHeading } from "./LastCodeThreadFamily";
+import {
+  LastCodeOwnerGroup,
+  LastCodeSubagentGroup,
+  LastCodeThreadGroupHeading,
+} from "./LastCodeThreadFamily";
 
 interface Props {
   scale: LegacySidebarScale;
@@ -45,7 +50,9 @@ function ThreadListExpansion({
           >
             <span className="flex min-w-0 flex-1 items-center gap-2">
               {status && <LastCodeThreadStatusLabel status={status} compact />}
-              <span>Show more</span>
+              <span>
+                <T>Show more</T>
+              </span>
             </span>
           </SidebarMenuSubButton>
         </SidebarMenuSubItem>
@@ -58,7 +65,9 @@ function ThreadListExpansion({
             size="sm"
             onClick={() => onChange(false)}
           >
-            <span>Show less</span>
+            <span>
+              <T>Show less</T>
+            </span>
           </SidebarMenuSubButton>
         </SidebarMenuSubItem>
       )}
@@ -76,6 +85,7 @@ export function LastCodeThreadList({
   navigateToThread,
   renderRow,
 }: Props) {
+  const gt = useGT();
   const attachAnimation = useLastCodeSidebarListAnimation();
   const scaleStyle = lastcodeSidebarScaleStyle(scale);
   const { hiddenThreadStatus, familyProjection } = projection;
@@ -100,7 +110,9 @@ export function LastCodeThreadList({
             data-thread-selection-safe
             className="flex h-8 w-full items-center pl-8 pr-2 text-left text-xs text-sidebar-muted-foreground/75"
           >
-            <span>No threads yet</span>
+            <span>
+              <T>No threads yet</T>
+            </span>
           </div>
         </SidebarMenuSubItem>
       ) : null}
@@ -108,6 +120,8 @@ export function LastCodeThreadList({
         renderedItems.map((item) =>
           item.type === "subagents" ? (
             <LastCodeSubagentGroup key={item.key} item={item} navigateToThread={navigateToThread} />
+          ) : item.type === "owner" ? (
+            <LastCodeOwnerGroup key={item.key} item={item} navigateToThread={navigateToThread} />
           ) : (
             <Fragment key={item.row.key}>
               <LastCodeThreadGroupHeading family={item.row} />
@@ -125,10 +139,10 @@ export function LastCodeThreadList({
           >
             <span>
               {olderSettled?.loading
-                ? "Loading…"
+                ? gt("Loading…")
                 : olderSettled?.failed
-                  ? "Retry"
-                  : "Load older threads"}
+                  ? gt("Retry")
+                  : gt("Load older threads")}
             </span>
           </SidebarMenuSubButton>
         </SidebarMenuSubItem>

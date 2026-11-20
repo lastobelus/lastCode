@@ -643,8 +643,9 @@ export interface UpdateEverythingResult {
 }
 
 /** A skipped server was not updated: it was already updating, was interrupted, or lost permission. */
-export const SKIPPED_SERVER_UPDATE =
-  "Not updated: it was already updating, the update was interrupted, or this session can no longer update it.";
+export const SKIPPED_SERVER_UPDATE = msg(
+  "Not updated: it was already updating, the update was interrupted, or this session can no longer update it.",
+);
 
 export function collectUpdateEverythingResult(input: {
   readonly localVersion: string | null;
@@ -665,13 +666,11 @@ export function collectUpdateEverythingResult(input: {
     restarting: [],
     failures: [
       ...input.localFailures.map((failure) => m(msg("This app: {failure}", { failure }))),
-      ...input.servers.flatMap(({ label, outcome }) =>
-        outcome.status === "failed"
-          ? [`${label}: ${outcome.message}`]
-          : outcome.status === "skipped"
-            ? [`${label}: ${SKIPPED_SERVER_UPDATE}`]
-            : [],
-      ),
+      ...input.servers.flatMap(({ label, outcome }) => {
+        if (outcome.status === "updated") return [];
+        const failure = outcome.status === "failed" ? outcome.message : m(SKIPPED_SERVER_UPDATE);
+        return [m(msg("{machine}: {failure}", { machine: label, failure }))];
+      }),
       ...input.providers.flatMap((outcome) => (outcome.status === "failed" ? [outcome.line] : [])),
     ],
   };
@@ -862,6 +861,8 @@ export function describeUpdateEverything(
   resolve: MessageResolver = m,
 ): {
   readonly summary: string;
+  /** What the run updates besides this app, e.g. "1 server update and 3 provider updates". */
+  readonly alsoUpdates: string | null;
   readonly version: string | null;
   readonly providerCount: number;
   readonly rows: ReadonlyArray<UpdateEverythingRow>;
@@ -870,16 +871,33 @@ export function describeUpdateEverything(
     (count, machine) => count + machine.providers.length,
     0,
   );
+  const serverCount = plan.servers.length;
   const summary =
     updateTargetsSentence(
       "update",
       {
         app: Boolean(plan.localVersion),
-        servers: plan.servers.length,
+        servers: serverCount,
         providers: providerCount,
       },
       resolve,
     ) ?? resolve(msg("Update {items}", { items: "" }));
+  const otherUpdates = [
+    serverCount > 0
+      ? resolve(
+          msg("{count, plural, one {{count} server update} other {{count} server updates}}", {
+            count: serverCount,
+          }),
+        )
+      : null,
+    providerCount > 0
+      ? resolve(
+          msg("{count, plural, one {{count} provider update} other {{count} provider updates}}", {
+            count: providerCount,
+          }),
+        )
+      : null,
+  ].filter((part) => part !== null);
 
   const rows = new Map<EnvironmentId | null, UpdateEverythingRow>();
   const update = (
@@ -918,6 +936,7 @@ export function describeUpdateEverything(
 
   return {
     summary,
+    alsoUpdates: otherUpdates.length > 0 ? joinList(otherUpdates, resolve) : null,
     version:
       plan.localVersion ??
       plan.servers.find((server) => server.selfUpdate !== "desktop-managed")?.targetVersion ??

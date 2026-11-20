@@ -669,6 +669,7 @@ export function recoveryActionLines({
   hasFailureRecord = true,
   isDaemonRunning = false,
   carryPhase,
+  hasReplayStopHistory = false,
   recoverySource,
   replayMode,
   rollbackReason,
@@ -676,7 +677,7 @@ export function recoveryActionLines({
   const lines = [];
   if (isRebaseInProgress) {
     lines.push(
-      `Resolve and stage conflicts, then repeat until the rebase finishes: git -C ${shellQuote(worktree)} rebase --continue`,
+      `Resolve and stage conflicts, then repeat until the rebase finishes: ${carryPhase || hasReplayStopHistory ? `node ${shellQuote(NodePath.join(automationWorktree ?? repoRoot, "scripts/lastcode-carry-replay.ts"))} --continue ${shellQuote(worktree)}` : `git -C ${shellQuote(worktree)} rebase --continue`}`,
     );
   } else if (isDaemonRunning) {
     return [
@@ -756,7 +757,7 @@ function readCarryReplayPlan(worktree) {
 }
 
 export function renderLauncher(modulePath) {
-  return `#!/bin/sh\nexec env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node ${shellQuote(modulePath)} "$@"\n`;
+  return `#!/bin/sh\nexec env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
 }
 
 function installCommand(repoRoot, home) {
@@ -1074,6 +1075,12 @@ function printDashboard(repoRoot, home, count, verbose) {
       hasFailureRecord: recoveryFailure !== undefined,
       isDaemonRunning: daemon.running,
       carryPhase: carryPlan?.phase ?? carryPlan?.status,
+      hasReplayStopHistory: NodeFS.existsSync(
+        NodePath.join(
+          git(recoveryWorktree, ["rev-parse", "--absolute-git-dir"]),
+          "lastcode-carry-replay-stops.jsonl",
+        ),
+      ),
       recoverySource: recovery.recoverySource,
       replayMode: recovery.replayMode,
       rollbackReason: recovery.rollbackReason,

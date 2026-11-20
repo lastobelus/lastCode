@@ -1,3 +1,5 @@
+import { msg, useGT } from "gt-react";
+import { m } from "~/i18n/messages";
 import { Globe2Icon, TerminalIcon } from "lucide-react";
 import { AuthPreviewOperateScope, type ScopedThreadRef } from "@t3tools/contracts";
 import {
@@ -24,7 +26,9 @@ export function LastCodeThreadProcesses({
   cleanupBlocked: boolean;
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
 }) {
+  const gt = useGT();
   const { discoveredPorts, terminalStatus } = processes;
+  const address = `localhost:${discoveredPorts[0]?.port ?? ""}`;
   const canOperatePreview = useEnvironmentScope(threadRef.environmentId, AuthPreviewOperateScope);
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const handleOpenDiscoveredPort = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -43,7 +47,7 @@ export function LastCodeThreadProcesses({
             render={
               <button
                 type="button"
-                aria-label={`Open localhost:${discoveredPorts[0]?.port ?? ""}`}
+                aria-label={gt("Open {address}", { address })}
                 className="inline-flex cursor-pointer items-center justify-center text-success-foreground outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
                 onClick={handleOpenDiscoveredPort}
               />
@@ -52,8 +56,9 @@ export function LastCodeThreadProcesses({
             <Globe2Icon className="size-3" />
           </TooltipTrigger>
           <TooltipPopup side="top">
-            Open localhost:{discoveredPorts[0]?.port}
-            {discoveredPorts.length > 1 ? ` (+${discoveredPorts.length - 1})` : ""}
+            {discoveredPorts.length > 1
+              ? gt("Open {address} (+{count})", { address, count: discoveredPorts.length - 1 })
+              : gt("Open {address}", { address })}
           </TooltipPopup>
         </Tooltip>
       ) : null}
@@ -88,8 +93,9 @@ async function openThreadDiscoveredPort(input: Parameters<typeof openDiscoveredP
   toastManager.add(
     stackedThreadToast({
       type: "error",
-      title: "Unable to open preview",
-      description: error instanceof Error ? error.message : "The preview could not be opened.",
+      title: m(msg("Unable to open preview")),
+      description:
+        error instanceof Error ? error.message : m(msg("The preview could not be opened.")),
     }),
   );
 }

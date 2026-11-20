@@ -208,6 +208,12 @@ const makeTestRelay = Effect.fnUntraced(function* (
   const shellReads: ThreadId[] = [];
   const catchUp = { activitySnapshotReads: 0 };
   const threads = ThreadManagementService.ThreadManagementService.of({
+    withActionObligation: unused,
+    reserveActionObligation: unused,
+    disposeActionObligation: unused,
+    executeArchive: unused,
+    getThreadArchiveFamily: unused,
+    getThreadOwnershipAvailability: unused,
     getThreadShell: unused,
     getShellSnapshot: unused,
     getAgentAwarenessSnapshot: (threadId) =>
@@ -233,6 +239,8 @@ const makeTestRelay = Effect.fnUntraced(function* (
     getThreadLinkMetadata: unused,
     ensureLegacyTranscript: unused,
     dispatch: unused,
+    setThreadParents: unused,
+    deleteMany: unused,
     dispatchLaunch: unused,
     searchThread: () => Effect.die("unused"),
     searchThreadStream: () => Stream.empty,
@@ -241,6 +249,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     getMessageCount: () => Effect.die("unused message count"),
     getRunCount: () => Effect.die("unused run count"),
     getMessagesById: () => Effect.die("unused messages by id"),
+    hasThreadReadAuthorization: unused,
     getTurnItem: () => Effect.die("unused turn item read"),
     getThreadRecords: () => Effect.die("unused record read"),
     getThreadProjection: unused,
@@ -325,10 +334,12 @@ const makeTestRelay = Effect.fnUntraced(function* (
       bootstrap: unused,
       update: unused,
       delete: unused,
+      reconcileScripts: unused,
       getByWorkspaceRoot: unused,
       workspaceScanDirectory: unused,
       snapshot: Effect.succeed({ projects: [project], updatedAt: NOW }),
       listPage: unused,
+      listTemporaryOwnedBy: unused,
       getShell: unused,
       listShells: unused,
       getById: () => Effect.succeedSome(project),
@@ -1011,6 +1022,26 @@ describe("AgentAwarenessRelay", () => {
       yield* TestClock.adjust("10 minutes");
       yield* relay.drain;
       assert.deepEqual(delivered, ["running", "completed"]);
+    }),
+  );
+
+  it.effect("publishes promoted conversations as independent activity", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* Ref.set(
+        currentShell,
+        shell({
+          lineage: {
+            rootThreadId: ThreadId.make("former-parent"),
+            parentThreadId: ThreadId.make("former-parent"),
+            relationshipToParent: "subagent",
+            independent: true,
+          },
+        }),
+      );
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 1);
+      assert.equal(publications[0]?.state?.phase, "running");
     }),
   );
 

@@ -9,6 +9,7 @@ import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
 import { Atom } from "effect/reactivity";
 import * as DateTime from "effect/DateTime";
 
+import type { MessageResolver } from "../i18n/messages";
 import { deriveThreadTitleFromPrompt } from "../lib/projectThreadStartTurn";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { appAtomRegistry } from "./atom-registry";
@@ -16,7 +17,12 @@ import type { QueuedThreadMessage } from "./thread-outbox-model";
 
 export type PendingThreadCreationOutcome =
   | { readonly kind: "delivered"; readonly message: QueuedThreadMessage }
-  | { readonly kind: "failed"; readonly message: QueuedThreadMessage; readonly reason: string };
+  | {
+      readonly kind: "failed";
+      readonly message: QueuedThreadMessage;
+      readonly reason: string;
+      readonly resolveReason?: (resolve: MessageResolver) => string;
+    };
 
 export type PendingThreadCreation = {
   readonly message: QueuedThreadMessage;

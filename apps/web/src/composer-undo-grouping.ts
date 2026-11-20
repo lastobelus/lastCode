@@ -17,8 +17,14 @@ export function markAsClipboardEdit(tr: Transaction, event: "paste" | "cut"): Tr
   return tr.setMeta(CLIPBOARD_EDIT_META, event);
 }
 
+/** A formatting shortcut, checkbox toggle, or code-block action owns one undo step. */
+export function markAsOneOffEdit(tr: Transaction): Transaction {
+  return tr.setMeta("composerOneOffEdit", true);
+}
+
 function changeKindOf(tr: Transaction): ComposerChangeKind | null {
   if (!tr.docChanged) return null;
+  if (tr.getMeta("composerOneOffEdit")) return "other";
   const uiEvent = tr.getMeta("uiEvent");
   if (uiEvent === "paste" || uiEvent === "drop" || uiEvent === "cut") return "other";
   if (tr.getMeta(CLIPBOARD_EDIT_META) != null) return "other";

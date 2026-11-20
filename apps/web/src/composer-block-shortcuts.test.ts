@@ -6,13 +6,13 @@ import StarterKit from "@tiptap/starter-kit";
 import { describe, expect, it, onTestFinished, vi } from "vite-plus/test";
 
 import {
-  buildDocJson,
+  structuredBuildDocJson as buildDocJson,
   ComposerBlockExtensions,
   ComposerCodeBlockExtension,
   ComposerListExtensions,
   ComposerTaskItemExtension,
   ComposerTaskListExtension,
-  serializeEditorDoc,
+  structuredSerializeEditorDoc as serializeEditorDoc,
 } from "./composer-rich-text-doc";
 
 const mac = typeof navigator !== "undefined" && /Mac|iP(hone|[oa]d)/.test(navigator.platform);

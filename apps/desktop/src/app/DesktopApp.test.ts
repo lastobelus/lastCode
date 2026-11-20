@@ -211,6 +211,8 @@ const runStubbedDesktop = (stub: StubbedDesktop) =>
           Layer.mock(DesktopBrowserHost.DesktopBrowserHost)({
             setRootFactory: unexpectedBrowserHostCall,
             attach: unexpectedBrowserHostCall,
+            agentLedPage: unexpectedBrowserHostCall,
+            loadFailed: unexpectedBrowserHostCall,
             reserveTab: unexpectedBrowserHostCall,
             releaseReservation: unexpectedBrowserHostCall,
             registerPopup: unexpectedBrowserHostCall,
@@ -219,6 +221,7 @@ const runStubbedDesktop = (stub: StubbedDesktop) =>
             setMainWindow: unexpectedBrowserHostCall,
             setPictureInPictureWindow: unexpectedBrowserHostCall,
             setBackgroundThrottling: unexpectedBrowserHostCall,
+            setCaptureDrawn: unexpectedBrowserHostCall,
             detach: unexpectedBrowserHostCall,
             setShown: unexpectedBrowserHostCall,
             humanStartedDownload: unexpectedBrowserHostCall,

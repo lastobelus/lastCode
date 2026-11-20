@@ -33,6 +33,7 @@ import { OrchestratorToolkit } from "../../apps/server/src/mcp/toolkits/orchestr
 import * as CommandReceiptStore from "../../apps/server/src/orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../../apps/server/src/orchestration-v2/Orchestrator.ts";
 import * as ProviderSessionManager from "../../apps/server/src/orchestration-v2/ProviderSessionManager.ts";
+import * as ProjectionStore from "../../apps/server/src/orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagementService from "../../apps/server/src/orchestration-v2/ThreadManagementService.ts";
 import * as PeerForwarding from "../../apps/server/src/peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../apps/server/src/peer/PeerLinkRequests.ts";
@@ -73,6 +74,7 @@ export const makeBackgroundWait = Effect.fn("evaluateMcpToolUse.makeBackgroundWa
     ThreadManagementService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
           Layer.mock(Orchestrator.OrchestratorV2)({
             getThreadRecords: () =>
               Effect.succeed({

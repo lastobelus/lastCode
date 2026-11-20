@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { ThreadAnnotationNavigationTrigger } from "../thread-annotation/ThreadAnnotation";
 import { PopoverCreateHandle } from "../ui/popover";
@@ -8,45 +7,31 @@ import { activateSidebarRowFromKeyboard } from "./sidebarRowKeyboard";
 
 vi.mock("../ChatMarkdown", () => ({ default: () => null }));
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
 async function withRow(
   annotationActive: boolean,
   check: (row: HTMLElement, navigate: ReturnType<typeof vi.fn>) => void,
 ) {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
   const navigate = vi.fn();
-  try {
-    await act(() => {
-      root.render(
-        <ThreadAnnotationNavigationTrigger
-          annotationActive={annotationActive}
-          handle={PopoverCreateHandle()}
-          id="sidebar-keyboard-row"
-          render={<div />}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(event) => activateSidebarRowFromKeyboard(event, navigate)}
-        >
-          Thread
-          <button type="button">Archive</button>
-          <button type="button">Confirm archive</button>
-          <a href="https://github.example/project/pull/42">Pull request</a>
-        </ThreadAnnotationNavigationTrigger>,
-      );
-    });
-    await act(() =>
-      check(container.querySelector<HTMLElement>("#sidebar-keyboard-row")!, navigate),
-    );
-  } finally {
-    await act(() => root.unmount());
-    container.remove();
-  }
+  await using screen = await render(
+    <ThreadAnnotationNavigationTrigger
+      annotationActive={annotationActive}
+      handle={PopoverCreateHandle()}
+      id="sidebar-keyboard-row"
+      render={<div />}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(event) => activateSidebarRowFromKeyboard(event, navigate)}
+    >
+      Thread
+      <button type="button">Archive</button>
+      <button type="button">Confirm archive</button>
+      <a href="https://github.example/project/pull/42">Pull request</a>
+    </ThreadAnnotationNavigationTrigger>,
+    { router: false },
+  );
+  await act(() =>
+    check(screen.container.querySelector<HTMLElement>("#sidebar-keyboard-row")!, navigate),
+  );
 }
 
 describe.each([true, false])("sidebar row keyboard with annotation=%s", (annotationActive) => {

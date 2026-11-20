@@ -13,6 +13,7 @@ import {
 import type { AnyProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import { ProviderAdapterCapabilitiesError } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import { defineSecretProviderDriver } from "@t3tools/secret-provider-core/server/driver";
 import { defineSecretProvider } from "@t3tools/secret-provider-core/shared/definition";
@@ -136,7 +137,14 @@ const setup = Effect.fn("SecretCheckTest.setup")(function* (
             streamChanges: Stream.empty,
             applyUsageLimits: () => Effect.void,
           },
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: {
+            instanceId: input.instanceId,
+            driver: driverKind,
+            getCapabilities: () =>
+              Effect.fail(new ProviderAdapterCapabilitiesError({ driver: driverKind })),
+            planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+            openSession: () => Effect.die("No provider process needed for secret checks"),
+          },
           textGeneration: {} as ProviderInstance["textGeneration"],
         } satisfies ProviderInstance;
       }),

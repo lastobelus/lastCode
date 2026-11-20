@@ -3,6 +3,32 @@
 Use a new thread for a separate task. Choose **New worktree** when its code changes
 need a separate branch and working directory.
 
+## Pause before going offline
+
+Enable **Environment pause button** in **Settings → LastCode** for each environment
+where you want it. It is off by default. The sidebar button pauses only the
+environment running on this computer. To pause a remote environment, or to pause
+from mobile, use its control in **Settings → Connections**. Each control shows
+that environment's own pause state.
+
+Click **Pause** once. Each active thread receives an ordinary “pause to go
+offline” message. Automatic thread wake-ups are held until you resume, even if
+you reconnect or restart. PR watches stop polling while paused. Scheduled tasks
+follow their usual missed-run policy when you return.
+
+The environment is quiet once its agents stop and its real background work ends:
+background commands, Project Actions and cleanup still count as unfinished.
+Browser previews keep running and don't need to stop before you move your laptop.
+Progress is shown while threads stop, but you don't need to watch it.
+
+The button turns into **Resume** (play) as soon as you pause. Click it at any
+moment, even while threads are still pausing. It sends “resume” only to threads
+that received Pause, and cancels pause messages that haven't been delivered yet.
+
+If a pause or resume message can't be delivered, the thread stays listed with
+the error. Open **Manage pause** and choose **Retry pause** or **Resume** for the
+failed message. Archived or deleted threads don't receive Resume.
+
 ## Start a thread
 
 On web and desktop, **New thread** opens the project picker when you have more than one
@@ -35,8 +61,11 @@ project in the heading.
 Each thread without a project works in its own folder under `~/.t3/scratch` (the
 `scratch` folder of your T3 data directory), named after its date, the first words
 of its first message, and a short id, like
-`2026-09-25-convert-these-pngs-to-webp-a1b2c3d4`. Deleting a thread keeps its
-folder, so the files the agent wrote stay until you delete them. Branch, worktree, and diff controls stay hidden because
+`2026-09-25-convert-these-pngs-to-webp-a1b2c3d4`. Deleting a thread initially keeps
+its folder. When the inactivity rule in [automatic worktree cleanup](project-settings.md#permanent-deletion-and-generated-files)
+is enabled, a scratch folder is saved and removed after every thread using it is
+archived or deleted and the inactivity delay has passed. You can restore it from
+Saved workspaces in Settings. Branch, worktree, and diff controls stay hidden because
 these folders are not Git repositories. This is unavailable when the data
 directory itself sits inside a Git checkout.
 
@@ -58,6 +87,17 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+## Organize related threads
+
+Ask an agent to create a group thread and move existing conversations under it.
+Parents can nest to any depth, and moving a parent brings its children along. A thread
+and its parent must be in the same project and environment.
+
+Organizing changes only where a thread sits. It doesn't change the thread's owner,
+stop or move running work, or change who receives a delegated task's result. A delegated
+child that its task still owns can't move until it is released. To see a group, ask the
+agent to list a parent's children. To undo a move, ask it to restore the previous placement.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.
@@ -68,6 +108,27 @@ state, including its pinned position, and reopens an archived thread you were
 viewing. Discarding an unsent draft from the sidebar works the same way: Undo brings
 back its text and attachments. `mod+z` triggers the most recent Undo, even from the composer; see
 [Keybindings](./keybindings.md#commands-with-special-behavior).
+
+Archiving includes grouped threads, subagents, and owned work in other projects on
+the same machine.
+If any family member is working or has unread replies, a confirmation lists it.
+Owned conversations you've typed in, and what they own, stay open unless you include
+them on web or desktop.
+**Stop active threads & archive** stops unfinished work, cancels pending approvals
+and queued messages, and archives the family. **Archive unread threads** preserves
+replies in archived history. Cancel to inspect children or make eligible threads
+independent before archiving again. Forks and independent threads stay separate.
+
+If work appears stuck, **Ask the agent** can ask the agent responsible for it whether
+it is finished. The question opens in that agent's conversation; review the answer,
+then try archiving again. Busy agents can be reviewed directly instead. Asking
+does not archive the family or authorize stopping unrelated work.
+
+Persistent children must be made independent or have their protection removed
+before the family can be archived. If stopping fails, the family remains visible;
+some work may already have stopped. Undo or restoring the archived family brings
+its conversations back without restarting work. Promoted conversations remain
+independent.
 
 On web and desktop, you can also drag files from your computer onto any thread row:
 the thread opens and the files are attached in its composer, ready for
@@ -263,17 +324,25 @@ to show the family status and child count in the parent row while keeping the ch
 
 ## Thread annotations in LastCode
 
-A thread can have one Markdown annotation for notes, headings, lists, task lists, and tags. In the
-LastCode sidebar, open a thread's context menu and choose **Annotate thread…**. An active annotation
-adds a short dotted yellow underline to the thread timestamp; hover it to read, edit, or resolve
-the note without opening the thread.
+A thread has one current Markdown annotation at a time, for notes, headings, lists, task lists, and
+tags. In the LastCode sidebar, open a thread's context menu and choose **Annotate thread…**. Once a
+note is current, the menu offers **Edit Annotation…** and **Resolve Annotation…** instead. The
+current annotation adds a short dotted yellow underline to the thread timestamp; hover it to read,
+edit, or resolve the note without opening the thread.
 
-Opening an annotated thread shows the active note as a pale-yellow card above the composer. You
-can dismiss the card for the current visit without deleting or resolving the note. The
-conversation minimap marks the message that was newest when the annotation was created or last
-changed. Editing, resolving, or reopening the annotation moves that marker to the newest message.
-Resolved annotations disappear from the sidebar and composer but remain available from their
-yellow minimap marker, where they can be edited or reopened.
+Opening an annotated thread shows a compact yellow note above the composer, with its first line
+and edit timestamp. Expand it to read the full Markdown; your expanded or collapsed choice is
+remembered for that thread across navigation and reloads. Choose **Edit** to open the existing
+Markdown in the editor. You can dismiss the note for the current visit without deleting or resolving it.
+
+The conversation minimap has a yellow marker for each annotation: solid for the current note, faded
+for resolved notes. A new note's marker sits on the newest message. It moves only when you resolve
+the note, to the message that is newest at that moment; editing or reopening leaves it in place.
+
+Resolved annotations disappear from the sidebar and composer but keep their minimap markers. Choose
+**Annotate thread…** to start a new note; your resolved notes stay as they are. Hover a resolved
+note's marker to edit it or reopen it. Only one note can be current, so to reopen an older note,
+resolve the current one first or copy what you need into it.
 
 ## Resumable Project Actions in LastCode
 
@@ -376,7 +445,23 @@ fill the screen; close the full-screen view to return to the parent and inspecto
 Stop on a thread also stops the subagents it delegated to.
 Before archiving the parent, wait for its delegated tasks to finish or cancel them.
 
-Subagent threads started by the agent can't take messages; message the parent
+A thread an agent starts belongs to the thread that started it, unless you ask for
+a top-level thread. By default, owned threads appear under their owner in the same
+project, even across connected machines, or in a collapsed group named after their
+owner in another project.
+
+To keep an owned thread as a top-level conversation, choose **Promote** from its
+sidebar menu. A launched child can be promoted while it runs. If a delegated task
+still owes its result or is waiting on a PR watch or Action, wait for it to finish
+or cancel it first. Choose **Return to owner** to restore its original owner and
+default placement. If the owner is on another machine, the menu tells you its
+state there wasn't checked.
+
+Restoring a thread restores the conversations archived with it, without restarting
+stopped work. Restore the parent before restoring its archived children. Deleting
+the parent deletes its subagents too.
+
+Provider-native subagents can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
 
@@ -444,3 +529,18 @@ A snoozed thread keeps working and stays hidden until its wake time, even while
 its agent wakes itself for background work. It comes back early for an approval,
 a new question, a failed run, or a message or answer you send. You can snooze an existing
 question and answer when the thread wakes; the question stays unanswered.
+
+## Reopen handoffs in LastCode
+
+LastCode remembers links and file chips you explicitly open from chat into the right pane,
+and destinations opened there by an agent. Find them under **Handoffs** in the thread menu
+or the right-pane **+** menu. Each entry keeps its Markdown label and reopens in its usual
+file, browser, or pull-request tab. Files opened from the Files navigator are not added.
+
+The menus show seven entries by default. Change **Handoffs shown in menus** in
+**Settings → LastCode** to show 1–50. When more entries exist, **Show all…** opens a
+searchable list; the menu limit does not delete older entries.
+
+History stays on this client and survives closing tabs or archiving threads. Known local HTML
+files receive fresh preview authorization when reopened. A saved URL still needs its original
+server, and moved or deleted files must be restored before they can open again.

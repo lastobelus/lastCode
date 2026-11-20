@@ -4,6 +4,7 @@ import { settleProjectScript, setupProjectScript } from "@t3tools/shared/project
 
 import {
   buildProjectScript,
+  selectProjectScriptTerminal,
   commandForProjectScript,
   projectScriptIdFromCommand,
   nextProjectScriptId,
@@ -129,5 +130,90 @@ describe("projectScripts helpers", () => {
     expect(
       releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: false, runOnSettle: false }),
     ).toBe(holder);
+  });
+});
+
+describe("Action terminal selection", () => {
+  const ordinary = {
+    id: "check",
+    name: "Check",
+    command: "echo ready",
+    icon: "test",
+    runOnWorktreeCreate: false,
+  } as const;
+  const base = {
+    script: ordinary,
+    baseTerminalId: "term-1",
+    isBaseTerminalBusy: false,
+    preferNewTerminal: false,
+    canReuseTerminal: true,
+    canReadTerminal: true,
+    allocateTerminalId: () => "term-2",
+  };
+
+  it("isolates named-profile output and keeps the next ordinary Action out of that terminal", () => {
+    const action = selectProjectScriptTerminal({
+      ...base,
+      script: { ...ordinary, terminalLinkProfileName: "Work account" },
+    });
+    expect(action).toEqual({
+      createNewTerminal: true,
+      terminalId: expect.stringMatching(/^term-2-[0-9a-f-]{36}$/u),
+      terminalLinkProfileName: "Work account",
+    });
+    const next = selectProjectScriptTerminal({
+      ...base,
+      baseTerminalId: action.terminalId,
+      baseTerminalLinkProfileName: action.terminalLinkProfileName,
+      allocateTerminalId: () => "term-3",
+    });
+    expect(next).toEqual({ createNewTerminal: true, terminalId: "term-3" });
+    expect(selectProjectScriptTerminal(base)).toEqual({
+      createNewTerminal: false,
+      terminalId: "term-1",
+    });
+  });
+
+  it("allocates different opted-in terminals for clients with the same stale numeric snapshot", () => {
+    const action = { ...ordinary, terminalLinkProfileName: "Work account" };
+    const first = selectProjectScriptTerminal({ ...base, script: action });
+    const second = selectProjectScriptTerminal({
+      ...base,
+      script: { ...action, terminalLinkProfileName: "Other account" },
+    });
+    expect(first.terminalId).not.toBe(second.terminalId);
+    expect(first.terminalId).not.toBe("term-2");
+    expect(second.terminalId).not.toBe("term-2");
+    expect(first.terminalLinkProfileName).toBe("Work account");
+    expect(second.terminalLinkProfileName).toBe("Other account");
+    expect(selectProjectScriptTerminal(base)).toEqual({
+      createNewTerminal: false,
+      terminalId: "term-1",
+    });
+  });
+
+  it.each([
+    { isBaseTerminalBusy: true },
+    { preferNewTerminal: true },
+    { canReuseTerminal: false },
+    { canReadTerminal: false },
+  ])("preserves ordinary Action allocation constraints: %j", (constraint) => {
+    expect(selectProjectScriptTerminal({ ...base, ...constraint })).toEqual({
+      createNewTerminal: true,
+      terminalId: "term-2",
+    });
+  });
+
+  it("preserves explicit intent when building an imported Action", () => {
+    expect(
+      buildProjectScript("check", {
+        ...ordinary,
+        waitForSetup: false,
+        runOnSettle: false,
+        previewUrl: null,
+        autoOpenPreview: false,
+        terminalLinkProfileName: "Work account",
+      }),
+    ).toMatchObject({ terminalLinkProfileName: "Work account" });
   });
 });

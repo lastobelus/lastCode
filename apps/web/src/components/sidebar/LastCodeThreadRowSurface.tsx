@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { useMessages } from "gt-react";
+import type { MessageResolver } from "~/i18n/messages";
 import { cn } from "../../lib/utils";
 import { useClientSetting } from "../../hooks/useSettings";
 import { ThreadAnnotationNavigationTrigger } from "../thread-annotation/ThreadAnnotation";
@@ -32,6 +34,7 @@ function relationshipLabel(
   family: LastCodeSidebarFamilyRow,
   relationship: Relationship,
   showSubheaders: boolean,
+  resolve: MessageResolver,
 ) {
   if (!relationship.relationshipLabel) return undefined;
   const { thread } = family;
@@ -39,7 +42,7 @@ function relationshipLabel(
   const protection = thread.persistent ? ", protected from archive and deletion" : "";
   const summary =
     (!family.expanded || !showSubheaders) && family.descendantCount
-      ? `, ${lastcodeSidebarFamilySummary(family)}`
+      ? `, ${lastcodeSidebarFamilySummary(family, resolve)}`
       : "";
   return `${thread.title}, ${relationship.relationshipLabel}${creator}${protection}${summary}`;
 }
@@ -73,8 +76,10 @@ export function LastCodeThreadRowSurface({
   fileDragOver,
   children,
 }: Props) {
+  const messages = useMessages();
   const {
     annotationPopoverHandle,
+    threadDetailsPopoverHandle,
     annotationTriggerId,
     threadNavigationRef,
     threadRowActive,
@@ -90,7 +95,7 @@ export function LastCodeThreadRowSurface({
   return (
     <ThreadAnnotationNavigationTrigger
       annotationActive={annotationActive}
-      handle={annotationPopoverHandle}
+      handle={annotationActive ? annotationPopoverHandle : threadDetailsPopoverHandle}
       id={annotationTriggerId}
       render={
         <div
@@ -102,7 +107,7 @@ export function LastCodeThreadRowSurface({
       tabIndex={0}
       aria-describedby={!annotationActive && threadRowActive ? threadDetailsTooltipId : undefined}
       data-active={active}
-      aria-label={relationshipLabel(family, relationship, showSubheaders)}
+      aria-label={relationshipLabel(family, relationship, showSubheaders, messages)}
       data-slot="sidebar-menu-sub-button"
       data-sidebar="menu-sub-button"
       data-size="sm"

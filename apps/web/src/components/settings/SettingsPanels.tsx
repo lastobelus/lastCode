@@ -45,6 +45,7 @@ import {
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateDisabledReason,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
 } from "../../components/desktopUpdate.logic";
@@ -155,6 +156,11 @@ const TIMESTAMP_FORMAT_LABELS = {
   "24-hour": msg("24-hour"),
 };
 
+const FINISHED_THREAD_ALERT_LABELS = {
+  mine: msg("Your threads"),
+  all: msg("All threads"),
+};
+
 const DIFF_LAYOUT_LABELS: Record<DiffLayout, string> = {
   stacked: msg("Stacked", { $context: "diff layout" }),
   split: msg("Split", { $context: "diff layout" }),
@@ -222,7 +228,10 @@ function AboutVersionSection() {
     const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
 
     if (action === "download") {
-      void downloadLocalUpdate(bridge, { notifyDownloaded: false });
+      void downloadLocalUpdate(bridge, {
+        notifyDownloaded: false,
+        isLocalBuild: updateState?.source === "lastcode-local",
+      });
       return;
     }
 
@@ -242,11 +251,11 @@ function AboutVersionSection() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: gt("Could not confirm update"),
+            title: resolveMessage(msg("Could not confirm update")),
             description:
               error instanceof Error
                 ? (thrownErrorMessage(error, resolveMessage) ?? error.message)
-                : gt("Update confirmation failed."),
+                : resolveMessage(msg("Update confirmation failed.")),
           }),
         );
         return;
@@ -255,17 +264,29 @@ function AboutVersionSection() {
         setIsUpdateActionPending(false);
         return;
       }
+      const confirmedVersion = updateState?.downloadedVersion ?? undefined;
       void bridge
-        .installUpdate()
+        .installUpdate(confirmedVersion)
+        .then((result) => {
+          const refusal = getDesktopUpdateInstallRefusal(result, confirmedVersion);
+          if (!refusal) return;
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: resolveMessage(msg("Update not installed")),
+              description: refusal,
+            }),
+          );
+        })
         .catch((error: unknown) => {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: gt("Could not install update"),
+              title: resolveMessage(msg("Could not install update")),
               description:
                 error instanceof Error
                   ? (thrownErrorMessage(error, resolveMessage) ?? error.message)
-                  : gt("Install failed."),
+                  : resolveMessage(msg("Install failed.")),
             }),
           );
         })
@@ -524,6 +545,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.inAppNotificationsEnabled !== DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled
       ? [gt("In-app notifications")]
       : []),
+    ...(settings.finishedThreadAlerts !== DEFAULT_UNIFIED_SETTINGS.finishedThreadAlerts
+      ? [gt("Finished thread alerts")]
+      : []),
     ...(settings.sidebarProjectGroupingMode !== DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
       ? [gt("Project Grouping")]
       : []),
@@ -701,6 +725,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       notificationMode: DEFAULT_UNIFIED_SETTINGS.notificationMode,
       inAppNotificationsEnabled: DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled,
+      finishedThreadAlerts: DEFAULT_UNIFIED_SETTINGS.finishedThreadAlerts,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       persistComposerContextStrip: DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip,
       diffFilesCollapsed: DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed,
@@ -855,6 +880,43 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) => updateSettings({ inAppNotificationsEnabled: checked })}
               aria-label={gt("In-app notifications")}
             />
+          }
+        />
+        <SettingsRow
+          {...setting("finished-thread-alerts")}
+          description={
+            <T>
+              Which threads alert when they finish, fail, or hit a usage limit. Yours are threads
+              you started or have sent a message in. Requests for input or approval always alert.
+            </T>
+          }
+          control={
+            <Select
+              value={settings.finishedThreadAlerts}
+              onValueChange={(value) => {
+                if (value === "mine" || value === "all") {
+                  updateSettings({ finishedThreadAlerts: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label={gt("Finished thread alerts")}
+              >
+                <SelectValue>
+                  {m(FINISHED_THREAD_ALERT_LABELS[settings.finishedThreadAlerts])}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="mine">
+                  {m(FINISHED_THREAD_ALERT_LABELS.mine)}
+                </SelectItem>
+                <SelectItem hideIndicator value="all">
+                  {m(FINISHED_THREAD_ALERT_LABELS.all)}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
           }
         />
       </SettingsSection>

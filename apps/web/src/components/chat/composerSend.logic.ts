@@ -1,4 +1,4 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { ThreadContextRecord } from "@t3tools/contracts";
 import { msg } from "gt-react";
 import { m, type MessageResolver } from "../../i18n/messages";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
@@ -40,8 +40,7 @@ export function referencedThreadContexts(draft: {
 export function loadBalancingSendWarning(
   input: {
     readonly pending: boolean;
-    readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
-    readonly candidateEnvironmentIds: ReadonlyArray<EnvironmentId>;
+    readonly hasReadableReferenceDestination: boolean;
   },
   resolve: MessageResolver = m,
 ) {
@@ -53,17 +52,12 @@ export function loadBalancingSendWarning(
       ),
     };
   }
-  const noMachineReadsEveryThread =
-    input.threadContexts.length > 0 &&
-    !input.candidateEnvironmentIds.some((environmentId) =>
-      input.threadContexts.every((record) => record.environmentId === environmentId),
-    );
   return {
     title: resolve(msg("Choose a machine to continue")),
-    description: noMachineReadsEveryThread
+    description: !input.hasReadableReferenceDestination
       ? resolve(
           msg(
-            "No machine can read every attached thread. Choose a machine in the composer or remove the threads.",
+            "No available machine can read every attached thread. Check connections, read permissions and server updates for the source and selected machines, or remove the references.",
           ),
         )
       : resolve(

@@ -1063,11 +1063,16 @@ layer("GitHubPullRequestApi.layer", (it) => {
           output(
             encodeJson({
               data: {
+                viewer: { login: "viewer" },
                 repository: {
                   pullRequest: {
                     ...(head ? { author: null, commits: { nodes: [] } } : {}),
-                    comments: { nodes: [], pageInfo: { hasNextPage: true, endCursor: "c1" } },
-                    ...(head ? { reviews: { nodes: [], pageInfo: lastPage } } : {}),
+                    comments: {
+                      totalCount: 0,
+                      nodes: [],
+                      pageInfo: { hasNextPage: true, endCursor: "c1" },
+                    },
+                    ...(head ? { reviews: { totalCount: 0, nodes: [], pageInfo: lastPage } } : {}),
                   },
                 },
               },

@@ -1,6 +1,7 @@
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
@@ -47,7 +48,7 @@ function IndexDraftLanding() {
 
   const mostRecentProject =
     sortScopedProjectsForSidebar(
-      projects.filter((project) => project.archivedAt == null),
+      projects.filter((project) => project.archivedAt == null && !isTemporaryProject(project)),
       threads,
       "updated_at",
     )[0] ?? null;

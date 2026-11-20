@@ -38,16 +38,16 @@ export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   snapshotAtom: threadEnvironment.snapshotAtom,
   hiddenThreadTagsAtom: serverEnvironment.hiddenThreadTagsAtom,
 });
-export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
-  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
-  pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
-});
 const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime, (ref) =>
   Atom.map(environmentThreadShells.threadShellAtom(ref), (thread) => thread !== null),
 );
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
   environmentThreads.stateAtom,
 );
+export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
+  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
+  pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
+});
 
 const EMPTY_THREAD_STATE_ATOM = Atom.make(AsyncResult.success(EMPTY_ENVIRONMENT_THREAD_STATE)).pipe(
   Atom.withLabel("web-environment-thread:empty"),

@@ -33,15 +33,19 @@ import { flushCompileCache } from "./compileCache.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as EffectWorker from "./orchestration-v2/EffectWorker.ts";
+import { backfillGroupThreads } from "./orchestration-v2/backfillGroupThreads.ts";
 import { repairHistoricalThreadCreators } from "./orchestration-v2/repairHistoricalThreadCreators.ts";
 import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
+import * as AutoPullStatus from "./project/AutoPullStatus.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import { protectProjectRoot } from "./vcs/ProjectRootGuard.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -199,36 +203,29 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
     ),
   ];
 
+  const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
   yield* Effect.forEach(
     workspaceRoots,
     (cwd) =>
       Effect.gen(function* () {
         const status = yield* git.statusDetails(cwd);
-        if (
-          !status.isRepo ||
-          !status.isDefaultBranch ||
-          !status.hasUpstream ||
-          status.hasWorkingTreeChanges ||
-          status.aheadCount > 0
-        ) {
-          yield* Effect.logDebug("Skipped automatic project pull", {
-            cwd,
-            reason: !status.isRepo
-              ? "not-a-repository"
-              : !status.isDefaultBranch
-                ? "not-on-default-branch"
-                : !status.hasUpstream
-                  ? "no-upstream"
-                  : status.hasWorkingTreeChanges
-                    ? "working-tree-changes"
-                    : "local-commits",
-          });
-          return;
+        const skipReason = AutoPullStatus.autoPullSkipReason(status);
+        if (skipReason !== null) {
+          yield* Effect.logInfo("Skipped automatic project pull", { cwd, reason: skipReason });
+          return yield* autoPullStatus.record(cwd, { result: "skipped", reason: skipReason });
         }
 
-        if (status.behindCount <= 0) return;
+        if (status.behindCount <= 0) {
+          return yield* autoPullStatus.record(
+            cwd,
+            AutoPullStatus.autoPullCurrencyOutcome(yield* git.statusFetchState(cwd)),
+          );
+        }
 
         const result = yield* git.pullCurrentBranch(cwd);
+        yield* autoPullStatus.record(cwd, {
+          result: result.status === "pulled" ? "pulled" : "up-to-date",
+        });
         yield* Effect.logDebug("Automatic project pull completed", {
           cwd,
           status: result.status,
@@ -239,9 +236,26 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
           Effect.logWarning("Automatic project pull failed", {
             cwd,
             cause,
-          }),
+          }).pipe(
+            Effect.andThen(
+              autoPullStatus.record(cwd, {
+                result: "failed",
+                reason: AutoPullStatus.autoPullFailureReason(cause),
+              }),
+            ),
+          ),
         ),
       ),
+    { concurrency: 4, discard: true },
+  );
+});
+
+const protectProjectRoots = Effect.fn("protectProjectRoots")(function* (
+  projects: ReadonlyArray<Pick<Project, "workspaceRoot">>,
+) {
+  yield* Effect.forEach(
+    new Set(projects.map((project) => project.workspaceRoot)),
+    protectProjectRoot,
     { concurrency: 4, discard: true },
   );
 });
@@ -456,6 +470,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
   const providerRuntimeRecovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const threadRecovery = yield* ThreadRecovery.ThreadRecoveryService;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -553,7 +568,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       ),
       recover: runStartupPhase(
         "orchestration-v2.creator-history.repair",
-        repairHistoricalThreadCreators.pipe(
+        repairHistoricalThreadCreators(environment.environmentId).pipe(
           Effect.tap((repairedThreadCount) =>
             repairedThreadCount === 0
               ? Effect.void
@@ -561,6 +576,18 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
           ),
         ),
       ).pipe(
+        Effect.andThen(
+          runStartupPhase(
+            "orchestration-v2.group-history.backfill",
+            backfillGroupThreads().pipe(
+              Effect.tap((groupThreadCount) =>
+                groupThreadCount === 0
+                  ? Effect.void
+                  : Effect.logInfo("Marked historical group threads", { groupThreadCount }),
+              ),
+            ),
+          ),
+        ),
         Effect.andThen(
           runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
         ),
@@ -572,7 +599,9 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       startEffectWorker: runStartupPhase(
         "orchestration-v2.effect-worker.start",
         startEffectWorkerWithRelay({
-          runWorker: EffectWorker.runDaemon,
+          runWorker: EffectWorker.runDaemonWithOptions({
+            reconcileThreadHealth: threadRecovery.reconcile,
+          }),
           startRelay: agentAwarenessRelay.start(),
           workerFiberRef: effectWorkerFiber,
         }),
@@ -600,6 +629,19 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
     ).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("Failed to load projects for automatic pull", { cause }),
+      ),
+      forkParked,
+    );
+
+    yield* runStartupPhase(
+      "projects.root-guard",
+      ProjectStore.ProjectStoreV2.pipe(
+        Effect.flatMap((store) => store.listShells()),
+        Effect.flatMap(protectProjectRoots),
+      ),
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Failed to load projects for the root guard", { cause }),
       ),
       forkParked,
     );

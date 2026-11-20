@@ -70,6 +70,10 @@ function nightlyUpdate(releaseNotes: DesktopUpdateState["releaseNotes"]): Deskto
   };
 }
 
+function upToDate(): DesktopUpdateState {
+  return { ...nightlyUpdate([]), status: "up-to-date", availableVersion: null };
+}
+
 const RELEASE_NOTES: DesktopUpdateState["releaseNotes"] = [
   { version: "0.0.50-nightly.2", items: ["Faster sidebar."], totalItems: 1 },
 ];
@@ -93,24 +97,28 @@ function publish(update: DesktopUpdateState | null) {
   });
 }
 
-const releaseNotes = () => document.querySelector('[aria-label="Update release notes"]');
+const releaseNotes = () => document.querySelector('[aria-label="Update details"]');
 
 describe("SidebarUpdatePill release notes", () => {
-  it("closes when the release notes stop applying", async () => {
+  it("closes when the update stops applying", async () => {
     setup(nightlyUpdate(RELEASE_NOTES));
     await using _screen = await render(<SidebarUpdatePill />);
     await userEvent.tab();
     await vi.waitFor(() => expect(releaseNotes()).not.toBeNull());
 
-    await publish(nightlyUpdate([]));
+    await publish(upToDate());
     await vi.waitFor(() => expect(releaseNotes()).toBeNull());
   });
 
-  it("opens when release notes arrive while the trigger has keyboard focus", async () => {
-    setup(nightlyUpdate([]));
+  it("opens when an update arrives while the trigger has keyboard focus", async () => {
+    setup(upToDate());
     await using _screen = await render(<SidebarUpdatePill />);
     await userEvent.tab();
     expect(releaseNotes()).toBeNull();
+
+    // The target and readiness show before any release notes do.
+    await publish(nightlyUpdate([]));
+    await expect.element(page.getByText("Ready to download", { exact: true })).toBeVisible();
 
     await publish(
       nightlyUpdate([

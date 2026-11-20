@@ -149,7 +149,7 @@ it.effect("tells the peer which thread a call is made for", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect.each([false, true])(
+it.live.each([false, true])(
   "reuses an initialized session before its first call finishes (cancelled: %s)",
   (cancelFirst) =>
     Effect.scoped(

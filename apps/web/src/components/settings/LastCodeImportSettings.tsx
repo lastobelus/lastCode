@@ -1,16 +1,19 @@
 import { type LastCodeSettingsImportPreview } from "@t3tools/contracts";
+import { msg, T, useGT, Var } from "gt-react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { useEffect, useState } from "react";
 import { isElectron } from "../../env";
+import { m } from "../../i18n/messages";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 function useT3SettingsImport() {
   const [importPreview, setImportPreview] = useState<LastCodeSettingsImportPreview | null>(null);
   const [isImporting, setIsImporting] = useState(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the native desktop settings-import preview when this settings control mounts
   useEffect(() => {
     const bridge = window.desktopBridge;
     if (!bridge || typeof bridge.previewT3SettingsImport !== "function") return;
@@ -21,8 +24,9 @@ function useT3SettingsImport() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not inspect T3 Code settings",
-            description: error instanceof Error ? error.message : "Settings preview failed.",
+            title: m(msg("Could not inspect {t3Code} settings", { t3Code: "T3 Code" })),
+            description:
+              error instanceof Error ? error.message : m(msg("Settings preview failed.")),
           }),
         );
       });
@@ -37,8 +41,13 @@ function useT3SettingsImport() {
       toastManager.add(
         stackedThreadToast({
           type: "success",
-          title: "T3 Code settings imported",
-          description: `Backed up the previous LastCode settings to ${result.backupDirectory}. Restarting LastCode…`,
+          title: m(msg("{t3Code} settings imported", { t3Code: "T3 Code" })),
+          description: m(
+            msg(
+              "Backed up the previous {lastCode} settings to {backupDirectory}. Restarting {lastCode}…",
+              { lastCode: "LastCode", backupDirectory: result.backupDirectory },
+            ),
+          ),
         }),
       );
     } catch (error) {
@@ -46,8 +55,8 @@ function useT3SettingsImport() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not import T3 Code settings",
-          description: error instanceof Error ? error.message : "Settings import failed.",
+          title: m(msg("Could not import {t3Code} settings", { t3Code: "T3 Code" })),
+          description: error instanceof Error ? error.message : m(msg("Settings import failed.")),
         }),
       );
     }
@@ -57,11 +66,20 @@ function useT3SettingsImport() {
 }
 
 function ImportPreview({ preview }: { preview: LastCodeSettingsImportPreview | null }) {
-  if (!isElectron) return "Open this page in the LastCode desktop app to import settings.";
-  if (!preview) return "Inspecting ~/.t3/userdata…";
+  const gt = useGT();
+  if (!isElectron) {
+    return gt("Open this page in the {lastCode} desktop app to import settings.", {
+      lastCode: "LastCode",
+    });
+  }
+  if (!preview) return gt("Inspecting {sourceDirectory}…", { sourceDirectory: "~/.t3/userdata" });
   return (
     <div className="space-y-1.5">
-      <p>Source: {preview.sourceDirectory}</p>
+      <p>
+        <T>
+          Source: <Var>{preview.sourceDirectory}</Var>
+        </T>
+      </p>
       {preview.message ? <p>{preview.message}</p> : null}
       <ul className="space-y-0.5">
         {preview.categories.map((category) => (
@@ -74,18 +92,30 @@ function ImportPreview({ preview }: { preview: LastCodeSettingsImportPreview | n
           </li>
         ))}
       </ul>
-      <p>Not imported: {preview.excluded.join("; ")}.</p>
+      <p>
+        <T>
+          Not imported: <Var>{preview.excluded.join("; ")}</Var>.
+        </T>
+      </p>
     </div>
   );
 }
 
 export function LastCodeImportSettings() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
   const { importPreview, isImporting, importSettings } = useT3SettingsImport();
   return (
-    <SettingsSection title="Import from T3 Code" icon={<DownloadIcon className="size-5" />}>
+    <SettingsSection
+      title={gt("Import from {t3Code}", { t3Code: "T3 Code" })}
+      icon={<DownloadIcon className="size-5" />}
+    >
       <SettingsRow
         {...searchableSetting("import-t3-settings")}
-        description="Copy selected preferences into LastCode once, back up the current LastCode files, then restart. The two apps remain independent after the import."
+        description={gt(
+          "Copy selected preferences into {lastCode} once, back up the current {lastCode} files, then restart. The two apps remain independent after the import.",
+          { lastCode: "LastCode" },
+        )}
         status={<ImportPreview preview={importPreview} />}
         control={
           <Button
@@ -94,7 +124,7 @@ export function LastCodeImportSettings() {
             disabled={!importPreview?.canImport || isImporting}
             onClick={() => void importSettings()}
           >
-            {isImporting ? "Importing…" : "Import and restart"}
+            {isImporting ? <T>Importing…</T> : <T>Import and restart</T>}
           </Button>
         }
       />

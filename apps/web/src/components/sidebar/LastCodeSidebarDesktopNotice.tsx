@@ -1,3 +1,4 @@
+import { T, useGT, useMessages, Var } from "gt-react";
 import {
   downloadLastCodeSidebarUpdate,
   installLastCodeSidebarUpdate,
@@ -43,6 +44,8 @@ function useLastCodeSidebarUpdateAction() {
   };
 }
 export function LastCodeSidebarDesktopNotice() {
+  const gt = useGT();
+  const messages = useMessages();
   const {
     desktopUpdateState,
     desktopUpdateButtonAction,
@@ -53,7 +56,7 @@ export function LastCodeSidebarDesktopNotice() {
     isElectron && shouldShowArm64IntelBuildWarning(desktopUpdateState);
   const arm64IntelBuildWarningDescription =
     desktopUpdateState && showArm64IntelBuildWarning
-      ? getArm64IntelBuildWarningDescription(desktopUpdateState)
+      ? getArm64IntelBuildWarningDescription(desktopUpdateState, messages)
       : null;
   return (
     <>
@@ -61,7 +64,11 @@ export function LastCodeSidebarDesktopNotice() {
         <SidebarGroup>
           <Alert variant="warning">
             <TriangleAlertIcon />
-            <AlertTitle>Intel build on Apple Silicon</AlertTitle>
+            <AlertTitle>
+              <T>
+                <Var>{"Intel"}</Var> build on <Var>{"Apple Silicon"}</Var>
+              </T>
+            </AlertTitle>
             <AlertDescription>{arm64IntelBuildWarningDescription}</AlertDescription>
             {desktopUpdateButtonAction !== "none" ? (
               <AlertAction>
@@ -72,8 +79,8 @@ export function LastCodeSidebarDesktopNotice() {
                   onClick={handleDesktopUpdateButtonClick}
                 >
                   {desktopUpdateButtonAction === "download"
-                    ? "Download ARM build"
-                    : "Install ARM build"}
+                    ? gt("Download {architecture} build", { architecture: "ARM" })
+                    : gt("Install {architecture} build", { architecture: "ARM" })}
                 </Button>
               </AlertAction>
             ) : null}

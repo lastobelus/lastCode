@@ -646,6 +646,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
       Effect.gen(function* () {
         const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         // Google's linux-arm64 build aborts like this on Asahi and Raspberry Pi 5 kernels.
+        // Read initialize before aborting so the fixture exercises exit handling, not a broken pipe.
         const spawner = ChildProcessSpawner.make((command) =>
           ChildProcess.isStandardCommand(command) &&
           String(command.command).endsWith(executableName)
@@ -654,7 +655,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
                   "sh",
                   [
                     "-c",
-                    "echo 'F1111 11:50:12.383176 page-size.cc:19] Check failed: sysconf(_SC_PAGE_SIZE) == kPageSize (16384 vs. 4096) Compile-time page size does not match runtime page size' >&2; kill -ABRT $$",
+                    "IFS= read -r request; echo 'F1111 11:50:12.383176 page-size.cc:19] Check failed: sysconf(_SC_PAGE_SIZE) == kPageSize (16384 vs. 4096) Compile-time page size does not match runtime page size' >&2; kill -ABRT $$",
                   ],
                   { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
                 ),
@@ -669,8 +670,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
         yield* installation.start;
         const state = yield* terminalState(installation);
         expect(state.phase).toBe("failed");
-        expect(state.message).toMatch(/page/i);
-      }),
+        expect(state.message).toMatch(/4 KiB memory pages/i);
+      }).pipe(TestClock.withLive),
   );
 
   it.effect.each(["downloaded", "existing", "concurrent"] as const)(
@@ -1046,8 +1047,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
           source: "managed",
           version: previousVersion,
         });
+        const canonicalExternalExecutable = yield* fs.realPath(externalExecutable);
         expect(yield* installation.resolve(externalExecutable)).toMatchObject({
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
           source: "override",
           managedVersionDirectory: null,
         });
@@ -1066,7 +1068,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
         yield* installation.remove();
         expect(yield* installation.resolve()).toMatchObject({
           source: "path",
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
         });
         const isolated = yield* makeHarness({ baseDir });
         expect(yield* isolated.installation.resolve().pipe(Effect.flip)).toMatchObject({
@@ -1076,11 +1078,26 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
           yield* isolated.installation.resolve(undefined, { PATH: externalDirectory }),
         ).toMatchObject({
           source: "path",
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
         });
         expect(
           yield* isolated.installation.resolve("agy", { PATH: externalDirectory }),
-        ).toMatchObject({ source: "override", executablePath: externalExecutable });
+        ).toMatchObject({ source: "override", executablePath: canonicalExternalExecutable });
+
+        const nonExecutableDirectory = path.join(baseDir, "non-executable");
+        yield* fs.makeDirectory(nonExecutableDirectory);
+        yield* fs.writeFileString(path.join(nonExecutableDirectory, "agy"), "not executable", {
+          mode: 0o644,
+        });
+        const shadowedPath = { PATH: `${nonExecutableDirectory}:${externalDirectory}` };
+        expect(yield* isolated.installation.resolve(undefined, shadowedPath)).toMatchObject({
+          source: "path",
+          executablePath: canonicalExternalExecutable,
+        });
+        expect(yield* isolated.installation.resolve("agy", shadowedPath)).toMatchObject({
+          source: "override",
+          executablePath: canonicalExternalExecutable,
+        });
       }),
   );
 

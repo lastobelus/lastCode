@@ -1,18 +1,28 @@
+import { msg, T, useGT } from "gt-react";
+import { m } from "~/i18n/messages";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
-import { CheckIcon, FolderPlusIcon, MessageSquareDashedIcon, SquarePenIcon } from "lucide-react";
+import {
+  CheckIcon,
+  FolderPlusIcon,
+  MessageSquareDashedIcon,
+  ScaleIcon,
+  SquarePenIcon,
+} from "lucide-react";
 
 import { openCommandPalette } from "~/commandPaletteBus";
 import { useHandleNewThread } from "~/hooks/useHandleNewThread";
 import { useScratchProject } from "~/hooks/useScratchProject";
+import { useClientSettings } from "~/hooks/useSettings";
 import { shortcutLabelForCommand } from "~/keybindings";
 import { resolveThreadActionProjectRef } from "~/lib/chatThreadActions";
 import { projectIconColorClassName } from "~/projectIconColors";
 import {
   buildSidebarProjectPickerEntries,
   NO_PROJECT_GROUP_KEY,
+  orderProjectMembersForPicker,
   projectGroupsSpanEnvironments,
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
@@ -29,11 +39,15 @@ import {
   MenuItem,
   MenuPopup,
   MenuSeparator,
+  MenuSub,
+  MenuSubPopup,
+  MenuSubTrigger,
   MenuTrigger,
 } from "../ui/menu";
 import { useSidebar } from "../ui/sidebar";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { TemporaryProjectsToggle } from "../TemporaryProjectsToggle";
 import { SidebarHeaderIconButton } from "./SidebarThreadHeader";
 
 export function LastCodeSidebarThreadPicker({
@@ -41,11 +55,14 @@ export function LastCodeSidebarThreadPicker({
 }: {
   readonly projectGroups: readonly SidebarProjectSnapshot[];
 }) {
+  const gt = useGT();
+  const remoteLabel = gt("Remote", { $context: "environment location" });
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
   const { scratchEnvironmentId, startScratchThread } = useScratchProject();
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const contextualProjectRef = resolveThreadActionProjectRef({
@@ -79,18 +96,21 @@ export function LastCodeSidebarThreadPicker({
     ),
   );
 
-  const createThread = async (project: SidebarProjectGroupMember) => {
+  const createThread = async (
+    project: SidebarProjectGroupMember,
+    environmentSelection: "auto" | "manual" = "manual",
+  ) => {
     if (isMobile) setOpenMobile(false);
     const result = await settlePromise(() =>
-      handleNewThread(scopeProjectRef(project.environmentId, project.id)),
+      handleNewThread(scopeProjectRef(project.environmentId, project.id), { environmentSelection }),
     );
     if (result._tag === "Failure") {
       const error = squashAtomCommandFailure(result);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not create thread",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: m(msg("Could not create thread")),
+          description: error instanceof Error ? error.message : m(msg("An error occurred.")),
         }),
       );
     }
@@ -100,14 +120,24 @@ export function LastCodeSidebarThreadPicker({
     <Menu>
       <MenuTrigger
         render={
-          <SidebarHeaderIconButton label="New thread" data-testid="legacy-new-thread-trigger" />
+          <SidebarHeaderIconButton
+            label={gt("New thread")}
+            data-testid="legacy-new-thread-trigger"
+          />
         }
       >
         <SquarePenIcon />
       </MenuTrigger>
-      <MenuPopup align="end" className="max-h-80 w-64 overflow-y-auto" aria-label="New thread in">
+      <MenuPopup
+        align="end"
+        className="max-h-80 w-64 overflow-y-auto"
+        aria-label={gt("New thread in")}
+      >
         <MenuGroup>
-          <MenuGroupLabel>New thread in…</MenuGroupLabel>
+          <MenuGroupLabel>
+            <T>New thread in…</T>
+          </MenuGroupLabel>
+          <TemporaryProjectsToggle menu />
           {scratchTargetEnvironmentId === null ? null : (
             <MenuItem
               onClick={() => {
@@ -122,38 +152,74 @@ export function LastCodeSidebarThreadPicker({
                 >
                   <MessageSquareDashedIcon className="size-full" />
                 </span>
-                No project
+                <T>No project</T>
               </span>
               {withoutProjectShortcutLabel ? <Kbd>{withoutProjectShortcutLabel}</Kbd> : null}
             </MenuItem>
           )}
           {scratchTargetEnvironmentId !== null && menuEntries.length > 0 ? <MenuSeparator /> : null}
-          {menuEntries.map(({ group, targetProject, isPreferred }) => (
-            <MenuItem key={group.projectKey} onClick={() => void createThread(targetProject)}>
-              <span className="flex min-w-0 flex-1 items-center gap-2">
-                <ProjectFavicon project={group} className="size-4 shrink-0" />
-                <Tooltip>
-                  <TooltipTrigger render={<span className="block min-w-0 truncate" />}>
-                    {group.displayName}
-                  </TooltipTrigger>
-                  <TooltipPopup side="top">{group.displayName}</TooltipPopup>
-                </Tooltip>
-                {showProjectEnvironments ? (
-                  <ProjectEnvironmentBadge
-                    group={group}
-                    primaryEnvironmentId={primaryEnvironmentId}
-                    machineByEnvironmentId={environmentMachineById}
-                  />
-                ) : null}
-              </span>
-              {isPreferred ? <CheckIcon className="size-3.5" /> : null}
-            </MenuItem>
-          ))}
+          {menuEntries.map(({ group, targetProject, isPreferred }) => {
+            const projectLabel = (
+              <>
+                <span className="flex min-w-0 flex-1 items-center gap-2">
+                  <ProjectFavicon project={group} className="size-4 shrink-0" />
+                  <Tooltip>
+                    <TooltipTrigger render={<span className="block min-w-0 truncate" />}>
+                      {group.displayName}
+                    </TooltipTrigger>
+                    <TooltipPopup side="top">{group.displayName}</TooltipPopup>
+                  </Tooltip>
+                  {showProjectEnvironments ? (
+                    <ProjectEnvironmentBadge
+                      group={group}
+                      primaryEnvironmentId={primaryEnvironmentId}
+                      machineByEnvironmentId={environmentMachineById}
+                    />
+                  ) : null}
+                </span>
+                {isPreferred ? <CheckIcon className="size-3.5" /> : null}
+              </>
+            );
+            if (group.memberProjects.length === 1) {
+              return (
+                <MenuItem key={group.projectKey} onClick={() => void createThread(targetProject)}>
+                  {projectLabel}
+                </MenuItem>
+              );
+            }
+            return (
+              <MenuSub key={group.projectKey}>
+                <MenuSubTrigger>{projectLabel}</MenuSubTrigger>
+                <MenuSubPopup aria-label={gt("Run {project} on", { project: group.displayName })}>
+                  {loadBalancingEnabled &&
+                  new Set(group.memberProjects.map((member) => member.environmentId)).size > 1 ? (
+                    <>
+                      <MenuItem onClick={() => void createThread(targetProject, "auto")}>
+                        <ScaleIcon />
+                        <T>Auto balance</T>
+                      </MenuItem>
+                      <MenuSeparator />
+                    </>
+                  ) : null}
+                  {orderProjectMembersForPicker(group.memberProjects, targetProject).map(
+                    (member) => (
+                      <MenuItem
+                        key={member.physicalProjectKey}
+                        onClick={() => void createThread(member)}
+                      >
+                        {member.environmentLabel ?? remoteLabel}: {member.workspaceRoot}
+                      </MenuItem>
+                    ),
+                  )}
+                </MenuSubPopup>
+              </MenuSub>
+            );
+          })}
         </MenuGroup>
         {scratchTargetEnvironmentId !== null || menuEntries.length > 0 ? <MenuSeparator /> : null}
         <MenuItem onClick={() => openCommandPalette({ open: "add-project" })}>
           <FolderPlusIcon />
-          Add project
+          <T>Add project</T>
         </MenuItem>
       </MenuPopup>
     </Menu>

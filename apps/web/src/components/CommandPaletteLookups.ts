@@ -6,6 +6,7 @@ import {
 import { useGT } from "gt-react";
 
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
+import { useProjectPickerGroups } from "../hooks/useProjectPickerGroups";
 import { useClientSettings } from "../hooks/useSettings";
 import { getProjectOrderKey } from "@t3tools/client-runtime/state/project-grouping";
 import { useProjects, useVisibleThreadShells } from "../state/entities";
@@ -78,15 +79,18 @@ export function useSortedProjectGroups(environmentLabelById: ReadonlyMap<Environ
       legacyProjectCwdPreferenceKey(project.workspaceRoot),
     ],
   });
-  const unsortedProjectGroups = buildSidebarProjectSnapshots({
-    projects: clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
-    settings: projectGroupingSettings,
-    primaryEnvironmentId,
-    resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
-  });
-  return sortLogicalProjectsForSidebar(
-    unsortedProjectGroups,
-    threads,
-    clientSettings.sidebarProjectSortOrder,
+  return useProjectPickerGroups(
+    clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
+    (candidates) =>
+      sortLogicalProjectsForSidebar(
+        buildSidebarProjectSnapshots({
+          projects: candidates,
+          settings: projectGroupingSettings,
+          primaryEnvironmentId,
+          resolveEnvironmentLabel: (id) => environmentLabelById.get(id) ?? null,
+        }),
+        threads,
+        clientSettings.sidebarProjectSortOrder,
+      ),
   );
 }

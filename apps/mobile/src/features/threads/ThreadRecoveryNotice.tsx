@@ -1,0 +1,125 @@
+import { StackActions, useNavigation } from "@react-navigation/native";
+import { presentThreadRecovery } from "@t3tools/client-runtime/state/thread-recovery";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import type { EnvironmentId } from "@t3tools/contracts";
+import { useGT, useMessages } from "gt-react-native";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { View } from "react-native";
+import { AppText as Text } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
+import { useThreadShell } from "../../state/entities";
+import { threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
+
+export function ThreadRecoveryNotice({
+  thread,
+  environmentId,
+}: {
+  thread: EnvironmentThreadShell;
+  environmentId: EnvironmentId;
+}) {
+  const navigation = useNavigation();
+  const gt = useGT();
+  const messages = useMessages();
+  const recover = useAtomCommand(threadEnvironment.recoverThread, { reportFailure: false });
+  const repair = useAtomCommand(threadEnvironment.repairThread, { reportFailure: false });
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [error, setError] = useState<{ key: string; message: string | null } | null>(null);
+  const [dismissedKey, setDismissedKey] = useState<string | null>(null);
+  const recovery = thread.recovery;
+  const repairThread = useThreadShell(
+    recovery?.repairThreadId ? { environmentId, threadId: recovery.repairThreadId } : null,
+  );
+  const key = `${environmentId}:${thread.id}:${recovery?.runId}:${recovery?.attemptId}`;
+  const mounted = useRef(true);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- guards native recovery request callbacks for this mounted notice
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const currentKey = useRef(key);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps in-flight recovery request identity aligned with the committed thread and attempt
+  useLayoutEffect(() => {
+    currentKey.current = key;
+  }, [key]);
+  const presentation = presentThreadRecovery(
+    recovery,
+    repairThread !== null && repairThread.deletedAt === null,
+    messages,
+  );
+  if (!recovery || !presentation || (dismissedKey === key && recovery.status === "recovered"))
+    return null;
+  const pending = pendingKey === key;
+  const act = async () => {
+    if (pending || presentation.busy) return;
+    setPendingKey(key);
+    setError(null);
+    const input = { threadId: thread.id, runId: recovery.runId, attemptId: recovery.attemptId };
+    await (async () => {
+      if (presentation.action === "launch-repair" || presentation.action === "view-repair") {
+        const result = await repair({ environmentId, input });
+        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+        if (mounted.current && currentKey.current === key && navigation.isFocused())
+          navigation.dispatch(
+            StackActions.push("Thread", { environmentId, threadId: result.value.threadId }),
+          );
+      } else {
+        const result = await recover({ environmentId, input });
+        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+      }
+    })()
+      .catch((cause) => {
+        setError({
+          key,
+          message: cause instanceof Error ? cause.message : null,
+        });
+      })
+      .finally(() => {
+        setPendingKey((value) => (value === key ? null : value));
+      });
+  };
+  return (
+    <View className="mx-3 mb-2 gap-2 rounded-xl border border-warning-foreground/25 bg-background p-3">
+      <Text
+        accessibilityLiveRegion="polite"
+        accessibilityRole="header"
+        className="text-sm font-t3-bold text-foreground"
+      >
+        {presentation.title}
+      </Text>
+      <Text className="text-xs text-muted-foreground">{presentation.description}</Text>
+      <View className="flex-row justify-end">
+        {presentation.label !== null ? (
+          <Button
+            label={
+              pending
+                ? presentation.action === "launch-repair" || presentation.action === "view-repair"
+                  ? gt("Opening…")
+                  : recovery.status === "suspect"
+                    ? gt("Checking…")
+                    : gt("Recovering…")
+                : presentation.label
+            }
+            disabled={pending || presentation.busy}
+            onPress={() => void act()}
+            tone="secondary"
+          />
+        ) : (
+          <Button
+            label={gt("Dismiss", { $context: "verb, dismiss a recovery notice" })}
+            onPress={() => setDismissedKey(key)}
+            tone="secondary"
+          />
+        )}
+      </View>
+      {error?.key === key ? (
+        <Text accessibilityRole="alert" className="text-sm text-destructive">
+          {error.message ?? gt("Could not recover this run.")}
+        </Text>
+      ) : null}
+    </View>
+  );
+}

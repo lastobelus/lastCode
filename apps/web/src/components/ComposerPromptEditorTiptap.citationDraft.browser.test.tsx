@@ -154,6 +154,7 @@ it.each(["blocked", "refusedLater"] as const)(
     await expect.element(comment).toHaveFocus();
     await userEvent.keyboard("{Control>}{Enter}{/Control}");
     await expect.element(comment).not.toBeInTheDocument();
+    await expect.element(page.getByTestId("composer-editor")).toHaveFocus();
     await userEvent.keyboard("x");
 
     await expect

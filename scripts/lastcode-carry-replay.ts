@@ -1,16 +1,23 @@
 #!/usr/bin/env node
 
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off -- Local Git orchestration intentionally uses host processes.
+import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { cleanGitEnvironment } from "./lastcode-nightly.ts";
+import { cleanGitEnvironment } from "./lib/lastcode-git.ts";
 import {
   isCheckpointMessageRewrite,
   normalizeCheckpointCommits,
 } from "./lastcode-quiet-references.ts";
+import {
+  appendCheckpointHistoryLine,
+  checkpointReplayStopKey,
+  isCheckpointReplayStop,
+  type CheckpointReplayStop,
+} from "./lastcode-checkpoint-history.ts";
 import { writeCarryConflictDossier } from "./lastcode-carry-dossier.ts";
 
 export const CARRY_REPLAY_GROUPS = [
@@ -73,6 +80,8 @@ export type CarryReplayPhase = "compile" | "replay" | "historical";
 export interface CarryReplayPlan {
   readonly schemaVersion: 1;
   readonly phase: CarryReplayPhase;
+  readonly replayId?: string;
+  readonly groupsByCommit?: Readonly<Record<string, CarryReplayGroup>>;
   readonly status: "running" | "complete";
   readonly source: string;
   readonly sourceBase: string;
@@ -670,6 +679,144 @@ export function readCarryReplayPlan(worktree: string): CarryReplayPlan | undefin
   return parsed;
 }
 
+function carryStopsPath(worktree: string): string {
+  return NodePath.join(
+    NodePath.dirname(carryPlanPath(worktree)),
+    "lastcode-carry-replay-stops.jsonl",
+  );
+}
+
+export function readCarryReplayStops(worktree: string): ReadonlyArray<CheckpointReplayStop> {
+  try {
+    return readCarryReplayStopsFile(carryStopsPath(worktree));
+  } catch {
+    console.warn("[lastcode:checkpoint] Could not read replay stop history.");
+    return [];
+  }
+}
+
+function readCarryReplayStopsFile(path: string): ReadonlyArray<CheckpointReplayStop> {
+  if (!NodeFS.existsSync(path)) return [];
+  return NodeFS.readFileSync(path, "utf8")
+    .split(/\r?\n/u)
+    .flatMap((line) => {
+      try {
+        const stop: unknown = JSON.parse(line);
+        return isCheckpointReplayStop(stop) ? [stop] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+export function recordCarryReplayStop(
+  worktree: string,
+  identity?: Pick<CheckpointReplayStop, "replayId" | "kind">,
+): void {
+  const started = performance.now();
+  const git = (args: ReadonlyArray<string>, options: GitOptions = {}) => {
+    const timeout = Math.floor(1_000 - (performance.now() - started));
+    if (timeout <= 0) throw new Error("Replay stop observation time budget reached.");
+    return runGit(worktree, args, { ...options, timeout });
+  };
+  try {
+    const dotGit = NodePath.join(worktree, ".git");
+    const gitDirectory = NodeFS.statSync(dotGit).isDirectory()
+      ? dotGit
+      : NodePath.resolve(
+          worktree,
+          NodeFS.readFileSync(dotGit, "utf8")
+            .replace(/^gitdir: /u, "")
+            .trim(),
+        );
+    if (
+      !["rebase-merge", "rebase-apply"].some((name) =>
+        NodeFS.existsSync(NodePath.join(gitDirectory, name)),
+      )
+    )
+      return;
+    const path = NodePath.join(gitDirectory, "lastcode-carry-replay-stops.jsonl");
+    const planPath = NodePath.join(gitDirectory, CARRY_PLAN_FILE);
+    const plan = NodeFS.existsSync(planPath)
+      ? (JSON.parse(NodeFS.readFileSync(planPath, "utf8")) as CarryReplayPlan)
+      : undefined;
+    if (plan && plan.schemaVersion !== 1) return;
+    const previous = readCarryReplayStopsFile(path);
+    const context =
+      identity ??
+      (plan
+        ? ({
+            replayId: plan.replayId ?? JSON.stringify([plan.phase, plan.source, plan.onto]),
+            kind: plan.phase === "compile" ? "fold" : "replay",
+          } as const)
+        : previous.at(-1));
+    if (!context) return;
+    const rebaseHeadPath = NodePath.join(gitDirectory, "REBASE_HEAD");
+    if (!NodeFS.existsSync(rebaseHeadPath)) return;
+    const commit = NodeFS.readFileSync(rebaseHeadPath, "utf8").trim();
+    if (!/^[0-9a-f]{40,64}$/u.test(commit)) return;
+    const paths = git(["diff", "--name-only", "--diff-filter=U", "-z"], { raw: true })
+      .split("\0")
+      .filter(Boolean);
+    if (paths.length === 0) return;
+    const conflictedPaths = { test: 0, generated: 0, other: 0 };
+    for (const path of paths) {
+      const kind =
+        /(?:^|\/)(?:__generated__|generated)(?:\/|$)|(?:^|\/)(?:pnpm-lock\.yaml|bun\.lockb?|package-lock\.json|yarn\.lock|agentContextBudget\.json|muse_transcript\.ndjson)$|\.generated\./u.test(
+          path,
+        )
+          ? "generated"
+          : /(?:^|\/)(?:__tests__|tests?|testdata|fixtures)(?:\/|$)|\.(?:test|spec)\./u.test(path)
+            ? "test"
+            : "other";
+      conflictedPaths[kind] += 1;
+    }
+    const stop: CheckpointReplayStop = {
+      replayId: context.replayId,
+      group:
+        plan?.phase === "compile"
+          ? (plan.groupsByCommit?.[commit] ?? "unknown")
+          : (parseCarryTrailers(git(["show", "-s", "--format=%B", commit])).group ?? "ungrouped"),
+      commit,
+      kind: context.kind,
+      conflictedPaths,
+    };
+    if (
+      previous.some(
+        (previous) => checkpointReplayStopKey(previous) === checkpointReplayStopKey(stop),
+      )
+    )
+      return;
+    appendCheckpointHistoryLine(path, stop);
+  } catch (error) {
+    console.warn(
+      `[lastcode:checkpoint] Could not record replay stop: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+export function continueCarryReplay(worktree: string): void {
+  const plan = readCarryReplayPlan(worktree);
+  if (!plan && !rebaseInProgress(worktree)) throw new Error("No rebase is in progress.");
+  recordCarryReplayStop(worktree);
+  try {
+    runGit(worktree, [
+      "-c",
+      "core.editor=true",
+      "-c",
+      "commit.gpgSign=false",
+      ...(plan && plan.phase !== "historical"
+        ? ["-c", "rerere.enabled=false", "-c", "rerere.autoupdate=false"]
+        : []),
+      "rebase",
+      "--continue",
+    ]);
+  } catch (error) {
+    recordCarryReplayStop(worktree);
+    throw error;
+  }
+}
+
 function assertWorktreeHead(worktree: string, expected: string): void {
   const actual = resolveCommit(worktree, "HEAD");
   if (actual !== expected)
@@ -726,6 +873,7 @@ function runInteractiveReplay(input: {
   readonly upstream: string;
   readonly onto: string;
   readonly todo: ReadonlyArray<string>;
+  readonly observeStop?: boolean;
 }): void {
   const temporaryRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-todo-"));
   const todoPath = NodePath.join(temporaryRoot, "todo");
@@ -761,6 +909,9 @@ function runInteractiveReplay(input: {
       ],
       { environment, timeout: 10 * 60_000 },
     );
+  } catch (error) {
+    if (input.observeStop !== false) recordCarryReplayStop(input.worktree);
+    throw error;
   } finally {
     NodeFS.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -770,7 +921,12 @@ function startPlan(
   worktree: string,
   plan: Omit<CarryReplayPlan, "schemaVersion" | "status">,
 ): void {
-  writeCarryReplayPlan(worktree, { schemaVersion: 1, status: "running", ...plan });
+  writeCarryReplayPlan(worktree, {
+    schemaVersion: 1,
+    status: "running",
+    replayId: NodeCrypto.randomUUID(),
+    ...plan,
+  });
 }
 
 function finishPlan(worktree: string, plan: CarryReplayPlan, resultHead: string): void {
@@ -783,8 +939,10 @@ export function completeCarryReplay(
 ): CarryReplayResult {
   const plan = readCarryReplayPlan(worktree);
   if (!plan) throw new Error("Carry replay worktree has no persisted plan.");
-  if (rebaseInProgress(worktree))
+  if (rebaseInProgress(worktree)) {
+    recordCarryReplayStop(worktree);
     throw new Error("Carry replay still has unresolved rebase state.");
+  }
   const previousHead = resolveCommit(worktree, "HEAD");
   if (
     plan.status === "complete" &&
@@ -893,6 +1051,7 @@ export function compileCarrySetSameBase(input: CompileCarrySetInput): CarryRepla
     (previousCompactHead !== undefined && isAncestor(input.repo, previousCompactHead, source));
   startPlan(input.worktree, {
     phase: "compile",
+    groupsByCommit: Object.fromEntries(expanded.items.map((item) => [item.commit, item.group])),
     source,
     sourceBase: base,
     onto: base,
@@ -1181,6 +1340,8 @@ export function replayCarrySetOnto(input: ReplayCarrySetInput): CarryReplayResul
       upstream: sourceBase,
       onto,
       todo: groups.map(({ commit, group }) => `pick ${commit} carry(${group})`),
+      // The dossier observes the stop inside its shared failure-reporting budget.
+      observeStop: false,
     });
   } catch (error) {
     try {
@@ -1245,4 +1406,16 @@ export function replayUngroupedOnto(input: ReplayUngroupedInput): CarryReplayRes
     todo,
   });
   return completeCarryReplay(input.worktree);
+}
+
+if (import.meta.main) {
+  try {
+    if (process.argv[2] !== "--continue" || process.argv.length > 4) {
+      throw new Error("Usage: node scripts/lastcode-carry-replay.ts --continue [worktree]");
+    }
+    continueCarryReplay(NodePath.resolve(process.argv[3] ?? process.cwd()));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

@@ -9,6 +9,7 @@ import {
   upstreamCommitsTouchingFiles,
   type UpstreamConflictCommit,
 } from "./lib/lastcode-upstream-conflicts.ts";
+import { recordCarryReplayStop } from "./lastcode-carry-replay.ts";
 import type {
   CarryContributionMetadata,
   CarryGroupResult,
@@ -599,6 +600,7 @@ export function writeCarryConflictDossier(
   groups: ReadonlyArray<CarryGroupResult>,
 ): string | undefined {
   const started = performance.now();
+  recordCarryReplayStop(input.worktree);
   const remaining = (reserve = 0) => {
     const timeout = Math.floor(8_000 - reserve - (performance.now() - started));
     if (timeout <= 0) throw new Error("Conflict dossier time budget reached.");

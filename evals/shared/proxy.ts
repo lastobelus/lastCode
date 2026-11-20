@@ -23,6 +23,10 @@ export const proxyConfig = () => {
           "-c",
           `
 import json, os, pathlib, sys, tomllib
+explicit = os.environ.get('LASTCODE_EVAL_PROXY_CONFIG')
+if explicit:
+    print(json.dumps(json.loads(pathlib.Path(explicit).read_text())))
+    raise SystemExit(0)
 home = pathlib.Path(os.environ.get('CODEX_HOME') or pathlib.Path.home() / '.codex')
 def fail(message):
   print(json.dumps({'error': message + ' The GPT evals call models through a CLIProxyAPI server set up as a custom model provider in Codex: set model_provider = "<name>" and add [model_providers.<name>] with base_url and its key.'}))

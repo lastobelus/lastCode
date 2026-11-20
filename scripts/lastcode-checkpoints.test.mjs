@@ -185,7 +185,7 @@ describe("LastCode checkpoint dashboard", () => {
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }
     expect(renderLauncher("/tmp/Last Code/checkpoints.mjs")).toContain(
-      "env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node '/tmp/Last Code/checkpoints.mjs' \"$@\"",
+      "env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.13.1 -- node '/tmp/Last Code/checkpoints.mjs' \"$@\"",
     );
   });
 
@@ -314,7 +314,7 @@ describe("LastCode checkpoint dashboard", () => {
         replayMode: "carry",
       }),
     ).toEqual([
-      "Resolve and stage conflicts, then repeat until the rebase finishes: git -C '/tmp/recovery' rebase --continue",
+      "Resolve and stage conflicts, then repeat until the rebase finishes: node '/tmp/automation/scripts/lastcode-carry-replay.ts' --continue '/tmp/recovery'",
       "Continue the retained carry replay: pnpm --dir '/tmp/automation' lastcode:checkpoint -- --select-recovery \"$(git -C '/tmp/recovery' rev-parse HEAD)\" --recovery-source 'abc123' --replay-mode carry",
     ]);
   });
