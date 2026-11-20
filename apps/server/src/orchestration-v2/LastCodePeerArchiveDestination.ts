@@ -440,13 +440,17 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
       client: McpClientCaller,
       key: LastCodeArchiveJournalKey,
       review: SelectionReview,
+      observedHolds: readonly FailedArchiveHold[] = [],
     ) {
-      const { failedHolds, ownerThreadIds } = generation.state;
-      if (failedHolds === undefined || failedHolds.length === 0) return;
+      const { failedHolds = [], ownerThreadIds } = generation.state;
+      const holdsByAnchor = new Map(
+        [...failedHolds, ...observedHolds].map((hold) => [hold.anchorThreadId, hold]),
+      );
+      if (holdsByAnchor.size === 0) return;
       const selected = cohortsByAnchor(review.cohorts);
       const retained: FailedArchiveHold[] = [];
       let remaining: Remaining;
-      for (const hold of failedHolds) {
+      for (const hold of holdsByAnchor.values()) {
         const { anchorThreadId, selectedThreadIds, commandId: failedCommandId } = hold;
         const next = selected.get(anchorThreadId);
         if (next !== undefined && sameThreadIds(next.selectedThreadIds, selectedThreadIds)) {
@@ -454,8 +458,8 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
           continue;
         }
 
-        // The revised review and old hold are already durable. Reuse the dismiss
-        // receipt if the server committed it before recording the release here.
+        // The failed attempt and its participants are already durable. A received
+        // dismissal receipt can outlive an interrupted journal update.
         const commandId = dismissCommandId(hold, review.revision);
         let receipt = yield* readReceipt(commandId, anchorThreadId, "thread.unarchive");
         let outcome: Remaining;
@@ -485,7 +489,10 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
           receipt === "rejected" ? changed : (outcome ?? pending),
         );
       }
-      if (retained.length !== failedHolds.length)
+      if (
+        retained.length !== failedHolds.length ||
+        retained.some((hold, index) => failedHolds[index]?.commandId !== hold.commandId)
+      )
         yield* generation.save({ ...generation.state, failedHolds: retained });
       return remaining;
     });
@@ -722,6 +729,7 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
           const { review } = generation.state;
           const selected = review === undefined ? undefined : cohortsByAnchor(review.cohorts);
           const restoredThreadIds: ThreadId[] = [];
+          const observedHolds: FailedArchiveHold[] = [];
           let remaining: Remaining;
           for (const entry of generation.state.cohorts) {
             const result = yield* Effect.result(
@@ -729,11 +737,19 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
                 const observed = yield* observeArchive(generation, client, key, entry, false);
                 if (observed.remaining !== undefined)
                   return { restored: [], remaining: observed.remaining };
+                const { archive, archived, selection } = observed.entry;
+                const failedCommandId = archive?.failed === true ? archive.id : archive?.retryOf;
+                if (archived === undefined && failedCommandId !== undefined)
+                  observedHolds.push({
+                    anchorThreadId: selection.anchorThreadId,
+                    selectedThreadIds: selection.selectedThreadIds,
+                    commandId: failedCommandId,
+                  });
                 const result = yield* restoreCohort(generation, client, key, observed.entry);
-                const selection = selected?.get(entry.selection.anchorThreadId);
+                const reviewedSelection = selected?.get(selection.anchorThreadId);
                 const current =
                   selected === undefined ||
-                  (selection !== undefined && sameCohort(selection, entry.selection));
+                  (reviewedSelection !== undefined && sameCohort(reviewedSelection, selection));
                 return {
                   restored: result.restored,
                   remaining: mergeRemaining(
@@ -750,6 +766,14 @@ export const makeLastCodePeerArchiveDestination = Effect.fn("LastCodePeerArchive
             restoredThreadIds.push(...result.success.restored);
             remaining = mergeRemaining(remaining, result.success.remaining);
           }
+          const release = yield* releaseObsoleteFailedHolds(
+            generation,
+            client,
+            key,
+            { revision: review?.revision ?? 0, cohorts: [] },
+            observedHolds,
+          );
+          remaining = mergeRemaining(remaining, release);
           return { restoredThreadIds, ...(remaining === undefined ? {} : { remaining }) };
         }),
       );

@@ -19,18 +19,21 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
-import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
+import { ServerEnvironment, ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
+import { PeerArchiveWriteTransport } from "../peer/LastCodePeerArchiveServices.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import { makeLastCodeArchiveJournal } from "./LastCodeArchiveJournal.ts";
+import * as LinkedOperations from "./LastCodeLinkedArchiveOperations.ts";
 import { makeLastCodePeerArchiveDestination } from "./LastCodePeerArchiveDestination.ts";
 import { PeerArchiveDispatch } from "./LastCodePeerArchiveDispatch.ts";
 import { OrchestratorV2 } from "./Orchestrator.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import { ThreadManagementService } from "./ThreadManagementService.ts";
 
 const db = Sqlite.layerMemory;
 const decodeApplyInput = Schema.decodeEffect(PeerArchiveApplyInput);
@@ -181,6 +184,82 @@ const harness = Effect.gen(function* () {
     });
   return { service, ports, store, seed, archiveId, complete, fail };
 });
+
+it.effect(
+  "records the linked generation once the production dispatch finishes local shutdown",
+  () =>
+    Effect.gen(function* () {
+      const { ports, seed, complete } = yield* harness;
+      const threads = yield* ThreadManagementService;
+      yield* seed([anchor, child]);
+      const peerStarted = yield* Deferred.make<CommandId>();
+      const command = {
+        type: "thread.archive",
+        threadId: anchor,
+        commandId: CommandId.make("local-shutdown"),
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: [child],
+        expectedArchiveThreadIds: [anchor, child],
+        linkedArchiveSelection: [
+          {
+            label: "Build machine",
+            environmentId: generation.ownerEnvironmentId,
+            status: "ready",
+            cohorts: [selection],
+          },
+        ],
+      } as const;
+
+      yield* Effect.gen(function* () {
+        const operations = yield* LinkedOperations.captureLinkedArchiveOperations;
+        const submitted = yield* operations
+          .dispatch(command, threads.dispatch(command))
+          .pipe(Effect.forkScoped);
+        const waitForAdmission = ports.orchestrator
+          .streamStoredEventsFrom({ threadId: anchor })
+          .pipe(
+            Stream.filter(
+              ({ commandId, event }) =>
+                commandId === command.commandId &&
+                event.type === "thread.metadata-updated" &&
+                event.payload.archivePending?.status === "stopping",
+            ),
+            Stream.runHead,
+          );
+        const admitted = yield* Effect.raceFirst(
+          waitForAdmission,
+          Fiber.join(submitted).pipe(
+            Effect.andThen(Effect.die("Local archive finished before shutdown was admitted")),
+          ),
+        );
+        assert.equal(admitted._tag, "Some");
+        assert.isFalse(yield* Deferred.isDone(peerStarted));
+        yield* complete(command.commandId);
+        yield* Fiber.join(submitted);
+        assert.equal(yield* Deferred.await(peerStarted), command.commandId);
+        // The source journal remains sufficient after the archive event has aged out.
+        const [status] = yield* operations.status(anchor);
+        assert.equal(status?.sourceArchiveCommandId, command.commandId);
+      }).pipe(
+        Effect.provide(
+          LinkedOperations.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.mock(ServerEnvironment)({ getEnvironmentId: Effect.succeed(destination) }),
+                Layer.mock(EventSinkV2)({ readByCommandId: () => Stream.empty }),
+                Layer.mock(PeerArchiveWriteTransport)({
+                  apply: (_id, request) =>
+                    Deferred.succeed(peerStarted, request.sourceArchiveCommandId).pipe(
+                      Effect.andThen(Effect.never),
+                    ),
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
 
 it.effect(
   "returns pending acceptance and replays only the generation's committed transitions",
@@ -550,6 +629,47 @@ it.effect.each(["resume subset", "reselect cohort"] as const)(
         result.receipts[0]?.threads.map(({ threadId }) => threadId).toSorted(),
         nextReview === "resume subset" ? [anchor] : [anchor, child],
       );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([false, true])(
+  "releases a failed shutdown when restoring a fenced generation (revised: %s)",
+  (revised) =>
+    Effect.gen(function* () {
+      const { service, ports, seed, store, archiveId, fail } = yield* harness;
+      yield* seed([anchor, child]);
+      yield* service.apply(client, input);
+      const failed = yield* archiveId();
+      yield* fail(failed);
+      if (revised) {
+        const dismissing = yield* Deferred.make<void>();
+        const interrupted = yield* makeLastCodePeerArchiveDestination({
+          ...ports,
+          orchestrator: {
+            dispatch: (command, options) =>
+              command.type === "thread.unarchive"
+                ? Deferred.succeed(dismissing, undefined).pipe(Effect.andThen(Effect.never))
+                : ports.orchestrator.dispatch(command, options),
+          },
+        });
+        const next = yield* decodeApplyInput({ ...input, selectionRevision: 1, cohorts: [] });
+        const fiber = yield* Effect.forkScoped(interrupted.apply(client, next));
+        yield* Deferred.await(dismissing);
+        yield* Fiber.interrupt(fiber);
+      }
+      assert.equal((yield* store.getThread(child)).archivePending?.status, "failed");
+      const reopened = yield* makeLastCodePeerArchiveDestination(ports);
+      for (const _ of [0, 1]) {
+        assert.deepStrictEqual(yield* reopened.restore(client, generation), {
+          restoredThreadIds: [],
+        });
+        assert.isNull((yield* store.getThread(anchor)).archivePending);
+        assert.isNull((yield* store.getThread(child)).archivePending);
+      }
+      assert.deepStrictEqual(yield* reopened.apply(client, input).pipe(Effect.flip), changed);
+      const next = { ...input, sourceArchiveCommandId: CommandId.make("next-archive") };
+      assert.deepStrictEqual((yield* reopened.apply(client, next)).remaining, pending);
+      assert.notEqual(yield* archiveId(), failed);
     }).pipe(Effect.provide(testLayer)),
 );
 
