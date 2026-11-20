@@ -51,6 +51,9 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
 1. Implement the smallest complete change, including focused regression tests
    for backend or automation behavior. [Build repairs](#build-repairs) skip
    the new tests.
+   For agent-facing text, leave `agentContextBudget.json` updates to checkpoint
+   regeneration. CI reports the byte change from base to the proposed merge.
+   A maintainer applies `agent-context-increase` to approve growth.
 2. Run the smallest relevant tests and lint required by `AGENTS.md`. Use the
    Quick CI policy below for workspace typechecks; do not recreate a deferred
    local gate with parallel TypeScript processes.
