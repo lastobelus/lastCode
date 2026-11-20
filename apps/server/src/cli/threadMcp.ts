@@ -1005,8 +1005,8 @@ export const threadCapacityCommand = Command.make("capacity", {
         .call(
           "t3_environment_read",
           Option.isSome(flags.environment)
-            ? { environmentId: EnvironmentId.make(flags.environment.value) }
-            : {},
+            ? { environmentId: EnvironmentId.make(flags.environment.value), includeLinked: true }
+            : { includeLinked: true },
           Schema.Struct({
             environmentId: EnvironmentId,
             capacity: OptionalEnvironmentCapacitySnapshot,
