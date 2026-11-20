@@ -76,21 +76,40 @@ export function parseLinuxSwapUsed(text: string): number | null {
   return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null;
 }
 
-async function volumeFreeBytes(
+export interface VolumeReading {
+  readonly freeBytes: number | null;
+  readonly device: number | null;
+}
+
+async function volumeReading(
   directory: string,
   dirname: (path: string) => string,
-): Promise<number | null> {
+): Promise<VolumeReading> {
   try {
-    const stat = await NodeFSP.statfs(directory);
-    const bytes = stat.bavail * stat.bsize;
-    return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null;
+    const [space, info] = await Promise.all([NodeFSP.statfs(directory), NodeFSP.stat(directory)]);
+    const bytes = space.bavail * space.bsize;
+    return {
+      freeBytes: Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null,
+      device: info.dev,
+    };
   } catch (error) {
     // Before the first worktree exists, measure the volume of its nearest existing parent.
     if (isMissing(error) && dirname(directory) !== directory) {
-      return volumeFreeBytes(dirname(directory), dirname);
+      return volumeReading(dirname(directory), dirname);
     }
-    return null;
+    return { freeBytes: null, device: null };
   }
+}
+
+// A volume mounted or linked in under the same path has unrelated free space; reporting it
+// unreadable once restarts the disk-rate window instead of turning the swap into a rate.
+export function freeBytesOnSameVolume(
+  previousDevice: number | null,
+  reading: VolumeReading,
+): number | null {
+  return previousDevice !== null && reading.device !== null && reading.device !== previousDevice
+    ? null
+    : reading.freeBytes;
 }
 
 function isMissing(error: unknown): boolean {
@@ -174,6 +193,14 @@ export const nativeSource = Effect.fn("capacity.nativeSource")(function* (worktr
     yield* Ref.set(knownCores, cores);
     return cores;
   });
+  const lastDevice = yield* Ref.make<number | null>(null);
+  const worktreesFreeBytes = Effect.promise(() => volumeReading(worktreesDir, path.dirname)).pipe(
+    Effect.flatMap((reading) =>
+      Ref.getAndSet(lastDevice, reading.device).pipe(
+        Effect.map((previous) => freeBytesOnSameVolume(previous, reading)),
+      ),
+    ),
+  );
   const unknownLive = { memoryPressure: "unknown", swapUsedBytes: null } as const;
   // Build the command on each read: a spawned command's output is fixed once created.
   const live =
@@ -199,7 +226,7 @@ export const nativeSource = Effect.fn("capacity.nativeSource")(function* (worktr
         {
           physicalCores,
           live,
-          worktreesFreeBytes: Effect.promise(() => volumeFreeBytes(worktreesDir, path.dirname)),
+          worktreesFreeBytes,
           worktreeFoldersByProject: folders,
         },
         { concurrency: "unbounded" },

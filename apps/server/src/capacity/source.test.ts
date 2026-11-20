@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  freeBytesOnSameVolume,
   parseDarwinLiveValues,
   parseDarwinMemoryPressure,
   parseDarwinSwapUsed,
@@ -61,5 +62,13 @@ describe("capacity native parsing", () => {
     expect(parseLinuxSwapUsed("SwapTotal: 0 kB\nSwapFree: 0 kB\n")).toBe(0);
     expect(parseLinuxSwapUsed("SwapTotal: 1 kB\nSwapFree: 2 kB\n")).toBeNull();
     expect(parseLinuxSwapUsed("MemAvailable: 1234 kB\n")).toBeNull();
+  });
+
+  it("reports free space unreadable once when a different volume appears under the path", () => {
+    expect(freeBytesOnSameVolume(null, { freeBytes: 10, device: 1 })).toBe(10);
+    expect(freeBytesOnSameVolume(1, { freeBytes: 20, device: 1 })).toBe(20);
+    expect(freeBytesOnSameVolume(1, { freeBytes: 30, device: 2 })).toBeNull();
+    expect(freeBytesOnSameVolume(1, { freeBytes: null, device: null })).toBeNull();
+    expect(freeBytesOnSameVolume(null, { freeBytes: 40, device: 2 })).toBe(40);
   });
 });
