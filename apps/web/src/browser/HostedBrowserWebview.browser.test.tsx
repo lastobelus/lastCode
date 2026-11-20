@@ -921,13 +921,14 @@ describe("HostedBrowserWebview settings hydration", () => {
     await using _fixture = setup();
     mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
     const browserPresentation = vi.fn(async () => undefined);
+    const setCaptureDrawn = vi.fn<DesktopPreviewBridge["setCaptureDrawn"]>(async () => undefined);
     vi.stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
       preview: createPreviewBridgeFixture({
         onBrowserEvent: () => () => {},
         browserPresentation,
         setShown: vi.fn<DesktopPreviewBridge["setShown"]>(async () => undefined),
-        setCaptureDrawn: async () => undefined,
+        setCaptureDrawn,
         onBrowserSurfaceRequest: () => () => undefined,
         browserSurfaceResponse: async () => undefined,
       }),
@@ -936,6 +937,8 @@ describe("HostedBrowserWebview settings hydration", () => {
     const owner = Symbol("browser-slot");
     useBrowserSurfaceStore.getState().claim(runtimeTabId, owner, false);
     useBrowserSurfaceStore.getState().acquireActivity(runtimeTabId);
+    // Mounting with a capture lease schedules two frames before reporting it drawn.
+    using _frames = fakeTimers();
     await act(async () => {
       await ensureClientSettingsHydrated();
       await render(
@@ -980,6 +983,10 @@ describe("HostedBrowserWebview settings hydration", () => {
       presented: false,
       rendering: true,
     });
+    await act(() => vi.advanceTimersToNextFrame());
+    expect(setCaptureDrawn).not.toHaveBeenCalledWith(runtimeTabId, true);
+    await act(() => vi.advanceTimersToNextFrame());
+    expect(setCaptureDrawn).toHaveBeenCalledExactlyOnceWith(runtimeTabId, true);
   });
 
   it("starts a retained background tab only after a settings read succeeds on retry", async () => {
