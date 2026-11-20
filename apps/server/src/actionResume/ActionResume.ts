@@ -1345,7 +1345,7 @@ const make = Effect.gen(function* () {
   const resumeInterruptedImpl = Effect.fn("ActionResume.resumeInterrupted")(function* (
     threadId: ThreadId,
   ) {
-    const runId = yield* mutex.withPermits(1)(
+    yield* mutex.withPermits(1)(
       Effect.gen(function* () {
         const current = registry.getLatest(threadId);
         if (current === null || current.delivery !== "available") {
@@ -1355,33 +1355,26 @@ const make = Effect.gen(function* () {
           });
         }
         yield* persistState({ ...current, delivery: "pending" });
-        return current.runId;
-      }),
-    );
-    const delivered = yield* Effect.exit(attemptDeliverPending(threadId));
-    const retained = yield* runs.get(threadId, runId);
-    const delivery = Option.getOrNull(retained)?.state.delivery;
-    if (delivered._tag === "Failure" || delivery === "pending") {
-      yield* mutex.withPermits(1)(
-        Effect.gen(function* () {
-          const latest = registry.getLatest(threadId);
-          if (latest?.runId === runId && latest.delivery === "pending") {
+        const delivered = yield* Effect.exit(deliverPendingUnlocked(threadId));
+        const latest = registry.getLatest(threadId);
+        if (delivered._tag === "Failure" || latest?.delivery === "pending") {
+          if (latest?.delivery === "pending") {
             yield* persistState({ ...latest, delivery: "available" });
           }
-        }),
-      );
-      if (delivered._tag === "Failure") return yield* Effect.failCause(delivered.cause);
-      return yield* new ActionResumeError({
-        reason: "internal_error",
-        message: "The interrupted Action follow-up cannot resume while this thread is busy.",
-      });
-    }
-    if (delivery !== "delivered") {
-      return yield* new ActionResumeError({
-        reason: "action_not_recoverable",
-        message: "This thread has no interrupted Action follow-up to resume.",
-      });
-    }
+          if (delivered._tag === "Failure") return yield* Effect.failCause(delivered.cause);
+          return yield* new ActionResumeError({
+            reason: "internal_error",
+            message: "The interrupted Action follow-up cannot resume while this thread is busy.",
+          });
+        }
+        if (latest?.delivery !== "delivered") {
+          return yield* new ActionResumeError({
+            reason: "action_not_recoverable",
+            message: "This thread has no interrupted Action follow-up to resume.",
+          });
+        }
+      }),
+    );
   });
 
   const discardInterruptedImpl = Effect.fn("ActionResume.discardInterrupted")(function* (

@@ -234,6 +234,7 @@ const makeHarness = Effect.gen(function* () {
     history: "retained terminal detail",
     failWrite: false,
     failDelivery: false,
+    failActionRunRead: false,
     missingHistory: false,
     alreadyDelivered: false,
     followUpRun: null as OrchestrationV2ThreadProjection["runs"][number] | null,
@@ -319,6 +320,18 @@ const makeHarness = Effect.gen(function* () {
     ),
   );
   const dependencies = Layer.mergeAll(
+    Layer.succeed(ActionRunStore.ActionRunStore, {
+      ...store,
+      get: (threadId, runId) =>
+        state.failActionRunRead
+          ? Effect.fail(
+              new ActionRunStore.ActionRunStoreError({
+                operation: "load",
+                cause: "read unavailable",
+              }),
+            )
+          : store.get(threadId, runId),
+    }),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       disposeActionObligation: (_threadId, _owner, actionRunId) =>
         Effect.sync(() => {
@@ -1382,8 +1395,12 @@ it.effect.each([
         }
         if (tool === "resume_interrupted_action" && !ownerEnded) {
           h.state.request = "command";
-          assert.equal((yield* recover())._tag, "Failure");
-          assert.equal(h.state.latest?.delivery, "available");
+          for (const failRead of [false, true]) {
+            h.state.failActionRunRead = failRead;
+            assert.equal((yield* recover())._tag, "Failure");
+            assert.equal(h.state.latest?.delivery, "available");
+          }
+          h.state.failActionRunRead = false;
           h.state.request = null;
         }
         const recovered = yield* recover();
