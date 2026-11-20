@@ -1716,12 +1716,16 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         yield* dispatchArchiveFamilyResult(command, events, effects);
         return undefined;
       case "thread.unarchive":
-        if (peer !== undefined) {
-          if (peer.kind !== "restore")
-            return yield* peerDispatch.reject(command, "Expected a linked restore.");
+        if (peer?.kind === "restore") {
           for (const threadId of yield* peerDispatch.restoreThreadIds(command, peer))
             yield* dispatchThreadMutation({ ...command, threadId }, events, effects);
-        } else yield* dispatchUnarchiveFamily(command, events, effects);
+        } else {
+          if (peer?.kind === "dismiss-failed")
+            yield* peerDispatch.validateFailedDismissal(command, peer);
+          else if (peer !== undefined)
+            return yield* peerDispatch.reject(command, "Expected a linked restore or dismissal.");
+          yield* dispatchUnarchiveFamily(command, events, effects);
+        }
         return undefined;
     }
   });
