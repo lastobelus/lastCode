@@ -5,6 +5,7 @@ import type { AnyRouter } from "@tanstack/react-router";
 import type { AtomRegistry } from "effect/reactivity";
 
 import { useComposerDraftStore } from "../composerDraftStore";
+import { getClientSettings } from "../hooks/useSettings";
 import { createLiveRegion } from "../hooks/useLiveRegion";
 import { liveShellEnvironmentIdsAtom } from "../state/shell";
 import { environmentThreadShells } from "../state/threads";
@@ -15,6 +16,7 @@ import {
   nextBackgroundThreadAnnouncement,
   resolveBackgroundThreadRequest,
 } from "./backgroundThreadAnnouncement";
+import { isUserThread } from "./ThreadNotificationCoordinator.logic";
 
 const backgroundThreadLiveRegion = createLiveRegion();
 const attachBackgroundThreadRegion = backgroundThreadLiveRegion.attach;
@@ -41,6 +43,7 @@ export function startBackgroundThreadAnnouncements(
     const threads = registry.get(environmentThreadShells.quietThreadShellsAtom);
     const liveEnvironmentIds = registry.get(liveShellEnvironmentIdsAtom);
     const now = new Date().toISOString();
+    const onlyMine = getClientSettings().finishedThreadAlerts === "mine";
     const snapshots: BackgroundThreadSnapshot[] = [];
     for (const thread of threads) {
       // Subagents and side chats have no row of their own; their requests surface on the parent.
@@ -54,6 +57,7 @@ export function startBackgroundThreadAnnouncements(
         runStatus: thread.latestRun?.status ?? null,
         activeRunId: thread.runtime?.activeRunId ?? null,
         snoozed: effectiveSnoozed(thread, { now }),
+        quietOutcome: onlyMine && !isUserThread(thread),
       });
     }
     const next = nextBackgroundThreadAnnouncement(memory, snapshots, openThreadKey);
