@@ -927,6 +927,7 @@ describe("HostedBrowserWebview settings hydration", () => {
         onBrowserEvent: () => () => {},
         browserPresentation,
         setShown: vi.fn<DesktopPreviewBridge["setShown"]>(async () => undefined),
+        setCaptureDrawn: async () => undefined,
         onBrowserSurfaceRequest: () => () => undefined,
         browserSurfaceResponse: async () => undefined,
       }),
