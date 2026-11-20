@@ -1243,7 +1243,7 @@ const PROVIDERS = [
   },
   {
     providerInstanceId: "codex",
-    models: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"].map(codexModel),
+    models: ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"].map(codexModel),
   },
   { providerInstanceId: "muse", models: ["muse-wonder-full", "muse-wonder"].map(codexModel) },
   { providerInstanceId: "grok", models: ["grok-4.7"].map(codexModel) },
