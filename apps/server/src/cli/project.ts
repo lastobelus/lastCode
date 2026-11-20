@@ -7,7 +7,6 @@ import {
   ProjectId,
   ProjectScript,
 } from "@t3tools/contracts";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { T3ProjectFileFromJson } from "@t3tools/shared/t3ProjectFile";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import {
@@ -32,8 +31,6 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 
-import { readProjectIcon } from "../assets/AssetAccess.ts";
-import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
@@ -62,13 +59,9 @@ import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as WorktreeSuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
-import {
-  type CliAuthLocationFlags,
-  projectLocationFlags,
-  resolveCliAuthConfig,
-  resolveThreadInspectionConfig,
-} from "./config.ts";
+import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import * as RunningServer from "./runningServer.ts";
+import { projectIconCommand } from "./projectIcon.ts";
 
 type ProjectMutationTarget = {
   readonly id: ProjectId;
@@ -873,37 +866,6 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
       // Include layer initialization so migration logs cannot corrupt the JSON result.
       Effect.provideService(Logger.LogToStderr, true),
     ),
-  ),
-);
-
-const projectIconCommand = Command.make("icon", {
-  ...projectLocationFlags,
-  stateDir: Flag.String("state-dir").pipe(Flag.optional),
-  projectId: Argument.String("project-id").pipe(Argument.withSchema(ProjectId)),
-  json: Flag.Boolean("json"),
-}).pipe(
-  Command.withDescription("Resolved project icon as JSON"),
-  Command.withHandler((flags) =>
-    Effect.gen(function* () {
-      const logLevel = yield* GlobalFlag.LogLevel;
-      const config = yield* resolveThreadInspectionConfig(flags, logLevel);
-      const fs = yield* FileSystem.FileSystem;
-      const icon = (yield* fs.exists(config.dbPath))
-        ? yield* readProjectIcon(flags.projectId).pipe(
-            Effect.provide([
-              ProjectStore.layer.pipe(
-                Layer.provide(NodeSqliteClient.layer({ filename: config.dbPath, readonly: true })),
-              ),
-              ProjectFaviconResolver.layer.pipe(
-                Layer.provide(T3ProjectFileLoader.layer),
-                Layer.provideMerge(WorkspacePaths.layer),
-              ),
-              ServerConfig.layer(config),
-            ]),
-          )
-        : null;
-      yield* Console.log(encodeUnknownJson(icon));
-    }).pipe(Effect.provideService(Logger.LogToStderr, true)),
   ),
 );
 

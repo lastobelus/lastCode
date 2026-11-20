@@ -23,7 +23,6 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
-import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -328,82 +327,6 @@ const makeProjectLookupFixture = Effect.fn("ProjectCliTest.makeProjectLookupFixt
   assert.isDefined(project);
   return { baseDir, workspaceRoot, project: project! };
 });
-
-it.effect("prints a bounded project icon using sidebar precedence", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture();
-    const readIcon = (id = project.id, home = baseDir) => {
-      const lines: Array<string> = [];
-      return runCli(["project", "icon", id, "--json", "--base-dir", home]).pipe(
-        Effect.updateService(Console.Console, (console) => ({
-          ...console,
-          log: (...args) => {
-            lines.push(args.join(" "));
-          },
-        })),
-        Effect.map(() => {
-          assert.lengthOf(lines, 1);
-          return JSON.parse(lines[0]!) as { mediaType: string; base64: string } | null;
-        }),
-      );
-    };
-
-    const repoIcon = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="3"/></svg>';
-    yield* fs.writeFileString(NodePath.join(workspaceRoot, "favicon.svg"), repoIcon);
-    const discovered = yield* readIcon();
-    assert.deepEqual(discovered, {
-      mediaType: "image/svg+xml",
-      base64: Buffer.from(repoIcon).toString("base64"),
-    });
-
-    const configuredIcon = NodePath.join(NodePath.dirname(baseDir), "picked.svg");
-    const picked = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4"/></svg>';
-    yield* fs.writeFileString(configuredIcon, picked);
-    yield* withProjectService(baseDir, (projects) =>
-      projects.update({
-        commandId: CommandId.make("project-cli-set-icon"),
-        projectId: project.id,
-        faviconPath: configuredIcon,
-        projectIcon: { kind: "emoji", emoji: "🛠<&" },
-      }),
-    );
-
-    const glyph = yield* readIcon();
-    assert.equal(glyph?.mediaType, "image/svg+xml");
-    assert.include(Buffer.from(glyph?.base64 ?? "", "base64").toString(), "🛠&lt;&amp;");
-
-    yield* withProjectService(baseDir, (projects) =>
-      projects.update({
-        commandId: CommandId.make("project-cli-set-lucide"),
-        projectId: project.id,
-        projectIcon: { kind: "lucide", name: "message-square-dashed", color: "blue" },
-      }),
-    );
-    const lucide = yield* readIcon();
-    assert.include(
-      Buffer.from(lucide?.base64 ?? "", "base64").toString(),
-      "lucide-message-square-dashed",
-    );
-
-    yield* withProjectService(baseDir, (projects) =>
-      projects.update({
-        commandId: CommandId.make("project-cli-clear-glyph"),
-        projectId: project.id,
-        projectIcon: null,
-      }),
-    );
-    assert.deepEqual(yield* readIcon(), {
-      mediaType: "image/svg+xml",
-      base64: Buffer.from(picked).toString("base64"),
-    });
-
-    yield* fs.writeFileString(configuredIcon, "x".repeat(128 * 1024 + 1));
-    assert.isNull(yield* readIcon());
-    assert.isNull(yield* readIcon(project.id, NodePath.join(baseDir, "missing")));
-    assert.isFalse(yield* fs.exists(NodePath.join(baseDir, "missing")));
-  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)), Effect.scoped),
-);
 
 it.effect.each([
   { label: "keeps its title", titleArgs: [], expectedTitle: undefined },
