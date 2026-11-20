@@ -8,6 +8,8 @@ import {
   MCP_PEER_LINK_SOFTWARE_ID,
   type PeerLink,
   type PeerLinkCreateInput,
+  type PeerLinkPreflightInput,
+  type PeerLinkPreflightResult,
   PeerLinkError,
   type PeerLinkSummary,
 } from "@t3tools/contracts";
@@ -103,7 +105,12 @@ export class PeerLinks extends Context.Service<
     readonly linkUnlessLinked: (
       input: PeerLinkCreateInput,
     ) => Effect.Effect<{ readonly link: PeerLink; readonly alreadyLinked: boolean }, PeerLinkError>;
+    readonly preflight: (
+      input: PeerLinkPreflightInput,
+    ) => Effect.Effect<PeerLinkPreflightResult, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
+    /** Stored links, including offline peers, with no network probes. */
+    readonly listStored?: Effect.Effect<ReadonlyArray<PeerLink>, PeerLinkError>;
     /** The stored link, without asking the peer whether it answers. */
     readonly get: (
       environmentId: EnvironmentId,
@@ -113,6 +120,7 @@ export class PeerLinks extends Context.Service<
     /** An address that answers as the linked peer, with its token, ready to call. */
     readonly resolve: (
       environmentId: EnvironmentId,
+      options?: { readonly refreshLabel?: boolean },
     ) => Effect.Effect<ResolvedPeerLink, PeerLinkError>;
     /** Records the outcome of a call, so listing shows whether the peer answered last time. */
     readonly recordOutcome: (
@@ -171,7 +179,7 @@ const peerOrigin = (url: string) => {
       new PeerLinkError({
         reason: "unreachable",
         // Never the address as given: it may hold a username, password or query.
-        message: "That address is not an http or https address.",
+        message: "Use an http or https address for the other environment.",
       }),
     );
   }
@@ -216,9 +224,18 @@ const probeFailure = (
       code === undefined ? `${origin} did not answer.` : `${origin} did not answer (${code}).`,
     );
   }
+  const status = HttpClientError.isHttpClientError(error) ? error.response?.status : undefined;
   return new PeerLinkError({
     reason: "not_a_t3_environment",
-    message: `${origin} answered, but not as a T3 Code environment this version understands.`,
+    message:
+      status !== undefined && status >= 500
+        ? `${origin} returned HTTP ${status} while checking its environment descriptor.`
+        : error._tag === "SchemaError" ||
+            (HttpClientError.isHttpClientError(error) &&
+              error.reason._tag === "DecodeError" &&
+              (status === undefined || (status >= 200 && status < 300)))
+          ? `${origin} did not return a valid T3 Code environment descriptor.`
+          : `${origin} answered, but not as a T3 Code environment this version understands.`,
   });
 };
 
@@ -462,7 +479,7 @@ const make = Effect.gen(function* () {
           if (descriptor.environmentId !== environmentId) {
             return yield* new PeerLinkError({
               reason: "unreachable",
-              message: `${origin} answered as another environment, ${descriptor.label}.`,
+              message: `${origin} answers as ${descriptor.label}, a different environment from ${name}.`,
               answeredAs: descriptor.label,
             });
           }
@@ -479,9 +496,10 @@ const make = Effect.gen(function* () {
         Result.isFailure(result) ? [result.failure] : [],
       );
       const answeredAs = failures.find((failure) => failure.answeredAs !== undefined)?.answeredAs;
+      const self = yield* environment.getDescriptor;
       return yield* new PeerLinkError({
         reason: "unreachable",
-        message: `This environment could not reach ${name}: ${failures.map((failure) => failure.message).join(" ")}`,
+        message: `${self.label} could not reach ${name}: ${failures.map((failure) => failure.message).join(" ")}`,
         ...(answeredAs === undefined ? {} : { answeredAs }),
       });
     }
@@ -497,10 +515,7 @@ const make = Effect.gen(function* () {
     return { primary, peer: yield* probe(primary), origins };
   });
 
-  const linkWith = Effect.fn("PeerLinks.link")(function* (
-    input: PeerLinkCreateInput,
-    keepLinked: boolean,
-  ) {
+  const prepareLink = Effect.fn("PeerLinks.prepareLink")(function* (input: PeerLinkPreflightInput) {
     if (!(yield* enabled)) {
       return yield* new PeerLinkError({ reason: "disabled", message: LINKED_ENVIRONMENTS_OFF });
     }
@@ -521,7 +536,13 @@ const make = Effect.gen(function* () {
       stored !== undefined && DateTime.isGreaterThan(stored.expiresAt, yield* DateTime.now)
         ? stored
         : undefined;
-    if (keepLinked && current !== undefined) return { link: current, alreadyLinked: true };
+    return { primary, peer, origins, current };
+  });
+
+  const verifyLink = Effect.fn("PeerLinks.verifyLink")(function* (
+    input: PeerLinkPreflightInput,
+    { primary, peer, current }: Effect.Success<ReturnType<typeof prepareLink>>,
+  ) {
     // Anything can answer as a linked machine, so an address alone renews its
     // link only where the link already reaches it, and never moves it.
     if (
@@ -547,6 +568,26 @@ const make = Effect.gen(function* () {
         message: `${peer.label} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.`,
       });
     }
+    return self;
+  });
+
+  const preflight: PeerLinks["Service"]["preflight"] = Effect.fn("PeerLinks.preflight")(
+    function* (input) {
+      const prepared = yield* prepareLink(input);
+      yield* verifyLink(input, prepared);
+      const { peer, origins } = prepared;
+      return { environmentId: peer.environmentId, label: peer.label, urls: origins };
+    },
+  );
+
+  const linkWith = Effect.fn("PeerLinks.link")(function* (
+    input: PeerLinkCreateInput,
+    keepLinked: boolean,
+  ) {
+    const prepared = yield* prepareLink(input);
+    const { primary, peer, origins, current } = prepared;
+    if (keepLinked && current !== undefined) return { link: current, alreadyLinked: true };
+    const self = yield* verifyLink(input, prepared);
     const issued = yield* signIn(primary, input, `T3 Code · ${self.label}`);
     const now = yield* DateTime.now;
     const linked: PeerLink = {
@@ -629,8 +670,10 @@ const make = Effect.gen(function* () {
     return { ...(yield* withLabel(link, answered.value.label)), status: "reachable" };
   });
 
+  const listStored = Effect.flatMap(readRows, (rows) => Effect.forEach(rows, toLink));
+
   const list: PeerLinks["Service"]["list"] = Effect.gen(function* () {
-    const links = yield* Effect.forEach(yield* readRows, toLink);
+    const links = yield* listStored;
     const now = yield* DateTime.now;
     return yield* Effect.forEach(links, (link) => statusOf(link, now), {
       concurrency: "unbounded",
@@ -661,7 +704,7 @@ const make = Effect.gen(function* () {
   );
 
   const resolve: PeerLinks["Service"]["resolve"] = Effect.fn("PeerLinks.resolve")(
-    function* (environmentId) {
+    function* (environmentId, options) {
       const notLinked = new PeerLinkError({
         reason: "unknown_link",
         message: `This environment is not linked to ${environmentId}. t3_environment_links lists the linked ones.`,
@@ -714,7 +757,7 @@ const make = Effect.gen(function* () {
         });
       }
       return {
-        link: yield* withLabel(link, peer.label),
+        link: options?.refreshLabel === false ? link : yield* withLabel(link, peer.label),
         url,
         token: new TextDecoder().decode(stored.value),
       };
@@ -747,9 +790,11 @@ const make = Effect.gen(function* () {
 
   return PeerLinks.of({
     enabled,
+    preflight,
     link,
     linkUnlessLinked,
     list,
+    listStored,
     get,
     unlink,
     resolve,

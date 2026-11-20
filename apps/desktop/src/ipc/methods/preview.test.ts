@@ -20,6 +20,7 @@ import * as PreviewIpc from "./preview.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 import * as DesktopClientSettings from "../../settings/DesktopClientSettings.ts";
 import * as BrowserProfileScope from "../../preview/BrowserProfileScope.ts";
+import * as LoopbackTunnel from "../../preview/LoopbackTunnel.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopConfig from "../../app/DesktopConfig.ts";
@@ -191,18 +192,28 @@ describe("preview IPC methods", () => {
       namespace: "profile",
     });
   });
-  effectIt.effect("clears the same named partition returned for local and remote tabs", () => {
+  function profileConfigFixture() {
     vi.stubGlobal("__dirname", "/app");
     const cleared: Array<ReadonlyArray<string> | undefined> = [];
     const sessions: string[] = [];
+    const sessionsByPartition = new Map<string, Electron.Session>();
+    const routes: Array<Parameters<LoopbackTunnel.LoopbackTunnel["Service"]["route"]>[0]> = [];
+    const partitionFor = (scope: string | undefined, persistent = true) =>
+      `${persistent ? "persist:" : ""}${scope}`;
     const manager = Layer.mock(PreviewManager.PreviewManager)({
       isBrowserPartition: () => true,
-      getBrowserSession: (scope) =>
+      getBrowserSession: (scope, persistent) =>
         Effect.sync(() => {
           sessions.push(scope!);
-          return null as never;
+          const partition = partitionFor(scope, persistent);
+          let session = sessionsByPartition.get(partition);
+          if (session === undefined) {
+            session = {} as Electron.Session;
+            sessionsByPartition.set(partition, session);
+          }
+          return session;
         }),
-      getBrowserPartition: (scope) => Effect.succeed(`persist:${scope}`),
+      getBrowserPartition: (scope, persistent) => Effect.succeed(partitionFor(scope, persistent)),
       clearCookies: (partitions) =>
         Effect.sync(() => {
           cleared.push(partitions);
@@ -212,6 +223,23 @@ describe("preview IPC methods", () => {
           cleared.push(partitions);
         }),
     });
+    const tunnel = Layer.mock(LoopbackTunnel.LoopbackTunnel)({
+      route: (input) =>
+        Effect.sync(() => {
+          routes.push(input);
+        }),
+    });
+    return {
+      cleared,
+      sessions,
+      sessionsByPartition,
+      routes,
+      layer: Layer.mergeAll(manager, layerProfileScope, tunnel),
+    };
+  }
+
+  effectIt.effect("clears the same named partition returned for local and remote tabs", () => {
+    const { cleared, sessions, layer } = profileConfigFixture();
     return Effect.gen(function* () {
       const local = yield* PreviewIpc.getPreviewConfig
         .handler({
@@ -229,8 +257,50 @@ describe("preview IPC methods", () => {
       yield* PreviewIpc.clearCache.handler({ environmentId: "desktop", profileId: "work" });
       expect(local.partition).toBe('persist:["desktop","work"]');
       expect(remote.partition).toBe(local.partition);
-      expect(cleared).toEqual([[local.partition], [local.partition]]);
-      expect(sessions).toEqual(Array(4).fill('["desktop","work"]'));
-    }).pipe(Effect.provide(Layer.merge(manager, layerProfileScope)));
+      expect(cleared).toEqual([
+        [local.partition, 'persist:["tunnel","remote","work"]'],
+        [local.partition, 'persist:["tunnel","desktop","work"]'],
+      ]);
+      expect(sessions).toEqual([
+        '["desktop","work"]',
+        '["desktop","work"]',
+        '["desktop","work"]',
+        '["tunnel","remote","work"]',
+        '["desktop","work"]',
+        '["tunnel","desktop","work"]',
+      ]);
+    }).pipe(Effect.provide(layer));
   });
+
+  effectIt.effect(
+    "isolates tunneled named guests from direct sessions and other environments",
+    () => {
+      const { layer, routes, sessionsByPartition } = profileConfigFixture();
+      const config = (environmentId: string, tunnelLoopback: boolean) =>
+        PreviewIpc.getPreviewConfig
+          .handler({ environmentId, profileId: "work", tunnelLoopback })
+          .pipe(Effect.flatMap(decodePreviewConfig));
+      return Effect.gen(function* () {
+        const direct = yield* config("desktop", false);
+        const remote = yield* config("remote", true);
+        const other = yield* config("other", true);
+        const reopened = yield* config("remote", true);
+        expect(direct.partition).toBe('persist:["desktop","work"]');
+        expect(remote.partition).toBe('persist:["tunnel","remote","work"]');
+        expect(other.partition).toBe('persist:["tunnel","other","work"]');
+        expect(reopened.partition).toBe(remote.partition);
+
+        expect(routes.map(({ environmentId, tunnelled }) => [environmentId, tunnelled])).toEqual([
+          ["desktop", false],
+          ["remote", true],
+          ["other", true],
+          ["remote", true],
+        ]);
+        expect(routes[0]?.session).toBe(sessionsByPartition.get(direct.partition));
+        expect(routes[1]?.session).toBe(sessionsByPartition.get(remote.partition));
+        expect(routes[2]?.session).toBe(sessionsByPartition.get(other.partition));
+        expect(routes[3]?.session).toBe(routes[1]?.session);
+      }).pipe(Effect.provide(layer));
+    },
+  );
 });

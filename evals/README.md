@@ -22,6 +22,13 @@ Each eval's README lists its models, flags, and cost. Start with one case and on
 
 Evals call paid models, so CI does not run them. CI typechecks this package and runs the graders' unit tests.
 
+### When this machine can't pay for the run
+
+Each eval's README names what it needs: an API key, a Codex login, or an eval proxy. If this machine has none, don't ask the user for a key, a file path or a proxy, and don't stop the rest of your work:
+
+- If a linked environment has them, run the eval there: `delegate_task` with `target.environmentId`. Push your branch first, so the environment can fetch your head. Choose a destination where `orchestrator_capabilities` reports `features.remoteWorktreeIsolationVersion: 1`, and pass `isolation: "worktree"`. If the eval reads credentials from a gitignored `.env`, link or copy that environment's existing `.env` into the worktree root without printing or committing it, and do not ask the user for new credentials. Run `vp i` there, then run the eval. The eval fails at startup if that environment lacks the credentials too.
+- Otherwise, report the eval as not run, with the exact command, and carry on.
+
 ## The shape of an eval
 
 Every eval follows the same shape, so a new one is easy to write and an old one is easy to run.

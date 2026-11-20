@@ -1,6 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Isolated native staging fixtures exercise the real provenance helper.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeChildProcess from "node:child_process";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
@@ -9,6 +12,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import { it, assert } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import {
   createGeneratedBuildStage,
   generatedBuildActivity,
@@ -19,7 +23,17 @@ import * as ServerConfig from "../config.ts";
 import * as GeneratedBuilds from "./GeneratedBuilds.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import { acquirePortableLock } from "../../../../scripts/lastcode-lock.mjs";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof NodeFSP>();
+  return { ...original, opendir: vi.fn(original.opendir) };
+});
+vi.mock("node:child_process", async (importOriginal) => {
+  const original = await importOriginal<typeof NodeChildProcess>();
+  return { ...original, execFile: vi.fn(original.execFile) };
+});
 
 const DAY = 86_400_000;
 const testLayer = GeneratedBuilds.layer.pipe(
@@ -446,6 +460,50 @@ it.effect(
       assert.notInclude(active.reason, input.worktreePath);
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect("walks each consumer root at most once per native inventory during removal", () => {
+  const execFile = vi.mocked(NodeChildProcess.execFile);
+  const opendir = vi.mocked(NodeFSP.opendir);
+  // A vanished vnode cannot be resolved by name, so every query needs a target walk.
+  const lsof = "p123\0\nfcwd\0tDIR\0n/\0\nf8\0tREG\0D0x12\0i5\0n/t3-absent/vanished.js\0\n";
+  const previous = execFile.getMockImplementation();
+  return Effect.gen(function* () {
+    const { emit, remove, input } = yield* fixture();
+    yield* emit("apps/web/dist", 1);
+    const output = NodePath.join(input.worktreePath, "apps/web/dist");
+    opendir.mockClear();
+    execFile.mockClear();
+    execFile.mockImplementation(((_file, _args, _options, callback) => {
+      (callback as (error: null, stdout: string, stderr: string) => void)(null, lsof, "");
+      return {} as NodeChildProcess.ChildProcess;
+    }) as typeof NodeChildProcess.execFile);
+    const result = yield* remove(DAY, 3, true).pipe(
+      Effect.provideService(
+        WorktreeConsumers.ProcessPaths,
+        WorktreeConsumers.ProcessPaths.defaultValue().pipe(
+          Effect.provideService(HostProcess.Platform, "darwin"),
+          Effect.provideService(HostProcess.UserId, 1000),
+          Effect.provideService(ResourceMonitorBinary.ProcessCaptureBinary, Effect.succeed(null)),
+        ),
+      ),
+    );
+    assert.equal(result.files, 1);
+    const captures = execFile.mock.invocationCallOrder;
+    const walks = opendir.mock.calls.flatMap(([target], index) =>
+      target === input.worktreePath || target === output
+        ? [
+            `${captures.filter((order) => order < opendir.mock.invocationCallOrder[index]!).length}:${String(target)}`,
+          ]
+        : [],
+    );
+    assert.isAbove(captures.length, 1);
+    assert.isAbove(walks.length, 0);
+    assert.deepEqual([...new Set(walks)], walks);
+  }).pipe(
+    Effect.ensuring(Effect.sync(() => execFile.mockImplementation(previous!))),
+    Effect.provide(testLayer),
+  );
+});
 
 it.effect("reports the failing consumer proof stage without copying native errors", () =>
   Effect.gen(function* () {

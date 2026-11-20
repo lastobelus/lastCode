@@ -6,6 +6,7 @@ import {
   DEFAULT_TERMINAL_ID,
   TERMINAL_WRITE_MAX_LENGTH,
   TerminalError,
+  TerminalAttachInput,
   TerminalOpenInput,
   TerminalProviderEnvironmentError,
 } from "./terminal.ts";
@@ -69,5 +70,24 @@ describe("chunkTerminalWrite", () => {
     expect(chunks[0]).toHaveLength(TERMINAL_WRITE_MAX_LENGTH - 1);
     expect(chunks[1]).toBe("😀tail");
     expect(chunks.join("")).toBe(data);
+  });
+});
+
+describe("terminal link profile launch intent", () => {
+  const input = { threadId: "thread-1", terminalId: "term-action-a", cwd: "/workspace/example" };
+  it("distinguishes explicit ordinary launch intent from reopening retained intent", () => {
+    expect(
+      decodeSync(TerminalOpenInput, { ...input, terminalLinkProfileName: null })
+        .terminalLinkProfileName,
+    ).toBeNull();
+    expect(decodeSync(TerminalOpenInput, input)).not.toHaveProperty("terminalLinkProfileName");
+    expect(
+      decodeSync(TerminalAttachInput, { ...input, terminalLinkProfileName: null })
+        .terminalLinkProfileName,
+    ).toBeNull();
+    expect(
+      decodeSync(TerminalOpenInput, { ...input, terminalLinkProfileName: "Work account" })
+        .terminalLinkProfileName,
+    ).toBe("Work account");
   });
 });

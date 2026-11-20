@@ -35,7 +35,6 @@ describe("LastCode project context menu", () => {
       "Rename",
       "Group into...",
       "Copy Path",
-      "Open dashboard",
       "Project settings",
       "Remove",
     ]);
@@ -45,7 +44,8 @@ describe("LastCode project context menu", () => {
     ]);
     expect(menu.actions.get("copy-path:environment-b")).toEqual({ action: "copy-path", member: b });
     expect(menu.items[2]?.children?.every((item) => !item.disabled)).toBe(true);
-    expect(menu.items[5]?.children?.[1]).toMatchObject({
+    const remove = menu.items.find((item) => item.id === "delete:submenu");
+    expect(remove?.children?.[1]).toMatchObject({
       label: "environment-b: /work/environment-b",
       disabled: true,
       destructive: true,
@@ -61,7 +61,7 @@ describe("LastCode project context menu", () => {
       groupedProjectCount: 2,
       isNoProjectGroup: false,
     });
-    expect(menu.items[5]?.children).toMatchObject([
+    expect(menu.items.find((item) => item.id === "delete:submenu")?.children).toMatchObject([
       {
         label: "protected: /work/protected (disable persistence first)",
         disabled: true,
@@ -76,7 +76,7 @@ describe("LastCode project context menu", () => {
       groupedProjectCount: 1,
       isNoProjectGroup: false,
     });
-    expect(menu.items[5]).toEqual({
+    expect(menu.items.find((item) => item.id === "delete:environment-a")).toEqual({
       id: "delete:environment-a",
       label: "Remove (disable persistence first)",
       destructive: true,
@@ -98,7 +98,6 @@ describe("LastCode project context menu", () => {
     });
     expect(menu.items.map((item) => item.id)).toEqual([
       "copy-path:submenu",
-      "open-dashboard",
       "project-settings",
       "delete:submenu",
     ]);

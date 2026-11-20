@@ -1,12 +1,27 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, getOwnedThreadFamily } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { useThreadActions } from "./useThreadActions";
 import { threadEnvironment } from "../state/threads";
 import { toastManager } from "../components/ui/toast";
 import { useThreadUndoNotice } from "./showThreadUndoNotice";
 import { announce } from "../lib/announce";
+import { makeThreadFixture } from "../test-fixtures";
+import { useThreadSelectionStore } from "../threadSelectionStore";
+
+const familyState = vi.hoisted(() => ({
+  threads: [] as ReturnType<typeof makeThreadFixture>[],
+  archiveSupport: true as boolean | undefined,
+  hiddenThreadIds: new Set<ThreadId>(),
+  confirmArchive: false,
+  unsupportedEnvironments: new Set<string>(),
+}));
+const newThread = vi.hoisted(() => vi.fn());
+const archiveDialog = vi.hoisted(() => vi.fn());
+const archiveFamilyLoad = vi.hoisted(() => vi.fn());
+vi.mock("../components/ThreadArchiveDialog", () => ({ requestThreadArchiveDialog: archiveDialog }));
 
 const commands = vi.hoisted(() => ({
   pin: vi.fn(),
@@ -45,13 +60,20 @@ vi.mock("react", async (original) => ({
   useMemo: (create: () => unknown) => create(),
   useRef: (value: unknown) => ({ current: value }),
 }));
-vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
-vi.mock("./useSettings", () => ({ useClientSettings: () => false }));
-vi.mock("./useHandleNewThread", () => ({
-  useNewThreadHandler: () => async () => {
-    router.state.location.href = "/draft/project";
-  },
+vi.mock("./useWorkspaceLifecycleConfirmation", async (original) => ({
+  ...(await original<typeof import("./useWorkspaceLifecycleConfirmation")>()),
+  useWorkspaceLifecycleConfirmation: () => ({
+    supported: () => false,
+    confirm: () => {
+      throw new Error("These Undo fixtures do not support saved workspaces.");
+    },
+  }),
 }));
+vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
+const archiveConfirm = vi.hoisted(() => vi.fn());
+vi.mock("./useSettings", () => ({ useClientSettings: () => familyState.confirmArchive }));
+vi.mock("../localApi", () => ({ readLocalApi: () => ({ dialogs: { confirm: archiveConfirm } }) }));
+vi.mock("./useHandleNewThread", () => ({ useNewThreadHandler: () => newThread }));
 vi.mock("../composerDraftStore", () => ({ useComposerDraftStore: () => vi.fn() }));
 vi.mock("../lib/composerDraftUploads", () => ({ releaseComposerDraftUploads: vi.fn() }));
 vi.mock("../terminalUiStateStore", () => ({ useTerminalUiStateStore: () => vi.fn() }));
@@ -74,11 +96,32 @@ const shellLoaded = vi.hoisted(() => ({ current: true }));
 vi.mock("../state/entities", async (original) => ({
   ...(await original<typeof import("../state/entities")>()),
   readEnvironmentServerConfigLoaded: () => true,
-  readThreadShell: () => (shellLoaded.current ? threadShell : null),
+  readEnvironmentSupportsArchiveFamilies: (environmentId: string) =>
+    familyState.archiveSupport === true && !familyState.unsupportedEnvironments.has(environmentId),
+  readThreadShell: (target: { threadId: ThreadId; environmentId: EnvironmentId }) =>
+    !shellLoaded.current || familyState.hiddenThreadIds.has(target.threadId)
+      ? null
+      : (familyState.threads.find(
+          (thread) =>
+            thread.id === target.threadId && thread.environmentId === target.environmentId,
+        ) ?? {
+          ...makeThreadFixture({ id: target.threadId, environmentId: target.environmentId }),
+          ...threadShell,
+          id: target.threadId,
+          environmentId: target.environmentId,
+        }),
+  readThreadShells: () => familyState.threads,
 }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) => {
     switch (command) {
+      case threadEnvironment.loadArchiveFamily:
+        return async (target: { environmentId: EnvironmentId; input: { threadId: ThreadId } }) => {
+          const result = await archiveFamilyLoad(target);
+          return result._tag === "Success" && Array.isArray(result.value)
+            ? { ...result, value: archiveDecisionFixture(result.value, target) }
+            : result;
+        };
       case threadEnvironment.pin:
         return commands.pin;
       case threadEnvironment.unpin:
@@ -105,6 +148,57 @@ vi.mock("../state/use-atom-command", () => ({
   },
 }));
 
+// Simulated server decisions for fixtures; the hook receives the authoritative command result.
+function archiveDecisionFixture(
+  threads: ReturnType<typeof makeThreadFixture>[],
+  target: { environmentId: EnvironmentId; input: { threadId: ThreadId } },
+) {
+  const shells = threads
+    .filter((thread) => thread.environmentId === target.environmentId)
+    .map((thread) => ({ ...thread, creationSource: thread.source.creationSource }));
+  const family = getOwnedThreadFamily(shells, target.input.threadId);
+  const participants = shells.filter(
+    (thread) =>
+      thread.id === target.input.threadId ||
+      family.children.some((child) => child.id === thread.id),
+  );
+  const activeThreads = participants.filter(
+    (thread) =>
+      threadRuntimeIsActive(thread.runtime) ||
+      thread.hasPendingApprovals ||
+      thread.hasPendingUserInput,
+  );
+  const unreadThreads = participants.filter(
+    (thread) =>
+      thread.latestRun?.status === "completed" &&
+      thread.latestRun.completedAt !== null &&
+      (thread.lastVisitedAt == null || thread.latestRun.completedAt > thread.lastVisitedAt),
+  );
+  const activeChildren = family.children.filter((child) =>
+    activeThreads.some((thread) => thread.id === child.id),
+  );
+  return {
+    threads,
+    children: family.children,
+    activeChildren,
+    activeThreads,
+    unreadThreads,
+    protectedChildren: family.protectedChildren,
+    childThreadIds: family.children.map((thread) => thread.id),
+    activeThreadIds: activeThreads.map((thread) => thread.id),
+    unreadThreadIds: unreadThreads.map((thread) => thread.id),
+    activeChildThreadIds: activeChildren.map((thread) => thread.id),
+    protectedChildThreadIds: family.protectedChildren.map((thread) => thread.id),
+    promotableChildThreadIds: [],
+    keptThreadIds: [],
+    nativeStopCount: family.nativeChildren.length,
+    requiresConfirmation:
+      activeThreads.length > 0 || unreadThreads.length > 0 || family.protectedChildren.length > 0,
+    canPromote: false,
+    canStopAndArchive: family.protectedChildren.length === 0,
+  };
+}
+
 const target = {
   environmentId: EnvironmentId.make("undo-env"),
   threadId: ThreadId.make("thread"),
@@ -116,13 +210,33 @@ function currentUndo() {
 }
 
 beforeEach(() => {
+  useThreadSelectionStore.getState().clearSelection();
+  familyState.threads = [];
+  familyState.hiddenThreadIds.clear();
+  familyState.archiveSupport = true;
+  familyState.confirmArchive = false;
+  archiveConfirm.mockReset().mockResolvedValue(true);
+  familyState.unsupportedEnvironments.clear();
+  newThread.mockReset().mockImplementation(async () => {
+    router.state.location.href = "/draft/project";
+  });
+  archiveDialog.mockReset();
+  archiveFamilyLoad.mockReset().mockImplementation(async ({ environmentId, input }) => ({
+    _tag: "Success",
+    value: [
+      familyState.threads.find(
+        (thread) => thread.id === input.threadId && thread.environmentId === environmentId,
+      ) ?? makeThreadFixture({ id: input.threadId, environmentId }),
+      ...familyState.threads.filter((thread) => thread.id !== input.threadId),
+    ],
+  }));
   vi.useFakeTimers();
   for (const command of Object.values(commands)) {
     command.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
   }
   router.navigate.mockClear();
   router.state.location.href = "/";
-  router.state.matches[0]!.params = {};
+  router.state.matches = [{ params: {} }];
   threadShell.pinnedAt = null;
   threadShell.activeOrderKey = null;
   threadShell.unsettledAt = null;
@@ -130,6 +244,7 @@ beforeEach(() => {
   shellLoaded.current = true;
 });
 afterEach(() => {
+  useThreadSelectionStore.getState().clearSelection();
   vi.runAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -214,57 +329,6 @@ describe("unpin Undo", () => {
     });
     await latestUndo();
     expect(commands.pin).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("archive Undo", () => {
-  it("unarchives and returns to the thread when archiving left it", async () => {
-    const add = vi.spyOn(toastManager, "add").mockReturnValue("toast");
-    router.state.matches[0]!.params = {
-      environmentId: target.environmentId,
-      threadId: target.threadId,
-    };
-    const actions = useThreadActions();
-    await actions.archiveThread(target);
-    expect(useThreadUndoNotice.getState().notice).toMatchObject({ action: "Archived", count: 1 });
-    expect(add).not.toHaveBeenCalled();
-    await currentUndo()();
-    expect(commands.unarchive).toHaveBeenCalledExactlyOnceWith({
-      environmentId: target.environmentId,
-      input: { threadId: target.threadId },
-    });
-    expect(router.navigate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "/$environmentId/$threadId",
-        params: { environmentId: target.environmentId, threadId: target.threadId },
-      }),
-    );
-  });
-});
-
-describe("archive navigation", () => {
-  it.each([
-    { destination: "/undo-env/thread", expected: "/draft/project" },
-    { destination: "/undo-env/other-thread", expected: "/undo-env/other-thread" },
-    { destination: "/settings", expected: "/settings" },
-  ])("ends at $expected after opening $destination while archiving", async (route) => {
-    router.state.location.href = "/undo-env/thread";
-    router.state.matches[0]!.params = {
-      environmentId: target.environmentId,
-      threadId: target.threadId,
-    };
-    let finishArchive!: () => void;
-    commands.archive.mockReturnValue(
-      new Promise((resolve) => {
-        finishArchive = () => resolve({ _tag: "Success", value: undefined });
-      }),
-    );
-    const archived = useThreadActions().archiveThread(target);
-    router.state.location.href = route.destination;
-    finishArchive();
-    expect((await archived)._tag).toBe("Success");
-    expect(useThreadUndoNotice.getState().notice).toMatchObject({ action: "Archived" });
-    expect(router.state.location.href).toBe(route.expected);
   });
 });
 

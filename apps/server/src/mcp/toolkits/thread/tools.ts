@@ -1,3 +1,6 @@
+import { ThreadRecoveryInput, ThreadRecoveryResult, ThreadRepairResult } from "@t3tools/contracts";
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
   OrchestratorMcpEnvironmentTarget,
   ScheduledTaskId,
@@ -6,6 +9,7 @@ import {
   OrchestrationThreadSearchMatch,
   OrchestrationV2ThreadForkSourcePoint,
   OrchestrationV2ContextTransfer,
+  CommandId,
   TrimmedNonEmptyString,
   ModelSelection,
   RuntimeMode,
@@ -13,6 +17,8 @@ import {
   RuntimeRequestId,
   ProviderUserInputAnswers,
   IsoDateTime,
+  ThreadArchiveChildDisposition,
+  ThreadArchiveTemporaryProjectSelection,
   OrchestratorMcpFailure,
   OrchestrationV2DispatchCommandResult,
   ThreadId,
@@ -20,6 +26,8 @@ import {
   NonNegativeInt,
   ProjectId,
   clampedPositiveInt,
+  OrchestratorMcpClientRequestId,
+  OrchestrationV2ThreadPlacementResult,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
@@ -29,10 +37,15 @@ import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import {
+  ArchiveFamilyToolResult,
+  ArchiveToolOperation,
+  ArchiveToolSelectionInput,
+} from "./LastCodeLinkedArchiveToolSchemas.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
+    "Pin, snooze, settle, archive, restore, or mark a thread unread. promote releases ownership to make a top-level thread. If a delegated task still owes its result or holds a continuation, wait or cancel it first. return_to_owner restores ownership. Omit threadId for this thread. snooze requires snoozedUntil. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active. Call t3_thread_archive_family first to decide archive readiness, who to ask, or whether they are available. Archiving a family requires childDisposition and its childThreadIds as expectedChildThreadIds. With archivePreview, set expectedArchiveThreadIds to preview threads excluding keptThreadIds. To include typed-in threads with user consent, exclude keptWithTypedInThreadIds instead, pass typedInThreadIds as includeTypedInThreadIds, and use archive_after_review or stop_and_archive. With user consent, pass each selected temporary project’s projectId and threadIds as expectedTemporaryProjects (requiresTypedIn only with typed-in consent). Deletion also removes their thread history, leaving folders on disk. Pass linkedArchiveSelection from preview. Include typed-in cohorts or stop linked work only with consent. archive_if_idle refuses active or unread family members; archive_after_review confirms unread replies but refuses newly active work; stop_and_archive confirms stopping active family members and archiving the selected family members. A childless active or unread thread also needs stop_and_archive or archive_after_review, respectively. archive with expectedArchiveCommandId retries only that exact failed attempt. unarchive restores an archived thread; with expectedArchiveCommandId it instead dismisses that exact failed archive on an active family, without stopping or restarting work. Failed participants resolve to the original owner and archive retries retain the observed failed attempt. This does not schedule a future action.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -46,11 +59,28 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "archive",
       "unarchive",
       "mark_unread",
+      "promote",
+      "return_to_owner",
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
+    childDisposition: Schema.optional(ThreadArchiveChildDisposition),
+    expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    expectedArchiveThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    expectedTemporaryProjects: Schema.optional(
+      Schema.Array(ThreadArchiveTemporaryProjectSelection),
+    ),
+    includeTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    linkedArchiveSelection: Schema.optional(ArchiveToolSelectionInput),
+    expectedLinkedArchiveCommandId: Schema.optional(CommandId),
+    expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   success: Schema.Union([
-    OrchestrationV2DispatchCommandResult,
+    Schema.Struct({
+      ...OrchestrationV2DispatchCommandResult.fields,
+      ownerStateChecked: Schema.optional(Schema.Boolean),
+      linkedArchiveOperations: Schema.optional(Schema.Array(ArchiveToolOperation)),
+      linkedArchiveGuidance: Schema.optional(Schema.String),
+    }),
     Schema.Struct({ settlesWhenTurnEnds: Schema.Literal(true) }),
   ]),
   failure: OrchestratorMcpFailure,
@@ -75,6 +105,26 @@ const commandTool = {
     SecureRandom.SecureRandom,
   ],
 };
+const ThreadGroupTool = Tool.make("t3_thread_group", {
+  ...commandTool,
+  description:
+    "Move existing interactive threads under another thread, or clear their placement with groupedUnderThreadId:null. A moved thread's descendants move with it. Thread and parent must share this environment and project. Delegated children their task still owns, and provider-native children, cannot move. Moving changes placement only. Ownership and result routing stay the same. Up to 200 distinct threads, applied in order; the first rejection stops the batch and leaves later items not_attempted. Use a new clientRequestId per request and reuse it only to retry: accepted items return their original result instead of moving again. Each result gives previous and new placement, so you can move it back. List direct children with t3_thread_list underThreadId. For an empty group thread, use t3_thread_launch without message or create_threads without prompt.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    projectId: Schema.optional(ProjectId),
+    clientRequestId: OrchestratorMcpClientRequestId,
+    items: Schema.Array(
+      Schema.Struct({
+        threadId: ThreadId,
+        groupedUnderThreadId: Schema.NullOr(ThreadId),
+      }),
+    ).check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+  }),
+  success: Schema.Struct({
+    items: Schema.Array(OrchestrationV2ThreadPlacementResult),
+    atomic: Schema.Literal(false),
+  }),
+}).annotate(Tool.Destructive, true);
 const queueEntry = Schema.Struct({
   queuedRunId: RunId,
   text: Schema.String,
@@ -146,6 +196,16 @@ const PendingRequestTool = Tool.make("t3_pending_request", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadArchiveFamilyTool = Tool.make("t3_thread_archive_family", {
+  ...commandTool,
+  description:
+    "Inspect before deciding whether to stop or archive a family, who owns its work, or whether to ask them. Ask one consultationTargets owner without unavailableReason via t3_thread_send mode:'queue', never yourself or its work threads. Report unavailable owners. Answers grant no stop/archive authority. keptThreadIds stay open by default. Linked operations return retryArgs. Provider proof may repair exact ended turns; unknown work stays active. Omit threadId for this thread. Reinspect before archive; see t3_thread_organize.",
+  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
+  success: ArchiveFamilyToolResult,
+})
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false);
+
 const threadConfiguration = Schema.Struct({
   threadId: ThreadId,
   modelSelection: ModelSelection,
@@ -190,7 +250,6 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
     }),
   ]),
 }).annotate(Tool.Destructive, true);
-
 const ThreadSearchTool = Tool.make("t3_thread_search", {
   ...commandTool,
   description:
@@ -241,9 +300,31 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadRecoverTool = Tool.make("t3_thread_recover", {
+  ...commandTool,
+  description:
+    "Check and reconcile a detected stale run using bounded deterministic recovery. Requires exact incident IDs from t3_thread_read. Does not restart completed work or launch an agent.",
+  parameters: ThreadRecoveryInput,
+  success: ThreadRecoveryResult,
+  dependencies: [...commandTool.dependencies, ThreadRecovery.ThreadRecoveryService],
+}).annotate(Tool.Destructive, true);
+const ThreadRepairTool = Tool.make("t3_thread_repair", {
+  ...commandTool,
+  description:
+    "Only after explicit user authorization: open an ordinary repair-agent thread for an incident whose deterministic recovery failed. Uses project default provider/model. Repeated calls return the same repair thread; never use automatically.",
+  parameters: ThreadRecoveryInput,
+  success: ThreadRepairResult,
+  dependencies: [...commandTool.dependencies, ThreadRecoveryRepair.ThreadRecoveryRepairService],
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 export const ThreadToolkit = Toolkit.make(
+  ThreadGroupTool,
+  ThreadRecoverTool,
+  ThreadRepairTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
+  ThreadArchiveFamilyTool,
   ThreadConfigureTool,
   ThreadTransferTool,
   ThreadOrganizeTool,

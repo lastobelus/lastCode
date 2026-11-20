@@ -43,6 +43,7 @@ export function useConnectionDiagnosis(environment: EnvironmentPresentation) {
       ? presentConnectionDiagnosis(
           {
             hostLabel: environment.label,
+            entry: environment.entry,
             state,
             via: relayOnly ? "relay" : "direct",
             // With a direct route as well, the relay's health says nothing about the route in use.
@@ -56,13 +57,24 @@ export function useConnectionDiagnosis(environment: EnvironmentPresentation) {
   return { diagnosis, state, relayOnly };
 }
 
-/** The failure headline alone, for banners outside Settings. */
+/** The failure headline, with an optional recovery step for connection banners. */
 export function ConnectionDiagnosisHeadline({
   environment,
+  showNextStep = false,
 }: {
   readonly environment: EnvironmentPresentation;
+  readonly showNextStep?: boolean;
 }) {
-  return useConnectionDiagnosis(environment).diagnosis?.headline ?? null;
+  const { diagnosis } = useConnectionDiagnosis(environment);
+  if (diagnosis === null) return null;
+  return showNextStep ? (
+    <>
+      {diagnosis.headline}
+      <span className="block">{diagnosis.steps[0]}</span>
+    </>
+  ) : (
+    diagnosis.headline
+  );
 }
 
 const HOP_MARK = { ok: "✓", failed: "✕", unchecked: "–" } as const;

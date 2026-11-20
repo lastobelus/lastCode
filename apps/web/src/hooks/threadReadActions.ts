@@ -1,3 +1,4 @@
+import { msg } from "gt-react";
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
@@ -5,6 +6,7 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
+import { m } from "../i18n/messages";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentServerConfigsAtom } from "../state/server";
 import { readEnvironmentScope } from "../state/session";
@@ -50,16 +52,26 @@ export async function markThreadsReadState(
     toastManager.add(
       stackedThreadToast({
         type: "info",
-        title: "Some threads could not be marked unread",
-        description: `${unsupported} of ${targets.length} threads have no completed reply yet.`,
+        title: m(msg("Some threads could not be marked unread")),
+        description: m(
+          msg("{unsupported} of {count} threads have no completed reply yet.", {
+            unsupported,
+            count: targets.length,
+          }),
+        ),
       }),
     );
   if (failed)
     toastManager.add(
       stackedThreadToast({
         type: "error",
-        title: "Read markers could not be saved",
-        description: `${failed} of ${targets.length} read markers could not be saved. Reconnect and try again.`,
+        title: m(msg("Read markers could not be saved")),
+        description: m(
+          msg("{failed} of {count} read markers could not be saved. Reconnect and try again.", {
+            failed,
+            count: targets.length,
+          }),
+        ),
       }),
     );
 }

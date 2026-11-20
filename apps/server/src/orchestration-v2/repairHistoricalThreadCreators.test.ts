@@ -1,38 +1,54 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Hash the persisted JSON bytes as the manifest does.
+import * as NodeCrypto from "node:crypto";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
   MessageId,
   NodeId,
   ProjectId,
   ProviderInstanceId,
   RunId,
+  ScheduledTaskId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
+  type ThreadCreatorOrigin,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Tracer from "effect/Tracer";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
-import { repairHistoricalThreadCreators } from "./repairHistoricalThreadCreators.ts";
+import * as ProjectionReplay from "./testkit/ProjectionReplay.ts";
+import {
+  repairHistoricalThreadCreators as repairHistoricalThreadCreatorsInEnvironment,
+  repairScopedHistoricalThreadCreators,
+} from "./repairHistoricalThreadCreators.ts";
 
 const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
 );
-const TestLayer = Layer.mergeAll(EventSink.layer, ProjectionMaintenance.layer).pipe(
-  Layer.provideMerge(stores),
-);
+const TestLayer = Layer.mergeAll(
+  EventSink.layer,
+  ProjectionMaintenance.layer,
+  ProjectionReplay.layer,
+).pipe(Layer.provideMerge(stores));
 const now = DateTime.makeUnsafe("2026-09-01T00:00:00Z");
 const provider = ProviderInstanceId.make("codex");
+const localEnvironment = EnvironmentId.make("local-environment");
+const remoteEnvironment = EnvironmentId.make("remote-environment");
+const repairHistoricalThreadCreators =
+  repairHistoricalThreadCreatorsInEnvironment(localEnvironment);
 
 const createThread = Effect.fnUntraced(function* (
   name: string,
@@ -117,18 +133,18 @@ const launchMessage = Effect.fnUntraced(function* (
 const creationRecord = Effect.fnUntraced(function* (
   thread: OrchestrationV2AppThread,
   creator: ThreadId,
+  commandId = CommandId.make(`record:${creator}:${thread.id}`),
 ) {
-  const key = `${creator}:${thread.id}`;
   yield* (yield* EventSink.EventSinkV2).write({
-    commandId: CommandId.make(`record:${key}`),
+    commandId,
     events: [
       {
-        id: EventId.make(`record:${key}`),
+        id: EventId.make(commandId),
         type: "turn-item.updated",
         threadId: creator,
         occurredAt: now,
         payload: {
-          id: TurnItemId.make(`item:${key}`),
+          id: TurnItemId.make(`turn-item:created-thread:${encodeURIComponent(commandId)}`),
           threadId: creator,
           runId: RunId.make(`run:${creator}`),
           nodeId: NodeId.make(`node:${creator}`),
@@ -154,8 +170,218 @@ const creationRecord = Effect.fnUntraced(function* (
 });
 
 it.layer(TestLayer)("historical thread creators", (it) => {
+  it.effect("applies only scoped provenance from guarded launch and schedule evidence", () =>
+    Effect.gen(function* () {
+      const scheduler = yield* createThread("scheduler", { archivedAt: now });
+      const scheduledTaskId = ScheduledTaskId.make("scheduled-task:weekly");
+      const child = yield* createThread("remote-launch", {
+        groupedUnderThreadId: null,
+        creatorGrouping: "grouped",
+        pinnedAt: now,
+        archivedAt: now,
+      });
+      const scheduled = yield* createThread(
+        "scheduled-fire",
+        {},
+        `scheduled-task:${scheduledTaskId}:123:scheduled`,
+      );
+      const localLaunch = yield* createThread("exact-local-launch", { creatorGrouping: "grouped" });
+      yield* launchMessage(localLaunch, scheduler.id);
+      const sql = yield* SqlClient.SqlClient;
+      const initialCommand = `${localLaunch.id}:initial-message`;
+      yield* sql`
+        INSERT INTO orchestration_command_receipts (
+          command_id, aggregate_kind, aggregate_id, command_type, accepted_at, result_sequence, status
+        )
+        SELECT command_id, 'thread', stream_id, 'message.dispatch', occurred_at, sequence, 'accepted'
+        FROM orchestration_events WHERE command_id = ${initialCommand}
+      `;
+      yield* sql`DELETE FROM orchestration_events WHERE command_id = ${initialCommand}`;
+      const packet = Effect.fnUntraced(function* (threadId: ThreadId, origin: ThreadCreatorOrigin) {
+        const creationEventId = EventId.make(`create:${threadId}`);
+        const [current] = yield* sql<{ readonly payload_json: string }>`
+          SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+        `;
+        const [created] = yield* sql<{ readonly payload_json: string }>`
+          SELECT payload_json FROM orchestration_events WHERE event_id = ${creationEventId}
+        `;
+        const hash = (value: string) => NodeCrypto.createHash("sha256").update(value).digest("hex");
+        return {
+          threadId,
+          creationEventId,
+          expectedPayloadSha256: hash(current!.payload_json),
+          creationPayloadSha256: hash(created!.payload_json),
+          evidenceSha256: "a".repeat(64),
+          origin,
+        };
+      });
+      const remote = yield* packet(child.id, {
+        kind: "thread_launch",
+        environmentId: remoteEnvironment,
+        threadId: ThreadId.make("creator-on-peer"),
+      });
+      const schedule = yield* packet(scheduled.id, {
+        kind: "scheduled_task",
+        environmentId: localEnvironment,
+        threadId: scheduler.id,
+        scheduledTaskId,
+      });
+      const competing = yield* packet(localLaunch.id, remote.origin);
+      const reused = yield* createThread("reused-launch-id");
+      yield* (yield* EventSink.EventSinkV2).write({
+        commandId: CommandId.make("reused-launch-id-again"),
+        events: [
+          {
+            id: EventId.make("created-reused-launch-again"),
+            type: "thread.created",
+            threadId: reused.id,
+            occurredAt: now,
+            payload: { ...reused, title: "Reused" },
+          },
+        ],
+      });
+      const reusedPacket = yield* packet(reused.id, remote.origin);
+      const scheduleCycle = yield* createThread(
+        "scheduled-cycle",
+        {},
+        `scheduled-task:${scheduledTaskId}:456:manual`,
+      );
+      const scheduleToCycle = yield* createThread(
+        "schedule-to-cycle",
+        {},
+        `scheduled-task:${scheduledTaskId}:789:manual`,
+      );
+      const scheduleToCyclePacket = yield* packet(scheduleToCycle.id, {
+        ...schedule.origin,
+        threadId: scheduled.id,
+      });
+      const webhook = yield* createThread(
+        "webhook-other-task",
+        {},
+        `scheduled-task:${scheduledTaskId}:webhook:delivery:relay:x:webhook:delivery:12345678-1234-4234-8234-123456789abc`,
+      );
+      const mismatchedWebhookPacket = yield* packet(webhook.id, schedule.origin);
+      const wrongTaskRun = yield* createThread(
+        "scheduled-run-for-other-task",
+        {},
+        `scheduled-task:${scheduledTaskId}:890:scheduled`,
+      );
+      yield* sql`INSERT INTO orchestration_v2_projection_runs (
+        run_id, thread_id, ordinal, provider, status, requested_at, payload_json
+      ) VALUES (
+        'wrong-task-run', ${wrongTaskRun.id}, 1, ${provider}, 'completed', '2026-09-01T00:00:00Z',
+        json_object('userMessageId', 'scheduled-task-message:scheduled-task:other:890:scheduled')
+      )`;
+      const wrongTaskRunPacket = yield* packet(wrongTaskRun.id, schedule.origin);
+      const linkedSchedule = yield* packet(scheduleCycle.id, {
+        ...schedule.origin,
+        threadId: scheduled.id,
+      });
+      const cycleStart = {
+        ...schedule,
+        origin: { ...schedule.origin, threadId: scheduleCycle.id },
+      };
+      const request = (entries: ReadonlyArray<typeof remote>, apply: boolean) =>
+        repairScopedHistoricalThreadCreators(
+          { version: 1, environmentId: localEnvironment, entries },
+          localEnvironment,
+          apply,
+        );
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const sequence = yield* eventStore.latestSequence();
+      assert.deepStrictEqual(
+        (yield* request([competing], true)).map((row) => row.status),
+        ["conflicting-local-evidence"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([reusedPacket], true)).map((row) => row.status),
+        ["ambiguous-creation"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([cycleStart, linkedSchedule], true)).map((row) => row.status),
+        ["creator-cycle", "creator-cycle"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([cycleStart, linkedSchedule, scheduleToCyclePacket], false)).map(
+          (row) => row.status,
+        ),
+        ["creator-cycle", "creator-cycle", "eligible"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([mismatchedWebhookPacket], true)).map((row) => row.status),
+        ["invalid-schedule-evidence"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([wrongTaskRunPacket], true)).map((row) => row.status),
+        ["conflicting-scheduled-task"],
+      );
+      assert.deepStrictEqual(
+        (yield* request(
+          [cycleStart, { ...linkedSchedule, creationEventId: remote.creationEventId }],
+          false,
+        )).map((row) => row.status),
+        ["eligible", "missing-creation-evidence"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([remote, schedule], false)).map((row) => row.status),
+        ["eligible", "eligible"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([{ ...remote, expectedPayloadSha256: "b".repeat(64) }], true)).map(
+          (row) => row.status,
+        ),
+        ["stale-target"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([{ ...remote, creationEventId: schedule.creationEventId }], true)).map(
+          (row) => row.status,
+        ),
+        ["missing-creation-evidence"],
+      );
+      assert.equal(yield* eventStore.latestSequence(), sequence);
+      assert.deepStrictEqual(
+        (yield* request([remote, schedule], true)).map((row) => row.status),
+        ["repaired", "repaired"],
+      );
+      assert.deepStrictEqual(yield* store.getThread(child.id), {
+        ...child,
+        creatorOrigin: remote.origin,
+      });
+      assert.deepStrictEqual(yield* store.getThread(scheduled.id), {
+        ...scheduled,
+        creatorOrigin: schedule.origin,
+      });
+      assert.deepStrictEqual(
+        (yield* request([remote, schedule], true)).map((row) => row.status),
+        ["already-repaired", "already-repaired"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([{ ...remote, evidenceSha256: "b".repeat(64) }], true)).map(
+          (row) => row.status,
+        ),
+        ["conflicting-repair-evidence"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([{ ...remote, expectedPayloadSha256: "b".repeat(64) }], true)).map(
+          (row) => row.status,
+        ),
+        ["conflicting-repair-evidence"],
+      );
+      const conflict = { ...remote, origin: { ...remote.origin, threadId: scheduler.id } };
+      assert.deepStrictEqual(
+        (yield* request([conflict], true)).map((row) => row.status),
+        ["conflicting-origin"],
+      );
+      assert.equal(yield* eventStore.latestSequence(), sequence + 2);
+      yield* (yield* ProjectionReplay.ProjectionReplay).rebuild;
+      assert.deepStrictEqual((yield* store.getThread(child.id)).creatorOrigin, remote.origin);
+      assert.deepStrictEqual((yield* store.getThread(scheduled.id)).creatorOrigin, schedule.origin);
+    }),
+  );
+
   it.effect(
-    "repairs exact MCP launches across projects, persists through replay and repeats without events",
+    "repairs exact MCP launches without adding grouping, persists through replay and repeats without events",
     () =>
       Effect.gen(function* () {
         const parent = yield* createThread("launch-parent");
@@ -164,42 +390,77 @@ it.layer(TestLayer)("historical thread creators", (it) => {
           pinnedAt: now,
           settledOverride: "settled",
         });
-        yield* launchMessage(child, parent.id);
+        yield* launchMessage(child, parent.id, {}, child.id);
         assert.equal(yield* repairHistoricalThreadCreators, 1);
         const store = yield* ProjectionStore.ProjectionStoreV2;
         const repaired = (yield* store.getThreadProjection(child.id)).thread;
         assert.deepStrictEqual(repaired, {
           ...child,
           creatorThreadId: parent.id,
-          creatorGrouping: "grouped",
+          creatorOrigin: {
+            kind: "thread_launch",
+            environmentId: localEnvironment,
+            threadId: parent.id,
+          },
         });
         const events = yield* EventStore.EventStoreV2;
         const sequence = yield* events.latestSequence();
         assert.equal(yield* repairHistoricalThreadCreators, 0);
         assert.equal(yield* events.latestSequence(), sequence);
-        yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2).rebuild;
+        yield* (yield* ProjectionReplay.ProjectionReplay).rebuild;
         assert.deepStrictEqual((yield* store.getThreadProjection(child.id)).thread, repaired);
         assert.equal(yield* repairHistoricalThreadCreators, 0);
       }),
   );
 
   it.effect(
-    "recovers a no-prompt creation record after compaction and preserves independent placement",
+    "recovers a retained no-prompt creation record after pruning and preserves independent placement",
     () =>
       Effect.gen(function* () {
         const parent = yield* createThread("record-parent");
         const child = yield* createThread(
-          "record-child",
+          "thread:mcp:namespace%3Aqualifier:request:0",
           { creatorGrouping: "independent" },
-          "separate-create-command",
+          "command:mcp:namespace%3Aqualifier:create-thread:request:0",
         );
-        yield* creationRecord(child, parent.id);
-        yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2).compactEventStore();
+        const recordCommand = CommandId.make(
+          "command:mcp:namespace%3Aqualifier:record-created-thread:request:0",
+        );
+        yield* creationRecord(child, parent.id, recordCommand);
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+          INSERT INTO orchestration_command_receipts (
+            command_id, aggregate_kind, aggregate_id, command_type, accepted_at, result_sequence, status
+          )
+          SELECT command_id, 'thread', stream_id, 'thread.created.record', occurred_at, sequence, 'accepted'
+          FROM orchestration_events WHERE command_id = ${recordCommand}
+        `;
+        yield* launchMessage(parent, child.id, {}, "later-parent-message");
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const events = yield* EventStore.EventStoreV2;
+        const sequence = yield* events.latestSequence();
+        assert.equal((yield* maintenance.pruneEventStore()).deletedEventCount, 0);
+        yield* TestClock.adjust("1 day");
+        yield* maintenance.pruneEventStore();
+        assert.equal(yield* events.latestSequence(), sequence);
+        assert.deepEqual(
+          yield* sql`SELECT event_id FROM orchestration_events
+            WHERE event_id = ${recordCommand}`,
+          [],
+        );
         assert.equal(yield* repairHistoricalThreadCreators, 1);
         const repaired = (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
           child.id,
         )).thread;
-        assert.deepStrictEqual(repaired, { ...child, creatorThreadId: parent.id });
+        assert.deepStrictEqual(repaired, {
+          ...child,
+          creatorThreadId: parent.id,
+          creatorOrigin: {
+            kind: "thread_launch",
+            environmentId: localEnvironment,
+            threadId: parent.id,
+          },
+        });
       }),
   );
 
@@ -250,7 +511,14 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       yield* launchMessage(wrongMessage, parent.id, { id: MessageId.make("different-message") });
       const wrongCreation = yield* createThread("wrong-creation", {}, "different-creation-command");
       yield* launchMessage(wrongCreation, parent.id);
+      const malformed = yield* createThread("malformed-sender");
+      yield* launchMessage(malformed, parent.id);
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE orchestration_events
+        SET payload_json = json_set(payload_json, '$.senderThreadId', '')
+        WHERE command_id = ${`${malformed.id}:initial-message`}`;
       const noEvidence = yield* createThread("no-evidence");
+      yield* creationRecord(noEvidence, parent.id);
       assert.equal(yield* repairHistoricalThreadCreators, 0);
       assert.equal(
         (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(noEvidence.id))
@@ -260,28 +528,28 @@ it.layer(TestLayer)("historical thread creators", (it) => {
     }),
   );
 
-  it.effect(
-    "rejects conflicting evidence, self-links and cycles through proposed or existing provenance",
-    () =>
-      Effect.gen(function* () {
-        const parent = yield* createThread("conflict-parent");
-        const other = yield* createThread("conflict-other");
-        const conflict = yield* createThread("conflict");
-        yield* launchMessage(conflict, parent.id);
-        yield* creationRecord(conflict, other.id);
-        const self = yield* createThread("self");
-        yield* launchMessage(self, self.id);
-        const left = yield* createThread("cycle-left");
-        const right = yield* createThread("cycle-right");
-        yield* launchMessage(left, right.id);
-        yield* creationRecord(right, left.id);
-        const existingChild = yield* createThread("existing-cycle-child", {
-          creatorThreadId: ThreadId.make("existing-cycle-parent"),
-        });
-        const existingParent = yield* createThread("existing-cycle-parent");
-        yield* launchMessage(existingParent, existingChild.id);
-        assert.equal(yield* repairHistoricalThreadCreators, 0);
-      }),
+  it.effect("rejects self-links and cycles through proposed or existing provenance", () =>
+    Effect.gen(function* () {
+      const self = yield* createThread("self");
+      yield* launchMessage(self, self.id);
+      const left = yield* createThread("cycle-left");
+      const right = yield* createThread("cycle-right");
+      yield* launchMessage(left, right.id);
+      yield* launchMessage(right, left.id);
+      const leadsToCycle = yield* createThread("downstream-cycle");
+      yield* launchMessage(leadsToCycle, left.id);
+      const existingChild = yield* createThread("existing-cycle-child", {
+        creatorThreadId: ThreadId.make("existing-cycle-parent"),
+      });
+      const existingParent = yield* createThread("existing-cycle-parent");
+      yield* launchMessage(existingParent, existingChild.id);
+      assert.equal(yield* repairHistoricalThreadCreators, 1);
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      assert.equal((yield* store.getThread(leadsToCycle.id)).creatorThreadId, left.id);
+      for (const thread of [self, left, right, existingParent]) {
+        assert.isUndefined((yield* store.getThread(thread.id)).creatorThreadId);
+      }
+    }),
   );
 
   it.effect("keeps deleted creator provenance but skips missing creators", () =>
@@ -353,7 +621,7 @@ it.layer(TestLayer)("historical thread creators", (it) => {
           );
           assert.match(
             details,
-            /SEARCH record USING INDEX orchestration_events_v2_thread_created_target_idx \(<expr>=\? AND sequence>\?\)/,
+            /SEARCH record USING INDEX idx_orch_events_command_id \(command_id=\?(?: AND rowid>\?)?\)/,
           );
           assert.notMatch(details, /SCAN (?:message|record)/);
           assert.notInclude(details, "idx_orchestration_events_application_sequence");

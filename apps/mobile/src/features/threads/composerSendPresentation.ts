@@ -32,6 +32,7 @@ export function resolveComposerSendPresentation(
     readonly editingQueuedMessage: boolean;
     readonly running: boolean;
     readonly canSteer: boolean;
+    readonly forceQueue: boolean;
     readonly followUpBehavior: FollowUpBehavior;
     readonly deliveryDeferred: boolean;
   },
@@ -42,6 +43,15 @@ export function resolveComposerSendPresentation(
       label: resolve(msg("Update queued message")),
       icon: "checkmark",
       action: null,
+      alternate: null,
+      offersFollowUpChoice: false,
+    };
+  }
+  if (input.forceQueue) {
+    return {
+      label: resolve(ACTION_LABEL.queue),
+      icon: "list.number",
+      action: "queue",
       alternate: null,
       offersFollowUpChoice: false,
     };

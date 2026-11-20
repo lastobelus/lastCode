@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   type ProjectIconOverride,
   ProjectId,
+  type ProjectRegistration,
   ProjectScript,
   type ThreadEnvMode,
 } from "@t3tools/contracts";
@@ -14,6 +15,7 @@ import * as Schema from "effect/Schema";
 
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import type { ProjectRow } from "./ProjectStore.ts";
+import { planKeepProject } from "../project/projectRegistration.ts";
 
 export interface ProjectCreateCommand {
   readonly type: "project.create";
@@ -21,6 +23,7 @@ export interface ProjectCreateCommand {
   readonly projectId: ProjectId;
   readonly title: string;
   readonly workspaceRoot: string;
+  readonly registration?: ProjectRegistration;
   readonly scripts?: ReadonlyArray<ProjectScript>;
 }
 
@@ -38,6 +41,7 @@ export interface ProjectMetaUpdateCommand {
   readonly scripts?: ReadonlyArray<ProjectScript>;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  readonly keepTemporary?: true;
 }
 
 export interface ProjectScriptsReconcileCommand {
@@ -174,6 +178,7 @@ export function planProjectCommand(input: {
           faviconPath: null,
           projectIcon: null,
           scripts: command.scripts ?? [],
+          ...(command.registration === undefined ? {} : { registration: command.registration }),
           createdAt: occurredAt,
           updatedAt: occurredAt,
         },
@@ -243,6 +248,7 @@ export function planProjectCommand(input: {
           ...(command.faviconPath === undefined ? {} : { faviconPath: command.faviconPath }),
           ...(command.projectIcon === undefined ? {} : { projectIcon: command.projectIcon }),
           ...(command.scripts === undefined ? {} : { scripts: command.scripts }),
+          ...planKeepProject(command.keepTemporary, project.registration),
           // Repeating a pin or archive keeps the original time.
           ...(command.pinned === undefined
             ? {}

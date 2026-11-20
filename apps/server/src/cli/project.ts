@@ -58,8 +58,10 @@ import {
 import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as WorktreeSuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import * as RunningServer from "./runningServer.ts";
+import { projectIconCommand } from "./projectIcon.ts";
 
 type ProjectMutationTarget = {
   readonly id: ProjectId;
@@ -70,6 +72,12 @@ type ProjectMutationTarget = {
 type ProjectCliDispatchCommand = ProjectMutation;
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
+const isRunningServerTransportError = Schema.is(
+  Schema.Union([
+    RunningServer.RunningServerUnreachableError,
+    RunningServer.RunningServerNoReplyError,
+  ]),
+);
 
 export class ProjectCommandIdGenerationError extends Schema.TaggedError<ProjectCommandIdGenerationError>()(
   "ProjectCommandIdGenerationError",
@@ -118,10 +126,7 @@ export class ProjectLiveServerRequestError extends Schema.TaggedError<ProjectLiv
   },
 ) {
   override get message(): string {
-    if (
-      this.cause instanceof RunningServer.RunningServerUnreachableError ||
-      this.cause instanceof RunningServer.RunningServerNoReplyError
-    ) {
+    if (isRunningServerTransportError(this.cause)) {
       return this.cause.message;
     }
     return "Failed to call the running server.";
@@ -265,6 +270,7 @@ const makeProjectCliRuntimeLayer = (layerProjectService: typeof RuntimeLayer.lay
       ),
     ),
     Layer.provideMerge(WorkspacePaths.layer),
+    Layer.provideMerge(WorktreeSuspensionRegistry.layer),
     Layer.provideMerge(
       ServerSettings.layer.pipe(
         Layer.provide(Layer.merge(ServerSecretStore.layer, ManagedPolicy.layer)),
@@ -364,6 +370,7 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
   flags: CliAuthLocationFlags,
   run: (input: {
     readonly snapshot: ProjectSnapshot;
+    readonly mode: "live" | "offline";
     readonly dispatch: (
       command: ProjectCliDispatchCommand,
     ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
@@ -387,9 +394,9 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
     const liveOutput = yield* RunningServer.changeState({
       scopes: AuthStandardClientScopes,
       viaServer: Effect.fn("project.viaServer")(function* (client) {
-        const snapshot = yield* client.projects.snapshot({ headers: {} }).pipe(
-          Effect.timeout(PROJECT_CLI_LIVE_SERVER_REQUEST_TIMEOUT),
-        );
+        const snapshot = yield* client.projects
+          .snapshot({ headers: {} })
+          .pipe(Effect.timeout(PROJECT_CLI_LIVE_SERVER_REQUEST_TIMEOUT));
         return yield* run({
           snapshot,
           dispatch: (command) =>
@@ -420,8 +427,7 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
         () => Effect.succeed(Option.none<string>()),
       ),
       Effect.mapError((cause) =>
-        cause instanceof RunningServer.RunningServerUnreachableError ||
-        cause instanceof RunningServer.RunningServerNoReplyError
+        isRunningServerTransportError(cause)
           ? new ProjectLiveServerRequestError({ operation: "callLiveServer", cause })
           : cause,
       ),
@@ -870,5 +876,6 @@ export const projectCommand = Command.make("project").pipe(
     projectRemoveCommand,
     projectRenameCommand,
     projectReconcileActionsCommand,
+    projectIconCommand,
   ]),
 );

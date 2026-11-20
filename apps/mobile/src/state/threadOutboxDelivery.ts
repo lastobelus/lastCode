@@ -16,6 +16,7 @@ import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import { managedRuntimeModeDenial } from "@t3tools/client-runtime/contract-labels";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -24,6 +25,10 @@ import {
   type EnvironmentId,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
+import {
+  threadContextsUnavailableForDestination,
+  type ThreadReferenceUnavailableReason,
+} from "@t3tools/shared/composerContextReferences";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -33,7 +38,7 @@ import * as Latch from "effect/Latch";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { msg } from "gt-react-native";
-import { m } from "../i18n/messages";
+import { m, type MessageResolver } from "../i18n/messages";
 
 import { createDebugLogger } from "../lib/debugLog";
 import type { DraftComposerAttachment } from "../lib/composerImages";
@@ -218,6 +223,68 @@ function findCreationProject(
 
 function settingsCommandId(message: QueuedThreadMessage, setting: string): CommandId {
   return CommandId.make(`${message.commandId}:${setting}`);
+}
+
+function unavailableThreadReference(message: QueuedThreadMessage) {
+  const connectedEnvironments = appAtomRegistry.get(workspaceConnections.environmentsAtom);
+  const serverConfigs = appAtomRegistry.get(environmentServerConfigsAtom);
+  const environments = new Map(
+    connectedEnvironments.map(
+      (environment) =>
+        [
+          environment.environmentId,
+          {
+            connected: environment.connectionState === "connected",
+            canRead: readEnvironmentScope(environment.environmentId, AuthOrchestrationReadScope),
+            supportsUniversalThreadReferences:
+              serverConfigs.get(environment.environmentId)?.environment.capabilities
+                .universalThreadReferences === true,
+          },
+        ] as const,
+    ),
+  );
+  return threadContextsUnavailableForDestination({
+    text: message.text,
+    records: message.context?.records ?? [],
+    destinationEnvironmentId: message.environmentId,
+    environments,
+  })[0];
+}
+
+type QueuedMessageRecoveryCopy = string | ((resolve: MessageResolver) => string);
+
+function threadReferenceRecoveryMessage(
+  reason: ThreadReferenceUnavailableReason,
+  environmentLabel: string | undefined,
+): (resolve: MessageResolver) => string {
+  return (resolve) => {
+    const owner =
+      environmentLabel ??
+      resolve(msg("its machine", { $context: "machine that owns the attached thread" }));
+    switch (reason) {
+      case "permission-denied":
+        return resolve(
+          msg(
+            "Attached thread unavailable. Check that you have read access to {owner} and to the machine you're sending to. The reference is still in your draft.",
+            { owner },
+          ),
+        );
+      case "unsupported":
+        return resolve(
+          msg(
+            "Attached thread unavailable. Check for server updates on {owner} and the machine you're sending to. The reference is still in your draft.",
+            { owner },
+          ),
+        );
+      case "disconnected":
+        return resolve(
+          msg(
+            "Attached thread unavailable. Check the connections to {owner} and the machine you're sending to before sending. The reference is still in your draft.",
+            { owner },
+          ),
+        );
+    }
+  };
 }
 
 /** Outbox or draft storage refused a step; the step decides what that means for the message. */
@@ -462,7 +529,7 @@ export const recoverEditedCreationAfterDelivery = Effect.fn("ThreadOutbox.recove
  * cannot take it yet (attachment cap); "deferred" means an editor or newer write owns it.
  */
 export const restoreRejectedQueuedMessage = Effect.fn("ThreadOutbox.restoreRejectedMessage")(
-  function* (queuedMessage: QueuedThreadMessage, message: string) {
+  function* (queuedMessage: QueuedThreadMessage, message: QueuedMessageRecoveryCopy) {
     const draftKey = recoveryDraftKey(queuedMessage);
     const threadKey = scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId);
     const editing = () => isEditingQueuedMessage(queuedMessage.messageId);
@@ -483,7 +550,12 @@ export const restoreRejectedQueuedMessage = Effect.fn("ThreadOutbox.restoreRejec
           removeThreadOutboxMessage(queuedMessage, revision, () => !editing()),
         );
         if (!removed) return "deferred" as const;
-        setThreadComposerError(threadKey, message, queuedMessage.messageId);
+        setThreadComposerError(
+          threadKey,
+          typeof message === "string" ? message : message(m),
+          queuedMessage.messageId,
+          typeof message === "string" ? undefined : message,
+        );
         return "restored" as const;
       }
       yield* storage("load-drafts", queuedMessage.messageId, () => waitForComposerDraftsLoaded());
@@ -515,7 +587,12 @@ export const restoreRejectedQueuedMessage = Effect.fn("ThreadOutbox.restoreRejec
           Effect.as("deferred" as const),
         );
       if (!queuedMessage.creation) {
-        setThreadComposerError(threadKey, message, queuedMessage.messageId);
+        setThreadComposerError(
+          threadKey,
+          typeof message === "string" ? message : message(m),
+          queuedMessage.messageId,
+          typeof message === "string" ? undefined : message,
+        );
       }
       stampRecoveryDraftProject(queuedMessage, draftKey);
       // The merge publishes even when persisting it fails, so the rollback is captured either way.
@@ -571,7 +648,8 @@ export const restoreRejectedQueuedMessage = Effect.fn("ThreadOutbox.restoreRejec
         recordPendingThreadCreationOutcome({
           kind: "failed",
           message: queuedMessage,
-          reason: message,
+          reason: typeof message === "string" ? message : message(m),
+          ...(typeof message === "string" ? {} : { resolveReason: message }),
         });
       }
       return "restored" as const;
@@ -827,7 +905,7 @@ export function createThreadOutboxDelivery(): {
   // parking on the draft avoids hammering the restore with backoff retries.
   const restoreQueuedMessage = Effect.fn("ThreadOutbox.restoreQueuedMessage")(function* (
     queuedMessage: QueuedThreadMessage,
-    message: string,
+    message: QueuedMessageRecoveryCopy,
   ) {
     const result = yield* restoreRejectedQueuedMessage(queuedMessage, message);
     if (result === "retry") return yield* retryDelivery;
@@ -859,6 +937,20 @@ export function createThreadOutboxDelivery(): {
     });
     blockedRecoveries.set(queuedMessage.messageId, { message: queuedMessage, unsubscribe });
   });
+
+  const restoreUnavailableReference = (queuedMessage: QueuedThreadMessage) => {
+    const unavailable = unavailableThreadReference(queuedMessage);
+    if (!unavailable) return null;
+    const owner = appAtomRegistry
+      .get(workspaceConnections.environmentsAtom)
+      .find(
+        (environment) => environment.environmentId === unavailable.record.environmentId,
+      )?.environmentLabel;
+    return restoreQueuedMessage(
+      queuedMessage,
+      threadReferenceRecoveryMessage(unavailable.reason, owner),
+    );
+  };
 
   const sendQueuedMessage = Effect.fn("ThreadOutbox.sendQueuedMessage")(function* (
     queuedMessage: QueuedThreadMessage,
@@ -1001,6 +1093,8 @@ export function createThreadOutboxDelivery(): {
       if (!isQueuedMessagePayloadCurrent(persistedMessage, deliveryRevision)) return;
     }
     if (!hasAccess()) return;
+    const unavailableReference = restoreUnavailableReference(persistedMessage);
+    if (unavailableReference) return yield* unavailableReference;
     const deliveryResult = yield* deliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
       input: {
@@ -1177,6 +1271,8 @@ export function createThreadOutboxDelivery(): {
         startFromOrigin: false,
       };
     }
+    const unavailableReference = restoreUnavailableReference(persistedMessage);
+    if (unavailableReference) return yield* unavailableReference;
     launchedCreations.set(persistedMessage.messageId, { revision: deliveryRevision, workspace });
     const deliveryResult = yield* deliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
@@ -1350,6 +1446,26 @@ export function createThreadOutboxDelivery(): {
     if (deliveryAction === "send" && !operableEnvironments.has(nextQueuedMessage.environmentId)) {
       return { _tag: "Wait" };
     }
+    const unavailableReference =
+      deliveryAction === "send" ? unavailableThreadReference(nextQueuedMessage) : undefined;
+    if (unavailableReference) {
+      const owner = connectedEnvironments.find(
+        (environment) => environment.environmentId === unavailableReference.record.environmentId,
+      )?.environmentLabel;
+      return {
+        _tag: "Dispatch",
+        messageId,
+        run: Effect.gen(function* () {
+          if (!(yield* confirmQueued(nextQueuedMessage)) || isEditingQueuedMessage(messageId)) {
+            return;
+          }
+          yield* restoreQueuedMessage(
+            nextQueuedMessage,
+            threadReferenceRecoveryMessage(unavailableReference.reason, owner),
+          );
+        }),
+      };
+    }
     const dispatchStep = resolveThreadOutboxDispatchStep({
       deliveryAction,
       fileAttachments: nextQueuedMessage.attachments.filter(
@@ -1416,6 +1532,8 @@ export function createThreadOutboxDelivery(): {
       // An editor that took the message after confirmation owns it; that is not a failure.
       if (isEditingQueuedMessage(messageId)) return;
       if (deliveryAction === "send") {
+        const unavailableReference = restoreUnavailableReference(nextQueuedMessage);
+        if (unavailableReference) return yield* unavailableReference;
         const liveThread = findThread(
           appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
           nextQueuedMessage,

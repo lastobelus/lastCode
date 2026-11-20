@@ -5,6 +5,8 @@ import {
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
   reduceDesktopUpdateStateOnDownloadComplete,
+  reduceDesktopUpdateStateOnDownloadStart,
+  reduceDesktopUpdateStateOnDownloadProgress,
   reduceDesktopUpdateStateOnDownloadFailure,
   reduceDesktopUpdateStateOnInstallFailure,
   reduceDesktopUpdateStateOnLocalBuildFailure,
@@ -51,6 +53,12 @@ describe("updateMachine", () => {
     expect(failed.releaseNotes).toEqual(downloadedState.releaseNotes);
     expect(failed.omittedReleaseCount).toBe(2);
     expect(failed.message).toBeNull();
+    expect(failed.refreshFailure).toBe("network unavailable");
+    expect(failed.checkSucceededAt).toBeUndefined();
+
+    const refreshed = reduceDesktopUpdateStateOnNoUpdate(failed, "2026-03-04T00:00:02.000Z");
+    expect(refreshed.refreshFailure).toBeUndefined();
+    expect(refreshed.checkSucceededAt).toBe("2026-03-04T00:00:02.000Z");
   });
 
   it("preserves available version on download failure for retry", () => {

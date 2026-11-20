@@ -9,6 +9,7 @@ import { describe, expect, it, onTestFinished } from "vite-plus/test";
 import { createActionProtocolDecoder } from "@t3tools/shared/actionResumeProtocol";
 import {
   parseDaemonStatus,
+  parseProcessIdentities,
   parseOptions,
   readSupervisorState,
   waitForCheckpoint,
@@ -26,17 +27,20 @@ const success = (finished = finishedAt): SupervisorState => ({
   startedAt,
   finishedAt: finished,
   supervisorPid: 42,
+  launchdPid: 42,
 });
 
 function harness(
   states: ReadonlyArray<SupervisorState | null>,
   daemons: ReadonlyArray<DaemonStatus>,
+  processes: ReadonlyArray<{ pid: number; parentPid: number; startedAt: number }> = [],
 ) {
   let index = 0;
   let now = 0;
   return {
     deps: {
       now: () => now,
+      readProcesses: () => processes,
       sleep: async (milliseconds: number) => {
         now += milliseconds;
         index += 1;
@@ -61,6 +65,86 @@ function stateFixture(value: unknown): string {
 }
 
 describe("wait for checkpoint", () => {
+  it("matches daily success and failure to the scheduler, not its child", async () => {
+    for (const wrapped of [false, true]) {
+      for (const status of ["success", "failed"] as const) {
+        const terminal = {
+          ...success(),
+          supervisorPid: 43,
+          launchdPid: wrapped ? 44 : 42,
+          status,
+          phase: status === "success" ? "complete" : "checkpoint",
+        };
+        await expect(
+          waitForCheckpoint(
+            harness(
+              [terminal],
+              [
+                { state: "running", pid: 42, runs: 3 },
+                { state: "idle", runs: 3 },
+              ],
+              [
+                { pid: 42, parentPid: 1, startedAt: 0 },
+                { pid: 44, parentPid: 42, startedAt: 0 },
+                { pid: 43, parentPid: wrapped ? 44 : 42, startedAt: 0 },
+              ],
+            ).deps,
+          ),
+        ).resolves.toEqual(terminal);
+      }
+    }
+  });
+
+  it("rejects stale, unrelated, unobserved, and reused descendant terminal identities", async () => {
+    for (const [terminal, processes] of [
+      [{ ...success(), launchdPid: 41 }, []],
+      [{ ...success(), supervisorPid: 43, launchdPid: 44 }, []],
+      [
+        { ...success(), supervisorPid: 43, launchdPid: 44 },
+        [
+          { pid: 42, parentPid: 1, startedAt: 0 },
+          { pid: 44, parentPid: 1, startedAt: 0 },
+          { pid: 43, parentPid: 44, startedAt: 0 },
+        ],
+      ],
+      [
+        { ...success(), supervisorPid: 43, launchdPid: 44 },
+        [
+          { pid: 42, parentPid: 1, startedAt: 0 },
+          { pid: 44, parentPid: 42, startedAt: 0 },
+          { pid: 43, parentPid: 44, startedAt: 1000 },
+        ],
+      ],
+      [
+        {
+          ...success(),
+          startedAt: newerFinishedAt,
+          finishedAt: newerFinishedAt,
+          supervisorPid: 43,
+          launchdPid: 44,
+        },
+        [
+          { pid: 42, parentPid: 1, startedAt: 0 },
+          { pid: 44, parentPid: 42, startedAt: 0 },
+          { pid: 43, parentPid: 44, startedAt: 0 },
+        ],
+      ],
+    ] as const) {
+      await expect(
+        waitForCheckpoint(
+          harness(
+            [terminal],
+            [
+              { state: "running", pid: 42, runs: 3 },
+              { state: "idle", runs: 3 },
+            ],
+            processes,
+          ).deps,
+        ),
+      ).rejects.toMatchObject({ reason: "no-state" });
+    }
+  });
+
   it("parses launchd state, pid, run count, malformed output, and probe failure", () => {
     expect(parseDaemonStatus("state = running\npid = 42\nruns = 3\nlast exit code = 0")).toEqual({
       state: "running",
@@ -68,6 +152,9 @@ describe("wait for checkpoint", () => {
       runs: 3,
       lastExit: "0",
     });
+    expect(parseProcessIdentities(" 42 1 Thu Jan  1 00:00:00 1970\ninvalid\n43 42 bad")).toEqual([
+      { pid: 42, parentPid: 1, startedAt: 0 },
+    ]);
     expect(parseDaemonStatus("garbage")).toEqual({ state: "unavailable" });
     expect(parseDaemonStatus("state = starting")).toEqual({ state: "unavailable" });
     expect(parseDaemonStatus("state = not running\nruns = 3")).toEqual({ state: "idle", runs: 3 });
@@ -83,6 +170,9 @@ describe("wait for checkpoint", () => {
       { ...success(), startedAt: newerFinishedAt, finishedAt },
       { ...success(), supervisorPid: undefined },
       { ...success(), supervisorPid: "42" },
+      { ...success(), launchdPid: undefined },
+      { ...success(), launchdPid: "42" },
+      { ...success(), launchdPid: 0 },
     ])
       expect(readSupervisorState(stateFixture(value))).toBeNull();
   });
@@ -119,7 +209,7 @@ describe("wait for checkpoint", () => {
     await expect(
       waitForCheckpoint(
         harness(
-          [success(), { ...success(newerFinishedAt), supervisorPid: 41 }],
+          [success(), { ...success(newerFinishedAt), supervisorPid: 41, launchdPid: 41 }],
           [{ state: "running", pid: 42 }, { state: "idle" }],
         ).deps,
         30_000,
@@ -145,7 +235,7 @@ describe("wait for checkpoint", () => {
     await expect(
       waitForCheckpoint(
         harness(
-          [success(), { ...success(), supervisorPid: 41 }],
+          [success(), { ...success(), supervisorPid: 41, launchdPid: 41 }],
           [{ state: "running", pid: 42 }, { state: "idle" }],
         ).deps,
         30_000,
@@ -196,6 +286,10 @@ describe("wait for checkpoint", () => {
         30_000,
       ),
     ).rejects.toThrow("launch count");
+    const reused = harness([success()], [{ state: "running", pid: 42 }]);
+    let snapshots = 0;
+    reused.deps.readProcesses = () => [{ pid: 42, parentPid: 1, startedAt: snapshots++ * 1000 }];
+    await expect(waitForCheckpoint(reused.deps)).rejects.toMatchObject({ reason: "run-replaced" });
   });
   it("returns failure and propagates cancellation without touching the daemon", async () => {
     const failed: SupervisorState = {
@@ -255,5 +349,30 @@ describe("wait for checkpoint", () => {
       report: { outcome: "attention", reason: "not-running" },
     });
     expect(decoder.finish()).toBe("");
+
+    NodeFS.writeFileSync(
+      launchctl,
+      "#!/bin/sh\nprintf 'state = running\\npid = 42\\nruns = 1\\n'\n",
+    );
+    const ps = NodePath.join(bin, "ps");
+    NodeFS.writeFileSync(ps, "#!/bin/sh\nexit 1\n");
+    NodeFS.chmodSync(ps, 0o755);
+    const probe = await execFile(
+      process.execPath,
+      [NodePath.join(import.meta.dirname, "lastcode-wait-for-checkpoint.ts")],
+      {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          T3CODE_ACTION_RUN_ID: runId,
+          T3CODE_ACTION_EVENT_TOKEN: token,
+        },
+      },
+    );
+    const probeDecoder = createActionProtocolDecoder({ runId, token });
+    expect(probeDecoder.push(probe.stdout).events).toMatchObject([
+      { kind: "result", report: { outcome: "attention", reason: "probe-failed" } },
+    ]);
+    expect(probeDecoder.finish()).toBe("");
   });
 });

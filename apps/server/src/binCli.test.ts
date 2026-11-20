@@ -9,28 +9,24 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./persistence/Migrations.ts";
+import { runLastCodeMigrations } from "./persistence/LastCodeMigrations.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
 
-it.live("keeps migration warnings out of JSON thread output", () =>
+it.live("keeps migration progress out of JSON thread output", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-json-" });
     const stateDir = `${root}/userdata`;
     yield* fs.makeDirectory(stateDir);
     yield* Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations();
-      const futureId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
-      yield* sql`
-        INSERT INTO effect_sql_migrations (migration_id, name)
-        VALUES (${futureId}, 'FutureMigration')
-      `;
+      // LastCode rejects future ledgers; a valid pending migration exercises log suppression.
+      yield* runMigrations({ toMigrationInclusive: migrationManifest.at(-2)![0] });
+      yield* runLastCodeMigrations();
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: `${stateDir}/statev2.sqlite` })));
 
     const server = yield* Effect.acquireRelease(
@@ -116,7 +112,7 @@ it.live("keeps migration warnings out of JSON thread output", () =>
       },
       { concurrency: "unbounded" },
     );
-    assert.strictEqual(Number(exitCode), 0, stderr);
+    assert.strictEqual(Number(exitCode), 0, stderr || stdout);
     assert.deepStrictEqual(JSON.parse(stdout), []);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

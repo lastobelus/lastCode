@@ -15,6 +15,7 @@ import {
   type LastCodeInstallableTag,
   type NightlyTag,
 } from "./lib/lastcode-installable-tag.ts";
+import { cleanGitEnvironment } from "./lib/lastcode-git.ts";
 
 export {
   LASTCODE_CHECKPOINT_TAG_PREFIX,
@@ -28,41 +29,14 @@ export {
   type NightlyTag,
 } from "./lib/lastcode-installable-tag.ts";
 
+export { cleanGitEnvironment } from "./lib/lastcode-git.ts";
+
 export const LASTCODE_BUILD_TAG_PREFIX = "lastcode/build/";
 
 export class LastCodeNightlyError extends Schema.TaggedError<LastCodeNightlyError>()(
   "LastCodeNightlyError",
   { message: Schema.String, cause: Schema.optional(Schema.Unknown) },
 ) {}
-
-const GIT_LOCAL_ENVIRONMENT_VARIABLES = new Set([
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_COMMON_DIR",
-  "GIT_CONFIG",
-  "GIT_CONFIG_COUNT",
-  "GIT_CONFIG_PARAMETERS",
-  "GIT_DIR",
-  "GIT_GRAFT_FILE",
-  "GIT_IMPLICIT_WORK_TREE",
-  "GIT_INDEX_FILE",
-  "GIT_NO_REPLACE_OBJECTS",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_PREFIX",
-  "GIT_REPLACE_REF_BASE",
-  "GIT_SHALLOW_FILE",
-  "GIT_WORK_TREE",
-]);
-
-export function cleanGitEnvironment(
-  environment: Readonly<Record<string, string | undefined>>,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined && !GIT_LOCAL_ENVIRONMENT_VARIABLES.has(entry[0]),
-    ),
-  );
-}
 
 export function compareNightlyTags(left: NightlyTag, right: NightlyTag): number {
   if (left.major !== right.major) return left.major - right.major;

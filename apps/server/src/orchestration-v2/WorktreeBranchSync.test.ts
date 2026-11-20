@@ -24,17 +24,32 @@ it.effect.each([false, true])(
     const commands: OrchestrationV2ServerCommand[] = [];
     const thread = (id: string, branch: string, worktreePath: string | null) =>
       ({ id: ThreadId.make(id), branch, worktreePath }) as OrchestrationV2ThreadShell;
+    // Subagents copy their parent's path and branch when created. Later descendants
+    // can therefore record the current branch while earlier ones still name the old one.
+    const family = [
+      ...Array.from({ length: 18 }, (_, index) =>
+        thread(`family-subagent-${index}`, index < 15 ? "t3/old" : "union", "/worktree"),
+      ),
+      thread("family-child", "union", "/worktree"),
+      ...Array.from({ length: 5 }, (_, index) =>
+        thread(`family-descendant-${index}`, "union", "/worktree"),
+      ),
+    ];
     const snapshot = {
       schemaVersion: 2,
       snapshotSequence: 0,
       threads: [
+        ...family,
         thread("generated", "t3/unify-converter-branches", "/worktree"),
         thread("shared", "t3/bfc349ae", "/link/worktree"),
         thread("current", "union", "/worktree"),
         thread("root", "main", null),
         thread("other", "feature", "/other"),
       ],
-      archivedThreads: [thread("archived", "t3/bfc349ae", "/worktree")],
+      archivedThreads: [
+        thread("family-root", "union", "/worktree"),
+        thread("archived", "t3/bfc349ae", "/worktree"),
+      ],
     };
     return Effect.gen(function* () {
       yield* Layer.build(WorktreeBranchSync.layer);
@@ -51,6 +66,12 @@ it.effect.each([false, true])(
           ];
         }),
         [
+          ...Array.from({ length: 15 }, (_, index) => [
+            `family-subagent-${index}`,
+            "union",
+            "t3/old",
+            "/worktree",
+          ]),
           ["generated", "union", "t3/unify-converter-branches", "/worktree"],
           ["shared", "union", "t3/bfc349ae", "/link/worktree"],
           ["archived", "union", "t3/bfc349ae", "/worktree"],

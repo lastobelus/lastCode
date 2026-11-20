@@ -10,6 +10,7 @@ import {
   makeThreadSearchKey,
   visibleThreadSearch,
   type EnvironmentThreadSearchMatch,
+  type EnvironmentThreadMentionCandidate,
   type SettledThreadSearch,
   type ThreadSearchResultsState,
   type ThreadSearchScope,
@@ -82,9 +83,11 @@ const anyOlderSettledAtom = Atom.family((environmentIdsKey: string) =>
 );
 const threadSearch = createThreadSearchResultsAtomFamily({
   getSearchAtom: (environmentId, input) =>
-    input.olderSettledBefore === undefined
-      ? orchestrationEnvironment.threadSearch({ environmentId, input })
-      : olderSettledThreads.searchAtom(environmentId, input),
+    input.mode === "thread-mention"
+      ? orchestrationEnvironment.threadMentionSearch({ environmentId, input })
+      : input.olderSettledBefore === undefined
+        ? orchestrationEnvironment.threadSearch({ environmentId, input })
+        : olderSettledThreads.searchAtom(environmentId, input),
   olderSettledBefore: olderSettledBeforeAtom,
   labelPrefix: "web:thread-search",
 });
@@ -120,6 +123,10 @@ export function useThreadSearch(
   readonly isPending: boolean;
   /** No environment could run the search for the current query, so an empty result is not "no matches". */
   readonly failed: boolean;
+  readonly mentionCandidates?: ReadonlyArray<EnvironmentThreadMentionCandidate>;
+  readonly mentionFailures?: ReadonlyArray<EnvironmentId>;
+  readonly mentionResolvedEnvironments?: ReadonlyArray<EnvironmentId>;
+  readonly mentionsTruncated?: boolean;
 } {
   // A pasted wall of text searches by its start rather than failing the request.
   const normalizedQuery = query.trim().slice(0, THREAD_SEARCH_QUERY_MAX_LENGTH).trim();
@@ -128,8 +135,10 @@ export function useThreadSearch(
   // Messages need a word of three or more letters; older settled titles match from two.
   const canSearch =
     environmentIds.length > 0 &&
-    ((scope.titlesOnly !== true && messageSearchTokens(normalizedQuery).long.length > 0) ||
-      (anyOlderSettled && normalizedQuery.length >= 2));
+    (scope.mode === "thread-mention"
+      ? normalizedQuery.length >= 2 || scope.threadIds !== undefined
+      : (scope.titlesOnly !== true && messageSearchTokens(normalizedQuery).long.length > 0) ||
+        (anyOlderSettled && normalizedQuery.length >= 2));
   const settledQuery = canSearch && normalizedQuery === debouncedQuery ? debouncedQuery : null;
   const searchKeyOf = (searchQuery: string) =>
     makeThreadSearchKey(environmentIds, searchQuery, scope);
@@ -143,7 +152,10 @@ export function useThreadSearch(
   // callers keep shown rows in place with `nextShownOrder`.
   const ready =
     settledQuery !== null &&
-    (!result.isLoading || result.matches.length > 0 || result.rows.length > 0)
+    (!result.isLoading ||
+      result.matches.length > 0 ||
+      result.rows.length > 0 ||
+      (result.mentionCandidates?.length ?? 0) > 0)
       ? { query: settledQuery, matches: result.matches }
       : null;
   // Kept from earlier renders: React's pattern for information from previous renders.
@@ -153,7 +165,8 @@ export function useThreadSearch(
     ? visibleThreadSearch(normalizedQuery, ready, previous)
     : { query: "", matches: EMPTY_THREAD_SEARCH_MATCHES };
   // The shown results' rows stay mounted until newer results replace them.
-  const shownKey = visible.query === "" ? null : searchKeyOf(visible.query);
+  const shownKey =
+    scope.mode === "thread-mention" || visible.query === "" ? null : searchKeyOf(visible.query);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mounts the shown search results' rows into the thread family registry until newer results replace them
   useEffect(() => {
     if (shownKey === null) return;
@@ -175,6 +188,14 @@ export function useThreadSearch(
     query: visible.query,
     isPending,
     failed,
+    ...(scope.mode === "thread-mention"
+      ? {
+          mentionCandidates: result.mentionCandidates ?? [],
+          mentionFailures: result.mentionFailures ?? [],
+          mentionResolvedEnvironments: result.mentionResolvedEnvironments ?? [],
+          mentionsTruncated: result.mentionsTruncated ?? false,
+        }
+      : {}),
   };
 }
 

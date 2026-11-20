@@ -94,6 +94,7 @@ export interface NewProjectScriptInput {
   autoOpenPreview: boolean;
   /** Permit provider-scoped MCP launch plus a one-shot automated follow-up. */
   allowAgentResume: boolean;
+  terminalLinkProfileName?: string;
 }
 
 export type ProjectScriptActionResult = AtomCommandResult<void, unknown>;
@@ -133,6 +134,9 @@ export function editorRequestForScript(
       runOnSettle: script.runOnSettle ?? false,
       stopOnSettle: script.stopOnSettle ?? false,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
+      ...(script.terminalLinkProfileName === undefined
+        ? {}
+        : { terminalLinkProfileName: script.terminalLinkProfileName }),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
       allowAgentResume: script.allowAgentResume ?? false,
@@ -298,6 +302,9 @@ function ProjectScriptEditorForm({
   const [stopOnSettle, setStopOnSettle] = useState(request.initial.stopOnSettle ?? false);
   const [keybinding, setKeybinding] = useState(request.initial.keybinding ?? "");
   const [previewUrl, setPreviewUrl] = useState(request.initial.previewUrl ?? "");
+  const [terminalLinkProfileName, setTerminalLinkProfileName] = useState(
+    request.initial.terminalLinkProfileName ?? "",
+  );
   const [autoOpenPreview, setAutoOpenPreview] = useState(request.initial.autoOpenPreview);
   const [allowAgentResume, setAllowAgentResume] = useState(request.initial.allowAgentResume);
   const [isSaving, setIsSaving] = useState(false);
@@ -374,6 +381,7 @@ function ProjectScriptEditorForm({
         command: commandForProjectScript(scriptIdForValidation),
       });
       const trimmedPreviewUrl = previewUrl.trim();
+      const trimmedTerminalLinkProfileName = terminalLinkProfileName.trim();
       payload = {
         name: trimmedName,
         command: trimmedCommand,
@@ -388,6 +396,9 @@ function ProjectScriptEditorForm({
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
         allowAgentResume,
+        ...(trimmedTerminalLinkProfileName.length > 0
+          ? { terminalLinkProfileName: trimmedTerminalLinkProfileName }
+          : {}),
       } satisfies NewProjectScriptInput;
     } catch (error) {
       setValidationError(thrownErrorMessage(error, m) ?? gt("Failed to save action."));
@@ -517,6 +528,36 @@ function ProjectScriptEditorForm({
               />
             </div>
             <div className="space-y-1.5">
+              <Label htmlFor="script-terminal-link-profile">
+                <T>Browser profile for terminal links (optional)</T>
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="script-terminal-link-profile"
+                  aria-describedby="script-terminal-link-profile-help"
+                  placeholder={gt("Existing desktop profile name")}
+                  value={terminalLinkProfileName}
+                  onChange={(event) => setTerminalLinkProfileName(event.target.value)}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-label={gt("Clear terminal link profile")}
+                  disabled={terminalLinkProfileName.length === 0}
+                  onClick={() => setTerminalLinkProfileName("")}
+                >
+                  <T>Clear</T>
+                </Button>
+              </div>
+              <p id="script-terminal-link-profile-help" className="text-xs text-muted-foreground">
+                <T>
+                  Enter the exact name of an existing Browser profile. Open this Action's terminal
+                  links in the desktop app that owns the profile. Leave blank to use your usual
+                  link-opening settings.
+                </T>
+              </p>
+            </div>
+            <div className="space-y-1.5">
               <Label htmlFor="script-preview-url">
                 <T>Preview URL (optional)</T>
               </Label>
@@ -586,7 +627,11 @@ function ProjectScriptEditorForm({
               />
             </label>
             <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
-              <span>Allow Codex and Claude to run and resume</span>
+              <span>
+                <T>
+                  Allow <Var>{"Codex"}</Var> and <Var>{"Claude"}</Var> to run and resume
+                </T>
+              </span>
               <Switch
                 checked={allowAgentResume}
                 onCheckedChange={(checked) => setAllowAgentResume(Boolean(checked))}

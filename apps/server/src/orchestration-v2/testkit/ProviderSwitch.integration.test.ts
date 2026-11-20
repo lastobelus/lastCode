@@ -479,6 +479,7 @@ function makeTestAdapter(input: {
             }),
           steerTurn: () => Effect.void,
           interruptTurn: () => Effect.void,
+          unloadThread: () => Effect.void,
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () =>
             unimplemented(input.driver, "readThreadSnapshot unused in provider switch test"),

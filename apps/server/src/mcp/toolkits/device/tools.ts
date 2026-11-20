@@ -93,8 +93,7 @@ export const DeviceScreenshotTool = Tool.make("device_screenshot", {
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const DeviceCloseTool = Tool.make("device_close", {
-  description:
-    "Remove a device from this thread's Device panel. `shutdown=true` also turns it off.",
+  description: "Close a device in this thread. Pass `shutdown=true` to turn off one you booted.",
   parameters: DeviceToolCloseInput,
   success: Schema.Record(Schema.String, Schema.Never),
   failure: DeviceToolFailure,

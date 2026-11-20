@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vite-plus/test";
+import { act, render as renderUi } from "../../../test/render";
+import { expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useLastCodeThreadFileDrop } from "./lastcodeThreadRowInteractions";
@@ -23,48 +22,47 @@ function Harness({
     </li>
   );
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+async function setup() {
+  await using stack = new AsyncDisposableStack();
   vi.clearAllMocks();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  vi.restoreAllMocks();
-});
-async function render(props: Parameters<typeof Harness>[0] = {}) {
-  await act(() => root.render(<Harness {...props} />));
-}
-const row = () => container.querySelector("li")!;
-const active = () => row().querySelector("span")!.textContent === "Drop files";
-async function drag(
-  name: string,
-  transfer = { types: ["Files"], files: [new File(["file"], "file.txt")], dropEffect: "none" },
-  relatedTarget: EventTarget | null = null,
-) {
-  const event = new Event(name, { bubbles: true, cancelable: true });
-  Object.defineProperties(event, {
-    dataTransfer: { value: transfer },
-    relatedTarget: { value: relatedTarget },
+  stack.defer(() => {
+    vi.restoreAllMocks();
   });
-  await act(() => row().dispatchEvent(event));
-  return event;
+  const screen = stack.use(await renderUi(null));
+  const { container, rerender } = screen;
+  async function render(props: Parameters<typeof Harness>[0] = {}) {
+    await rerender(<Harness {...props} />);
+  }
+  const row = () => container.querySelector("li")!;
+  const active = () => row().querySelector("span")!.textContent === "Drop files";
+  async function drag(
+    name: string,
+    transfer = { types: ["Files"], files: [new File(["file"], "file.txt")], dropEffect: "none" },
+    relatedTarget: EventTarget | null = null,
+  ) {
+    const event = new Event(name, { bubbles: true, cancelable: true });
+    Object.defineProperties(event, {
+      dataTransfer: { value: transfer },
+      relatedTarget: { value: relatedTarget },
+    });
+    await act(() => row().dispatchEvent(event));
+    return event;
+  }
+  const owner = stack.move();
+  return {
+    container,
+    render,
+    row,
+    active,
+    drag,
+    rerender,
+    [Symbol.asyncDispose]: () => owner.disposeAsync(),
+  };
 }
 it("highlights file drags, sets copy effect and preserves internal movement", async () => {
+  await using fixture = await setup();
+  const { render, row, active, drag } = fixture;
+
   await render();
   const transfer = { types: ["Files"], files: [], dropEffect: "none" };
   expect((await drag("dragenter", transfer)).defaultPrevented).toBe(true);
@@ -77,6 +75,9 @@ it("highlights file drags, sets copy effect and preserves internal movement", as
   expect(active()).toBe(false);
 });
 it("leaves text drag events and navigation controls alone", async () => {
+  await using fixture = await setup();
+  const { render, active, drag } = fixture;
+
   await render();
   const transfer = { types: ["text/plain"], files: [], dropEffect: "none" };
   for (const name of ["dragenter", "dragover", "dragleave", "drop"])
@@ -85,6 +86,9 @@ it("leaves text drag events and navigation controls alone", async () => {
   expect(drop).not.toHaveBeenCalled();
 });
 it("drops actual files on the scoped destination and resets its highlight", async () => {
+  await using fixture = await setup();
+  const { render, active, drag } = fixture;
+
   await render({ target: remote });
   const transfer = {
     types: ["Files"],
@@ -98,6 +102,9 @@ it("drops actual files on the scoped destination and resets its highlight", asyn
   expect(drop).toHaveBeenCalledExactlyOnceWith(remote, transfer.files);
 });
 it("keeps folders excluded from row drops while forwarding file items", async () => {
+  await using fixture = await setup();
+  const { render, row } = fixture;
+
   await render();
   const file = new File(["file"], "file.txt"),
     folder = new File([], "folder");
@@ -117,6 +124,9 @@ it("keeps folders excluded from row drops while forwarding file items", async ()
   expect(drop).toHaveBeenCalledExactlyOnceWith(first, [file]);
 });
 it("uses refreshed destination and callback without replacing the mounted row", async () => {
+  await using fixture = await setup();
+  const { render, row, active, drag } = fixture;
+
   await render();
   const before = row();
   await drag("dragenter");
@@ -129,6 +139,9 @@ it("uses refreshed destination and callback without replacing the mounted row", 
   expect(nextDrop).toHaveBeenCalledExactlyOnceWith(remote, transfer.files);
 });
 it("clears cancelled global drags and releases the exact listener on exit and unmount", async () => {
+  await using fixture = await setup();
+  const { rerender, render, active, drag } = fixture;
+
   const add = vi.spyOn(window, "addEventListener"),
     remove = vi.spyOn(window, "removeEventListener");
   await render();
@@ -141,6 +154,6 @@ it("clears cancelled global drags and releases the exact listener on exit and un
   expect(remove).toHaveBeenCalledWith("dragend", listeners()[0]);
   await drag("dragenter");
   expect(listeners()).toHaveLength(2);
-  await act(() => root.render(null));
+  await rerender(null);
   expect(remove).toHaveBeenCalledWith("dragend", listeners()[1]);
 });

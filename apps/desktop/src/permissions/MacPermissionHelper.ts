@@ -41,8 +41,11 @@ const escapeHtml = (value: string) =>
     }
   });
 
-function helperHtml(permission: MacPermission, icon: string) {
+function helperHtml(permission: MacPermission, icon: string, appName: string) {
   const title = escapeHtml(m(MAC_PERMISSION_SETUP_TITLES[permission]));
+  const escapedAppName = escapeHtml(appName);
+  const brandedLabel = (message: string) =>
+    escapeHtml(m(message).replaceAll("T3 Code", () => appName));
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
 <title>${title}</title><style>
@@ -62,8 +65,8 @@ button:focus-visible { outline: 2px solid #007aff; outline-offset: -2px; }
 img { width: 32px; height: 32px; pointer-events: none; }
 </style></head><body><main id="panel">
 <button id="close" aria-label="${escapeHtml(m(msg("Close permission helper")))}">×</button>
-<header>${escapeHtml(m(msg("↑ Drag T3 Code into the list above")))}</header>
-<button id="app" draggable="true" aria-label="${escapeHtml(m(msg("Drag T3 Code to System Settings, or click to reveal in Finder")))}"><img src="${escapeHtml(icon)}" alt="" draggable="false">T3 Code</button>
+<header>${brandedLabel(msg("↑ Drag T3 Code into the list above"))}</header>
+<button id="app" draggable="true" aria-label="${brandedLabel(msg("Drag T3 Code to System Settings, or click to reveal in Finder"))}"><img src="${escapeHtml(icon)}" alt="" draggable="false">${escapedAppName}</button>
 </main></body></html>`;
 }
 
@@ -90,12 +93,13 @@ export class MacPermissionHelper {
     if (generation !== this.generation) return;
     const bundle = macAppBundlePath(Electron.app.getPath("exe"));
     if (!bundle) return;
+    const appName = bundle.slice(bundle.lastIndexOf("/") + 1, -".app".length);
     if (owner?.isDestroyed()) return;
     // Finder can return generic icons for mounted artifacts; use the packaging PNG.
     const appIcon = iconPaths
       .map((iconPath) => Electron.nativeImage.createFromPath(iconPath))
       .find((image) => !image.isEmpty());
-    if (!appIcon) throw new Error("The packaged T3 Code icon is missing.");
+    if (!appIcon) throw new Error(`The packaged ${appName} icon is missing.`);
     const icon = appIcon.resize({ width: 64, height: 64 });
     const window = new Electron.BrowserWindow({
       width: 560,
@@ -195,7 +199,7 @@ export class MacPermissionHelper {
     window.webContents.on("will-navigate", (event) => event.preventDefault());
     try {
       await window.loadURL(
-        `data:text/html;charset=utf-8,${encodeURIComponent(helperHtml(permission, icon.toDataURL()))}`,
+        `data:text/html;charset=utf-8,${encodeURIComponent(helperHtml(permission, icon.toDataURL(), appName))}`,
       );
       if (!window.isDestroyed()) {
         stopTracking = watchMacSettingsWindow(

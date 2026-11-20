@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { ProjectRegistration } from "./projectRegistration.lastcode.ts";
 
 import {
   ApprovalRequestId,
@@ -35,6 +36,7 @@ export type ApplicationEventMetadata = typeof ApplicationEventMetadata.Type;
 
 export const ApplicationProjectCreatedPayload = Schema.Struct({
   projectId: ProjectId,
+  registration: Schema.optional(ProjectRegistration),
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
@@ -50,6 +52,7 @@ export type ApplicationProjectCreatedPayload = typeof ApplicationProjectCreatedP
 
 export const ApplicationProjectMetaUpdatedPayload = Schema.Struct({
   projectId: ProjectId,
+  registration: Schema.optional(ProjectRegistration),
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),

@@ -14,6 +14,7 @@ import {
   PullRequestReviewDecision,
   PullRequestReviewGuide,
   PullRequestReviewGuideRun,
+  PullRequestWatchQuietTimeoutMinutes,
   PullRequestState,
   PullRequestUnavailableError,
   PullRequestWatchUntil,
@@ -40,6 +41,13 @@ import {
 } from "../../../pullRequest/pullRequestTarget.ts";
 import * as PullRequestService from "../../../pullRequest/PullRequestService.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
+
+export {
+  PullRequestWatchFailedError,
+  PullRequestNotOpenError,
+  PullRequestWatchFromSubagentError,
+  PullRequestWatchRestartRefusedError,
+} from "../../../pullRequest/PullRequestWatchService.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -82,6 +90,24 @@ export const PullRequestTargetInput = Schema.Struct({
   ),
 });
 export type PullRequestTargetInput = typeof PullRequestTargetInput.Type;
+
+export const WatchPullRequestInput = Schema.Struct({
+  ...PullRequestTargetInput.fields,
+  until: Schema.optional(
+    PullRequestWatchUntil.annotate({
+      description:
+        'How long this thread stays working. Omit it to keep the current value; a new watch starts at "checks". "checks": until checks finish, for a PR you hand to the user. "merged": until it merges or closes or you unwatch it, when you will act on it yourself, such as merging after someone else approves.',
+    }),
+  ),
+  quietTimeoutMinutes: Schema.optional(
+    Schema.NullOr(PullRequestWatchQuietTimeoutMinutes).annotate({
+      description:
+        "Wake you once after this many minutes without new actionable checks, comments, reviews, conflicts or pushes; each resets the timer. A number starts it now; null disables it. Omit to keep the timer; new waits and restarts use the setting (default 45). After a quiet wake or unreadable stop, re-watch only if the user asked (restart).",
+    }),
+  ),
+  restart: Schema.optional(Schema.Boolean),
+});
+export type WatchPullRequestInput = typeof WatchPullRequestInput.Type;
 
 export class PullRequestThreadRequiredError extends Schema.TaggedError<PullRequestThreadRequiredError>()(
   "PullRequestThreadRequiredError",
@@ -188,6 +214,7 @@ export const PullRequestToolError = Schema.Union([
   PullRequestUnavailableError,
   PullRequestWatchService.PullRequestNotOpenError,
   PullRequestWatchService.PullRequestWatchFromSubagentError,
+  PullRequestWatchService.PullRequestWatchRestartRefusedError,
   PullRequestProjectNotFoundError,
   PullRequestGuideFailedError,
   PullRequestForgeError,
@@ -378,19 +405,9 @@ const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
-const WatchPullRequestInput = Schema.Struct({
-  ...PullRequestTargetInput.fields,
-  until: Schema.optional(
-    PullRequestWatchUntil.annotate({
-      description:
-        'How long this thread stays working. Omit it to keep the current value; a new watch starts at "checks". "checks": until checks finish, for a PR you hand to the user. "merged": until it merges or closes or you unwatch it, when you will act on it yourself, such as merging after someone else approves.',
-    }),
-  ),
-});
-
 const WatchPullRequestTool = Tool.make("watch_pull_request", {
   description:
-    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your account's top-level conversation comments, or conflicts. Reactions on your reviews and inline review comments may not wake you until a slower periodic full read, up to about 30 minutes later. Handle old comments first. Only later ones wake you. Reactions carry no timestamp, so old ones may wake you once on the first check. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
+    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your top-level PR comments, and conflicts. Handle existing comments before you register; later changes wake you. Reactions carry no timestamp, so an old one may be reported once, and inline or review reactions may take the slower full read, up to about 30 minutes. After registering, run any required project gate check, then end your turn if gates are pending. The watch persists across wakes; register again only for an allowed rearm. A wake is neither merge permission nor a clean review. An app-owned delegated child may watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance of the destination's installed checkpoint, or authorized a narrow isolated acceptance scenario; otherwise hand the watch to the parent. An owning child stays unfinished across passive waits, handles its own events, and unwatches before handback.",
   parameters: WatchPullRequestInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
@@ -401,10 +418,11 @@ const WatchPullRequestTool = Tool.make("watch_pull_request", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false)
-  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromSubagents);
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleForPullRequestWatch);
 
 const UnwatchPullRequestTool = Tool.make("unwatch_pull_request", {
-  description: "Stop watching a PR for this thread. It stays linked.",
+  description:
+    "Stop this thread's PR watch; the PR stays linked. An owning child calls this before handback and still reports the actual result in its current turn. Other watches and merge authority are unaffected.",
   parameters: PullRequestTargetInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
@@ -415,7 +433,7 @@ const UnwatchPullRequestTool = Tool.make("unwatch_pull_request", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false)
-  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromSubagents);
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleForPullRequestWatch);
 
 const GuideTarget = Schema.Struct({
   url: PullRequestTargetInput.fields.url,

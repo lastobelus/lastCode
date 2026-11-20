@@ -26,11 +26,19 @@ import * as Stream from "effect/Stream";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as PauseStore from "../environment/EnvironmentPauseStore.ts";
+
+const layerEventSink = EventSink.layer.pipe(
+  Layer.provide(Layer.merge(EventStore.layer, ProjectionStore.layer)),
+  Layer.provide(SqlitePersistence.layerMemory),
+);
 
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -46,7 +54,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
     const providerSessionId = ProviderSessionId.make("session:steer-rejected");
     const providerThreadId = ProviderThreadId.make("provider-thread:steer-rejected");
     const providerTurnId = ProviderTurnId.make("provider-turn:steer-rejected");
-    const messageId = MessageId.make("message:steer-rejected");
+    const messageId = MessageId.make("environment-pause:fixture:thread:steer-rejected:pause:0");
     const runId = RunId.make("run:steer-rejected");
     const nodeId = NodeId.make("node:steer-rejected");
     const attemptId = RunAttemptId.make("attempt:steer-rejected");
@@ -67,7 +75,14 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       createdAt: now,
       updatedAt: now,
     };
+    const receipts = yield* Ref.make<ReadonlyArray<boolean | "cancelled">>([]);
     for (const testCase of [
+      {
+        target: "cancelled-pause",
+        status: "running",
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      },
       { target: "recorded", status: "running", adapterRejected: true, deliveryRejected: true },
       {
         target: "recorded",
@@ -193,7 +208,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
                 providerThreadId,
                 userMessageId: messageId,
                 rootNodeId: nodeId,
-                activeAttemptId: attemptId,
+                activeAttemptId: testCase.status === "running" ? attemptId : null,
                 status: runStatus,
                 requestedAt: now,
                 startedAt: now,
@@ -242,6 +257,14 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       const layerControl = ProviderTurnControlService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            testCase.target === "cancelled-pause"
+              ? Layer.mock(PauseStore.EnvironmentPauseStore)({
+                  get: Effect.succeed(null),
+                  recordDelivery: (_id, delivered) =>
+                    Ref.update(receipts, (rows) => [...rows, delivered]),
+                })
+              : Layer.empty,
+            layerEventSink,
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getProviderControlContext: () =>
                 testCase.target === "read-failure"
@@ -264,16 +287,15 @@ it.effect("preserves steering rejection separately from turn completion", () =>
                           cause: "session unavailable",
                         }),
                       )
-                    : testCase.target === "recorded"
+                    : testCase.target === "recorded" || testCase.target === "cancelled-pause"
                       ? Effect.succeedSome(runtime)
                       : Effect.die("Invalid targets must not reach a live provider session"),
             }),
-            Layer.mock(EventSink.EventSinkV2)({}),
             McpAppModelContext.layerEmpty,
           ),
         ),
       );
-      const error = yield* Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
         return yield* control
           .steer({
@@ -283,8 +305,17 @@ it.effect("preserves steering rejection separately from turn completion", () =>
             providerTurnId,
             messageId,
           })
-          .pipe(Effect.flip);
+          .pipe(Effect.result);
       }).pipe(Effect.provide(layerControl));
+      if (testCase.target === "cancelled-pause") {
+        assert.equal(result._tag, "Success");
+        assert.deepEqual(yield* Ref.get(receipts), ["cancelled"]);
+        assert.equal(context.run?.status, "running");
+        continue;
+      }
+      assert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
+      const error = result.failure;
       assert.equal(
         error.turnCompleted,
         testCase.status === "pending"
@@ -439,6 +470,7 @@ function layerProjectionStore(
       getSubagentCount: () => Effect.die("unused subagent count"),
       getRunCount: () => Effect.die("unused run count"),
       listAppOwnedChildThreadIds: () => Effect.die("unused listAppOwnedChildThreadIds"),
+      listLiveSideChatIds: () => Effect.die("unused listLiveSideChatIds"),
       getNextTurnItemOrdinal: () => Effect.die("unused ordinal read"),
       getTurnItem: () => Effect.die("unused turn item read"),
       getMessagesById: () => Effect.die("unused getMessagesById"),
@@ -463,6 +495,17 @@ function layerProjectionStore(
       getThreadSnapshot: () => Effect.die("unused getThreadSnapshot"),
       getThreadSnapshotWindow: () => Effect.die("unused getThreadSnapshotWindow"),
       getPullRequestSnapshot: () => Effect.die("unused getPullRequestSnapshot"),
+      getArchiveFamilyThreadIds: () => Effect.die("not used by turn control tests"),
+      getGroupedCreatorThreadIds: () => Effect.die("not used by turn control tests"),
+      getOwnedThreadIds: () => Effect.die("not used by turn control tests"),
+      getPendingPullRequestWatchDeliveries: Effect.succeed([]),
+      getPersistentThreads: Effect.die("unused getPersistentThreads"),
+      getThreadLatestAssistantMessageAt: () => Effect.die("not used by turn control tests"),
+      getVisiblePublications: () => Effect.die("Unused visible publication read"),
+      getWorktreeCleanupThreads: Effect.die("unused getWorktreeCleanupThreads"),
+      getWorktreeSuspensionThreads: () => Effect.die("unused getWorktreeSuspensionThreads"),
+      hasOutstandingOwnedWork: () => Effect.die("unused hasOutstandingOwnedWork"),
+      hasThreadReadAuthorization: () => Effect.die("unused hasThreadReadAuthorization"),
     }),
   );
 }
@@ -481,6 +524,7 @@ function layerSessions(
       isLive: (providerSessionId) => Effect.succeed(providerSessionId === liveSessionId),
       pendingExecution: Effect.succeed([]),
       ownershipRevision: Effect.succeed(0),
+      workspaceOwnership: Effect.succeed([]),
       close: () => Effect.void,
       closeInstance: () => Effect.void,
       release: () => Effect.void,
@@ -596,7 +640,7 @@ it.effect(
           Layer.mergeAll(
             layerProjection,
             layerSessionManager,
-            Layer.mock(EventSink.EventSinkV2)({}),
+            layerEventSink,
             McpAppModelContext.layerEmpty,
           ),
         ),

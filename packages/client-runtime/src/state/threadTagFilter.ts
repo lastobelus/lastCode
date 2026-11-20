@@ -31,6 +31,7 @@ export function visibilityParentKey(
   if (!isListedThreadLineage(thread.lineage) && parentId !== null) {
     return threadKey({ environmentId, threadId: parentId });
   }
+  if (thread.lineage.independent === true) return null;
   return thread.delegatedFrom === undefined ? null : threadKey(thread.delegatedFrom);
 }
 

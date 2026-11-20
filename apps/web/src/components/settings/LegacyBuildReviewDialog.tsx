@@ -7,7 +7,9 @@ import type {
 } from "@t3tools/contracts";
 import { BUILD_REVIEW_PAGE_SIZE } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { useEffect, useEffectEvent, useReducer, useState } from "react";
+import { m, type MessageResolver } from "../../i18n/messages";
 import { formatBytes } from "../../lib/formatBytes";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -29,15 +31,33 @@ import { SettingsRow } from "./settingsLayout";
 import { useSearchableSetting } from "./settingsSearch";
 import { buildReviewDraftReducer, EMPTY_BUILD_REVIEW_DRAFT } from "./buildReviewDraft";
 
-function eligibility(target: BuildReviewTarget) {
+function eligibility(target: BuildReviewTarget, resolve: MessageResolver = m) {
   if (target.protectedReason) return target.protectedReason;
-  if (target.delayDays === null)
-    return "Automatic dependency and build cleanup is Off. Approval does not enable it.";
-  if (target.archived)
-    return "Archived owners are eligible immediately while automatic cleanup is enabled, subject to active-consumer checks.";
-  if (target.eligibleAt !== null)
-    return `Eligible after ${new Date(target.eligibleAt).toLocaleString()}, subject to active-consumer checks.`;
-  return `Without a trusted use date, this build starts the full ${target.delayDays}-day delay. An old folder date does not make it eligible sooner.`;
+  if (target.delayDays === null) {
+    return resolve(
+      msg("Automatic dependency and build cleanup is Off. Approval does not enable it."),
+    );
+  }
+  if (target.archived) {
+    return resolve(
+      msg(
+        "Archived owners are eligible immediately while automatic cleanup is enabled, subject to active-consumer checks.",
+      ),
+    );
+  }
+  if (target.eligibleAt !== null) {
+    return resolve(
+      msg("Eligible after {date}, subject to active-consumer checks.", {
+        date: new Date(target.eligibleAt).toLocaleString(),
+      }),
+    );
+  }
+  return resolve(
+    msg(
+      "Without a trusted use date, this build starts the full {days}-day delay. An old folder date does not make it eligible sooner.",
+      { days: target.delayDays },
+    ),
+  );
 }
 
 function RootReview({
@@ -47,6 +67,8 @@ function RootReview({
   environmentId: EnvironmentId;
   target: BuildReviewTarget;
 }) {
+  const gt = useGT();
+  const resolve = useMessages();
   const previewCommand = useAtomCommand(serverEnvironment.previewBuildReview, {
     reportFailure: false,
   });
@@ -68,6 +90,7 @@ function RootReview({
       setRequest((value) => ({ offset: 0, revision: value.revision + 1 }));
     }
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns the server build-preview request for the mounted review and ignores its result after cleanup
   useEffect(() => {
     let cancelled = false;
     void load(environmentId, target.id, request.offset).then((result) => {
@@ -77,7 +100,9 @@ function RootReview({
       else
         dispatch({
           type: "reset",
-          notice: `Could not load this build. Reload to review again. ${String(squashAtomCommandFailure(result))}`,
+          notice: msg("Could not load this build. Reload to review again. {error}", {
+            error: String(squashAtomCommandFailure(result)),
+          }),
         });
     });
     return () => {
@@ -101,13 +126,18 @@ function RootReview({
     setSaving(false);
     if (result._tag === "Success") {
       setMessage(
-        `${result.value.message} ${result.value.selectedCount} files approved. Saving does not delete files.`,
+        msg("{message} {count} files approved. Saving does not delete files.", {
+          message: result.value.message,
+          count: result.value.selectedCount,
+        }),
       );
       reload();
     } else {
       dispatch({
         type: "reset",
-        notice: `Approval was not saved. Reload this root and select files again. ${String(squashAtomCommandFailure(result))}`,
+        notice: msg("Approval was not saved. Reload this root and select files again. {error}", {
+          error: String(squashAtomCommandFailure(result)),
+        }),
       });
     }
   };
@@ -115,47 +145,66 @@ function RootReview({
     <div className="space-y-4">
       <div className="space-y-1 text-xs wrap-anywhere select-text">
         <p>
-          {target.projectName} · {target.branch ?? "No branch"}
+          {target.projectName} · {target.branch ?? gt("No branch", { $context: "no Git branch" })}
         </p>
         <p>
-          Worktree: <code>{target.worktreePath}</code>
+          <T>
+            Worktree:{" "}
+            <code>
+              <Var>{target.worktreePath}</Var>
+            </code>
+          </T>
         </p>
         <p>
-          Build root: <code>{target.root}</code>
+          <T>
+            Build root:{" "}
+            <code>
+              <Var>{target.root}</Var>
+            </code>
+          </T>
         </p>
-        <p>{eligibility(preview?.target ?? target)}</p>
+        <p>{eligibility(preview?.target ?? target, resolve)}</p>
       </div>
       <p className="text-xs text-muted-foreground">
-        Review is limited to 1,000 files and 512 MiB per root, in pages of 200. Only unchanged files
-        you explicitly select can be reclaimed by the current automatic dependency and build cleanup
-        policy. Source and other files remain protected.
+        <T>
+          Review is limited to 1,000 files and 512 MiB per root, in pages of 200. Only unchanged
+          files you explicitly select can be reclaimed by the current automatic dependency and build
+          cleanup policy. Source and other files remain protected.
+        </T>
       </p>
       {message && (
         <p role="status" className="text-sm">
-          {message}
+          {resolve(message)}
         </p>
       )}
       {draft.notice && (
         <p role="alert" className="text-sm text-destructive">
-          {draft.notice}
+          {resolve(draft.notice)}
         </p>
       )}
       {loading && (
         <p role="status" className="text-sm">
-          Loading build files…
+          <T>Loading build files…</T>
         </p>
       )}
       {!loading && !preview && (
         <Button variant="outline" size="sm" onClick={reload}>
-          Reload root
+          <T>Reload root</T>
         </Button>
       )}
       {preview && (
         <>
           <p className="text-xs text-muted-foreground">
-            {preview.totalFiles.toLocaleString()} files · {formatBytes(preview.totalSize)} logical ·{" "}
-            {formatBytes(preview.totalBytes)} allocated estimate. Previously approved:{" "}
-            {preview.selectedPaths.length}. This review: {draft.paths.length} selected.
+            {gt(
+              "{files} files · {logical} logical · {allocated} allocated estimate. Previously approved: {previous}. This review: {selected} selected.",
+              {
+                files: preview.totalFiles.toLocaleString(),
+                logical: formatBytes(preview.totalSize),
+                allocated: formatBytes(preview.totalBytes),
+                previous: preview.selectedPaths.length,
+                selected: draft.paths.length,
+              },
+            )}
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -170,7 +219,7 @@ function RootReview({
                 })
               }
             >
-              Select this page
+              <T>Select this page</T>
             </Button>
             <Button
               variant="ghost"
@@ -184,17 +233,17 @@ function RootReview({
                 })
               }
             >
-              Clear this page
+              <T>Clear this page</T>
             </Button>
             <Button variant="ghost" size="sm" disabled={loading || saving} onClick={reload}>
-              Reload root
+              <T>Reload root</T>
             </Button>
           </div>
           <ul className="divide-y rounded-md border">
             {preview.files.map((file) => (
               <li key={file.path} className="flex items-start gap-3 p-3">
                 <Checkbox
-                  aria-label={`Approve ${file.path}`}
+                  aria-label={gt("Approve {path}", { path: file.path })}
                   checked={draft.paths.includes(file.path)}
                   disabled={!file.selectable || loading || saving || !allowed}
                   onCheckedChange={(checked) =>
@@ -204,7 +253,10 @@ function RootReview({
                 <div className="min-w-0 flex-1 text-xs wrap-anywhere select-text">
                   <code>{file.path}</code>
                   <p className="text-muted-foreground">
-                    {formatBytes(file.size)} logical · {formatBytes(file.bytes)} allocated
+                    <T>
+                      <Var>{formatBytes(file.size)}</Var> logical ·{" "}
+                      <Var>{formatBytes(file.bytes)}</Var> allocated
+                    </T>
                     {file.reason ? ` · ${file.reason}` : ""}
                   </p>
                 </div>
@@ -224,12 +276,16 @@ function RootReview({
                 }));
               }}
             >
-              Previous page
+              <T>Previous page</T>
             </Button>
             <span className="text-xs">
               {preview.totalFiles === 0
-                ? "No files"
-                : `${preview.offset + 1}–${preview.offset + preview.files.length} of ${preview.totalFiles}`}
+                ? gt("No files")
+                : gt("{first}–{last} of {total}", {
+                    first: preview.offset + 1,
+                    last: preview.offset + preview.files.length,
+                    total: preview.totalFiles,
+                  })}
             </span>
             <Button
               variant="outline"
@@ -245,16 +301,20 @@ function RootReview({
                 }));
               }}
             >
-              Next page
+              <T>Next page</T>
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Saving replaces the previous approval for this root. An empty selection clears approval
-            and keeps the root protected. New, changed and unselected files stay protected. A later
-            build or actual use can invalidate approval.
+            <T>
+              Saving replaces the previous approval for this root. An empty selection clears
+              approval and keeps the root protected. New, changed and unselected files stay
+              protected. A later build or actual use can invalidate approval.
+            </T>
           </p>
           {!allowed && (
-            <p className="text-xs">Settings write permission is required on this environment.</p>
+            <p className="text-xs">
+              <T>Settings write permission is required on this environment.</T>
+            </p>
           )}
           <Button
             variant="outline"
@@ -263,10 +323,10 @@ function RootReview({
             onClick={() => void save()}
           >
             {saving
-              ? "Saving…"
+              ? gt("Saving…")
               : draft.paths.length === 0
-                ? "Clear approval and keep protected"
-                : `Approve ${draft.paths.length} selected files`}
+                ? gt("Clear approval and keep protected")
+                : gt("Approve {count} selected files", { count: draft.paths.length })}
           </Button>
         </>
       )}
@@ -281,6 +341,7 @@ function EnvironmentReview({
   environmentId: EnvironmentId;
   projectIds: readonly ProjectId[];
 }) {
+  const gt = useGT();
   const run = useAtomCommand(serverEnvironment.buildReviewTargets, { reportFailure: false });
   const allowed = useAtomValue(serverEnvironment.buildReviewTargets.permissionAtom(environmentId));
   const [targets, setTargets] = useState<readonly BuildReviewTarget[]>([]);
@@ -295,6 +356,7 @@ function EnvironmentReview({
       ),
     ),
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns the server build-target discovery requests for the mounted settings view and ignores results after cleanup
   useEffect(() => {
     if (!allowed) return;
     let cancelled = false;
@@ -313,12 +375,20 @@ function EnvironmentReview({
   return (
     <div className="space-y-4">
       {!allowed ? (
-        <p>Settings write permission is required on this environment.</p>
+        <p>
+          <T>Settings write permission is required on this environment.</T>
+        </p>
       ) : loading ? (
-        <p role="status">Finding build roots…</p>
+        <p role="status">
+          <T>Finding build roots…</T>
+        </p>
       ) : error ? (
         <div className="space-y-2">
-          <p role="alert">Could not load build roots: {error}</p>
+          <p role="alert">
+            <T>
+              Could not load build roots: <Var>{error}</Var>
+            </T>
+          </p>
           <Button
             variant="outline"
             size="sm"
@@ -328,15 +398,17 @@ function EnvironmentReview({
               setRequest((value) => ({ ...value, revision: value.revision + 1 }));
             }}
           >
-            Reload targets
+            <T>Reload targets</T>
           </Button>
         </div>
       ) : targets.length === 0 ? (
-        <p>No reviewable older build roots in this scope.</p>
+        <p>
+          <T>No reviewable older build roots in this scope.</T>
+        </p>
       ) : (
         <Select value={targetId} onValueChange={setTargetId}>
-          <SelectTrigger aria-label="Project, worktree and build root">
-            <SelectValue placeholder="Choose a project, worktree and build root">
+          <SelectTrigger aria-label={gt("Project, worktree and build root")}>
+            <SelectValue placeholder={gt("Choose a project, worktree and build root")}>
               {target ? `${target.projectName} · ${target.label}` : null}
             </SelectValue>
           </SelectTrigger>
@@ -357,6 +429,7 @@ function EnvironmentReview({
 }
 
 export function LegacyBuildReviewRow() {
+  const gt = useGT();
   const setting = useSearchableSetting();
   const { connectedEnvironments, targets } = useSettingsScope();
   const [open, setOpen] = useState(false);
@@ -375,7 +448,9 @@ export function LegacyBuildReviewRow() {
     <>
       <SettingsRow
         {...setting("storage-review-older-builds")}
-        description="Choose exact files from older builds to approve for the existing automatic cleanup policy. Reviewing and saving do not delete files."
+        description={gt(
+          "Choose exact files from older builds to approve for the existing automatic cleanup policy. Reviewing and saving do not delete files.",
+        )}
         control={
           <Button
             variant="outline"
@@ -385,25 +460,29 @@ export function LegacyBuildReviewRow() {
               setOpen(true);
             }}
           >
-            Review older builds
+            <T>Review older builds</T>
           </Button>
         }
       />
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogPopup>
           <DialogHeader>
-            <DialogTitle>Review older builds</DialogTitle>
+            <DialogTitle>
+              <T>Review older builds</T>
+            </DialogTitle>
             <DialogDescription>
-              Choose a connected environment and build root, then explicitly select files to
-              approve.
+              <T>
+                Choose a connected environment and build root, then explicitly select files to
+                approve.
+              </T>
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
             {open && (
               <div className="space-y-4">
                 <Select value={environment?.environmentId ?? null} onValueChange={setEnvironmentId}>
-                  <SelectTrigger aria-label="Build review environment">
-                    <SelectValue placeholder="Choose an environment">
+                  <SelectTrigger aria-label={gt("Build review environment")}>
+                    <SelectValue placeholder={gt("Choose an environment")}>
                       {environment
                         ? settingsScopeEnvironmentLabel(environment, connectedEnvironments)
                         : null}
@@ -429,7 +508,7 @@ export function LegacyBuildReviewRow() {
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>
-              Close
+              <T context="verb, closes the older build review dialog">Close</T>
             </Button>
           </DialogFooter>
         </DialogPopup>

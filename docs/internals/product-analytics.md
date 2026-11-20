@@ -142,6 +142,12 @@ uuid when it is recorded (the endpoint rejects events without one), backs off af
 a failed send, and drops a batch after a few tries. Without these limits, one stuck
 batch was sent every second for days.
 
+A server can also send a copy to a compatible `/batch/` endpoint by setting both
+`LASTCODE_TELEMETRY_COPY_HOST` and `LASTCODE_TELEMETRY_COPY_KEY`. The copy is off
+when either is unset or empty. It uses the same events and telemetry opt-out, with
+its own bounded buffer and retries so its delivery cannot block upstream. Both
+queues are in memory and may lose events on shutdown or extended failure.
+
 ## Collection boundary
 
 Keep analytics payloads to product metadata and normalized measurements. Do not

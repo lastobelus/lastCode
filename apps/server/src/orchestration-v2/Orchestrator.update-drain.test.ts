@@ -1,7 +1,10 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
+  MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -66,6 +69,7 @@ const makeHarness = Effect.gen(function* () {
   const database = SqlitePersistence.layerMemory;
   const projections = ProjectionStore.layer.pipe(Layer.provide(database));
   const archiveRequested = yield* Deferred.make<void>();
+  const turnRequested = yield* Deferred.make<void>();
   const admissionRequests = yield* Queue.unbounded<void>();
   const drainRequests = yield* Queue.unbounded<void>();
   const control = { archiveGate: null as Gate | null, snapshotGate: null as Gate | null };
@@ -101,7 +105,9 @@ const makeHarness = Effect.gen(function* () {
             ? Deferred.succeed(archiveRequested, undefined).pipe(
                 Effect.andThen(Queue.offer(admissionRequests, undefined)),
               )
-            : Effect.void
+            : kind === "thread-turn"
+              ? Deferred.succeed(turnRequested, undefined)
+              : Effect.void
           ).pipe(
             Effect.andThen(
               admission.admit(
@@ -154,6 +160,7 @@ const makeHarness = Effect.gen(function* () {
   return {
     control,
     archiveRequested,
+    turnRequested,
     admissionRequests,
     drainRequests,
     layer: Layer.mergeAll(
@@ -242,6 +249,120 @@ const startDrain = Effect.gen(function* () {
   });
 });
 
+it.effect.each([false, true])(
+  "refuses remote activation during drain without side effects (claim race=%s)",
+  (claimRace) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const gate = yield* makeGate;
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+        const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sink = yield* EventSink.EventSinkV2;
+        yield* seedFamily;
+        const thread = yield* projections.getThread(threadId);
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("remote-drain:link-origin"),
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...thread, linkOrigin: { sessionId: "peer-session", label: "Peer" } },
+            },
+          ],
+        });
+        const delegation = {
+          parentEnvironmentId: EnvironmentId.make("environment:parent"),
+          parentThreadId: ThreadId.make("remote-parent"),
+          sourceTaskId: NodeId.make("remote-task"),
+          delegationId: "remote-drain-delegation",
+        };
+        yield* orchestrator.dispatch({
+          type: "remote_delegation.prepare",
+          commandId: CommandId.make("remote-drain:prepare"),
+          threadId,
+          association: { ...delegation, linkSessionId: "peer-session", stage: "prepared" },
+        });
+        const command = {
+          type: "remote_delegation.activate" as const,
+          commandId: CommandId.make("remote-drain:activate"),
+          threadId,
+          delegation,
+          linkSessionId: "peer-session",
+          messageId: MessageId.make("remote-drain:message"),
+          text: "Do the delegated work.",
+        };
+        const before = yield* projections.getThreadProjection(threadId);
+        const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+        yield* startDrain;
+        if (claimRace) harness.control.snapshotGate = gate;
+        const claiming = claimRace
+          ? yield* admission.claimActivation({ requestId }).pipe(Effect.forkChild)
+          : undefined;
+        if (claiming !== undefined) yield* Deferred.await(gate.entered);
+        const activating = yield* orchestrator
+          .dispatch(command)
+          .pipe(Effect.result, Effect.forkChild);
+        if (claiming !== undefined) {
+          assert.isTrue(
+            yield* Effect.race(
+              Deferred.await(harness.turnRequested).pipe(Effect.as(true)),
+              Fiber.await(activating).pipe(Effect.as(false)),
+            ),
+          );
+          yield* Deferred.succeed(gate.release, undefined);
+          assert.equal((yield* Fiber.join(claiming)).commandType, "update-drain.claim");
+        }
+        const rejected = yield* Fiber.join(activating);
+        assert.equal(rejected._tag, "Failure");
+        if (rejected._tag === "Failure") {
+          assert.equal(rejected.failure._tag, "OrchestratorDispatchError");
+          if (rejected.failure._tag === "OrchestratorDispatchError")
+            assert.equal(
+              (rejected.failure.cause as { _tag: string })._tag,
+              "UpdateDrainAdmissionError",
+            );
+        }
+        assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+        assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+        assert.isTrue(Option.isNone(yield* receipts.getByCommandId(command.commandId)));
+        assert.isEmpty(yield* outbox.listByCommandId(command.commandId));
+        if (!claimRace) {
+          yield* admission.dispatch({
+            type: "update-drain.cancel",
+            commandId: CommandId.make("remote-drain:cancel"),
+            requestId,
+            createdAt: DateTime.formatIso(now),
+          });
+          yield* orchestrator.dispatch(command);
+          const accepted = yield* projections.getThreadProjection(threadId);
+          assert.lengthOf(accepted.runs, 1);
+          assert.deepEqual(accepted.runs[0]?.remoteDelegation, delegation);
+          assert.equal(accepted.thread.remoteDelegations?.[0]?.stage, "active");
+          yield* admission.dispatch({
+            type: "update-drain.start",
+            commandId: CommandId.make("remote-drain:start-again"),
+            requestId: UpdateDrainRequestId.make("remote-drain:second-request"),
+            targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+            createdAt: DateTime.formatIso(now),
+          });
+          const acceptedSequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+          yield* orchestrator.dispatch(command);
+          assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, acceptedSequence);
+          assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 1);
+        }
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(gate.release, undefined)),
+        Effect.provide(harness.layer),
+      );
+    }),
+);
+
 it.effect("commits an admitted archive before drain and prevents activation until it settles", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness;
@@ -302,9 +423,7 @@ it.effect("commits an admitted archive before drain and prevents activation unti
         ...(yield* outbox.listByCommandId(CommandId.make("archive-update:complete"))),
       ];
       for (const _effect of durableEffects) {
-        const next = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "test-cleanup", leaseDurationMs: 60000 }),
-        );
+        const next = Option.getOrThrow(yield* outbox.claimNext({ workerId: "test-cleanup" }));
         yield* outbox.succeed({ effectId: next.id, workerId: "test-cleanup" });
       }
       yield* admission.claimActivation({ requestId });
@@ -475,9 +594,7 @@ it.effect("keeps an accepted idle deletion blocked through pending and running c
       );
       const pending = yield* outbox.listByCommandId(command.commandId);
       for (let count = 0; count < pending.length; count += 1) {
-        const running = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "delete-cleanup", leaseDurationMs: 60000 }),
-        );
+        const running = Option.getOrThrow(yield* outbox.claimNext({ workerId: "delete-cleanup" }));
         assert.equal(
           (yield* admission.claimActivation({ requestId }).pipe(Effect.result))._tag,
           "Failure",
@@ -512,9 +629,7 @@ it.effect(
         yield* orchestrator.dispatch(settle);
         const pending = yield* outbox.listByCommandId(settle.commandId);
         for (let count = 0; count < pending.length; count += 1) {
-          const effect = Option.getOrThrow(
-            yield* outbox.claimNext({ workerId: "settle-cleanup", leaseDurationMs: 60000 }),
-          );
+          const effect = Option.getOrThrow(yield* outbox.claimNext({ workerId: "settle-cleanup" }));
           yield* outbox.succeed({ effectId: effect.id, workerId: "settle-cleanup" });
         }
         yield* admission.claimActivation({ requestId });
@@ -744,9 +859,7 @@ it.effect("refuses an accepted workspace cleanup after claim when it would detac
       };
       const acceptedBinding = yield* orchestrator.dispatch(binding);
       for (const _effect of yield* outbox.listByCommandId(binding.commandId)) {
-        const next = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "workspace-cleanup", leaseDurationMs: 60000 }),
-        );
+        const next = Option.getOrThrow(yield* outbox.claimNext({ workerId: "workspace-cleanup" }));
         yield* outbox.succeed({ effectId: next.id, workerId: "workspace-cleanup" });
       }
       const { providerThreads } = yield* projections.getThreadRecords(threadId, [
