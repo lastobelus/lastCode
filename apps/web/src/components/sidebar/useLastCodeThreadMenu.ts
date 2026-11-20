@@ -1,3 +1,4 @@
+import { contextualProjectSettings } from "../../projectSettingsNavigation";
 import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 import { mergeWorktreeSuspensionMenuItems } from "../worktreeSuspensionMenu";
@@ -22,7 +23,7 @@ import { useWorktreeSuspensionActions } from "../../hooks/useWorktreeSuspensionA
 import { useRightPanelStore } from "../../rightPanelStore";
 import { useSidebar } from "../ui/sidebar";
 import { readLocalApi } from "../../localApi";
-import { readThreadShell } from "../../state/entities";
+import { readProject, readThreadShell } from "../../state/entities";
 import { useStopThreadProcesses } from "../../state/previewHosting";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { threadEnvironment } from "../../state/threads";
@@ -154,10 +155,12 @@ export function useLastCodeThreadMenu(
       "project-settings": () => {
         if (target.projectSettingsKey === null) return;
         if (isMobile) setOpenMobile(false);
-        void router.navigate({
-          to: "/projects/$projectKey",
-          params: { projectKey: target.projectSettingsKey },
-        });
+        void router.navigate(
+          contextualProjectSettings(
+            target.projectSettingsKey,
+            readProject(scopeProjectRef(thread.environmentId, thread.projectId)),
+          ),
+        );
       },
       "new-thread-on-branch": async () => {
         // Explicit branch carry-over keeps the existing worktree when present.
