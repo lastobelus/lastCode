@@ -228,21 +228,28 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     rootId: ThreadId,
   ) => {
     const family = getOwnedThreadFamily(shells, rootId, recordedParentOf);
-    const typedInThreadIds = family.children
-      .filter(
-        (thread) => recordedParentOf(thread) !== null && thread.latestUserAuthoredMessageAt != null,
+    const liveFamilyIds = new Set(family.children.map(({ id }) => id));
+    const typedInBranches = shells.flatMap((thread) => {
+      if (
+        thread.id === rootId ||
+        thread.deletedAt !== null ||
+        !family.reachableThreadIds.has(thread.id) ||
+        recordedParentOf(thread) === null ||
+        thread.latestUserAuthoredMessageAt == null
       )
-      .map((thread) => thread.id);
-    const typedInBranchIds = new Set(
-      typedInThreadIds.flatMap((id) => [
-        id,
-        ...getOwnedThreadFamily(shells, id, recordedParentOf).children.map((thread) => thread.id),
-      ]),
-    );
-    typedInBranchIds.delete(rootId);
+        return [];
+      const liveIds = [
+        thread.id,
+        ...getOwnedThreadFamily(shells, thread.id, recordedParentOf).children.map(({ id }) => id),
+      ].filter((id) => liveFamilyIds.has(id));
+      return liveIds.length === 0 ? [] : [{ threadId: thread.id, liveIds }];
+    });
+    const typedInThreadIds = typedInBranches.map(({ threadId }) => threadId);
+    const typedInBranchIds = new Set(typedInBranches.flatMap(({ liveIds }) => liveIds));
     const legacyIds = new Set(getOwnedThreadFamily(shells, rootId).children.map(({ id }) => id));
     const widened = family.children.filter(({ id }) => !legacyIds.has(id));
     const expanded = widened.length > 0;
+    // Keep the deployed archive selection for historical families.
     if (!expanded && typedInThreadIds.length === 0)
       return {
         ...family,
@@ -252,14 +259,13 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         expanded,
       };
 
-    const familyIds = new Set(family.children.map(({ id }) => id));
     const groups = shells.filter(
       (group) =>
         group.id !== rootId &&
         group.groupThread === true &&
         group.archivedAt === null &&
         group.deletedAt === null &&
-        (familyIds.has(group.id) ||
+        (liveFamilyIds.has(group.id) ||
           widened.some(
             (child) =>
               child.projectId === group.projectId &&
@@ -309,7 +315,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     const selectedByDefault = selectedWith(typedInBranchIds);
     const children = [
       ...family.children,
-      ...groups.filter(({ id }) => !familyIds.has(id) && selectedWithTypedIn.has(id)),
+      ...groups.filter(({ id }) => !liveFamilyIds.has(id) && selectedWithTypedIn.has(id)),
     ];
     return {
       ...family,

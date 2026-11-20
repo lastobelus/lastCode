@@ -191,6 +191,7 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
   const nativeChildren = directChildren.filter((child) => child.creationSource === "provider");
   const protectedChildren = children.filter((child) => child.persistent === true);
   return {
+    reachableThreadIds: visited,
     children,
     directChildren,
     promotableChildren,

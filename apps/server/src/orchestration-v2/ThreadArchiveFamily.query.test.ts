@@ -15,7 +15,9 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -457,11 +459,13 @@ const ownedArchiveCases = [
   { includeTypedIn: false, groupIsOwned: true },
   { includeTypedIn: true, groupIsOwned: true },
   { includeTypedIn: true, groupIsOwned: true, groupIsUsed: true },
+  { includeTypedIn: false, groupIsOwned: false, typedIsArchived: true },
+  { includeTypedIn: true, groupIsOwned: false, typedIsArchived: true },
 ];
 
 it.effect.each(ownedArchiveCases)(
   "archives the observed cross-project targets (%j)",
-  ({ includeTypedIn, groupIsOwned, groupIsUsed }) =>
+  ({ includeTypedIn, groupIsOwned, groupIsUsed, typedIsArchived }) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -507,6 +511,7 @@ it.effect.each(ownedArchiveCases)(
         { ...launch(childId, rootId), workspaceUserAdopted: true, groupedUnderThreadId: groupId },
         {
           ...launch(typedId, childId),
+          ...(typedIsArchived ? { archivedAt: now } : {}),
           ...(groupIsOwned ? { groupedUnderThreadId: groupId } : {}),
         },
         {
@@ -571,8 +576,17 @@ it.effect.each(ownedArchiveCases)(
         });
       }
       const family = yield* service.getThreadArchiveFamily(rootId);
-      const allIds = [rootId, childId, groupId, typedId, grandchildId, legacyChild];
-      const kept = [typedId, grandchildId, ...(groupIsOwned ? [groupId] : [])];
+      const allIds = [
+        rootId,
+        childId,
+        groupId,
+        grandchildId,
+        legacyChild,
+        ...(typedIsArchived ? [] : [typedId]),
+      ];
+      const kept = allIds.filter(
+        (id) => id === typedId || id === grandchildId || (groupIsOwned && id === groupId),
+      );
       const selected = includeTypedIn
         ? allIds.filter((id) => !groupIsUsed || id !== groupId)
         : allIds.filter((id) => !kept.includes(id));
@@ -632,17 +646,37 @@ it.effect.each(ownedArchiveCases)(
       for (const id of selected)
         assert.equal((yield* store.getThread(id)).archivePending?.status, "failed");
       const retryId = CommandId.make("owned-archive:retry");
-      yield* orchestrator.dispatch({
-        ...begin,
-        commandId: retryId,
-        expectedArchiveCommandId: begin.commandId,
-      });
+      const beforeRetry = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+      const retry = yield* service
+        .dispatch({
+          ...begin,
+          commandId: retryId,
+          expectedArchiveCommandId: begin.commandId,
+        })
+        .pipe(Effect.forkChild);
+      yield* orchestrator
+        .streamStoredEventsFrom({ threadId: rootId, afterSequence: beforeRetry })
+        .pipe(
+          Stream.filter(
+            ({ commandId, event }) =>
+              commandId === retryId &&
+              event.type === "thread.metadata-updated" &&
+              event.payload.archivePending?.status === "stopping",
+          ),
+          Stream.runHead,
+        );
+      assert.isUndefined(retry.pollUnsafe());
       yield* orchestrator.dispatch({
         type: "thread.archive.complete",
-        commandId: CommandId.make("owned-archive:complete"),
+        commandId: CommandId.make(`${retryId}:complete`),
         threadId: rootId,
         requestId: retryId,
       });
+      const receipt = yield* Fiber.join(retry);
+      assert.deepEqual(
+        receipt.storedEvents.map(({ event }) => event.type),
+        ["thread.archived"],
+      );
       for (const id of selected) {
         assert.deepEqual(
           (yield* store.getThread(id)).archivedWith,
@@ -675,6 +709,7 @@ it.effect.each(ownedArchiveCases)(
       for (const id of selected.filter((id) => id !== legacyChild))
         assert.isNull((yield* store.getThread(id)).archivedAt);
       assert.isNotNull((yield* store.getThread(legacyChild)).archivedAt);
+      if (typedIsArchived) assert.isNotNull((yield* store.getThread(typedId)).archivedAt);
       assert.deepEqual(
         (yield* store.getThread(typedId)).creatorOrigin,
         launch(typedId, childId).creatorOrigin,
