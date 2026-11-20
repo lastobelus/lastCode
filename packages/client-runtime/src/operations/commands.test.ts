@@ -57,6 +57,7 @@ import {
   revertThreadCheckpoint,
   resumeThreadQueue,
   startThreadTurn,
+  updateProject,
 } from "./commands.ts";
 
 const layerTestRandom = Layer.succeed(
@@ -153,6 +154,21 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("V2 environment commands", () => {
+  it.effect("keeps a temporary project through the existing project mutation RPC", () =>
+    Effect.gen(function* () {
+      const projects: ProjectMutation[] = [];
+      const supervisor = yield* makeSupervisor({ commands: [], projects });
+      const commandId = CommandId.make("keep-project");
+      const projectId = ProjectId.make("temporary-project");
+      yield* updateProject({ commandId, projectId, keepTemporary: true }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+      expect(projects).toEqual([
+        { type: "project.update", commandId, projectId, keepTemporary: true },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
   it.effect("distinguishes sending a selected queued message from resuming queue order", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];

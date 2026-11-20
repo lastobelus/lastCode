@@ -10,6 +10,10 @@ import { useGT, useMessages } from "gt-react-native";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
 
+import {
+  useDiscoverableProjects,
+  useTemporaryProjectsMenuItem,
+} from "../../state/temporary-projects";
 import { useProjects } from "../../state/entities";
 import { steadyNavigationThreadShellsAtom } from "../../state/threads";
 import { useLaunchingThreads, usePendingNewTasks } from "../../state/use-pending-new-tasks";
@@ -50,6 +54,8 @@ export function HomeRouteScreen() {
   const { primarySidebarSearchQuery } = useWorkspacePaneState();
   const selectDetail = useSelectWorkspaceDetail();
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects(projects);
+  const temporaryProjectsToggle = useTemporaryProjectsMenuItem();
   // Stop rebuilding the streaming thread list while Thread covers Home.
   const visible = useHomeRouteVisible();
   const threads = useLaunchingThreads(
@@ -124,13 +130,13 @@ export function HomeRouteScreen() {
     () =>
       buildHomeProjectScopes(
         {
-          projects,
+          projects: discoverable,
           environmentId: selectedEnvironmentId,
           projectGroupingMode: listOptions.projectGroupingMode,
         },
         m,
       ),
-    [listOptions.projectGroupingMode, projects, selectedEnvironmentId, m],
+    [listOptions.projectGroupingMode, discoverable, selectedEnvironmentId, m],
   );
   const projectFilterOptions = useMemo(
     () =>
@@ -178,6 +184,7 @@ export function HomeRouteScreen() {
               {
                 environments,
                 projects: projectFilterOptions,
+                temporaryProjectsToggle,
                 selectedEnvironmentId,
                 selectedProjectKey,
                 onEnvironmentChange: setSelectedEnvironmentId,

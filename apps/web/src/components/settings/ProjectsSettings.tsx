@@ -2,6 +2,7 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { T, useGT } from "gt-react";
 import { LayersIcon } from "lucide-react";
 
+import { TemporaryProjectsToggle } from "../TemporaryProjectsToggle";
 import { Button } from "../ui/button";
 import { ProjectSettingsPanel } from "./ProjectSettingsPanel";
 import { useSettingsScope } from "./SettingsScopeContext";
@@ -38,6 +39,9 @@ export function ProjectsSettings() {
       (scope.reason === "project-missing" || scope.reason === "checkout-missing"));
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <div className="self-start px-3 sm:px-4">
+        <TemporaryProjectsToggle />
+      </div>
       {value.project && projectScope ? (
         <ProjectSettingsPanel
           projectKey={value.project}

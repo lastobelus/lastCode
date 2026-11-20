@@ -65,7 +65,7 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
 }
 
 function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironment: boolean) {
-  const groups = useSettingsProjectGroups();
+  const groups = useSettingsProjectGroups(rawSearch);
   const { environments: availableEnvironments, isReady: environmentsReady } = useEnvironments();
   const settingsHydrated = useClientSettingsHydrated();
   const projectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();

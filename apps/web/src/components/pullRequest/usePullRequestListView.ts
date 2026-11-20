@@ -1,3 +1,5 @@
+import { useDiscoverableProjects } from "../../hooks/useDiscoverableProjects";
+import { withContextualProject } from "@t3tools/client-runtime/state/temporary-projects";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { parsePullRequestQuery } from "@t3tools/client-runtime/pull-request-query";
@@ -70,6 +72,7 @@ export function usePullRequestScope(
 ) {
   const { environments } = useEnvironments();
   const allProjects = useProjects();
+  const discoverable = useDiscoverableProjects();
   const projectsKnown = useAllEnvironmentShellsBootstrapped();
   const capableEnvironments = environments
     .filter((environment) => environment.serverConfig !== null)
@@ -95,7 +98,16 @@ export function usePullRequestScope(
   );
   const scopedProjectId = resolveProjectScope(search.projectId, projects, projectsKnown);
   const scopedProject = findScopedProject(projects, scopedEnvironmentId, scopedProjectId);
-  const scopedProjects = pullRequestFilterProjects(projects, environmentLabels, scopedProject);
+  const scopedProjects = pullRequestFilterProjects(
+    withContextualProject(
+      discoverable.filter(
+        (project) => !project.isScratch && environmentIds.includes(project.environmentId),
+      ),
+      scopedProject ?? undefined,
+    ),
+    environmentLabels,
+    scopedProject,
+  );
 
   const selectedHost = search.selectedHost ?? search.host;
   // A named server still connecting is kept named rather than falling back: falling back while it

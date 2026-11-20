@@ -25,6 +25,11 @@ import { isTriagePrompt, replaceTriagePlaybookLink } from "@t3tools/shared/triag
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 
+import {
+  useContextualDiscoverableProjects,
+  useDiscoverableProjects,
+} from "../../state/temporary-projects";
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import { useProjects, useServerConfigs, useThreadShells } from "../../state/entities";
 import type { TurnCommandMetadata } from "../../lib/commandMetadata";
 import type { DraftComposerAttachment } from "../../lib/composerImages";
@@ -228,6 +233,7 @@ export function NewTaskFlowProvider(
   }>,
 ) {
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects(projects);
   const messages = useMessages();
   const threads = useThreadShells();
   const { savedConnectionsById } = useSavedRemoteConnections();
@@ -236,7 +242,7 @@ export function NewTaskFlowProvider(
   const projectScopes = sortHomeProjectScopes({
     scopes: buildHomeProjectScopes(
       {
-        projects,
+        projects: discoverable,
         environmentId: null,
         projectGroupingMode: groupingSettings.sidebarProjectGroupingMode,
       },
@@ -326,7 +332,7 @@ export function NewTaskFlowProvider(
     (selectedEnvironmentIdOverride !== null &&
     projects.some((project) => project.environmentId === selectedEnvironmentIdOverride)
       ? selectedEnvironmentIdOverride
-      : (projects[0]?.environmentId ?? null));
+      : (projects.find((project) => !isTemporaryProject(project))?.environmentId ?? null));
   const projectsForEnvironment = pipe(
     projects,
     Arr.filter((project) => project.environmentId === selectedEnvironmentId),
@@ -341,8 +347,10 @@ export function NewTaskFlowProvider(
         projectsForEnvironment.find(
           (project) => scopedProjectKey(project.environmentId, project.id) === selectedProjectKey,
         ) ??
-        projectsForEnvironment[0] ??
+        projectsForEnvironment.find((project) => !isTemporaryProject(project)) ??
         null);
+
+  const environmentProjects = useContextualDiscoverableProjects(discoverable, selectedProject);
 
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const modelSelectionNow = useNowMinuteMs();
@@ -582,7 +590,7 @@ export function NewTaskFlowProvider(
 
   const selectEnvironment = (environmentId: EnvironmentId) => {
     const match = resolveEnvironmentProjectMatch(
-      projects.filter((project) => project.environmentId === environmentId),
+      environmentProjects.filter((project) => project.environmentId === environmentId),
       selectedProject,
     );
     updateFlow({
@@ -827,7 +835,7 @@ export function NewTaskFlowProvider(
         (selectedProjectTitle !== null && project.title === selectedProjectTitle)
       );
     };
-    for (const project of projects) {
+    for (const project of environmentProjects) {
       if (!hostsSelectedRepository(project)) {
         continue;
       }

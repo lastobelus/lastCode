@@ -81,7 +81,9 @@ vi.mock("./LastCodeSidebarProject", () => ({
     );
     return (
       <section data-project={props.project.projectKey}>
-        <input aria-label={props.project.projectKey} defaultValue="original" />
+        {!props.threadsOnly && (
+          <input aria-label={props.project.projectKey} defaultValue="original" />
+        )}
         <button
           onClick={() => props.onListExpandedChange(props.project.projectKey, !props.listExpanded)}
         >
@@ -174,6 +176,7 @@ vi.mock("./useLastCodeSidebarProjects", () => ({
     useUiStateStore((s) => s.projectOrder);
     return {
       sortedProjects: fixture.projects,
+      threadOnlyProjects: fixture.threadOnlyProjects,
       orderedProjectKeys: orderedKeys,
       resolveProjectKey,
       index,
@@ -232,6 +235,7 @@ const resolveProjectKey = (ref: { environmentId: EnvironmentId; projectId: Proje
 const index = indexLastCodeSidebarThreads(threads, resolveProjectKey);
 const fixture = {
   projects: defaultProjects,
+  threadOnlyProjects: [] as SidebarProjectSnapshot[],
   route: null as string | null,
   navigation: [] as readonly string[],
   prewarm: new Set<string>(),
@@ -301,6 +305,22 @@ describe("content-owned expansion and navigation", () => {
     expect(fixture.navigation).toEqual(renderedKeys(screen.container));
     expect(renderedKeys(screen.container)).toHaveLength(4);
   });
+  it("keeps a hidden temporary project's threads in the rendered navigation order", async () => {
+    setup();
+    fixture.projects = [grouped];
+    fixture.threadOnlyProjects = [other];
+    useUiStateStore.setState({ projectExpandedById: { [other.projectKey]: false } });
+    await using screen = await render(null);
+
+    await show(screen);
+
+    expect(section(screen.container, "other").querySelector("input")).toBeNull();
+    const firstThread = threads[3]!;
+    expect(renderedKeys(screen.container)).toContain(
+      scopedThreadKey(scopeThreadRef(firstThread.environmentId, firstThread.id)),
+    );
+    expect(fixture.navigation).toEqual(renderedKeys(screen.container));
+  });
   it("retains expansion through scoped route and collection refreshes", async () => {
     setup();
     await using screen = await render(null);
@@ -336,6 +356,7 @@ function setup() {
   });
   useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
   fixture.projects = defaultProjects;
+  fixture.threadOnlyProjects = [];
   fixture.route = null;
   fixture.navigation = [];
   fixture.prewarm.clear();

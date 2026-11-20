@@ -25,6 +25,7 @@ export type ProjectGroupUpdate = Partial<{
   projectIcon: ProjectIconOverride | null;
   pinned: boolean;
   archived: boolean;
+  keepTemporary: true;
 }>;
 
 type ProjectGroupMember = Pick<

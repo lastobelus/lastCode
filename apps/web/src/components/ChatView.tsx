@@ -1,3 +1,4 @@
+import { contextualProjectSettings } from "../projectSettingsNavigation";
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { useGT, useMessages } from "gt-react";
@@ -1210,10 +1211,7 @@ export default function ChatView(props: ChatViewProps) {
       : undefined;
   const handleOpenDraftProjectSettings = () => {
     if (!activeDraftLogicalProjectKey) return;
-    void navigate({
-      to: "/projects/$projectKey",
-      params: { projectKey: activeDraftLogicalProjectKey },
-    });
+    void navigate(contextualProjectSettings(activeDraftLogicalProjectKey, activeProject));
   };
   const handleOpenDraftProjectSettingsStable = useStableCallback(handleOpenDraftProjectSettings);
   const activeEnvironmentBootstrapComplete = useEnvironmentShellHasSnapshot(

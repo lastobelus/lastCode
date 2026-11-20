@@ -53,6 +53,7 @@ import {
   canPickExternalProjectFavicon,
   ProjectFaviconPickerDialog,
 } from "./ProjectFaviconPickerDialog";
+import { KeepTemporaryProjectRows } from "./KeepTemporaryProjectRows";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import {
@@ -183,7 +184,11 @@ export function ProjectSettingsPanel({
   unavailable?: ReactNode;
 }) {
   const gt = useGT();
-  const groups = useSettingsProjectGroups();
+  const groups = useSettingsProjectGroups({
+    project: projectKey,
+    machine: environmentId ?? undefined,
+    checkout: checkoutKey ?? undefined,
+  });
   const pathname = useLocation({ select: (location) => location.pathname });
 
   const selected = groups.find((group) => group.projectKey === projectKey) ?? null;
@@ -596,6 +601,7 @@ function ProjectDetail({
           </AlertDescription>
         </Alert>
         <SettingsSection id="project-overview" title={gt("Project")} hideTitle>
+          <KeepTemporaryProjectRows members={group.memberProjects} />
           {!canEditGroup ? (
             <p className="px-3 py-2 text-sm text-muted-foreground sm:px-4">
               {group.memberProjects.length > 1

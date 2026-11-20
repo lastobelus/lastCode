@@ -1,3 +1,4 @@
+import { useScheduledTaskProjectChoices } from "./temporaryProjectTaskScope";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
 import { useAtomValue } from "@effect/atom-react";
@@ -67,12 +68,7 @@ import {
   useEnvironmentHttpBaseUrl,
   type EnvironmentPresentation,
 } from "../../state/environments";
-import {
-  useProjects,
-  useQuietThreadShell,
-  useThreadShell,
-  useVisibleThreadShells,
-} from "../../state/entities";
+import { useQuietThreadShell, useThreadShell, useVisibleThreadShells } from "../../state/entities";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { environmentAtomList, environmentIdsKey } from "../../state/environmentAtomList";
@@ -1482,11 +1478,11 @@ function ScheduledTaskEditorForm({
     connected ? serverEnvironment.scheduledTasksLive({ environmentId, input: {} }) : null,
     messages,
   );
-  const allProjects = useProjects();
-  const projectsOn = (id: EnvironmentId) =>
-    allProjects.filter(
-      (project) => project.environmentId === id && matchesScheduledTaskScope(scope, id, project.id),
-    );
+  const { projectsOn, discoverable } = useScheduledTaskProjectChoices(
+    scope,
+    initialEnvironmentId,
+    task,
+  );
   const scopedProjects = projectsOn(environmentId);
   const settings = useEnvironmentSettings(environmentId);
   const providers =
@@ -1833,7 +1829,7 @@ function ScheduledTaskEditorForm({
                   {projects.map((project) => (
                     <SelectItem key={project.id} value={project.id} label={project.title}>
                       <span className="block truncate">{project.title}</span>
-                      {allProjects.some(
+                      {discoverable.some(
                         (other) =>
                           other.title === project.title &&
                           (other.environmentId !== project.environmentId ||

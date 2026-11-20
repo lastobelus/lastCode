@@ -47,6 +47,7 @@ import {
 import { useSidebar } from "../ui/sidebar";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { TemporaryProjectsToggle } from "../TemporaryProjectsToggle";
 import { SidebarHeaderIconButton } from "./SidebarThreadHeader";
 
 export function LastCodeSidebarThreadPicker({
@@ -136,6 +137,7 @@ export function LastCodeSidebarThreadPicker({
           <MenuGroupLabel>
             <T>New thread in…</T>
           </MenuGroupLabel>
+          <TemporaryProjectsToggle menu />
           {scratchTargetEnvironmentId === null ? null : (
             <MenuItem
               onClick={() => {

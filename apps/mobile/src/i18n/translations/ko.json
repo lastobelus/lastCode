@@ -5565,5 +5565,10 @@
   "8afa8cbe18948320": "Enter 1 to 3650 days, then tap Save.",
   "c9b2723ade9155f6": "Save dependency retention days",
   "f3287c4ed3bdb117": "Save",
-  "45d8a48a56da69a3": "Filter settings environments"
+  "45d8a48a56da69a3": "Filter settings environments",
+  "0c5204be873f3a76": "임시 프로젝트 표시",
+  "0e2e3bf285bfc97c": "임시 프로젝트 숨기기",
+  "66dc3acf46bef713": "프로젝트 유지",
+  "35fa9b4a4dc657c7": "프로젝트를 유지할 수 없습니다",
+  "f8228a0b231333da": "임시 프로젝트"
 }

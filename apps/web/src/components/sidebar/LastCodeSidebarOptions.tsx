@@ -17,6 +17,7 @@ import {
   NumberFieldInput,
 } from "../ui/number-field";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { TemporaryProjectsToggle } from "../TemporaryProjectsToggle";
 import { Button } from "../ui/button";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
   updated_at: msg("Last user message"),
@@ -76,6 +77,7 @@ export function LastCodeSidebarOptions() {
         </TooltipPopup>
       </Tooltip>
       <MenuPopup align="end" side="bottom">
+        <TemporaryProjectsToggle menu />
         <MenuGroup>
           <div className="px-2 py-1 sm:text-xs font-medium text-muted-foreground">
             <T>Sort projects</T>

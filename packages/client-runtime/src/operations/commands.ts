@@ -77,6 +77,7 @@ export interface UpdateProjectInput extends CommandMetadata {
   readonly scripts?: ReadonlyArray<ProjectScript>;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  readonly keepTemporary?: true;
 }
 
 export interface DeleteProjectInput extends CommandMetadata {
@@ -438,6 +439,7 @@ const mutateProject = Effect.fn("EnvironmentCommands.mutateProject")(function* (
       }
     | {
         readonly type: "project.update";
+        readonly keepTemporary?: true;
         readonly commandId: CommandId;
         readonly projectId: ProjectId;
         readonly title?: string;
@@ -496,6 +498,7 @@ export const updateProject = Effect.fn("EnvironmentCommands.updateProject")(func
     ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
     ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
     ...(input.archived === undefined ? {} : { archived: input.archived }),
+    ...(input.keepTemporary === true ? { keepTemporary: input.keepTemporary } : {}),
   });
 });
 

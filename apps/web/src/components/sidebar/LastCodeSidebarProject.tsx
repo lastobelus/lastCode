@@ -28,6 +28,7 @@ interface Props {
   dragHandle: LastCodeProjectDragHandle | null;
   gestures: LastCodeProjectDragGestures;
   newThread: { handle: ReturnType<typeof useNewThreadHandler>; shortcutLabel: string | null };
+  threadsOnly?: boolean;
 }
 /** Compose one logical project's focused projection, menus, editors and keyed family list. */
 export function LastCodeSidebarProject(props: Props) {
@@ -35,9 +36,10 @@ export function LastCodeSidebarProject(props: Props) {
   const scale = useClientSetting("legacySidebarScale");
   const environments = useLastCodeProjectEnvironmentIcons(project);
   const preferenceKeys = lastCodeProjectExpansionPreferenceKeys(project);
-  const expanded = useUiStateStore((state) =>
+  const projectExpanded = useUiStateStore((state) =>
     resolveProjectExpanded(state.projectExpandedById, preferenceKeys),
   );
+  const expanded = props.threadsOnly || projectExpanded;
   const {
     threadsByKey,
     projectStatus,
@@ -71,22 +73,24 @@ export function LastCodeSidebarProject(props: Props) {
   const onExpandedChange = (value: boolean) => onListExpandedChange(project.projectKey, value);
   return (
     <>
-      <LastCodeProjectHeader
-        project={project}
-        expanded={expanded}
-        status={projectStatus}
-        environments={environments}
-        latestThreadTimestamp={latestThreadTimestamp}
-        drag={{ manual: props.dragHandle !== null, handle: props.dragHandle }}
-        gestures={props.gestures}
-        showMenu={showProjectMenu}
-      >
-        <LastCodeProjectNewThread
+      {!props.threadsOnly && (
+        <LastCodeProjectHeader
           project={project}
-          handleNewThread={newThread.handle}
-          shortcutLabel={newThread.shortcutLabel}
-        />
-      </LastCodeProjectHeader>
+          expanded={expanded}
+          status={projectStatus}
+          environments={environments}
+          latestThreadTimestamp={latestThreadTimestamp}
+          drag={{ manual: props.dragHandle !== null, handle: props.dragHandle }}
+          gestures={props.gestures}
+          showMenu={showProjectMenu}
+        >
+          <LastCodeProjectNewThread
+            project={project}
+            handleNewThread={newThread.handle}
+            shortcutLabel={newThread.shortcutLabel}
+          />
+        </LastCodeProjectHeader>
+      )}
       <LastCodeThreadList
         scale={scale}
         projectExpanded={expanded}

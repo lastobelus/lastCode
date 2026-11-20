@@ -1,3 +1,4 @@
+import { useDiscoverableProjects } from "./useDiscoverableProjects";
 import { useMessages } from "gt-react";
 
 import { orderItemsByPreferredIds, sortSidebarV2ProjectGroups } from "../components/Sidebar.logic";
@@ -7,12 +8,12 @@ import {
 } from "@t3tools/client-runtime/state/project-grouping";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { useEnvironmentIdentities, usePrimaryEnvironmentId } from "../state/environments";
-import { useDelegatedUnderParent, useProjects, useQuietThreadShells } from "../state/entities";
+import { useDelegatedUnderParent, useQuietThreadShells } from "../state/entities";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
 
-export function useSidebarProjectGroups() {
-  const projects = useProjects();
+export function useSidebarProjectGroups({ discovery = false } = {}) {
+  const projects = useDiscoverableProjects({ showAll: !discovery });
   // Activity order lags a running thread's streaming ticks until its next
   // real change; reading every tick re-rendered the whole sidebar with it.
   const threads = useQuietThreadShells();

@@ -3,6 +3,7 @@ import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
 
 import type { AppBarMenu } from "../../../components/ui/AppBar.types";
 import { ENVIRONMENT_MACHINE_SYMBOLS } from "../../../components/EnvironmentMachineSymbol";
+import { useTemporaryProjectsMenuItem } from "../../../state/temporary-projects";
 import { useSettingsEnvironmentFilter } from "../settings-environment-filter";
 
 /** The settings scope filter, as an `AppBar` menu. */
@@ -16,10 +17,12 @@ export function useSettingsEnvironmentMenu(
     selectedIds,
     selectAll,
     toggleEnvironment,
+    projectGroups,
     selectableProjectGroups,
     selectedProjectKey,
     selectProject,
   } = useSettingsEnvironmentFilter();
+  const temporaryProjectsToggle = useTemporaryProjectsMenuItem();
   const environmentOnly = props.environmentOnly === true;
   const filterLabel = environmentOnly
     ? gt("Filter settings environments")
@@ -61,7 +64,7 @@ export function useSettingsEnvironmentMenu(
             {
               id: "projects",
               title:
-                selectableProjectGroups.find((group) => group.key === selectedProjectKey)?.label ??
+                projectGroups.find((group) => group.key === selectedProjectKey)?.label ??
                 (selectedProjectKey === null ? gt("All projects") : gt("Unavailable project")),
               items: [
                 {
@@ -70,6 +73,7 @@ export function useSettingsEnvironmentMenu(
                   selected: selectedProjectKey === null,
                   onPress: () => selectProject(null),
                 },
+                ...(temporaryProjectsToggle ? [temporaryProjectsToggle] : []),
                 ...selectableProjectGroups.map((group) => ({
                   id: `project:${group.key}`,
                   title: group.archived

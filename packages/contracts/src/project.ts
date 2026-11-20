@@ -3,6 +3,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { SavedWorkspaceDisposition } from "./workspaceLifecycle.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { projectRegistrationViewFields } from "./projectRegistration.lastcode.ts";
 import {
   CommandId,
   ForwardCompatibleUnion,
@@ -180,6 +181,7 @@ export const Project = Schema.Struct({
   scripts: Schema.Array(ProjectScript),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  ...projectRegistrationViewFields,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -202,6 +204,7 @@ export const ProjectCreatePayload = Schema.Struct({
 export type ProjectCreatePayload = typeof ProjectCreatePayload.Type;
 
 export const ProjectUpdatePayload = Schema.Struct({
+  keepTemporary: Schema.optional(Schema.Literal(true)),
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),

@@ -39,6 +39,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { ListActionRow as SettingsActionRow } from "../../components/ui/ListActionRow";
+import { KeepTemporaryProjectRows } from "./components/KeepTemporaryProjectRows";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { useSettingsEnvironmentMenu } from "./components/SettingsEnvironmentFilterHeader";
 import { useSettingsEnvironmentFilter, type SettingsTarget } from "./settings-environment-filter";
@@ -372,6 +373,8 @@ function ProjectOverviewContent(props: {
           </View>
         </View>
       </SettingsSection>
+
+      <KeepTemporaryProjectRows projects={props.members} environments={props.environments} />
 
       {canOrganize ? (
         <SettingsSection title={gt("Organize")}>

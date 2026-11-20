@@ -30,6 +30,7 @@ import { Button } from "../../components/ui/Button";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { AppText as Text } from "../../components/ui/AppText";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
+import { useTemporaryProjectsMenuItem } from "../../state/temporary-projects";
 import { useProjects, useServerConfigs } from "../../state/entities";
 import { projectEnvironment } from "../../state/projects";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -170,6 +171,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   const gt = useGT();
   const m = useMessages();
   const projects = useProjects();
+  const temporaryProjectsToggle = useTemporaryProjectsMenuItem();
   const [searchText, setSearchText] = useState("");
   const { projectScopes, selectedEnvironmentId, setProject } = useNewTaskFlow();
   const { state: catalogState } = useWorkspaceState();
@@ -390,6 +392,13 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               : {}),
           }}
         >
+          {temporaryProjectsToggle ? (
+            <Button
+              label={temporaryProjectsToggle.title}
+              tone="secondary"
+              onPress={temporaryProjectsToggle.onPress}
+            />
+          ) : null}
           {scratchOption !== null && listScopes.length > 0 ? (
             Platform.OS === "android" ? (
               <View collapsable={false} className="overflow-hidden rounded-[28px] bg-grouped-card">

@@ -1,3 +1,11 @@
+import { useAtomValue } from "@effect/atom-react";
+import {
+  discoverableProjects,
+  isTemporaryProject,
+  showTemporaryProjectsAtom,
+} from "@t3tools/client-runtime/state/temporary-projects";
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
+import { scopeProjectRef, scopedProjectKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useMessages } from "gt-react";
 import { useProjects, useThreadShells } from "../../state/entities";
@@ -45,19 +53,55 @@ export function useLastCodeSidebarProjects(environments: ProjectEnvironments) {
     desktopLocalEnvironmentIds,
     wslEnvironmentIds,
   } = environments;
-  const groups = buildSidebarProjectSnapshots({
-    projects: orderedProjects,
+  const projectGrouping = {
     settings,
     primaryEnvironmentId,
-    scratchWorkspaceRootsByEnvironmentId,
     resolveMessage: messages,
-    resolveEnvironmentLabel: (id) => environmentLabelById.get(id) ?? null,
-    isDesktopLocalEnvironment: (id) => desktopLocalEnvironmentIds.has(id),
-    isWslEnvironment: (id) => wslEnvironmentIds.has(id),
+    resolveEnvironmentLabel: (id: EnvironmentId) => environmentLabelById.get(id) ?? null,
+    isDesktopLocalEnvironment: (id: EnvironmentId) => desktopLocalEnvironmentIds.has(id),
+    isWslEnvironment: (id: EnvironmentId) => wslEnvironmentIds.has(id),
+  };
+  const visibleProjects = discoverableProjects(
+    orderedProjects,
+    useAtomValue(showTemporaryProjectsAtom),
+  );
+  const groups = buildSidebarProjectSnapshots({
+    ...projectGrouping,
+    projects: visibleProjects,
+    scratchWorkspaceRootsByEnvironmentId,
   });
-  const resolveProjectKey = createLastCodeSidebarProjectLookup(orderedProjects, groups);
+  const projectsWithThreads =
+    visibleProjects === orderedProjects
+      ? null
+      : new Set(
+          threads
+            .filter(threadShellIsVisible)
+            .map((thread) =>
+              scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
+            ),
+        );
+  const threadGroups = projectsWithThreads
+    ? buildSidebarProjectSnapshots({
+        ...projectGrouping,
+        projects: orderedProjects.filter(
+          (project) =>
+            isTemporaryProject(project) &&
+            projectsWithThreads.has(
+              scopedProjectKey(scopeProjectRef(project.environmentId, project.id)),
+            ),
+        ),
+        groupScratchProjects: false,
+      }).map((group) => ({ ...group, projectKey: `temporary:${group.projectKey}` }))
+    : [];
+  const resolveProjectKey = createLastCodeSidebarProjectLookup(orderedProjects, [
+    ...groups,
+    ...threadGroups,
+  ]);
   const index = indexLastCodeSidebarThreads(threads, resolveProjectKey);
   const sortedProjects = sortLastCodeSidebarProjects(groups, threads, resolveProjectKey, sortOrder);
+  const threadOnlyProjects = threadGroups.length
+    ? sortLastCodeSidebarProjects(threadGroups, threads, resolveProjectKey, sortOrder)
+    : [];
   const orderedProjectKeys = orderedProjects.map(getProjectOrderKey);
-  return { sortedProjects, orderedProjectKeys, resolveProjectKey, index };
+  return { sortedProjects, threadOnlyProjects, orderedProjectKeys, resolveProjectKey, index };
 }

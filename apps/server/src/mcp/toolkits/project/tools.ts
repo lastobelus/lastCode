@@ -5,6 +5,7 @@ import {
   ModelSelection,
   TrimmedNonEmptyString,
   ThreadId,
+  ThreadOwner,
   RemoteDelegationSelector,
   RemoteWorktreeBaseCommit,
   RunId,
@@ -55,9 +56,11 @@ const shared = {
 };
 const ProjectListTool = Tool.make("t3_project_list", {
   ...shared,
-  description: "List projects. Pages can shift.",
+  description:
+    "List projects. temporaryOwner filters to temporary projects owned by that thread. Pages can shift.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
+    temporaryOwner: Schema.optional(ThreadOwner),
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(clampedPositiveInt(100)),
   }),
@@ -81,18 +84,20 @@ const ProjectReadTool = Tool.make("t3_project_read", {
 const ProjectCreateTool = Tool.make("t3_project_create", {
   ...shared,
   description:
-    "Register a project folder. `createWorkspaceRootIfMissing` creates it; a registered folder is rejected. No `workspaceRoot`: makes a git repo from `title` with README, icon, first commit (`commitError` on failure; project still exists). Clone first with `t3_project_clone` if needed.",
+    "Register a project folder. `createWorkspaceRootIfMissing` creates it; a registered folder is rejected. No `workspaceRoot`: makes a git repo from `title` with README, icon, first commit (`commitError` on failure; project still exists). Clone first with `t3_project_clone` if needed. Use temporary:true for throwaway workspaces.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     ...ProjectCreatePayload.fields,
     workspaceRoot: Schema.optional(ProjectCreatePayload.fields.workspaceRoot),
+    temporary: Schema.optional(Schema.Boolean),
   }),
   success: Schema.Struct({ ...Project.fields, commitError: Schema.optional(Schema.String) }),
   dependencies: [...shared.dependencies, ManagedProjectFolders.ManagedProjectFolders],
 }).annotate(Tool.Destructive, true);
 const ProjectUpdateTool = Tool.make("t3_project_update", {
   ...shared,
-  description: "Update one project's settings. Omitted fields are unchanged.",
+  description:
+    "Update one project's settings. keepTemporary:true keeps a temporary project. Omitted fields are unchanged.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: ProjectId,

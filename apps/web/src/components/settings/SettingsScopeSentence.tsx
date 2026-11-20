@@ -28,6 +28,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "../ui/menu";
+import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { useOptionalSettingsScope } from "./SettingsScopeContext";
 import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope";
 import {
@@ -405,7 +406,8 @@ function CheckoutScopeMenu({ value, groups, onChange }: SettingsScopeMenuProps) 
 function ProjectScopeMenu({ value, groups, environments, onChange }: SettingsScopeMenuProps) {
   const gt = useGT();
   const selected = groups.find((group) => group.projectKey === value.project);
-  const projects = projectScopeMenuGroups(groups, value).map((group) => ({
+  const discoverableGroups = useSettingsProjectGroups();
+  const projects = projectScopeMenuGroups(discoverableGroups, value).map((group) => ({
     group,
     machines: settingsScopeProjectMachines(group, environments, true).join(", "),
   }));

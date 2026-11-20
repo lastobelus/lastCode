@@ -616,5 +616,12 @@ describe("default project selection", () => {
         "last-used:project",
       ),
     ).toEqual({ environmentId: "first", projectId: "project" });
+    expect(
+      resolveDefaultProjectRef(
+        [{ ...projects[1]!, temporary: true }, projects[0]!],
+        [],
+        "last-used:project",
+      ),
+    ).toEqual({ environmentId: "first", projectId: "project" });
   });
 });

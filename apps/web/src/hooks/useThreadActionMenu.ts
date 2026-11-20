@@ -1,3 +1,4 @@
+import { contextualProjectSettings } from "../projectSettingsNavigation";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { mergeWorktreeSuspensionMenuItems } from "../components/worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "./threadReadActions";
@@ -263,10 +264,7 @@ export function useThreadActionMenu(input: {
           const projectKey =
             logicalProjectKeyByPhysicalKey.get(derivePhysicalProjectKey(project)) ??
             deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings);
-          void router.navigate({
-            to: "/projects/$projectKey",
-            params: { projectKey },
-          });
+          void router.navigate(contextualProjectSettings(projectKey, project));
           return;
         }
         case "new-thread-on-branch": {

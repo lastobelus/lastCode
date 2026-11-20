@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { buildProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
+import { projectsForSettingsScope } from "@t3tools/client-runtime/state/temporary-projects";
 import { useLocale, useMessages } from "gt-react-native";
 import {
   createContext,
@@ -14,6 +15,7 @@ import {
 
 import type { MessageResolver } from "../../i18n/messages";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
+import { useDiscoverableProjects } from "../../state/temporary-projects";
 import { useProjects } from "../../state/entities";
 import { useMobileProjectGroupingSettings } from "../../state/project-grouping";
 import { toggleSettingsEnvironment } from "./settings-environment-filter.logic";
@@ -125,11 +127,25 @@ export function useSettingsEnvironmentFilter() {
     selection;
   const { environments } = useEnvironments();
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects(projects);
   const groupingSettings = useMobileProjectGroupingSettings();
   const groupingMode = groupingSettings.sidebarProjectGroupingMode;
   const messages = useMessages();
   const locale = useLocale();
-  const projectGroups = settingsProjectGroups(projects, groupingMode, messages, locale);
+  const scopedProjects = useMemo(
+    () =>
+      projectsForSettingsScope(
+        projects,
+        discoverable,
+        {
+          sidebarProjectGroupingMode: groupingMode,
+          sidebarProjectGroupingOverrides: {},
+        },
+        { project: selectedProjectKey },
+      ),
+    [projects, discoverable, groupingMode, selectedProjectKey],
+  );
+  const projectGroups = settingsProjectGroups(scopedProjects, groupingMode, messages, locale);
   const availableTargets = connectedSettingsTargets(environments);
   const selectedTargets = useMemo(
     () =>
@@ -138,14 +154,15 @@ export function useSettingsEnvironmentFilter() {
       ),
     [availableTargets, selectedIds],
   );
+  const discoverableGroups = settingsProjectGroups(discoverable, groupingMode, messages, locale);
   const selectableProjectGroups = useMemo(
     () =>
-      projectGroups.filter((group) =>
+      discoverableGroups.filter((group) =>
         group.members.some((member) =>
           selectedTargets.some((target) => target.environmentId === member.project.environmentId),
         ),
       ),
-    [projectGroups, selectedTargets],
+    [discoverableGroups, selectedTargets],
   );
   return useMemo(
     () => ({

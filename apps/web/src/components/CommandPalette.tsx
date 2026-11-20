@@ -1,3 +1,8 @@
+import {
+  contextualProjectActionTarget,
+  contextualProjectSettings,
+} from "../projectSettingsNavigation";
+import { useProject } from "../state/entities";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { decodeMsg, msg, T, useGT, useMessages, Var } from "gt-react";
 import { m, type MessageResolver } from "../i18n/messages";
@@ -135,6 +140,7 @@ import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { useStartTriage } from "../hooks/useStartTriage";
 import { pickTriageEnvironment } from "../lib/triageTarget";
+import { TemporaryProjectsToggle } from "./TemporaryProjectsToggle";
 import { useNewProject } from "../hooks/useNewProject";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { reportProjectFailure, useProjectPin } from "../hooks/useProjectGroupUpdate";
@@ -280,7 +286,10 @@ import { suggestAppAccessForRemote } from "./sourceControlAppAccessToast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
-import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
+import {
+  pickableProjectGroups,
+  selectProjectGroupingSettings,
+} from "@t3tools/client-runtime/state/project-grouping";
 import {
   buildSidebarProjectPickerEntries,
   orderProjectMembersForPicker,
@@ -590,6 +599,8 @@ function OpenCommandPaletteDialog(props: {
     defaultProjectRef,
     handleNewThread,
   });
+  const contextualProject = useProject(contextualProjectRef);
+  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projectPickerEntries = buildSidebarProjectPickerEntries({
     groups: pickableProjectGroups(projectGroups),
     preferredProjectRef: contextualProjectRef,
@@ -1903,21 +1914,26 @@ function OpenCommandPaletteDialog(props: {
     });
   }
   const contextualProjectGroup = currentProjectGroup ?? projectGroups[0] ?? null;
-  if (contextualProjectGroup) {
+  const actionTarget = contextualProjectActionTarget(
+    contextualProjectGroup,
+    contextualProject,
+    projectGroupingSettings,
+  );
+  if (actionTarget !== null) {
     actionItems.push({
       kind: "action",
       value: "action:project-dashboard",
       searchTerms: ["dashboard", "project", "attention", "questions", "reviews", "qa", "progress"],
       title: gt("Open project dashboard"),
-      description: contextualProjectGroup.displayName,
+      description: actionTarget.label,
       icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         await navigate({
           to: "/dashboard",
           search: {
             environmentId:
-              contextualProjectRef?.environmentId ?? contextualProjectGroup.environmentId,
-            projectId: contextualProjectRef?.projectId ?? contextualProjectGroup.id,
+              contextualProjectRef?.environmentId ?? actionTarget.project.environmentId,
+            projectId: contextualProjectRef?.projectId ?? actionTarget.project.id,
           },
         });
       },
@@ -1939,13 +1955,10 @@ function OpenCommandPaletteDialog(props: {
         "t3.json",
       ],
       title: gt("Project settings"),
-      description: contextualProjectGroup.displayName,
+      description: actionTarget.label,
       icon: <FolderIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
-        await navigate({
-          to: "/projects/$projectKey",
-          params: { projectKey: contextualProjectGroup.projectKey },
-        });
+        await navigate(contextualProjectSettings(actionTarget.key, contextualProject));
       },
     });
   }
@@ -3182,7 +3195,17 @@ function OpenCommandPaletteDialog(props: {
       aria-label={gt("Command palette")}
       autoHighlight={autoHighlightsFirstRow ? "always" : false}
       footerActionLabel={footerActionLabel}
-      footerTrailing={footerTrailing}
+      footerTrailing={
+        (currentView === null && !isActionsOnly) ||
+        currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP ? (
+          <div className="flex items-center gap-2">
+            <TemporaryProjectsToggle />
+            {footerTrailing}
+          </div>
+        ) : (
+          footerTrailing
+        )
+      }
       inputAccessory={inputAccessory}
       inputProps={{
         className: hasHighlightedNewProjectItem

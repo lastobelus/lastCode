@@ -1,3 +1,4 @@
+import { useDiscoverableProjects } from "../../hooks/useDiscoverableProjects";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -110,6 +111,7 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
   const navigate = useNavigate();
   const ready = useAtomValue(allReachableShellsLiveAtom);
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects();
   const threads = useThreadShells();
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -125,9 +127,9 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
   const [launch, setLaunch] = useState<LinkLaunch | null>(null);
   const launchedRef = useRef<LinkLaunch | null>(null);
 
-  const recentProjects = () =>
+  const recentProjects = (candidates: ReadonlyArray<EnvironmentProject>) =>
     sortScopedProjectsForSidebar(
-      projects.filter((project) => project.isScratch !== true),
+      candidates.filter((project) => project.isScratch !== true),
       threads,
       "updated_at",
     );
@@ -294,7 +296,7 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
     !started &&
     link.kind === "pull-request" &&
     localPullRequestThread === undefined
-      ? findPromptLinkProjects(recentProjects(), link.pullRequest)
+      ? findPromptLinkProjects(recentProjects(projects), link.pullRequest)
       : [];
   const serverPullRequestThread = useAtomValue(
     link.kind === "pull-request" && lookupProjects.length > 0
@@ -313,7 +315,9 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
     const pullRequestThread = localPullRequestThread ?? serverPullRequestThread ?? undefined;
     const repository = link.kind === "new" ? link.repository : link.pullRequest;
     const project =
-      repository === null ? undefined : findPromptLinkProjects(recentProjects(), repository)[0];
+      repository === null
+        ? undefined
+        : findPromptLinkProjects(recentProjects(discoverable), repository)[0];
     if (pullRequestThread !== undefined) {
       setState({ status: "opened" });
       setLaunch({ kind: "thread", thread: pullRequestThread });

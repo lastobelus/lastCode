@@ -13224,5 +13224,10 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "0c5204be873f3a76": "一時プロジェクトを表示",
+  "0e2e3bf285bfc97c": "一時プロジェクトを非表示",
+  "66dc3acf46bef713": "プロジェクトを保持",
+  "35fa9b4a4dc657c7": "プロジェクトを保持できませんでした",
+  "a7c92c59b409fa46": "一時プロジェクト"
 }

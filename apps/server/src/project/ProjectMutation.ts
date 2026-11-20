@@ -48,6 +48,7 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
         ...(mutation.scripts === undefined ? {} : { scripts: mutation.scripts }),
         ...(mutation.pinned === undefined ? {} : { pinned: mutation.pinned }),
         ...(mutation.archived === undefined ? {} : { archived: mutation.archived }),
+        ...(mutation.keepTemporary === undefined ? {} : { keepTemporary: mutation.keepTemporary }),
       });
 
     case "project.scripts.reconcile":

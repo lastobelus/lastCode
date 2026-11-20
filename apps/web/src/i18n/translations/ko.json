@@ -13220,5 +13220,10 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "0c5204be873f3a76": "임시 프로젝트 표시",
+  "0e2e3bf285bfc97c": "임시 프로젝트 숨기기",
+  "66dc3acf46bef713": "프로젝트 유지",
+  "35fa9b4a4dc657c7": "프로젝트를 유지할 수 없습니다",
+  "a7c92c59b409fa46": "임시 프로젝트"
 }
