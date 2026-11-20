@@ -262,6 +262,7 @@ const command = (
   env?: NodeJS.ProcessEnv,
   input?: string,
   maxBuffer = 64 * 1024 * 1024,
+  overflowFailure?: { reason: string; path: string },
 ) =>
   new Promise<Buffer>((resolve, reject) => {
     const child = NodeChildProcess.execFile(
@@ -271,9 +272,11 @@ const command = (
       (error, stdout) => {
         if (error) {
           reject(
-            new WorktreeSuspensionError(
-              `${NodePath.basename(program)} could not complete verification`,
-            ),
+            error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" && overflowFailure !== undefined
+              ? new WorktreeSuspensionError(overflowFailure.reason, overflowFailure.path)
+              : new WorktreeSuspensionError(
+                  `${NodePath.basename(program)} could not complete verification`,
+                ),
           );
         } else resolve(stdout);
       },
@@ -740,6 +743,10 @@ const metadataCheck = async (
         undefined,
         undefined,
         MAX_ATTRIBUTE_BYTES * 4,
+        {
+          reason: "extended attributes exceed the value limit or are invalid",
+          path: absolute,
+        },
       );
       const hex = value.toString("ascii").replace(/\s/gu, "").toLowerCase();
       if (!/^(?:[a-f0-9]{2})*$/u.test(hex) || hex.length > MAX_ATTRIBUTE_BYTES * 2)
@@ -1185,12 +1192,22 @@ const checkIndex = (data: Buffer, objectHashBytes: number, indexPath: string) =>
 };
 
 const assertEmptyGitlinks = async (root: string, indexEntries: Buffer) => {
-  for (const entry of indexEntries.toString("utf8").split("\0")) {
-    if (entry.startsWith("040000 ")) refuse("sparse index entries are unsupported");
-    if (!entry.startsWith("160000 ")) continue;
-    const name = entry.slice(entry.indexOf("\t") + 1);
-    validRelativePath(name);
+  for (let offset = 0; offset < indexEntries.length;) {
+    const end = indexEntries.indexOf(0, offset);
+    if (end < 0) refuse("the Git index is incomplete");
+    const entry = indexEntries.subarray(offset, end);
+    offset = end + 1;
+    const mode = entry.subarray(0, 7).toString("ascii");
+    if (mode === "040000 ") refuse("sparse index entries are unsupported");
+    if (mode !== "160000 ") continue;
+    const separator = entry.indexOf(9);
+    if (separator < 0) refuse("the Git index is incomplete");
+    const rawName = entry.subarray(separator + 1);
+    const name = rawName.toString("utf8");
     const target = NodePath.join(root, name);
+    if (!Buffer.from(name).equals(rawName))
+      refuse(`a filename is not UTF-8 (name bytes: ${rawName.toString("hex")})`, target);
+    validRelativePath(name, root);
     if (await exists(target)) {
       const stat = await NodeFSP.lstat(target);
       if (

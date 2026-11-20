@@ -948,17 +948,12 @@ it
   },
 );
 
-it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
-  "bounds attribute values before hashing and validates saved attribute records",
-  async () => {
+it.runIf(HostProcess.Platform.defaultValue() === "darwin").each([64 * 1024 + 1, 128 * 1024])(
+  "bounds %i-byte attribute values before hashing and validates saved attribute records",
+  async (bytes) => {
     await using test = await fixture();
     const path = NodePath.join(test.workspace, "tracked.txt");
-    await execute("/usr/bin/xattr", [
-      "-swx",
-      "com.apple.ResourceFork",
-      "ab".repeat(64 * 1024 + 1),
-      path,
-    ]);
+    await execute("/usr/bin/xattr", ["-swx", "com.apple.ResourceFork", "ab".repeat(bytes), path]);
     using reads = vi.spyOn(NodeFSP, "open");
     await expect(
       test.store.capture({
@@ -966,7 +961,9 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
         operationId: "attribute-limit",
         ownerBinding: "fixture-owner",
       }),
-    ).rejects.toThrow("value limit");
+    ).rejects.toThrow(
+      `Workspace needs review: extended attributes exceed the value limit or are invalid (${JSON.stringify(path)})`,
+    );
     expect(
       reads.mock.calls.filter(
         ([name]) =>
@@ -1537,54 +1534,59 @@ it.each([
   expect(await NodeFSP.readFile(path, "utf8")).toBe("a".repeat(64));
 });
 
-it.each(["generated", "index-only", "HEAD-only", "newline-index"] as const)(
-  "reports unsafe tracked filenames (%s)",
-  async (kind) => {
-    await using test = await fixture();
-    if (kind === "generated") {
-      await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
-      await NodeFSP.mkdir(NodePath.join(test.workspace, "node_modules"));
-    }
-    const rawPath =
-      kind === "newline-index"
-        ? Buffer.from("z/unsafe\nname")
-        : Buffer.concat([Buffer.from("z/"), Buffer.from([255])]);
-    const blob = await git(test.workspace, "rev-parse", ":tracked.txt");
-    const updateIndex = (input: Buffer) =>
-      new Promise<void>((resolve, reject) => {
-        const child = NodeChildProcess.execFile(
-          "git",
-          ["-c", "core.hooksPath=/dev/null", "update-index", "-z", "--index-info"],
-          { cwd: test.workspace },
-          (error) => (error ? reject(error) : resolve()),
-        );
-        child.stdin!.end(input);
-      });
-    await updateIndex(Buffer.concat([Buffer.from(`100644 ${blob}\t`), rawPath, Buffer.from([0])]));
-    if (kind === "HEAD-only") {
-      await git(test.workspace, "commit", "-m", "tracked raw name");
-      await updateIndex(
-        Buffer.concat([Buffer.from(`0 ${"0".repeat(blob.length)}\t`), rawPath, Buffer.from([0])]),
+it.each([
+  "generated",
+  "index-only",
+  "HEAD-only",
+  "newline-index",
+  "gitlink",
+  "newline-gitlink",
+] as const)("reports unsafe tracked filenames (%s)", async (kind) => {
+  await using test = await fixture();
+  if (kind === "generated") {
+    await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
+    await NodeFSP.mkdir(NodePath.join(test.workspace, "node_modules"));
+  }
+  const rawPath = kind.startsWith("newline-")
+    ? Buffer.from("z/unsafe\nname")
+    : Buffer.concat([Buffer.from("z/"), Buffer.from([255])]);
+  const blob = await git(test.workspace, "rev-parse", ":tracked.txt");
+  const updateIndex = (input: Buffer) =>
+    new Promise<void>((resolve, reject) => {
+      const child = NodeChildProcess.execFile(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "update-index", "-z", "--index-info"],
+        { cwd: test.workspace },
+        (error) => (error ? reject(error) : resolve()),
       );
-    }
-    await expect(
-      test.store.capture({
-        sourcePath: test.workspace,
-        operationId: "tracked-name",
-        ownerBinding: "fixture-owner",
-      }),
-    ).rejects.toThrow(
-      `Workspace needs review: ${
-        kind === "newline-index"
-          ? "a filename cannot be represented safely"
-          : `${kind === "generated" ? "a tracked filename" : "a filename"} is not UTF-8 (name bytes: ${rawPath.toString("hex")})`
-      } (${JSON.stringify(NodePath.join(test.workspace, rawPath.toString("utf8")))})`,
+      child.stdin!.end(input);
+    });
+  const mode = kind.endsWith("gitlink") ? "160000" : "100644";
+  const object = kind.endsWith("gitlink") ? test.head : blob;
+  await updateIndex(Buffer.concat([Buffer.from(`${mode} ${object}\t`), rawPath, Buffer.from([0])]));
+  if (kind === "HEAD-only") {
+    await git(test.workspace, "commit", "-m", "tracked raw name");
+    await updateIndex(
+      Buffer.concat([Buffer.from(`0 ${"0".repeat(blob.length)}\t`), rawPath, Buffer.from([0])]),
     );
-    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
-      "unstaged\n",
-    );
-  },
-);
+  }
+  await expect(
+    test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "tracked-name",
+      ownerBinding: "fixture-owner",
+    }),
+  ).rejects.toThrow(
+    `Workspace needs review: ${
+      kind.startsWith("newline-")
+        ? "a filename cannot be represented safely"
+        : `${kind === "generated" ? "a tracked filename" : "a filename"} is not UTF-8 (name bytes: ${rawPath.toString("hex")})`
+    } (${JSON.stringify(NodePath.join(test.workspace, rawPath.toString("utf8")))})`,
+  );
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+    "unstaged\n",
+  );
+});
 
 it("batches retained metadata by argument bytes", async () => {
   await using test = await fixture();
