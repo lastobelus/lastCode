@@ -13299,5 +13299,10 @@
   "0c5204be873f3a76": "Visa tillfälliga projekt",
   "66dc3acf46bef713": "Behåll projektet",
   "35fa9b4a4dc657c7": "Det gick inte att behålla projektet",
-  "a7c92c59b409fa46": "Tillfälligt projekt"
+  "a7c92c59b409fa46": "Tillfälligt projekt",
+  "d22e7e0190f2c9a3": "Dina trådar",
+  "5cba2c5bf39f6de2": "Alla trådar",
+  "6d41d41d8eb64606": "Aviseringar för avslutade trådar",
+  "f36fe70ddf163463": "Vilka trådar som aviserar när de blir klara, misslyckas eller når en användningsgräns. Dina trådar är de du har startat eller skickat ett meddelande i. Förfrågningar om indata eller godkännande aviserar alltid.",
+  "fb3e494a31288492": "avisering notis klar avslutad agent mcp delegerad eval mina alla notification toast"
 }

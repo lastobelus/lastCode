@@ -1,3 +1,4 @@
+import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -130,4 +131,15 @@ export function createThreadNotificationGate<Key>(
       attended.clear();
     },
   };
+}
+
+/**
+ * The user started this thread, or took it over by writing in it. Agent-run threads (MCP
+ * launches, delegated tasks, eval cells, agent-scheduled runs) report through their parent.
+ */
+export function isUserThread(thread: {
+  readonly createdBy?: OrchestrationV2ThreadShell["createdBy"];
+  readonly latestUserAuthoredMessageAt?: unknown;
+}): boolean {
+  return thread.createdBy === "user" || thread.latestUserAuthoredMessageAt != null;
 }
