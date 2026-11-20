@@ -36,7 +36,7 @@ jobs:
       build: ${{ steps.detect.outputs.build }}
       desktop_launch: ${{ steps.detect.outputs.desktop_launch }}
       test: ${{ steps.detect.outputs.test }}
-      test_packages: ${{ steps.detect.outputs.test_packages }}
+      test_matrix: ${{ steps.test_matrix.outputs.matrix }}
       test_web: ${{ steps.detect.outputs.test_web }}
       test_server: ${{ steps.detect.outputs.test_server }}
       rust: ${{ steps.detect.outputs.rust }}
@@ -52,6 +52,7 @@ jobs:
           sparse-checkout: |
             /pnpm-workspace.yaml
             /.github/scripts/ci-changes.cjs
+            /.github/scripts/lastcode-ci-test-matrix.cjs
             /.github/actions/ci-changes/
             /*/package.json
             /*/*/package.json
@@ -61,6 +62,13 @@ jobs:
       - name: Detect affected jobs
         id: detect
         uses: ./.github/actions/ci-changes
+
+      - name: Assign affected packages to test runners
+        id: test_matrix
+        if: ${{ !cancelled() && steps.detect.outputs.test != 'false' }}
+        env:
+          TEST_PACKAGES: ${{ steps.detect.outputs.test_packages }}
+        run: node .github/scripts/lastcode-ci-test-matrix.cjs >> "$GITHUB_OUTPUT"
 
   # Lint and the desktop build each get a runner so they run side by side.
   # Typecheck shares the build's install. Lint always runs: it formats every
@@ -293,8 +301,9 @@ jobs:
           cat "$RUNNER_TEMP/typecheck.log"
           exit "$(cat "$RUNNER_TEMP/typecheck-status")"
 
-  # Everything except `t3` (apps/server) and the web app, which has its own job
-  # below. `--parallel` drops the package dependency ordering that `vp run`
+  # Remaining package suites after the web and server jobs below. The matrix
+  # gives mobile, scripts, and shared dedicated runners, as in release.yml.
+  # `--parallel` drops the package dependency ordering that `vp run`
   # applies by default: these `test` tasks declare no `dependsOn` and resolve
   # workspace deps from source, so ordering only bought us idle runners between
   # dependency layers. The concurrency limit stays at the default 4 so peak load
@@ -303,12 +312,15 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    name: Test
+    name: ${{ matrix.name }}
     needs: changes
     if: ${{ (github.event.action != 'edited' || github.event.changes.base) && !cancelled() && needs.changes.outputs.test != 'false' }}
     runs-on: ubuntu-24.04
-    # Include dependency setup and the complete package test run in the deadline.
+    # Include dependency setup and each group of package tests in the deadline.
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.test_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -335,6 +347,7 @@ jobs:
       # The desktop tests compile the browser secret helper. The install runs in
       # the background while Vite+ installs; the step before the tests waits for it.
       - name: Start installing browser secret helper build libraries
+        if: matrix.desktop
         run: |
           # Fetch only the indexes these main and universe packages need. The full set is ~42 MB,
           # which a slow mirror can stretch past the wait below.
@@ -359,41 +372,44 @@ jobs:
       # electron's install.js (run by ensure:electron) reads this cache before it
       # downloads from GitHub. The key changes only with the Electron version.
       - name: Cache Electron download
+        if: matrix.desktop
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/electron
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('node_modules/.pnpm/electron@*/node_modules/electron/package.json') }}
 
       - name: Ensure Electron runtime is installed
+        if: matrix.desktop
         run: vp run --filter @t3tools/desktop ensure:electron
 
       - name: Test preview artifact validation
+        if: matrix.workflowTests
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
 
       - name: Test release checks
-        run: node --test .github/scripts/check-nightly-release.test.cjs .github/scripts/vercel-deployment-output.test.cjs .github/scripts/mobile-preview-comment.test.cjs .github/scripts/mobile-ios-preview-record.test.cjs .github/scripts/test-delta.test.cjs .github/scripts/lastcode-upstream-delta.test.cjs .github/scripts/lastcode-metadata-ci-gate.test.cjs
+        if: matrix.workflowTests
+        run: node --test .github/scripts/check-nightly-release.test.cjs .github/scripts/vercel-deployment-output.test.cjs .github/scripts/mobile-preview-comment.test.cjs .github/scripts/mobile-ios-preview-record.test.cjs .github/scripts/test-delta.test.cjs .github/scripts/lastcode-upstream-delta.test.cjs .github/scripts/lastcode-metadata-ci-gate.test.cjs .github/scripts/lastcode-ci-test-matrix.test.cjs
 
       - name: Test APT mirror configuration
+        if: matrix.workflowTests
         run: node --test .github/scripts/setup-apt-mirrors.test.cjs
 
       - name: Finish installing browser secret helper build libraries
+        if: matrix.desktop
         timeout-minutes: 5
         run: |
           until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done
           cat "$RUNNER_TEMP/apt.log"
           exit "$(cat "$RUNNER_TEMP/apt-status")"
 
-      # `changes` lists the affected packages, or nothing when all of them are.
       - name: Test
         env:
-          TEST_PACKAGES: ${{ needs.changes.outputs.test_packages }}
+          TEST_FILTERS: ${{ matrix.filters }}
         run: |
           set -o pipefail
-          filters=(--filter '!t3' --filter '!@t3tools/monorepo' --filter '!@t3tools/web')
-          if [[ -n "$TEST_PACKAGES" ]]; then
-            filters=()
-            for package in $TEST_PACKAGES; do filters+=(--filter "$package"); done
-          fi
+          filters=()
+          read -r -a packages <<< "$TEST_FILTERS"
+          for package in "${packages[@]}"; do filters+=(--filter "$package"); done
           # The runner's trace writer can crash on surrogate pairs in test output.
           vp run --parallel --concurrency-limit 4 "${filters[@]}" test 2>&1 | python3 -u -c '
           import sys
