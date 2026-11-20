@@ -13168,5 +13168,6 @@
   "5cba2c5bf39f6de2": "Alle Threads",
   "6d41d41d8eb64606": "Hinweise zu beendeten Threads",
   "f36fe70ddf163463": "Welche Threads einen Hinweis zeigen, wenn sie fertig sind, fehlschlagen oder ein Nutzungslimit erreichen. Deine Threads sind die, die du gestartet oder in denen du eine Nachricht gesendet hast. Anfragen nach Eingabe oder Genehmigung lösen immer einen Hinweis aus.",
-  "fb3e494a31288492": "benachrichtigung hinweis abgeschlossen beendet agent mcp delegiert eval meine alle notification toast"
+  "fb3e494a31288492": "benachrichtigung hinweis abgeschlossen beendet agent mcp delegiert eval meine alle notification toast",
+  "cb49755a81176f6c": "Diese temporären Projekte und ihre Thread-Verläufe werden gelöscht. Ihre Ordner und Dateien bleiben auf dem Datenträger. Beim Aufheben der Archivierung werden sie nicht wiederhergestellt."
 }

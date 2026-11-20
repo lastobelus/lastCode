@@ -429,14 +429,7 @@ export interface ThreadManagementServiceShape {
   readonly searchThread: (
     input: OrchestrationV2SearchThreadInput,
   ) => Effect.Effect<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
-  readonly executeArchive: (input: {
-    readonly threadId: ThreadId;
-    readonly requestId: CommandId;
-  }) => Effect.Effect<
-    void,
-    Orchestrator.OrchestratorV2Error,
-    ProviderSessionManager.ProviderSessionManagerV2
-  >;
+  readonly executeArchive: LastCodeArchiveRunner.LastCodeArchiveRunner["Service"]["execute"];
   readonly ensureLegacyTranscript: (
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
@@ -905,6 +898,7 @@ const make = Effect.gen(function* () {
     yield* assertDispatchTargetEnabled(command);
     const result = yield* orchestrator.dispatch(command, options);
     if (command.type !== "thread.archive") return result;
+    yield* archiveRunner.awaitTemporaryProjectRemoval(command);
     const pending = result.storedEvents.some(
       (stored) =>
         stored.event.threadId === command.threadId &&

@@ -259,7 +259,7 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
-  it.effect("forwards the explicit archive decision, reviewed child set and failed attempt", () =>
+  it.effect("forwards the reviewed archive inputs and failed attempt", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
       const supervisor = yield* makeSupervisor({ commands, projects: [] });
@@ -268,6 +268,7 @@ describe("V2 environment commands", () => {
         threadId: ThreadId.make("parent"),
         childDisposition: "archive_after_review",
         expectedChildThreadIds: [ThreadId.make("child")],
+        expectedTemporaryProjectIds: [ProjectId.make("scratch")],
         expectedArchiveCommandId: CommandId.make("failed-attempt"),
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
       expect(commands).toEqual([
@@ -277,6 +278,7 @@ describe("V2 environment commands", () => {
           threadId: "parent",
           childDisposition: "archive_after_review",
           expectedChildThreadIds: ["child"],
+          expectedTemporaryProjectIds: ["scratch"],
           expectedArchiveCommandId: "failed-attempt",
         },
       ]);

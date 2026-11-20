@@ -1,6 +1,6 @@
 import { RegistryProvider } from "@effect/atom-react";
 import type { ThreadArchiveFamily } from "@t3tools/client-runtime/state/thread-archive";
-import { EnvironmentId, ThreadId, type SavedWorkspace } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId, type SavedWorkspace } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import { useState } from "react";
@@ -205,6 +205,14 @@ it.each([false, true])(
                 projectId,
               })),
               typedInThreadIds: [child.id],
+              temporaryProjects: [
+                { projectId: ProjectId.make("scratch"), title: "Scratch", requiresTypedIn: false },
+                {
+                  projectId: ProjectId.make("opt-in"),
+                  title: "Opt-in project",
+                  requiresTypedIn: true,
+                },
+              ],
             },
           }}
         />
@@ -216,9 +224,13 @@ it.each([false, true])(
       .element(page.getByRole("list", { name: "Saved copies retained" }).getByText(/Saved work/))
       .toBeVisible();
     await expect.element(savedCopies).not.toBeInTheDocument();
+    await expect.element(page.getByText("Scratch", { exact: true })).toBeVisible();
+    await expect.element(page.getByText(/Unarchiving won't restore them/)).toBeVisible();
+    await expect.element(page.getByText("Opt-in project")).not.toBeInTheDocument();
     if (includeTypedIn) {
       await page.getByRole("checkbox", { name: /Also archive threads/ }).click();
       await expect.element(savedCopies.getByText(/Saved work/)).toBeVisible();
+      await expect.element(page.getByText("Opt-in project")).toBeVisible();
     }
     await page.getByRole("button", { name: "Confirm and discard saved data" }).click();
     await expect.element(screen.getByRole("status")).toHaveTextContent(

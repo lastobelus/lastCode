@@ -1,4 +1,5 @@
 import { makeLastCodeArchivePlanner } from "./LastCodeArchivePlanner.ts";
+import { ArchiveTemporaryProjects } from "./LastCodeArchiveTemporaryProjects.ts";
 import { makeLastCodeThreadPromotion, threadPlacementParentId } from "./LastCodeThreadPromotion.ts";
 import { planGroupThreadUse } from "./planGroupThreadUse.ts";
 import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
@@ -20423,7 +20424,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
   });
 
+  const archiveProjects = yield* Effect.serviceOption(ArchiveTemporaryProjects);
   const archivePlanner = makeLastCodeArchivePlanner({
+    ...(Option.isSome(archiveProjects) ? { projects: archiveProjects.value } : {}),
     ...(Option.isSome(actionEnvironmentIdentity)
       ? { environmentId: yield* actionEnvironmentIdentity.value.getEnvironmentId }
       : {}),

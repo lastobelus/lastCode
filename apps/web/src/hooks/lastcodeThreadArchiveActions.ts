@@ -177,9 +177,7 @@ export function createLastCodeThreadArchiveActions(ports: {
       familyChoice?: {
         childDisposition: ThreadArchiveChildDisposition;
         expectedChildThreadIds: readonly ThreadId[];
-        expectedArchiveThreadIds?: readonly ThreadId[];
-        includeTypedInThreadIds?: readonly ThreadId[];
-      };
+      } & ReturnType<typeof archivePreviewSelection>;
       familyOwner?: EnvironmentThreadShell;
       familySnapshot?: ArchiveFamily;
     } = {},
@@ -596,11 +594,13 @@ export function createLastCodeThreadArchiveActions(ports: {
               ...family.childThreadIds,
             ];
             const confirmedTypedIn = new Set(selection.includeTypedInThreadIds);
+            const confirmedProjects = new Set(selection.expectedTemporaryProjectIds);
             if (
               !freshOwner ||
               freshIds.length !== remaining.size ||
               freshIds.some((id) => !remaining.has(id)) ||
-              freshSelection.includeTypedInThreadIds?.some((id) => !confirmedTypedIn.has(id))
+              freshSelection.includeTypedInThreadIds?.some((id) => !confirmedTypedIn.has(id)) ||
+              freshSelection.expectedTemporaryProjectIds?.some((id) => !confirmedProjects.has(id))
             ) {
               return AsyncResult.failure(
                 Cause.fail(
@@ -616,6 +616,9 @@ export function createLastCodeThreadArchiveActions(ports: {
               // Keep the exact consent even if removing the overlap returns a legacy family.
               ...(selection.expectedArchiveThreadIds !== undefined
                 ? { expectedArchiveThreadIds: [...remaining] }
+                : {}),
+              ...(selection.expectedTemporaryProjectIds !== undefined
+                ? { expectedTemporaryProjectIds: freshSelection.expectedTemporaryProjectIds ?? [] }
                 : {}),
             };
           }

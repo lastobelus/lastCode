@@ -14,6 +14,7 @@ import {
   consultThreadArchiveAgent,
   THREAD_ARCHIVE_CONSULTATION_BUSY_MESSAGE,
   THREAD_ARCHIVE_CONSULTATION_UNAVAILABLE_MESSAGE,
+  archivePreviewSelection,
   archiveRetryThreadId,
   getArchiveRecoveryRows,
   presentThreadArchive,
@@ -60,6 +61,59 @@ describe("archive confirmation", () => {
     expect(confirmation.blocked).toBe(true);
     expect(confirmation.threads[0]?.label).toBe("Persistent");
     expect(confirmation.description).toContain("can't be archived");
+  });
+  it("keeps bulk project names in sync with consent and scopes duplicates by environment", () => {
+    const scratch = {
+      projectId: ProjectId.make("scratch"),
+      title: "Scratch",
+      requiresTypedIn: false,
+    };
+    const typedIn = {
+      projectId: ProjectId.make("typed-in"),
+      title: "Typed in",
+      requiresTypedIn: true,
+    };
+    const archivePreview = {
+      environmentId: base.environmentId,
+      threads: [],
+      typedInThreadIds: [child.id],
+      temporaryProjects: [scratch, typedIn],
+    };
+    const remote = {
+      ...archivePreview,
+      environmentId: EnvironmentId.make("remote"),
+      temporaryProjects: [{ ...scratch, title: "Remote scratch" }],
+    };
+    const bulk = {
+      ...family,
+      activeThreadIds: [base.id],
+      bulkPreviews: [archivePreview, archivePreview, remote].map((archivePreview) => ({
+        archivePreview,
+        threads: family.threads,
+      })),
+    };
+    const selection = { archivePreview, keptThreadIds: [child.id] };
+    expect(archivePreviewSelection(selection).expectedTemporaryProjectIds).toEqual([
+      scratch.projectId,
+    ]);
+    expect(archivePreviewSelection(selection, true).expectedTemporaryProjectIds).toEqual([
+      scratch.projectId,
+      typedIn.projectId,
+    ]);
+    const defaultConfirmation = buildThreadArchiveConfirmation(bulk);
+    expect(defaultConfirmation.description).not.toContain(
+      "Unread replies stay in archived history",
+    );
+    expect(defaultConfirmation.description).not.toContain("Unarchiving reopens history");
+    expect(defaultConfirmation.temporaryProjects.map(({ title }) => title)).toEqual([
+      "Scratch",
+      "Remote scratch",
+    ]);
+    expect(
+      buildThreadArchiveConfirmation(bulk, undefined, true).temporaryProjects.map(
+        ({ title }) => title,
+      ),
+    ).toEqual(["Scratch", "Typed in", "Remote scratch"]);
   });
 });
 const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShellJson);

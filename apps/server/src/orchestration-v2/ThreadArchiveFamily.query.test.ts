@@ -1,3 +1,5 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -15,12 +17,29 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ServerConfig from "../config.ts";
+import * as ProjectEnrichment from "../project/ProjectEnrichmentService.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
+import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
+import * as EffectWorker from "./EffectWorker.ts";
+import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
+import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { ArchiveTemporaryProjects } from "./LastCodeArchiveTemporaryProjects.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -453,6 +472,201 @@ it.effect.each([
 );
 
 const archiveEnvironment = EnvironmentId.make("archive-query:environment");
+
+const archiveProjectsTestLayer = Layer.effect(
+  ProjectService.ProjectService,
+  ProjectService.make,
+).pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectStore.layer,
+      EventSink.layer.pipe(Layer.provide(Layer.merge(EventStore.layer, ProjectionStore.layer))),
+      ProjectionStore.layer,
+      IdAllocator.layer,
+      ThreadCommandExecutor.layer,
+      ServerSettings.layerTest(),
+      ServerConfig.layerTest(process.cwd(), { prefix: "temporary-wrap-up-test-" }),
+      UpdateDrainAdmissionTestkit.layerOpen,
+      SuspensionRegistryTestkit.layer,
+      Layer.mock(ProjectEnrichment.ProjectEnrichmentService)({
+        getAvailable: () =>
+          Effect.succeed({
+            repositoryIdentity: null,
+            faviconPath: null,
+            repositoryIdentityResolved: true,
+          }),
+        peek: () =>
+          Effect.succeed({
+            repositoryIdentity: null,
+            faviconPath: null,
+            repositoryIdentityResolved: true,
+          }),
+        readRepositoryIdentity: () => Effect.succeed(null),
+        invalidate: () => Effect.void,
+      }),
+      Layer.mock(WorkspacePaths.WorkspacePaths)({
+        normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
+      }),
+      Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
+        reconcileShells: Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
+        ensureTranscript: () => Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
+      }),
+    ),
+  ),
+  Layer.provide(database),
+  Layer.provide(NodeServices.layer),
+);
+
+const archiveWrapUpTestLayer = baseLayer.pipe(
+  Layer.provideMerge(
+    Layer.merge(
+      Layer.succeed(ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(archiveEnvironment),
+      }),
+      Layer.effect(ArchiveTemporaryProjects, ProjectService.ProjectService).pipe(
+        Layer.provideMerge(archiveProjectsTestLayer),
+      ),
+    ),
+  ),
+  Layer.provideMerge(NodeServices.layer),
+);
+
+it.effect.each(["remove", "keep", "new-thread", "written-in"] as const)(
+  "archives before removing a confirmed temporary project (%s)",
+  (scenario) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const projects = yield* ProjectService.ProjectService;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const now = yield* DateTime.now;
+      const root = makeThread(ThreadId.make("cleanup:root"), now);
+      const owner = { environmentId: archiveEnvironment, threadId: root.id };
+      const folder = yield* fs.makeTempDirectoryScoped({ prefix: "temporary-wrap-up-" });
+      const createProject = (name: string) =>
+        Effect.gen(function* () {
+          const projectId = ProjectId.make(`cleanup:${name}`);
+          const workspaceRoot = path.join(folder, name);
+          yield* fs.makeDirectory(workspaceRoot);
+          yield* projects.create(
+            {
+              projectId,
+              commandId: CommandId.make(`register:${projectId}`),
+              title: name,
+              workspaceRoot,
+            },
+            { temporary: true, owner },
+          );
+          return { id: projectId, workspaceRoot };
+        });
+      const scratch = yield* createProject("Scratch");
+      const occupied = yield* createProject("Occupied");
+      const marker = path.join(scratch.workspaceRoot, "keep.txt");
+      yield* fs.writeFileString(marker, "Workspace files stay on disk.");
+      const task = {
+        ...makeThread(ThreadId.make("cleanup:task"), now),
+        projectId: scratch.id,
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+        creatorOrigin: { kind: "thread_launch" as const, ...owner, owned: true },
+      };
+      const unrelated = {
+        ...makeThread(ThreadId.make("cleanup:unrelated"), now),
+        projectId: occupied.id,
+      };
+      const seedThread = (thread: OrchestrationV2AppThread) =>
+        store.apply({
+          id: EventId.make(`create:${thread.id}`),
+          type: "thread.created",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: thread,
+        });
+      for (const thread of [root, task, unrelated]) yield* seedThread(thread);
+      const keepWrittenIn = scenario === "written-in";
+      if (keepWrittenIn)
+        yield* store.apply({
+          id: EventId.make("cleanup:user-message"),
+          type: "message.updated",
+          threadId: task.id,
+          occurredAt: now,
+          payload: {
+            id: MessageId.make("cleanup:user-message"),
+            threadId: task.id,
+            runId: null,
+            nodeId: null,
+            role: "user",
+            text: "Keep working here",
+            attachments: [],
+            streaming: false,
+            createdBy: "user",
+            creationSource: "web",
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      const preview = yield* orchestrator.getThreadArchiveFamily(root.id);
+      assert.isTrue(preview.requiresConfirmation);
+      assert.deepEqual(preview.archivePreview?.temporaryProjects, [
+        { projectId: scratch.id, title: "Scratch", requiresTypedIn: keepWrittenIn },
+      ]);
+      const request = {
+        type: "thread.archive" as const,
+        threadId: root.id,
+        childDisposition: "archive_after_review" as const,
+        expectedChildThreadIds: preview.childThreadIds,
+        expectedArchiveThreadIds: keepWrittenIn ? [root.id] : [root.id, task.id],
+      };
+      const missingConsent = yield* orchestrator
+        .dispatch({
+          ...request,
+          commandId: CommandId.make("cleanup:unconfirmed"),
+          ...(keepWrittenIn ? { expectedTemporaryProjectIds: [scratch.id] } : {}),
+        })
+        .pipe(Effect.flip);
+      assert.equal(missingConsent._tag, "OrchestratorDispatchError");
+      assert.isNull((yield* store.getThread(root.id)).archivedAt);
+      const commandId = CommandId.make("cleanup:confirmed");
+      yield* orchestrator.dispatch({
+        ...request,
+        commandId,
+        expectedTemporaryProjectIds: keepWrittenIn ? [] : [scratch.id],
+      });
+      assert.isTrue(Option.isSome(yield* projects.getById(scratch.id)));
+      assert.isNull((yield* store.getThread(task.id)).archivedAt);
+      if (scenario === "keep")
+        yield* projects.update({
+          projectId: scratch.id,
+          commandId: CommandId.make("cleanup:keep"),
+          keepTemporary: true,
+        });
+      if (scenario === "new-thread")
+        yield* seedThread({
+          ...makeThread(ThreadId.make("cleanup:new"), now),
+          projectId: scratch.id,
+        });
+      yield* worker.drain();
+      assert.isNotNull((yield* store.getThread(root.id)).archivedAt);
+      assert.equal((yield* store.getThread(task.id)).archivedAt !== null, !keepWrittenIn);
+      assert.equal(Option.isNone(yield* projects.getById(scratch.id)), scenario === "remove");
+      assert.equal((yield* store.getThread(task.id)).deletedAt !== null, scenario === "remove");
+      assert.isTrue(Option.isSome(yield* projects.getById(occupied.id)));
+      assert.isNull((yield* store.getThread(unrelated.id)).archivedAt);
+      assert.equal(yield* fs.readFileString(marker), "Workspace files stay on disk.");
+      if (scenario === "remove") {
+        yield* orchestrator.dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make("cleanup:restore"),
+          threadId: root.id,
+        });
+        assert.isNull((yield* store.getThread(root.id)).archivedAt);
+        assert.isTrue(Option.isNone(yield* projects.getById(scratch.id)));
+        assert.isNotNull((yield* store.getThread(task.id)).deletedAt);
+      }
+    }).pipe(Effect.provide(archiveWrapUpTestLayer)),
+);
 
 const ownedArchiveCases = [
   { includeTypedIn: false, groupIsOwned: false },

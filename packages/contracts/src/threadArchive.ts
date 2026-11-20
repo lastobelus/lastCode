@@ -54,10 +54,29 @@ export const ThreadArchivePending = Schema.Union([
   ThreadArchiveParticipant,
 ]);
 
+export const ThreadArchiveTemporaryProjectPlan = Schema.Struct({
+  projects: Schema.Array(
+    Schema.Struct({ projectId: ProjectId, threadIds: Schema.Array(ThreadId) }),
+  ),
+  owner: Schema.Struct({ threadId: ThreadId, environmentId: EnvironmentId }),
+  allowedOwnerThreadIds: Schema.Array(ThreadId),
+  modeLimit: ThreadArchiveOperation.fields.modeLimit,
+});
+export type ThreadArchiveTemporaryProjectPlan = typeof ThreadArchiveTemporaryProjectPlan.Type;
+
 export const ThreadArchivePreview = Schema.Struct({
   environmentId: EnvironmentId,
   typedInThreadIds: Schema.Array(ThreadId),
   keptWithTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
+  temporaryProjects: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        projectId: ProjectId,
+        title: Schema.String,
+        requiresTypedIn: Schema.Boolean,
+      }),
+    ),
+  ),
   threads: Schema.Array(
     Schema.Struct({
       threadId: ThreadId,

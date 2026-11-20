@@ -6,6 +6,8 @@ import {
   isOrchestrationV2WorkActive,
   isOwnedSubagentThread,
   type EnvironmentId,
+  type ProjectId,
+  type ThreadArchiveTemporaryProjectPlan,
   type OrchestrationV2AppThread,
   type OrchestrationV2Command,
   type OrchestrationV2DomainEvent,
@@ -34,6 +36,12 @@ import type {
   OrchestratorV2DispatchResult,
   OrchestratorV2Error,
 } from "./Orchestrator.ts";
+import type { ProjectService } from "../project/ProjectService.ts";
+import {
+  readTemporaryProjectThreads,
+  selectTemporaryProjects,
+  temporaryProjectArchiveOwners,
+} from "./LastCodeArchiveTemporaryProjects.ts";
 import type { ProjectionStoreV2Shape, ProjectionStoreV2Error } from "./ProjectionStore.ts";
 import {
   archiveRepairNeedsConfirmation,
@@ -79,10 +87,12 @@ type WithLock = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E,
 
 interface LastCodeArchivePlannerPorts {
   readonly environmentId?: EnvironmentId;
+  readonly projects?: Pick<ProjectService["Service"], "listTemporaryOwnedBy">;
 
   readonly reader: {
     readonly store: Pick<
       ProjectionStoreV2Shape,
+      | "getShellSnapshot"
       | "getThread"
       | "getThreadShell"
       | "getThreadRecords"
@@ -345,6 +355,14 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     };
   };
 
+  const temporaryProjectOwner = (threadId: ThreadId) =>
+    ports.environmentId === undefined
+      ? undefined
+      : { environmentId: ports.environmentId, threadId };
+
+  const readTemporaryProjects = (threadId: ThreadId) =>
+    readTemporaryProjectThreads(ports.projects, projectionStore, temporaryProjectOwner(threadId));
+
   const getThreadArchiveFamily = Effect.fn("LastCodeArchivePlanner.getThreadArchiveFamily")(
     function* (
       threadId: ThreadId,
@@ -353,8 +371,15 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       const family = selectArchiveFamily(shells, threadId);
       const owner = shells.find((thread) => thread.id === threadId);
       const threads = owner === undefined ? [...family.children] : [owner, ...family.children];
-      const hasArchivePreview = family.expanded || family.typedInThreadIds.length > 0;
-      if (hasArchivePreview) {
+      const projectThreads =
+        owner?.archivedAt === null
+          ? yield* readTemporaryProjects(threadId).pipe(
+              Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+            )
+          : [];
+      const needsThreadPreview = family.expanded || family.typedInThreadIds.length > 0;
+      const familyCount = threads.length;
+      if (needsThreadPreview || projectThreads.length > 0) {
         const familyIds = new Set(threads.map(({ id }) => id));
         const sideChats = yield* archivableSideChats(threadId).pipe(
           Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
@@ -367,6 +392,29 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
           if (shell !== null) threads.push(shell);
         }
       }
+      const projectOwner = temporaryProjectOwner(threadId);
+      const previewProjects = (kept: ReadonlySet<ThreadId>) => {
+        if (projectOwner === undefined || projectThreads.length === 0) return [];
+        const selection = new Set(threads.filter(({ id }) => !kept.has(id)).map(({ id }) => id));
+        return selectTemporaryProjects(
+          projectThreads,
+          projectOwner,
+          selection,
+          temporaryProjectArchiveOwners(shells, projectOwner, selection),
+        );
+      };
+      const defaultProjects = new Set(
+        previewProjects(family.keptThreadIds).map(({ projectId }) => projectId),
+      );
+      const temporaryProjects = previewProjects(family.keptWithTypedInThreadIds).map(
+        ({ projectId, title }) => ({
+          projectId,
+          title,
+          requiresTypedIn: !defaultProjects.has(projectId),
+        }),
+      );
+      const hasArchivePreview = needsThreadPreview || temporaryProjects.length > 0;
+      if (!hasArchivePreview) threads.length = familyCount;
       const archiveCandidates = threads.filter(({ id }) => !family.keptThreadIds.has(id));
       const activity = yield* Effect.forEach(threads, (thread) =>
         archiveThreadPolicy(thread).pipe(
@@ -392,6 +440,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
                 ...(family.keptWithTypedInThreadIds.size > 0
                   ? { keptWithTypedInThreadIds: [...family.keptWithTypedInThreadIds] }
                   : {}),
+                ...(temporaryProjects.length === 0 ? {} : { temporaryProjects }),
                 threads: threads.map(({ id, projectId, title }) => ({
                   threadId: id,
                   projectId,
@@ -562,7 +611,10 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
     }
   });
 
-  const sameThreadIds = (left: ReadonlyArray<ThreadId>, right: ReadonlyArray<ThreadId>) => {
+  const sameThreadIds = <Id extends ThreadId | ProjectId>(
+    left: ReadonlyArray<Id>,
+    right: ReadonlyArray<Id>,
+  ) => {
     if (left.length !== right.length || new Set(left).size !== left.length) return false;
     const rightIds = new Set(right);
     return rightIds.size === right.length && left.every((id) => rightIds.has(id));
@@ -814,6 +866,46 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       return yield* reject(
         "Review the archive preview again. Pass expectedArchiveThreadIds excluding keptThreadIds. To include threads the user wrote in, confirm typedInThreadIds and exclude keptWithTypedInThreadIds instead.",
       );
+    const projectOwner = archivedRepair ? undefined : temporaryProjectOwner(root.id);
+    const projectThreads =
+      projectOwner === undefined
+        ? []
+        : yield* readTemporaryProjects(root.id).pipe(mapDispatchError(command));
+    const projectArchiveOwners =
+      projectOwner === undefined || projectThreads.length === 0
+        ? new Set<ThreadId>()
+        : temporaryProjectArchiveOwners(shells, projectOwner, archiveIdSet);
+    const temporaryProjects = selectTemporaryProjects(
+      projectThreads,
+      projectOwner,
+      archiveIdSet,
+      projectArchiveOwners,
+    );
+    const expectedProjects = command.expectedTemporaryProjectIds;
+    if (
+      (expectedProjects !== undefined || temporaryProjects.length > 0) &&
+      (!sameThreadIds(
+        expectedProjects ?? [],
+        temporaryProjects.map(({ projectId }) => projectId),
+      ) ||
+        (temporaryProjects.length > 0 && expected === undefined))
+    )
+      return yield* reject(
+        "Review the archive preview again. Pass the confirmed temporary project IDs as expectedTemporaryProjectIds.",
+      );
+    const modeLimit = yield* DispatchModeLimit;
+    const temporaryProjectPlan: ThreadArchiveTemporaryProjectPlan | undefined =
+      projectOwner === undefined || temporaryProjects.length === 0
+        ? undefined
+        : {
+            owner: projectOwner,
+            allowedOwnerThreadIds: [...projectArchiveOwners],
+            projects: temporaryProjects.map(({ projectId, threadIds }) => ({
+              projectId,
+              threadIds,
+            })),
+            modeLimit,
+          };
     if (
       family.children.length > 0 &&
       (command.childDisposition === undefined || command.expectedChildThreadIds === undefined)
@@ -909,6 +1001,7 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       );
     if (
       !archivedRepair &&
+      temporaryProjectPlan === undefined &&
       archiveIds.length === 1 &&
       family.children.length === 0 &&
       context.providerSessions.length === 0 &&
@@ -923,7 +1016,6 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
       return;
     }
     const now = yield* DateTime.now;
-    const modeLimit = yield* DispatchModeLimit;
     const pending = {
       threadId: command.threadId,
       commandId: command.commandId,
@@ -998,7 +1090,11 @@ export function makeLastCodeArchivePlanner(ports: LastCodeArchivePlannerPorts) {
         id: `effect:${command.commandId}:thread.archive`,
         commandId: command.commandId,
         threadId: command.threadId,
-        request: { type: "thread.archive", requestId: command.commandId },
+        request: {
+          type: "thread.archive",
+          requestId: command.commandId,
+          ...(temporaryProjectPlan === undefined ? {} : { temporaryProjectPlan }),
+        },
       } satisfies PendingOrchestrationEffectV2,
     ]);
   });

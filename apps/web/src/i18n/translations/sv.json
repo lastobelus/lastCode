@@ -13175,5 +13175,6 @@
   "5cba2c5bf39f6de2": "Alla trådar",
   "6d41d41d8eb64606": "Aviseringar för avslutade trådar",
   "f36fe70ddf163463": "Vilka trådar som aviserar när de blir klara, misslyckas eller når en användningsgräns. Dina trådar är de du har startat eller skickat ett meddelande i. Förfrågningar om indata eller godkännande aviserar alltid.",
-  "fb3e494a31288492": "avisering notis klar avslutad agent mcp delegerad eval mina alla notification toast"
+  "fb3e494a31288492": "avisering notis klar avslutad agent mcp delegerad eval mina alla notification toast",
+  "cb49755a81176f6c": "De här tillfälliga projekten och deras trådhistorik raderas. Mapparna och filerna finns kvar på disken. Avarkivering återställer dem inte."
 }

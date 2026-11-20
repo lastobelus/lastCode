@@ -48,6 +48,11 @@ import {
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import {
+  canRemoveWrappedProject,
+  WrappedProjectChanged,
+  type WrappedProjectDeletion,
+} from "../orchestration-v2/LastCodeArchiveTemporaryProjects.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import { deletedProjectOverridePatch } from "../provider/ProjectSettingsOverrideSweep.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
@@ -81,6 +86,7 @@ export interface ProjectDeleteInput {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly force?: boolean;
+  readonly wrappedProject?: WrappedProjectDeletion;
   readonly savedWorkspace?: SavedWorkspaceDisposition;
 }
 
@@ -153,6 +159,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
 }
 
 export type ProjectServiceError =
+  | WrappedProjectChanged
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
@@ -606,7 +613,8 @@ export const make = Effect.gen(function* () {
         }
         return yield* readCommitted(input.projectId);
       });
-      return yield* input.workspaceRoot === undefined ? run : withProjectRootLease(run);
+      const update = input.keepTemporary === true ? threadCommands.withPersistenceLock(run) : run;
+      return yield* input.workspaceRoot === undefined ? update : withProjectRootLease(update);
     },
   );
 
@@ -779,6 +787,11 @@ export const make = Effect.gen(function* () {
     const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads].sort(
       (a, b) => DateTime.toEpochMillis(b.createdAt) - DateTime.toEpochMillis(a.createdAt),
     );
+    if (
+      input.wrappedProject !== undefined &&
+      !canRemoveWrappedProject(projectThreads, input.wrappedProject)
+    )
+      return yield* new WrappedProjectChanged({ projectId });
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
@@ -837,6 +850,12 @@ export const make = Effect.gen(function* () {
               }
 
               if (existing.value.deletedAt === null) {
+                if (
+                  input.wrappedProject !== undefined &&
+                  temporaryProjectsOwnedBy([existing.value], input.wrappedProject.owner).length ===
+                    0
+                )
+                  return yield* new WrappedProjectChanged({ projectId });
                 yield* deleteChildThreads(input);
               }
               yield* commit({ type: "project.delete", commandId: input.commandId, projectId });

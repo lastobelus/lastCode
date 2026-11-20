@@ -3512,6 +3512,7 @@ export const OrchestrationV2Command = Schema.Union([
     childDisposition: Schema.optional(ThreadArchiveChildDisposition),
     expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
     expectedArchiveThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    expectedTemporaryProjectIds: Schema.optional(Schema.Array(ProjectId)),
     includeTypedInThreadIds: Schema.optional(Schema.Array(ThreadId)),
     /** Retries only this failed archive attempt on its original owner. */
     expectedArchiveCommandId: Schema.optional(CommandId),

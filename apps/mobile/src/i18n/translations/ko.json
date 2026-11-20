@@ -5568,5 +5568,6 @@
   "8afa8cbe18948320": "Enter 1 to 3650 days, then tap Save.",
   "c9b2723ade9155f6": "Save dependency retention days",
   "f3287c4ed3bdb117": "Save",
-  "45d8a48a56da69a3": "Filter settings environments"
+  "45d8a48a56da69a3": "Filter settings environments",
+  "cb49755a81176f6c": "이 임시 프로젝트와 해당 스레드 기록이 삭제됩니다. 폴더와 파일은 디스크에 남습니다. 보관을 해제해도 복원되지 않습니다."
 }

@@ -323,7 +323,11 @@ export const layerExecutor: Layer.Layer<
               );
           case "thread.archive":
             return threads
-              .executeArchive({ threadId: effect.threadId, requestId: effect.request.requestId })
+              .executeArchive({
+                threadId: effect.threadId,
+                // Preserve the confirmed project scope when replaying the effect.
+                ...effect.request,
+              })
               .pipe(
                 Effect.provideService(
                   ProviderSessionManager.ProviderSessionManagerV2,

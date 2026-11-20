@@ -49,6 +49,7 @@ it.effect.each([
     const planner = makeLastCodeArchivePlanner({
       reader: {
         store: {
+          getShellSnapshot: unexpected,
           getThread: unexpected,
           getThreadShell: () => Effect.succeed(null),
           getThreadRecords: unexpected,
