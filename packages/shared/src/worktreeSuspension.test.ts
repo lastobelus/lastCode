@@ -1672,8 +1672,11 @@ it("batches retained metadata by argument bytes", async () => {
   await NodeFSP.mkdir(NodePath.join(test.workspace, "node_modules"));
   const retained = NodePath.join(test.workspace, "retained");
   await NodeFSP.mkdir(retained);
+  // Avoid ext4 directory-index metadata in this batching fixture.
+  for (let group = 0; group < 20; group++)
+    await NodeFSP.mkdir(NodePath.join(retained, `group-${group}`));
   for (let index = 0; index < 500; index++)
-    await NodeFSP.writeFile(NodePath.join(retained, `file-${index}`), "x");
+    await NodeFSP.writeFile(NodePath.join(retained, `group-${index % 20}`, `file-${index}`), "x");
   using commands = vi.spyOn(NodeChildProcess, "execFile");
   await test.store.capture({
     sourcePath: test.workspace,
