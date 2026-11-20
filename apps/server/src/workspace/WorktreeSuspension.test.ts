@@ -145,6 +145,7 @@ const harness = (
     scratch?: boolean;
     failAfterPublication?: "suspended" | "active";
     cleanupThreads?: boolean;
+    archiveFamilyThreadIds?: readonly ThreadId[];
     historicalOwners?: Effect.Success<
       Cleanup.WorktreeCleanupService["Service"]["historicalWorktreeOwners"]
     >;
@@ -383,7 +384,8 @@ const harness = (
                   .map((thread) => ({ threadId: thread.id, worktreePath: thread.worktreePath! })),
               ),
             getOwnedThreadIds: (id) => Effect.succeed([id]),
-            getArchiveFamilyThreadIds: (id) => Effect.succeed([id]),
+            getArchiveFamilyThreadIds: (id) =>
+              Effect.succeed(options.archiveFamilyThreadIds ?? [id]),
             getShellSnapshot: () =>
               Effect.sync(() => ({
                 schemaVersion: 2 as const,
@@ -2032,6 +2034,59 @@ it.live("confirmed deletion discards the absent current copy without restoring i
         await expect(NodeFSP.lstat(f.workspace)).rejects.toMatchObject({ code: "ENOENT" });
         expect(await git(f.repository, "for-each-ref", `refs/lastcode/suspension/${id}/`)).toBe("");
       });
+    }),
+  ),
+);
+
+it.live("discards the confirmed archive's saved copy while another family member stays open", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, { archiveFamilyThreadIds: [firstId, secondId] });
+      h.threads.set(secondId, { ...h.threads.get(secondId)!, worktreePath: null });
+      const saved = yield* h.suspend;
+      const target = {
+        kind: "threads" as const,
+        threadIds: [firstId],
+        archiveThreadIds: [firstId],
+      };
+      const operation = "archive" as const;
+      const wrongSelection = yield* h.lifecycle.preview({
+        operation,
+        target: { ...target, archiveThreadIds: [firstId, secondId] },
+      });
+      const archive = Effect.sync(() => {
+        h.threads.set(firstId, { ...h.threads.get(firstId)!, archivedAt: at });
+      });
+      const mismatched = yield* h.lifecycle
+        .run(
+          {
+            operation,
+            target,
+            commandId: CommandId.make("archive:mismatched"),
+            savedWorkspace: { mode: "discard", previewToken: wrongSelection.token },
+          },
+          archive,
+        )
+        .pipe(Effect.result);
+      expect(mismatched._tag).toBe("Failure");
+      expect(h.threads.get(firstId)?.archivedAt).toBeNull();
+
+      const preview = yield* h.lifecycle.preview({ operation, target });
+      expect(preview.threadIds).toEqual([firstId]);
+      expect(preview.snapshots.map(({ snapshotId }) => snapshotId)).toEqual([
+        saved.summary.snapshotId,
+      ]);
+      yield* h.lifecycle.run(
+        {
+          operation,
+          target,
+          commandId: CommandId.make("archive:confirmed"),
+          savedWorkspace: { mode: "discard", previewToken: preview.token },
+        },
+        archive,
+      );
+      expect(h.threads.get(secondId)?.archivedAt).toBeNull();
+      expect((yield* h.registry.list)[0]?.summary.state).toBe("discarded");
     }),
   ),
 );

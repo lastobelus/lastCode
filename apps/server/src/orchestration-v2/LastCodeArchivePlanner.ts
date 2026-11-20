@@ -17,6 +17,7 @@ import {
   type OrchestrationV2ThreadArchiveFamily,
   type ThreadId,
   type ThreadPullRequestLink,
+  type WorkspaceLifecycleTarget,
 } from "@t3tools/contracts";
 import { getThreadOwner } from "@t3tools/shared/threadOwnership";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -55,6 +56,19 @@ type LastCodeArchiveCommand = Extract<
 type LastCodeArchiveFamilyCommand =
   | LastCodeArchiveCommand
   | Extract<OrchestrationV2ServerCommand, { readonly type: "thread.delete" }>;
+
+export function threadWorkspaceLifecycleTarget(
+  command: Extract<OrchestrationV2Command, { readonly type: "thread.archive" | "thread.delete" }>,
+): WorkspaceLifecycleTarget {
+  return {
+    kind: "threads",
+    threadIds: [command.threadId],
+    ...(command.type === "thread.archive" && command.expectedArchiveThreadIds !== undefined
+      ? { archiveThreadIds: command.expectedArchiveThreadIds }
+      : {}),
+  };
+}
+
 type CancelUnsettledEffects = {
   readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
   readonly threadIds?: ReadonlyArray<ThreadId>;

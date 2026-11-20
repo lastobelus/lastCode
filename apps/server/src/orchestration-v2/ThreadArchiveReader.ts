@@ -4,16 +4,21 @@ import type * as SqlClient from "effect/sql/SqlClient";
 import { interactiveThreadParentSql } from "./InteractiveThreadParentSql.ts";
 
 // Candidate discovery only. The planner qualifies recorded owners with getThreadOwner.
-export const readArchiveFamilyThreadIds = (sql: SqlClient.SqlClient, threadId: ThreadId) =>
-  sql<{ readonly thread_id: string }>`
+export const readArchiveFamilyThreadIds = (
+  sql: SqlClient.SqlClient,
+  threadId: ThreadId,
+  options?: { readonly legacyOnly?: boolean },
+) => {
+  const discovery = options?.legacyOnly ? 0 : 1;
+  return sql<{ readonly thread_id: string }>`
         WITH RECURSIVE recorded_owner_candidates(thread_id, parent_id) AS MATERIALIZED (
           SELECT thread_id, CAST(json_extract(payload_json, '$.creatorOrigin.threadId') AS TEXT)
           FROM orchestration_v2_projection_threads
-          WHERE json_extract(payload_json, '$.creatorOrigin.owned') = 1
+          WHERE ${discovery} = 1 AND json_extract(payload_json, '$.creatorOrigin.owned') = 1
           UNION ALL
           SELECT thread_id, CAST(json_extract(payload_json, '$.delegatedFrom.threadId') AS TEXT)
           FROM orchestration_v2_projection_threads
-          WHERE json_extract(payload_json, '$.delegatedFrom.threadId') IS NOT NULL
+          WHERE ${discovery} = 1 AND json_extract(payload_json, '$.delegatedFrom.threadId') IS NOT NULL
         ), family(thread_id) AS (
           SELECT ${threadId}
           UNION
@@ -35,7 +40,7 @@ export const readArchiveFamilyThreadIds = (sql: SqlClient.SqlClient, threadId: T
           JOIN orchestration_v2_projection_threads AS child ON child.thread_id = family.thread_id
           JOIN orchestration_v2_projection_threads AS parent
             ON parent.thread_id = ${interactiveThreadParentSql(sql, "child")}
-          WHERE child.project_id = parent.project_id
+          WHERE ${discovery} = 1 AND child.project_id = parent.project_id
             AND parent.archived_at IS NULL AND parent.deleted_at IS NULL
             AND json_extract(parent.payload_json, '$.groupThread') = 1
         )
@@ -58,8 +63,9 @@ export const readArchiveFamilyThreadIds = (sql: SqlClient.SqlClient, threadId: T
         UNION
         SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
         JOIN orchestration_v2_projection_threads AS root ON root.thread_id = ${threadId}
-        WHERE json_extract(child.payload_json, '$.archivedWith.threadId') =
+        WHERE ${discovery} = 1 AND json_extract(child.payload_json, '$.archivedWith.threadId') =
               json_extract(root.payload_json, '$.archivedWith.threadId')
           AND json_extract(child.payload_json, '$.archivedWith.commandId') =
               json_extract(root.payload_json, '$.archivedWith.commandId')
       `.pipe(Effect.map((rows) => rows.map((row) => ThreadId.make(row.thread_id))));
+};

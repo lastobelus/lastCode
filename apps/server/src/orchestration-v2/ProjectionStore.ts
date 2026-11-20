@@ -703,6 +703,7 @@ export interface ProjectionStoreV2Shape {
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
   readonly getArchiveFamilyThreadIds: (
     threadId: ThreadId,
+    options?: { readonly legacyOnly?: boolean },
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
   readonly getGroupedCreatorThreadIds: (
     creatorThreadIds: ReadonlyArray<ThreadId>,
@@ -6223,8 +6224,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const getArchiveFamilyThreadIds: ProjectionStoreV2Shape["getArchiveFamilyThreadIds"] = (
       threadId,
+      options,
     ) =>
-      readArchiveFamilyThreadIds(sql, threadId).pipe(
+      readArchiveFamilyThreadIds(sql, threadId, options).pipe(
         Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
       );
 
