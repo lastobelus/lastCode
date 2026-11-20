@@ -13,8 +13,7 @@ import {
 import { subagentHoldsCompletion } from "@t3tools/provider-core/server/subagentProjection";
 import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
 import * as Effect from "effect/Effect";
-import type { OrchestratorV2DispatchResult, OrchestratorV2Error } from "./Orchestrator.ts";
-import type { ProjectionStoreV2, ProjectionStoreV2Error } from "./ProjectionStore.ts";
+import type { ProjectionStoreV2 } from "./ProjectionStore.ts";
 
 export function threadPlacementParentId(thread: OrchestrationV2ThreadShell): ThreadId | null {
   return isOwnedSubagentThread(thread)
@@ -26,6 +25,9 @@ function defaultReturnParentId(
   thread: OrchestrationV2AppThread,
   owner: OrchestrationV2ThreadShell,
 ): ThreadId | null {
+  // Clearing independence restores the execution parent even with explicit null placement.
+  if (thread.lineage.relationshipToParent === "subagent" && thread.delegatedFrom == null)
+    return thread.lineage.parentThreadId;
   if (
     thread.projectId !== owner.projectId ||
     owner.lineage.sideChat === true ||
@@ -33,9 +35,7 @@ function defaultReturnParentId(
     thread.delegatedFrom != null
   )
     return null;
-  return thread.creatorThreadId === owner.id || thread.lineage.relationshipToParent === "subagent"
-    ? owner.id
-    : null;
+  return thread.creatorThreadId === owner.id ? owner.id : null;
 }
 
 type Task = Pick<OrchestrationV2Subagent, "status" | "result" | "completionDelivery">;
@@ -166,50 +166,10 @@ export function makeLastCodeThreadPromotion<E>(
 
   const participants = Effect.fn("LastCodeThreadPromotion.participants")(function* (
     threadId: ThreadId,
-    action: ThreadOwnershipAction,
   ) {
     const thread = yield* store.getThread(threadId);
     const { owner, environmentId } = yield* readOwner(thread);
-    const ids = new Set([threadId]);
-    if (owner?.environmentId !== environmentId) return ids;
-    ids.add(owner.threadId);
-    if (action === "return_to_owner") {
-      const ownerShell = yield* store.getThreadShell(owner.threadId);
-      if (ownerShell === null || defaultReturnParentId(thread, ownerShell) === null) return ids;
-      let next = threadPlacementParentId(ownerShell);
-      while (next !== null && !ids.has(next)) {
-        ids.add(next);
-        const ancestor = yield* store.getThreadShell(next);
-        next = ancestor === null ? null : threadPlacementParentId(ancestor);
-      }
-    }
-    return ids;
-  });
-
-  const withParticipantLocks = Effect.fn("LastCodeThreadPromotion.withParticipantLocks")(function* (
-    threadId: ThreadId,
-    action: ThreadOwnershipAction,
-    withLocks: (
-      ids: Iterable<ThreadId>,
-      effect: Effect.Effect<OrchestratorV2DispatchResult | null, OrchestratorV2Error>,
-    ) => Effect.Effect<OrchestratorV2DispatchResult | null, OrchestratorV2Error>,
-    dispatch: Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>,
-    mapLookupError: (cause: E | ProjectionStoreV2Error) => OrchestratorV2Error,
-  ) {
-    const collect = participants(threadId, action).pipe(Effect.mapError(mapLookupError));
-    for (;;) {
-      const locked = yield* collect;
-      const result = yield* withLocks(
-        locked,
-        Effect.gen(function* () {
-          // An ancestor may have moved before its lock was acquired.
-          const current = yield* collect;
-          if ([...current].some((id) => !locked.has(id))) return null;
-          return yield* dispatch;
-        }),
-      );
-      if (result !== null) return result;
-    }
+    return owner?.environmentId === environmentId ? [threadId, owner.threadId] : [threadId];
   });
 
   const plan = Effect.fn("LastCodeThreadPromotion.plan")(function* (
@@ -248,5 +208,5 @@ export function makeLastCodeThreadPromotion<E>(
     };
   });
 
-  return { read, withParticipantLocks, plan };
+  return { read, participants, plan };
 }

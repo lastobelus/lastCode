@@ -47,6 +47,8 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { loadSubscriberShellSnapshot } from "./ShellStream.ts";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as ProjectionReplay from "./testkit/ProjectionReplay.ts";
 import * as EventStore from "./EventStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -164,7 +166,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
   Layer.provideMerge(UpdateDrainAdmissionTestkit.layerOpen),
-  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
   Layer.provideMerge(ServerSettings.layerTest()),
@@ -731,6 +733,58 @@ it.layer(layerFollowups)("delegated background wakes", (it) => {
         assert.isNull(promoted.groupedUnderThreadId);
         assert.deepEqual(promoted.forkedFrom, before.forkedFrom);
         assert.strictEqual((yield* orchestrator.dispatch(command)).sequence, result.sequence);
+
+        const sql = yield* SqlClient.SqlClient;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const { snapshot } = yield* loadSubscriberShellSnapshot({
+          sql,
+          listShellIndex: store.listActiveShellIndex(),
+          readThreads: (threadIds) =>
+            store.readShellSnapshot({
+              location: "active",
+              ...(threadIds === undefined ? {} : { threadIds }),
+            }),
+          listProjects: Effect.succeed([]),
+          latestSequence: Effect.succeed(result.sequence),
+          options: { omitIdleSubagents: true, omitOlderSettled: true },
+        });
+        assert.isTrue(snapshot.threads.some((thread) => thread.id === child.childThreadId));
+
+        const projects = yield* ProjectService.ProjectService;
+        const sink = yield* EventSink.EventSinkV2;
+        const movedProject = ProjectId.make("project:promotion-moved");
+        yield* projects.create({
+          commandId: CommandId.make("project:promotion-moved"),
+          projectId: movedProject,
+          title: "Moved owner",
+          workspaceRoot: "/workspace/promotion-moved",
+        });
+        const owner = (yield* orchestrator.getThreadProjection(parentThreadId)).thread;
+        const placeOwner = (projectId: ProjectId) =>
+          sink.write({
+            events: [
+              {
+                type: "thread.metadata-updated",
+                id: EventId.make(`event:promotion-owner:${projectId}`),
+                threadId: parentThreadId,
+                occurredAt: now,
+                payload: { ...owner, projectId },
+              },
+            ],
+          });
+        yield* placeOwner(movedProject);
+        const invalidParent = yield* Effect.flip(
+          orchestrator.dispatch({
+            ...command,
+            action: "return_to_owner",
+            commandId: CommandId.make("command:return-with-moved-owner"),
+          }),
+        );
+        assert.include(JSON.stringify(invalidParent), "in this project");
+        assert.isTrue(
+          (yield* orchestrator.getThreadProjection(child.childThreadId)).thread.lineage.independent,
+        );
+        yield* placeOwner(projectId);
 
         yield* orchestrator.dispatch({
           ...command,

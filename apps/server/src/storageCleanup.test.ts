@@ -2869,6 +2869,7 @@ describe("subagent worktree ownership", () => {
     "pending-parent",
     "unsettled-child",
     "pinned-child",
+    "released-child",
     "fork",
     "missing-parent",
     "cycle",
@@ -2906,6 +2907,7 @@ describe("subagent worktree ownership", () => {
                   : root.id,
           rootThreadId: root.id,
           relationshipToParent: scenario === "fork" ? "fork" : "subagent",
+          ...(scenario === "released-child" ? { independent: true } : {}),
         },
         status: scenario === "running-child" ? "running" : "completed",
         pendingBackgroundTasks:
@@ -3025,6 +3027,7 @@ describe("subagent worktree ownership", () => {
     "cycle",
     "two-tops",
     "wrong-root",
+    "released-child",
     "running",
     "pending",
     "unrelated",
@@ -3089,6 +3092,7 @@ describe("subagent worktree ownership", () => {
                 ? null
                 : "subagent",
           ...(scenario === "side-chat" ? { sideChat: true } : {}),
+          ...(scenario === "released-child" ? { independent: true } : {}),
         },
         status: ["running", "branchless-running"].includes(scenario) ? "running" : "completed",
         pendingBackgroundTasks: scenario === "pending" ? [{ taskId: "task", kind: "command" }] : [],
@@ -3132,6 +3136,7 @@ describe("subagent worktree ownership", () => {
         "cycle",
         "two-tops",
         "wrong-root",
+        "released-child",
       ].includes(scenario);
       expect(yield* fixture.fs.exists(fixture.worktree)).toBe(!removed);
       expect(checkoutEntries(report)[0]).toMatchObject({

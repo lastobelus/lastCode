@@ -20598,17 +20598,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           dispatchAccepted(undefined, sideChatIds),
         );
       if (command.type === "thread.ownership.change")
-        return yield* promotion.withParticipantLocks(
-          command.threadId,
-          command.action,
-          withThreadDispatchLocks,
-          dispatchAccepted(),
-          (cause) =>
-            new OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
+        return yield* promotion.participants(command.threadId).pipe(
+          mapDispatchError(command),
+          Effect.flatMap((ids) => withThreadDispatchLocks(ids, dispatchAccepted())),
         );
       if (
         (command.type === "thread.create" &&

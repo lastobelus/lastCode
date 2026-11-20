@@ -13,6 +13,7 @@ import {
   BUILD_REVIEW_PAGE_SIZE,
   GitCommandError,
   CommandId,
+  isOwnedSubagentThread,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
@@ -302,8 +303,7 @@ function worktreeOwner<T extends Pick<OrchestrationV2ThreadShell, "id" | "lineag
     while (current.id !== owner.id) {
       if (
         seen.has(current.id) ||
-        (current.lineage.relationshipToParent !== "subagent" &&
-          current.lineage.sideChat !== true) ||
+        (!isOwnedSubagentThread(current) && current.lineage.sideChat !== true) ||
         current.lineage.rootThreadId !== owner.lineage.rootThreadId
       )
         return undefined;
@@ -326,7 +326,7 @@ function worktreeSettlementChain(
   let current = thread;
   while (current.settledAt === null) {
     if (
-      current.lineage.relationshipToParent !== "subagent" ||
+      !isOwnedSubagentThread(current) ||
       current.settledOverride === "active" ||
       current.pinnedAt != null
     )

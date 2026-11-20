@@ -15,6 +15,7 @@ import {
   isListedThreadLineage,
   isLiveSubagentShell,
   isOlderSettledThreadShell,
+  isOwnedSubagentThread,
   OrchestrationProjectShell as ProjectShellSchema,
   OrchestrationV2ThreadShell as ThreadShellSchema,
 } from "@t3tools/contracts";
@@ -208,7 +209,8 @@ function shellTrimFacts(rows: ReadonlyArray<ShellTrimRow>): ShellTrimFacts {
     if (row.lineage.relationshipToParent === "subagent") {
       subagentThreadIds.add(row.id);
       if (row.lineage.parentThreadId) subagentParentIds.add(row.lineage.parentThreadId);
-    } else if (
+    }
+    if (
       isListedThreadLineage(row.lineage) &&
       row.settledOverride === "settled" &&
       row.settledAt !== null
@@ -254,7 +256,7 @@ function omitIdleSubagentShellsWith(
 ): ReadonlyArray<OrchestrationV2ThreadShell> {
   return threads.filter(
     (thread) =>
-      thread.lineage.relationshipToParent !== "subagent" ||
+      !isOwnedSubagentThread(thread) ||
       isLiveSubagentShell(thread) ||
       thread.worktreeCleanup != null ||
       facts.subagentParentIds.has(thread.id) ||
@@ -377,7 +379,7 @@ function shellSubscriberThreadIds(
   const facts = shellTrimFacts(index);
   const subagents = index.filter(
     (entry) =>
-      entry.lineage.relationshipToParent === "subagent" &&
+      isOwnedSubagentThread(entry) &&
       (!options.omitIdleSubagents ||
         entry.mayBeLive ||
         entry.hasRemoteTasks ||
@@ -390,7 +392,7 @@ function shellSubscriberThreadIds(
   const keptSubagentIds = new Set(subagents.map((entry) => entry.id));
   const beforeMs = facts.olderSettledBeforeMs;
   return index.flatMap((entry) =>
-    entry.lineage.relationshipToParent === "subagent"
+    isOwnedSubagentThread(entry)
       ? keptSubagentIds.has(entry.id)
         ? [entry.id]
         : []

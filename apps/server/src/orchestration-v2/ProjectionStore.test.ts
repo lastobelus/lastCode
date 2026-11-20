@@ -9286,6 +9286,27 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           `only the child of the open parent is armed (${JSON.stringify(options)})`,
         );
       }
+      const childWithSettledParent = (yield* store.getThreadProjection(settledParentChild)).thread;
+      yield* store.apply({
+        id: EventId.make("event:settled-parent-limit:released"),
+        type: "thread.metadata-updated",
+        threadId: settledParentChild,
+        occurredAt: now,
+        payload: {
+          ...childWithSettledParent,
+          lineage: { ...childWithSettledParent.lineage, independent: true },
+        },
+      });
+      const released = (yield* store.getLimitRecoveryCandidates({
+        now,
+        autoResume: true,
+        snooze: false,
+      })).find((row) => row.id === settledParentChild);
+      assert.isDefined(released);
+      assert.equal(
+        limitRecoveryCommand(released, true, DateTime.toEpochMillis(now), false)?.type,
+        "thread.metadata.update",
+      );
       // A recovery armed before the parent settled still resumes at its reset.
       yield* store.apply({
         id: EventId.make("event:settled-parent-limit:settled:armed"),
