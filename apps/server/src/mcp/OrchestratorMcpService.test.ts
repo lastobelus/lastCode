@@ -15,6 +15,7 @@ import {
   type Project,
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
+  type ModelSelection,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
   ScheduledTaskId,
@@ -77,9 +78,15 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
-import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpToolAccess from "./McpToolAccess.ts";
+import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
+import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
+import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
+import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -1838,6 +1845,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed(providers),
       refreshInstance: () => Effect.succeed(providers),
+      refreshWorkspaceSnapshot: () => Effect.succeed(providers),
     });
 
   const adapterRegistryLayer = (instanceIds: ReadonlyArray<ProviderInstanceId>) =>
@@ -4445,6 +4453,11 @@ describe("OrchestratorMcpService provider resolution", () => {
         readonly project: ScheduledTask["modelSelection"] | null;
         readonly environment?: ScheduledTask["modelSelection"];
       } = { project: existing.modelSelection },
+      models?: {
+        providers?: ReadonlyArray<ServerProvider>;
+        enabledForProject?: boolean;
+        parent?: OrchestrationV2ThreadProjection;
+      },
     ) =>
       OrchestratorMcpService.layer.pipe(
         Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
@@ -4464,15 +4477,19 @@ describe("OrchestratorMcpService provider resolution", () => {
             }),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadShell: () => Effect.succeed(null),
+              getThreadRecords: () => Effect.succeed(models!.parent!),
+              isProviderInstanceEnabledForProject: () =>
+                Effect.succeed(models?.enabledForProject ?? true),
             }),
             ServerSettings.layerTest(
               defaults.environment === undefined
                 ? {}
                 : { defaultModelSelection: defaults.environment },
             ),
-            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+            providerRegistryLayer(models?.providers ?? []),
             Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-              list: () => Effect.succeed([]),
+              list: () =>
+                Effect.succeed(models?.providers?.map((provider) => provider.instanceId) ?? []),
             }),
             Layer.mock(ProjectService.ProjectService)({
               getById: () =>
@@ -4481,6 +4498,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   workspaceRoot,
                   defaultModelSelection: defaults.project,
                 } as never),
+              workspaceScanDirectory: (cwd) => Effect.succeed(cwd),
             }),
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(RemoteDelegation.RemoteDelegation)({}),
@@ -4493,7 +4511,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                       ? Effect.void
                       : Ref.update(inputs, (all) => [...all, input]),
                   ),
-                  Effect.as({ task }),
+                  Effect.as({ task: { ...task, modelSelection: input.modelSelection } }),
                 ),
             }),
           ),
@@ -4506,6 +4524,345 @@ describe("OrchestratorMcpService provider resolution", () => {
       resolveCommit: () => Effect.succeed({ commitSha: "abc123" }),
     };
     const schedule = { type: "interval", everyMs: 3_600_000 } as const;
+
+    const selectedModel = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-haiku-4-5",
+      options: [{ id: "effort", value: "low" }],
+    } as const satisfies ModelSelection;
+    // `schedule_task` names the instance as `target` does.
+    const requested = ({ instanceId, model, options }: ModelSelection) => ({
+      providerInstanceId: instanceId,
+      model,
+      ...(options === undefined ? {} : { options }),
+    });
+    const selectedProvider: ServerProvider = {
+      ...providerSnapshot({
+        instanceId: selectedModel.instanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        model: selectedModel.model,
+      }),
+      models: [
+        {
+          slug: "machine-only-model",
+          name: "machine-only-model",
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+      // The selected model is only in the project folder's catalog, as orchestrator_capabilities lists it.
+      workspaceSnapshots: [
+        {
+          cwd: workspaceRoot,
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          slashCommands: [],
+          skills: [],
+          models: [
+            {
+              slug: selectedModel.model,
+              name: selectedModel.model,
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "effort",
+                    label: "Effort",
+                    type: "select",
+                    options: [{ id: "low", label: "Low" }],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    it.effect.each([
+      { name: "with options", selection: selectedModel, freshSession: undefined },
+      {
+        name: "without options and with new threads per run",
+        freshSession: false,
+        selection: { instanceId: selectedModel.instanceId, model: selectedModel.model },
+      },
+    ])(
+      "creates, updates, and lists the selected scheduled-task model $name",
+      ({ selection, freshSession }) =>
+        Effect.gen(function* () {
+          const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                { ...existing, threadId: ThreadId.make("thread:previous-scheduled-run") },
+                saved,
+                undefined,
+                {
+                  providers: [selectedProvider],
+                },
+              ),
+            ),
+          );
+          const dependencies = Layer.mergeAll(
+            Layer.succeed(OrchestratorMcpService.OrchestratorMcpService, mcp),
+            Layer.succeed(McpInvocationContext.McpInvocationContext, client),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(ThreadMetadataMcpService.ThreadMetadataMcpService)({}),
+            Layer.mock(PeerForwarding.PeerForwarding)({}),
+            Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+            Layer.mock(PeerLinks.PeerLinks)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          );
+          const toolkit = yield* OrchestratorToolkit.pipe(
+            Effect.provide(
+              McpToolAccess.HandlersLayer.layer(OrchestratorHandlers.layer).pipe(
+                Layer.provide(dependencies),
+              ),
+            ),
+          );
+          const createResults = yield* toolkit
+            .handle("schedule_task", {
+              projectId,
+              prompt: "Check the build",
+              schedule,
+              modelSelection: requested(selection),
+              ...(freshSession === undefined ? {} : { freshSession }),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          const updateResults = yield* toolkit
+            .handle("schedule_task", {
+              scheduledTaskId: existing.id,
+              modelSelection: requested(selection),
+              ...(freshSession === undefined ? {} : { freshSession }),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          const savedInputs = yield* Ref.get(saved);
+          const expectedMode = freshSession === false ? "new_thread" : "fresh_session";
+          assert.lengthOf(savedInputs, 2);
+          for (const input of savedInputs) {
+            assert.deepEqual(input.modelSelection, selection);
+            assert.equal(input.threadId, null);
+            assert.equal(input.threadMode, expectedMode);
+          }
+          const expected = { modelSelection: requested(selection) };
+          assert.deepInclude(createResults.at(-1)?.result, expected);
+          assert.deepInclude(updateResults.at(-1)?.result, expected);
+          const listed = yield* mcp.listScheduledTasks(client, {});
+          assert.deepEqual(listed.tasks[0]?.modelSelection, requested(existing.modelSelection));
+        }),
+    );
+
+    it.effect(
+      "inherits a caller or project model on create and keeps a stored model on update",
+      () =>
+        Effect.gen(function* () {
+          const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const projection = parentProjection([], selectedModel);
+          const parent = { ...projection, thread: { ...projection.thread, projectId } };
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                existing,
+                saved,
+                undefined,
+                {
+                  parent,
+                },
+              ),
+            ),
+          );
+          yield* mcp.scheduleTask(client, { projectId, prompt: "Check the build", schedule });
+          yield* mcp.scheduleTask(scope, {
+            projectId,
+            prompt: "Check the build",
+            schedule,
+            bindToCurrentThread: false,
+          });
+          yield* mcp.updateScheduledTask(scope, { scheduledTaskId: existing.id, title: "Renamed" });
+          assert.deepEqual(
+            (yield* Ref.get(saved)).map((input) => input.modelSelection),
+            [existing.modelSelection, selectedModel, existing.modelSelection],
+          );
+        }),
+    );
+
+    it.effect("accepts an Antigravity suffixed model as delegate_task does", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const instanceId = ProviderInstanceId.make("antigravity");
+        const antigravity: ServerProvider = {
+          ...providerSnapshot({
+            instanceId,
+            driver: ProviderDriverKind.make("antigravity"),
+            model: "gemini-4-neon",
+          }),
+          models: [
+            {
+              slug: "gemini-4-neon",
+              name: "Gemini 4 Neon",
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "thinking",
+                    label: "Thinking",
+                    type: "select",
+                    role: "reasoning",
+                    options: [
+                      { id: "low", label: "Low" },
+                      { id: "high", label: "High" },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        };
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            service(
+              masterRepository,
+              yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+              existing,
+              saved,
+              undefined,
+              { providers: [antigravity] },
+            ),
+          ),
+        );
+        yield* mcp.scheduleTask(client, {
+          projectId,
+          prompt: "Check the build",
+          schedule,
+          modelSelection: { providerInstanceId: instanceId, model: "gemini-4-neon-high" },
+        });
+        assert.deepEqual((yield* Ref.get(saved)).at(0)?.modelSelection, {
+          instanceId,
+          model: "gemini-4-neon",
+          options: [{ id: "thinking", value: "high" }],
+        });
+      }),
+    );
+
+    it.effect("refuses to bind an explicit task model to the caller's thread", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const projection = parentProjection([], existing.modelSelection);
+        const parent = { ...projection, thread: { ...projection.thread, projectId } };
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            service(
+              masterRepository,
+              yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+              existing,
+              saved,
+              undefined,
+              { parent, providers: [selectedProvider] },
+            ),
+          ),
+        );
+        const modelAndBinding = {
+          modelSelection: requested(selectedModel),
+          bindToCurrentThread: true,
+        };
+        const createError = yield* mcp
+          .scheduleTask(scope, {
+            projectId,
+            prompt: "Check the build",
+            schedule,
+            ...modelAndBinding,
+          })
+          .pipe(Effect.flip);
+        const updateError = yield* mcp
+          .updateScheduledTask(scope, {
+            scheduledTaskId: existing.id,
+            ...modelAndBinding,
+          })
+          .pipe(Effect.flip);
+        for (const error of [createError, updateError]) {
+          assert.equal(error.code, "invalid_request");
+          assert.include(error.message, "bindToCurrentThread");
+        }
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect.each([
+      {
+        name: "unknown provider",
+        selection: { ...selectedModel, instanceId: ProviderInstanceId.make("missing") },
+        providers: [selectedProvider],
+        problem: "missing",
+      },
+      {
+        name: "disabled provider",
+        selection: selectedModel,
+        providers: [{ ...selectedProvider, enabled: false }],
+        problem: "disabled",
+      },
+      {
+        name: "provider disabled for this project",
+        selection: selectedModel,
+        providers: [selectedProvider],
+        enabledForProject: false,
+        problem: "disabled",
+      },
+      {
+        name: "unknown model",
+        selection: { ...selectedModel, model: "missing-model" },
+        providers: [selectedProvider],
+        problem: "missing-model",
+      },
+      {
+        name: "invalid options",
+        selection: { ...selectedModel, options: [{ id: "effort", value: "invalid" }] },
+        providers: [selectedProvider],
+        problem: "effort",
+      },
+    ])(
+      "rejects $name on scheduled-task create and update",
+      ({ selection, providers, enabledForProject, problem }) =>
+        Effect.gen(function* () {
+          const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                existing,
+                saved,
+                undefined,
+                {
+                  providers,
+                  enabledForProject: enabledForProject ?? true,
+                },
+              ),
+            ),
+          );
+          const created = yield* mcp
+            .scheduleTask(client, {
+              projectId,
+              prompt: "Check the build",
+              schedule,
+              modelSelection: requested(selection),
+            })
+            .pipe(Effect.flip);
+          const updated = yield* mcp
+            .updateScheduledTask(client, {
+              scheduledTaskId: existing.id,
+              modelSelection: requested(selection),
+            })
+            .pipe(Effect.flip);
+          for (const error of [created, updated]) {
+            assert.equal(error.code, "invalid_request");
+            assert.include(error.message, problem);
+          }
+          assert.deepEqual(yield* Ref.get(saved), []);
+        }),
+    );
 
     it.effect("starts from the project's default branch", () =>
       Effect.gen(function* () {

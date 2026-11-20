@@ -103,7 +103,10 @@ import {
 const MODELS = {
   "claude-sonnet-5-5": "Sonnet 5.5",
   "claude-opus-5-5": "Opus 5.5",
+  "claude-fable-5-2": "Fable 5.2",
   "gpt-6.1-sol": "GPT-6.1 Sol",
+  "gpt-6.1-terra": "GPT-6.1 Terra",
+  "gpt-6.2-astra": "GPT-6.2 Astra",
   "gpt-6-astra": "GPT-6 Astra",
   "gpt-6-luna": "GPT-6 Luna",
 } as const;
@@ -120,10 +123,7 @@ const PRICES = {
 };
 type PricedModel = keyof typeof PRICES;
 /** GPT models that can play the shell through CLIProxyAPI, when no Anthropic key is at hand. */
-const PROXY_SHELL_MODELS = [
-  "gpt-6.1-terra",
-  ...(Object.keys(MODELS) as Array<Model>).filter(isCodex),
-] as const;
+const PROXY_SHELL_MODELS = (Object.keys(MODELS) as Array<Model>).filter(isCodex);
 type ShellModel = PricedModel | (typeof PROXY_SHELL_MODELS)[number];
 const isPricedModel = (model: ShellModel): model is PricedModel => model in PRICES;
 const T3_PREFIX = "mcp__t3-code__";
@@ -353,8 +353,8 @@ export const McpToolUseCase = Schema.Struct({
     /**
      * Canned tool results by bare name, T3 or native. `"default"` uses the runner's result. For a
      * device tool, a T3 `DeviceError` (`{"_tag": ..., "cause": null}`) fails it inside T3; for a
-     * preview tool, a `PreviewAutomationError` fails it with that error's message. A
-     * `{"$sequence": [...]}` mock answers its nth call with the nth result, then repeats the last.
+     * preview tool, a `PreviewAutomationError` fails it with that error's message. `{"$error": s}`
+     * fails any call with s. `{"$sequence": [...]}` answers the nth call with the nth result.
      */
     mocks: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
     /** First matching partial input wins over a tool's fixed reply. */
@@ -2129,6 +2129,7 @@ export const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(fun
   }
   // A pasted secret is saved without a card, so a mocked card outcome does not apply.
   if (mock !== undefined && mock !== "default" && !pastedSecret(name, input)) {
+    if (isRecord(mock) && typeof mock.$error === "string") return failed(mock.$error);
     if (name === "request_secret") savedSecretFile(sample, mock);
     if (name === "pull_request_create" && isRecord(mock) && typeof mock.url === "string") {
       sample.linked.add(mock.url);
@@ -2438,15 +2439,18 @@ export const failedEarly = (expect: McpToolUseCase["expect"], run: SampleRun, pa
     pasted,
   ).some((check) => !check.pass && SETTLED.test(check.check));
 
-const requestBody = ({ base, tools }: Sample, effort: string, messages: unknown) => ({
+// The eval proxy adds its own cache breakpoints, and the API allows only 4, so proxied requests send none.
+const requestBody = ({ base, tools }: Sample, effort: string, messages: unknown, cache = true) => ({
   model: base.model,
   max_tokens: 16_000,
   thinking: { type: "adaptive", display: "summarized" },
   output_config: { effort },
-  cache_control: { type: "ephemeral" },
+  ...(cache ? { cache_control: { type: "ephemeral" } } : {}),
   // Like Claude Code, cache the shared system prompt so every sample reuses it.
   system: base.system.map((block, i) =>
-    i === base.system.length - 1 ? { ...block, cache_control: { type: "ephemeral" } } : block,
+    cache && i === base.system.length - 1
+      ? { ...block, cache_control: { type: "ephemeral" } }
+      : block,
   ),
   tools,
   messages,
@@ -2681,7 +2685,11 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
   for (let step = 0; step < maxSteps; step++) {
     const response = input
       ? yield* callCodex(config, codexRequest(base, input))
-      : yield* callModel(config.apiKey, requestBody(sample, config.effort, messages));
+      : yield* callModel(
+          config.apiKey,
+          requestBody(sample, config.effort, messages, Boolean(config.apiKey)),
+          config.apiKey ? undefined : config.proxy,
+        );
     addUsage(usage, response.usage);
     if ("raw" in response) {
       input?.push(...response.raw);
@@ -2836,7 +2844,7 @@ export const summarize = (
   const codex = isCodex(options.model);
   const agent = spend(
     rows.map((row) => row.usage),
-    codex ? undefined : options.model,
+    codex || !(options.model in PRICES) ? undefined : (options.model as PricedModel),
   );
   const shell = spend(
     rows.map((row) => row.shellUsage),
@@ -3118,15 +3126,15 @@ const main = Effect.gen(function* () {
   }
   const apiKey = yield* Config.String("ANTHROPIC_API_KEY").pipe(Config.withDefault(""));
   const out = flags.out;
-  if ((!apiKey && !codex) || out === undefined) {
+  if (out === undefined) {
     const message =
-      "Set ANTHROPIC_API_KEY and pass --out <directory>. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used.";
+      "Pass --out <directory>. Without ANTHROPIC_API_KEY, Claude models go through the eval proxy. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used.";
     return yield* Effect.die(new Error(message));
   }
   const config: Config = {
     apiKey,
     model: flags.model,
-    ...(codex || !isPricedModel(flags["shell-model"]) ? { proxy: proxyConfig() } : {}),
+    ...(codex || !apiKey || !isPricedModel(flags["shell-model"]) ? { proxy: proxyConfig() } : {}),
     effort,
     maxSteps: flags["max-steps"] ?? (codex ? 10 : 6),
     shellModel: flags["shell-model"],

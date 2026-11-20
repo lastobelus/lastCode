@@ -12,7 +12,7 @@ pnpm mcp-tool-use --case review-round-uses-thread-send --samples 1 --out runs/ch
 pnpm mcp-tool-use --model claude-opus-5-5 --out runs/opus
 ```
 
-- `ANTHROPIC_API_KEY` in the repo root `.env` pays for Claude models and the Haiku shell simulator.
+- `ANTHROPIC_API_KEY` in the repo root `.env` pays for Claude models and the Haiku shell simulator. Without it, Claude models go through the eval proxy below, which must be signed in to Claude.
 - Codex models (`gpt-*` in `MODELS` in `run.ts`) go through a CLIProxyAPI server, set up as the Codex model provider: `model_provider` in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) when it names a `[model_providers.<name>]` table, otherwise `[model_providers.vibeproxy]`. That table needs `base_url` (the proxy's OpenAI-compatible URL, such as `http://localhost:8317/v1`) and a key in `experimental_bearer_token` or the variable named by `env_key`. Set `LASTCODE_EVAL_PROXY_CONFIG` to a private JSON file with `url` and `headers` to use an authorized eval proxy without changing the Codex configuration. Keep credentials private and the proxy under about 12 samples in flight across all runs. Without one, see [When this machine can't pay for the run](../README.md#when-this-machine-cant-pay-for-the-run).
 - `--shell-model` picks the model that plays the shell: `claude-haiku-5-5` by default, or `gpt-6.1-terra` / `gpt-6-luna` through the same proxy, so Codex runs need no Anthropic key. Prefer Terra: Luna often contradicts the case's world (it calls named checkouts missing or files empty). Compare runs only when they used the same shell model.
 - Flags: `--case <ids>`, `--cases <file.ndjson>`, `--samples <n>` (default 2, and a 3rd when the first 2 disagree), `--concurrency <n>` (samples in flight, default 8), `--max-steps <n>`, `--effort <level>`, `--dry-run` (prints request bodies, no model calls), and `--context` (prints the size of T3's text and schemas, no key needed).
@@ -288,6 +288,24 @@ Passes per case, main's runtime text (3 samples) → this branch's "Link every o
 | file-links-no-files-control   | 3/3 → 6/6 | 3/3 → 6/6  |
 
 After the change, the first reference to a file is an absolute link. The remaining failures come from two other kinds of span. Some repeat the file later as relative inline code (Sonnet's other-checkout failures). Others quote values rather than cite files, such as `main` set to `src/index.ts` or the import `./ws`. Chat still turns those spans into pills.
+
+## Scheduled-task model cases
+
+`cases/scheduled-task-models.ndjson` checks that an agent asked for a model sets `schedule_task`'s `modelSelection` instead of writing the model into the task prompt, launching a proxy thread, or giving up. The cases use interval schedules, and their `schedule_task` mocks omit `prompt` and `title` and report `freshSession: true` as the server does: a mocked clock time, prompt or setting that differs from the request makes models "correct" the task with a second call.
+
+### Results
+
+Passes per case, main's text → `modelSelection` without description text, 3 samples each, with GPT-6.1 Terra playing the shell. Terra ran at medium effort; the others at the runner's default.
+
+| Case                                 | Terra     | Sonnet 5.5 | Opus 5.5  | GPT-6.2 Astra | Fable 5.2 |
+| ------------------------------------ | --------- | ---------- | --------- | ------------- | --------- |
+| schedule-task-picks-model            | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
+| schedule-task-other-provider-options | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
+| update-scheduled-task-model          | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
+| schedule-task-default-model          | 3/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3 | 2/3 → 3/3     | 3/3 → 3/3 |
+| schedule-task-model-bound-conflict   | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
+
+The seven earlier scheduling cases passed 3/3 on every model, except Opus on `schedule-runs-job-first`: 1/6 on both texts, because Opus asks to redo the test run before scheduling. Fable's other-provider and picks-model results come from a rerun after the `freshSession` mock fix.
 
 ## Where T3's text lives
 

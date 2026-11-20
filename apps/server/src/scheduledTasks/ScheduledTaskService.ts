@@ -265,6 +265,7 @@ export class ScheduledTaskService extends Context.Service<
     readonly subscribeList: () => Stream.Stream<ScheduledTaskListResult, ScheduledTaskError>;
     readonly upsert: (
       input: ScheduledTaskUpsertInput,
+      options?: { readonly resetThread: boolean },
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
     readonly setEnabled: (
       input: ScheduledTaskSetEnabledInput,
@@ -618,14 +619,17 @@ export const layer = Layer.effect(
       WHERE task_id = ${id}
     `.pipe(NodeSqliteClient.readOnly);
 
-    const findTask = Effect.fn("ScheduledTaskService.findTask")(function* (id: ScheduledTaskId) {
-      const rows = yield* getRows(id).pipe(
+    const findTaskRow = (id: ScheduledTaskId) =>
+      getRows(id).pipe(
+        Effect.map((rows) => rows[0] ?? null),
         Effect.mapError((cause) =>
           taskError("Could not load schedule task.", { taskId: id, cause }),
         ),
       );
-      const row = rows[0];
-      if (row === undefined) return null;
+
+    const findTask = Effect.fn("ScheduledTaskService.findTask")(function* (id: ScheduledTaskId) {
+      const row = yield* findTaskRow(id);
+      if (row === null) return null;
       return withPolicy(yield* decodeRow(row, yield* readWebhookOrigin));
     });
 
@@ -666,6 +670,7 @@ export const layer = Layer.effect(
         readonly secret: string | null;
         readonly secretChanged: boolean;
       },
+      resetThread: boolean,
     ) =>
       sql<{ task_id: string }>`
         INSERT INTO scheduled_tasks (
@@ -726,10 +731,10 @@ export const layer = Layer.effect(
           enabled = excluded.enabled,
           schedule_json = excluded.schedule_json,
           project_id = excluded.project_id,
-          -- A first run may bind the thread while this save is in flight; only a
-          -- switch to new threads unbinds.
+          -- A first run may bind while this save is in flight. Keep that binding
+          -- unless this save explicitly requests a new destination.
           thread_id = CASE
-            WHEN excluded.thread_mode = 'new_thread' THEN NULL
+            WHEN ${resetThread ? 1 : 0} = 1 OR excluded.thread_mode = 'new_thread' THEN NULL
             WHEN excluded.project_id != scheduled_tasks.project_id THEN excluded.thread_id
             ELSE COALESCE(excluded.thread_id, scheduled_tasks.thread_id)
           END,
@@ -901,12 +906,13 @@ export const layer = Layer.effect(
     // A thread deleted before the binding landed already ran its task cleanup, so apply that
     // cleanup here; a later deletion finds the binding. An unconfirmed lookup keeps the binding.
     const bindThread = Effect.fn("ScheduledTaskService.bindThread")(
-      function* (task: ScheduledTask, threadId: ThreadId) {
+      function* (task: ScheduledTask, threadId: ThreadId, modelSelectionJson: string) {
         yield* sql`
           UPDATE scheduled_tasks SET thread_id = ${threadId}
           WHERE task_id = ${task.id} AND created_at = ${task.createdAt}
             AND project_id = ${task.projectId}
             AND thread_id IS NULL AND thread_mode != 'new_thread'
+            AND model_selection_json = ${modelSelectionJson}
         `;
         const shell = yield* threadManagement.getThreadShell(threadId);
         if (shell === null || shell.deletedAt != null) yield* deleteForThread(threadId);
@@ -1000,8 +1006,8 @@ export const layer = Layer.effect(
       const startedAtIso = iso(startedAt);
       const run = Effect.gen(function* () {
         // Re-read stale poll snapshots so deleted, paused or postponed tasks cannot fire.
-        const active = yield* findTask(task.id);
-        if (active === null) {
+        const activeRow = yield* findTaskRow(task.id);
+        if (activeRow === null) {
           if (webhook !== undefined) {
             return yield* new WebhookDeliverySkipped({
               reason: "The task was deleted before this delivery ran.",
@@ -1012,6 +1018,7 @@ export const layer = Layer.effect(
           }
           return { task, threadId: null, dispatchFailed: false };
         }
+        const active = withPolicy(yield* decodeRow(activeRow, yield* readWebhookOrigin));
         if (
           webhook !== undefined &&
           (yield* sql`SELECT 1 FROM scheduled_task_webhook_pending WHERE delivery_id = ${webhook.deliveryId} AND state = 'completed'`.pipe(
@@ -1161,7 +1168,9 @@ export const layer = Layer.effect(
                   .pipe(
                     Effect.map((launched) => launched.threadId),
                     Effect.tap((threadId) =>
-                      threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
+                      threadMode === "new_thread"
+                        ? Effect.void
+                        : bindThread(active, threadId, activeRow.model_selection_json),
                     ),
                   ),
               )
@@ -1480,7 +1489,7 @@ export const layer = Layer.effect(
 
     const upsert: ScheduledTaskService["Service"]["upsert"] = Effect.fn(
       "ScheduledTaskService.upsert",
-    )(function* (input) {
+    )(function* (input, options) {
       // A webhook task the policy blocks can still be edited while it is off.
       if (input.enabled && input.schedule.type === "webhook" && webhookPolicyBlock !== undefined) {
         return yield* taskError(
@@ -1515,7 +1524,8 @@ export const layer = Layer.effect(
         existingTask !== null &&
         existingTask.projectId !== input.projectId &&
         keptThreadId === existingTask.threadId;
-      const threadId = threadMode === "new_thread" || movedOffThread ? null : keptThreadId;
+      const threadId =
+        threadMode === "new_thread" || movedOffThread || options?.resetThread ? null : keptThreadId;
       // An unchanged destination is not rechecked, so a task on an archived thread stays editable.
       if (threadId !== null && threadId !== existingTask?.threadId) {
         yield* requireDestinationThread(threadId, input.projectId, id);
@@ -1642,6 +1652,7 @@ export const layer = Layer.effect(
         input.requireExisting === true,
         scheduleUnchanged ? existingTask.schedule : null,
         webhook,
+        options?.resetThread === true,
       );
       yield* notifyChanged;
       return { task: (yield* findTask(id)) ?? task };
