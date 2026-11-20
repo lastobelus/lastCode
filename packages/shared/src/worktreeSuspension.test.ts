@@ -1463,88 +1463,106 @@ it.each([false, true])(
   },
 );
 
-it.each(["ignored", "unignored", "tracked", "removed-from-index", "ignored-parent"] as const)(
-  "excludes only ignored untracked generated directories (%s)",
-  async (kind) => {
-    await using test = await fixture();
-    const protectedParent = kind === "ignored-parent";
-    const relative = protectedParent ? "tmp/node_modules" : "apps/web/node_modules";
-    const directory = NodePath.join(test.workspace, relative);
-    await NodeFSP.mkdir(directory, { recursive: true });
-    const file = NodePath.join(directory, "payload");
-    await NodeFSP.writeFile(file, "x".repeat(8192));
-    if (protectedParent) {
-      await NodeFSP.mkdir(NodePath.join(test.workspace, "tmp/build"));
-      await NodeFSP.writeFile(NodePath.join(test.workspace, "tmp/build/notes.txt"), "user notes");
-    }
-    if (kind !== "unignored")
-      await NodeFSP.appendFile(
-        NodePath.join(test.workspace, ".gitignore"),
-        protectedParent ? "tmp/\n" : "node_modules/\n",
-      );
-    if (kind === "tracked" || kind === "removed-from-index")
-      await git(test.workspace, "add", "--force", `${relative}/payload`);
-    if (kind === "removed-from-index") {
-      await git(
-        test.workspace,
-        "commit",
-        "--only",
-        "-m",
-        "tracked generated file",
-        "--",
-        `${relative}/payload`,
-      );
-      await git(test.workspace, "rm", "--cached", "--", `${relative}/payload`);
-    }
-    const store = createWorktreeSuspensionStore({
-      storeRoot: NodePath.join(test.root, "bounded"),
-      limits: protectedParent
-        ? { maxBytes: 16384, maxFileBytes: 16384 }
-        : { maxBytes: 4096, maxFileBytes: 4096 },
+it.each([
+  "ignored",
+  "unignored",
+  "tracked",
+  "removed-from-index",
+  "ignored-parent",
+  "ignored-parent-tracked",
+  "case-variant",
+] as const)("excludes only ignored untracked generated directories (%s)", async (kind) => {
+  await using test = await fixture();
+  const protectedParent = kind.startsWith("ignored-parent");
+  const caseVariant = kind === "case-variant";
+  const retainedDirectory = protectedParent || caseVariant;
+  const relative = protectedParent
+    ? "tmp/node_modules"
+    : caseVariant
+      ? "build"
+      : "apps/web/node_modules";
+  const directory = NodePath.join(test.workspace, relative);
+  if (caseVariant) {
+    const original = NodePath.join(test.workspace, "Build");
+    await NodeFSP.mkdir(original);
+    await NodeFSP.writeFile(NodePath.join(original, "payload"), "committed\n");
+    await git(test.workspace, "add", "--force", "Build/payload");
+    await git(test.workspace, "commit", "--only", "-m", "tracked directory", "--", "Build/payload");
+    await NodeFSP.rename(original, directory);
+  } else await NodeFSP.mkdir(directory, { recursive: true });
+  const file = NodePath.join(directory, "payload");
+  await NodeFSP.writeFile(file, "x".repeat(8192));
+  if (protectedParent) {
+    await NodeFSP.mkdir(NodePath.join(test.workspace, "tmp/build"));
+    await NodeFSP.writeFile(NodePath.join(test.workspace, "tmp/build/notes.txt"), "user notes");
+  }
+  if (kind === "ignored-parent-tracked") {
+    await NodeFSP.writeFile(NodePath.join(test.workspace, "tmp/.gitkeep"), "tracked parent\n");
+    await git(test.workspace, "add", "--force", "tmp/.gitkeep");
+  }
+  if (kind !== "unignored")
+    await NodeFSP.appendFile(
+      NodePath.join(test.workspace, ".gitignore"),
+      protectedParent ? "tmp/\n" : caseVariant ? "build/\n" : "node_modules/\n",
+    );
+  if (kind === "tracked" || kind === "removed-from-index")
+    await git(test.workspace, "add", "--force", `${relative}/payload`);
+  if (kind === "removed-from-index") {
+    await git(
+      test.workspace,
+      "commit",
+      "--only",
+      "-m",
+      "tracked generated file",
+      "--",
+      `${relative}/payload`,
+    );
+    await git(test.workspace, "rm", "--cached", "--", `${relative}/payload`);
+  }
+  const store = createWorktreeSuspensionStore({
+    storeRoot: NodePath.join(test.root, "bounded"),
+    limits: retainedDirectory
+      ? { maxBytes: 16384, maxFileBytes: 16384 }
+      : { maxBytes: 4096, maxFileBytes: 4096 },
+  });
+  using reads = vi.spyOn(NodeFSP, "readdir");
+  const capture = store.capture({
+    sourcePath: test.workspace,
+    operationId: "generated",
+    ownerBinding: "fixture-owner",
+  });
+  if (kind === "ignored" || retainedDirectory) {
+    const snapshot = await capture;
+    expect(snapshot.entries.some((entry) => entry.path.startsWith(`${relative}/`))).toBe(
+      retainedDirectory,
+    );
+    expect(reads.mock.calls.some(([name]) => name === directory)).toBe(retainedDirectory);
+    // Unknown metadata in an excluded tree must not be recursively inspected.
+    if (!retainedDirectory && HostProcess.Platform.defaultValue() === "darwin")
+      await execute("/usr/bin/xattr", ["-sw", "com.example.user-note", "retained elsewhere", file]);
+    await store.trialRestore(snapshot.id);
+    await store.suspend(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+      guard: async () => {},
     });
-    using reads = vi.spyOn(NodeFSP, "readdir");
-    const capture = store.capture({
-      sourcePath: test.workspace,
-      operationId: "generated",
-      ownerBinding: "fixture-owner",
-    });
-    if (kind === "ignored" || protectedParent) {
-      const snapshot = await capture;
-      expect(snapshot.entries.some((entry) => entry.path.startsWith(`${relative}/`))).toBe(
-        protectedParent,
-      );
-      expect(reads.mock.calls.some(([name]) => name === directory)).toBe(protectedParent);
-      // Unknown metadata in an excluded tree must not be recursively inspected.
-      if (!protectedParent && HostProcess.Platform.defaultValue() === "darwin")
-        await execute("/usr/bin/xattr", [
-          "-sw",
-          "com.example.user-note",
-          "retained elsewhere",
-          file,
-        ]);
-      await store.trialRestore(snapshot.id);
-      await store.suspend(snapshot.id, {
-        quarantineParent: NodePath.join(test.root, "quarantine"),
-        guard: async () => {},
-      });
-      await store.restore(snapshot.id, { destinationPath: test.workspace });
-      if (protectedParent) {
-        expect(await NodeFSP.readFile(file, "utf8")).toBe("x".repeat(8192));
+    await store.restore(snapshot.id, { destinationPath: test.workspace });
+    if (retainedDirectory) {
+      expect(await NodeFSP.readFile(file, "utf8")).toBe("x".repeat(8192));
+      if (protectedParent)
         expect(
           await NodeFSP.readFile(NodePath.join(test.workspace, "tmp/build/notes.txt"), "utf8"),
         ).toBe("user notes");
-      } else await expect(NodeFSP.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(await NodeFSP.readFile(NodePath.join(test.workspace, "notes/private"), "utf8")).toBe(
-        "ignored note\n",
-      );
-    } else {
-      await expect(capture).rejects.toThrow(
-        `Workspace needs review: a file exceeds the preservation limit (${JSON.stringify(file)})`,
-      );
-      expect(await NodeFSP.readFile(file, "utf8")).toBe("x".repeat(8192));
-    }
-  },
-);
+    } else await expect(NodeFSP.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "notes/private"), "utf8")).toBe(
+      "ignored note\n",
+    );
+  } else {
+    await expect(capture).rejects.toThrow(
+      `Workspace needs review: a file exceeds the preservation limit (${JSON.stringify(file)})`,
+    );
+    expect(await NodeFSP.readFile(file, "utf8")).toBe("x".repeat(8192));
+  }
+});
 
 it.each([
   { name: "unsafe filename", relative: "unsafe\nname", limits: {} },

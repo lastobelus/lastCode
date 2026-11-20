@@ -922,16 +922,17 @@ const inventory = async (
             );
         }
       }
+      // Conservatively protect case variants, including case-only Finder renames.
       for (const name of trackedText.split("\0").filter(Boolean)) {
-        trackedDirectories.add(name);
+        trackedDirectories.add(name.toLowerCase());
         let parent = NodePath.posix.dirname(name);
         while (parent !== ".") {
-          trackedDirectories.add(parent);
+          trackedDirectories.add(parent.toLowerCase());
           parent = NodePath.posix.dirname(parent);
         }
       }
     }
-    if (trackedDirectories.has(relative)) return false;
+    if (trackedDirectories.has(relative.toLowerCase())) return false;
     // A Git query failure preserves the directory, just like a nonignored path.
     try {
       const parent = NodePath.posix.dirname(relative);
@@ -940,7 +941,7 @@ const inventory = async (
       // Check both paths in the same process rather than querying every directory.
       const ignored = await git(
         root,
-        ["check-ignore", "-z", "--stdin"],
+        ["check-ignore", "--no-index", "-z", "--stdin"],
         undefined,
         candidate + (parent === "." ? "" : `${parent}/\0`),
       );
