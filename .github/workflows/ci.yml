@@ -36,6 +36,7 @@ jobs:
       build: ${{ steps.detect.outputs.build }}
       desktop_launch: ${{ steps.detect.outputs.desktop_launch }}
       test: ${{ steps.detect.outputs.test }}
+      test_packages: ${{ steps.detect.outputs.test_packages }}
       test_matrix: ${{ steps.test_matrix.outputs.matrix }}
       test_web: ${{ steps.detect.outputs.test_web }}
       test_server: ${{ steps.detect.outputs.test_server }}
@@ -347,7 +348,6 @@ jobs:
       # The desktop tests compile the browser secret helper. The install runs in
       # the background while Vite+ installs; the step before the tests waits for it.
       - name: Start installing browser secret helper build libraries
-        if: matrix.desktop
         run: |
           # Fetch only the indexes these main and universe packages need. The full set is ~42 MB,
           # which a slow mirror can stretch past the wait below.
@@ -372,30 +372,24 @@ jobs:
       # electron's install.js (run by ensure:electron) reads this cache before it
       # downloads from GitHub. The key changes only with the Electron version.
       - name: Cache Electron download
-        if: matrix.desktop
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/electron
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('node_modules/.pnpm/electron@*/node_modules/electron/package.json') }}
 
       - name: Ensure Electron runtime is installed
-        if: matrix.desktop
         run: vp run --filter @t3tools/desktop ensure:electron
 
       - name: Test preview artifact validation
-        if: matrix.workflowTests
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
 
       - name: Test release checks
-        if: matrix.workflowTests
         run: node --test .github/scripts/check-nightly-release.test.cjs .github/scripts/vercel-deployment-output.test.cjs .github/scripts/mobile-preview-comment.test.cjs .github/scripts/mobile-ios-preview-record.test.cjs .github/scripts/test-delta.test.cjs .github/scripts/lastcode-upstream-delta.test.cjs .github/scripts/lastcode-metadata-ci-gate.test.cjs .github/scripts/lastcode-ci-test-matrix.test.cjs
 
       - name: Test APT mirror configuration
-        if: matrix.workflowTests
         run: node --test .github/scripts/setup-apt-mirrors.test.cjs
 
       - name: Finish installing browser secret helper build libraries
-        if: matrix.desktop
         timeout-minutes: 5
         run: |
           until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done

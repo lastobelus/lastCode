@@ -1,7 +1,7 @@
 const isolatedJobs = [
-  { name: "Test Mobile", filters: "@t3tools/mobile", desktop: false },
-  { name: "Test Scripts", filters: "@t3tools/scripts", desktop: false },
-  { name: "Test Shared", filters: "@t3tools/shared", desktop: false },
+  { name: "Test Mobile", filters: "@t3tools/mobile" },
+  { name: "Test Scripts", filters: "@t3tools/scripts" },
+  { name: "Test Shared", filters: "@t3tools/shared" },
 ];
 const isolatedPackages = isolatedJobs.map(({ filters }) => filters);
 const defaultExclusions = ["t3", "@t3tools/monorepo", "@t3tools/web", ...isolatedPackages];
@@ -14,10 +14,9 @@ function testMatrix(testPackages = "") {
     : packages.filter((name) => !isolatedPackages.includes(name));
   const rows = isolatedJobs.filter(({ filters }) => full || packages.includes(filters));
   if (mainFilters.length > 0) {
-    rows.unshift({ name: "Test", filters: mainFilters.join(" "), desktop: true });
+    rows.unshift({ name: "Test", filters: mainFilters.join(" ") });
   }
-  // The workflow tests previously ran on every non-skipped Test job.
-  return { include: rows.map((row, index) => ({ ...row, workflowTests: index === 0 })) };
+  return { include: rows };
 }
 
 if (require.main === module) {

@@ -277,16 +277,12 @@ jobs:
         include:
           - name: tests
             filters: "!t3 !@t3tools/monorepo !@t3tools/web !@t3tools/mobile !@t3tools/scripts !@t3tools/shared"
-            desktop: true
           - name: mobile tests
             filters: "@t3tools/mobile"
-            desktop: false
           - name: script tests
             filters: "@t3tools/scripts"
-            desktop: false
           - name: shared tests
             filters: "@t3tools/shared"
-            desktop: false
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -303,7 +299,6 @@ jobs:
           task-cache-read-token: ${{ secrets.T3_TASK_CACHE_READ_TOKEN }}
 
       - name: Ensure Electron runtime is installed
-        if: matrix.desktop
         run: vp run --filter @t3tools/desktop ensure:electron
 
       - uses: ./.github/actions/setup-apt-mirrors

@@ -5,7 +5,7 @@ const test = require("node:test");
 const { decide, readWorkspace } = require("./ci-changes.cjs");
 const { testMatrix } = require("./lastcode-ci-test-matrix.cjs");
 
-test("full CI runs each package in its assigned job and workflow tests once", () => {
+test("full CI runs each package in its assigned job", () => {
   const workspace = readWorkspace();
   const changes = decide([], workspace, true).outputs;
   const { include } = testMatrix(changes.test_packages);
@@ -26,42 +26,25 @@ test("full CI runs each package in its assigned job and workflow tests once", ()
     isolated.map(({ filters }) => filters),
     ["@t3tools/mobile", "@t3tools/scripts", "@t3tools/shared"],
   );
-  assert.deepEqual(
-    include.filter((row) => row.workflowTests),
-    [main],
-  );
-  assert.ok(main.desktop);
-  assert.ok(isolated.every((row) => !row.desktop));
 });
 
-test("filtered CI schedules only affected packages and still runs the workflow tests", () => {
+test("filtered CI schedules only affected packages", () => {
   const workspace = readWorkspace();
   const scripts = decide(["scripts/check-changed.ts"], workspace, false).outputs;
   const mobile = decide(["apps/mobile/src/Example.ts"], workspace, false).outputs;
   const desktop = decide(["apps/desktop/src/Example.ts"], workspace, false).outputs;
   const docs = decide(["docs/guide.md"], workspace, false).outputs;
   assert.deepEqual(testMatrix(scripts.test_packages).include, [
-    { name: "Test Scripts", filters: "@t3tools/scripts", desktop: false, workflowTests: true },
+    { name: "Test Scripts", filters: "@t3tools/scripts" },
   ]);
-  assert.deepEqual(
-    testMatrix(mobile.test_packages).include.map(({ name, filters, workflowTests }) => [
-      name,
-      filters,
-      workflowTests,
-    ]),
-    [
-      ["Test Mobile", "@t3tools/mobile", true],
-      ["Test Scripts", "@t3tools/scripts", false],
-    ],
-  );
+  assert.deepEqual(testMatrix(mobile.test_packages).include, [
+    { name: "Test Mobile", filters: "@t3tools/mobile" },
+    { name: "Test Scripts", filters: "@t3tools/scripts" },
+  ]);
   const desktopRows = testMatrix(desktop.test_packages).include;
   assert.deepEqual(
     desktopRows.flatMap(({ filters }) => filters.split(" ")).sort(),
     desktop.test_packages.split(" ").sort(),
-  );
-  assert.deepEqual(
-    desktopRows.filter((row) => row.workflowTests),
-    [desktopRows[0]],
   );
   assert.equal(docs.test, false);
 });
@@ -69,9 +52,9 @@ test("filtered CI schedules only affected packages and still runs the workflow t
 test("the release workflow uses the same full package split as CI", () => {
   const { parse } = require("yaml");
   const release = parse(fs.readFileSync(path.join(__dirname, "../workflows/release.yml"), "utf8"));
-  const packageGroups = (rows) => rows.map(({ filters, desktop }) => ({ filters, desktop }));
+  const packageFilters = (rows) => rows.map(({ filters }) => filters);
   assert.deepEqual(
-    packageGroups(release.jobs.test.strategy.matrix.include),
-    packageGroups(testMatrix().include),
+    packageFilters(release.jobs.test.strategy.matrix.include),
+    packageFilters(testMatrix().include),
   );
 });
