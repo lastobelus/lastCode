@@ -20,6 +20,7 @@ it.effect("upgrades existing databases with a bounded latest-assistant-reply loo
       [20, "OrchestrationV2RetiredNativePromotion"],
       [21, "ThreadReadAuthority"],
       [22, "ProjectRegistration"],
+      [23, "OrchestrationV2ArchiveRecordedOwnerIndexes"],
     ]);
     assert.deepEqual(yield* runDatabaseMigrations(), []);
     const plan = yield* sql<{ readonly detail: string }>`
