@@ -4,8 +4,16 @@ import * as Queue from "effect/Queue";
 import * as Tracer from "effect/Tracer";
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CommandId, type Project, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CommandId,
+  DEFAULT_SERVER_SETTINGS,
+  type ServerSettings as ServerSettingsValue,
+  type Project,
+  ProjectId,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -590,32 +598,51 @@ it.layer(layerTest)("ProjectService", (it) => {
     }),
   );
 
-  it.effect("returns the deleted project when a completed delete is retried", () =>
-    Effect.gen(function* () {
-      const service = yield* ProjectService.ProjectService;
-      const sql = yield* SqlClient.SqlClient;
-      const projectId = ProjectId.make("project:delete-retry");
-      yield* service.create({
-        commandId: CommandId.make("command:delete-retry:create"),
-        projectId,
-        title: "Delete retry",
-        workspaceRoot: "/work/delete-retry",
-      });
-      // Enrichment landing between the two deletes would change the project the retry reads.
-      yield* waitForProject(
-        service,
-        projectId,
-        (project) => project.faviconPath !== null && project.repositoryIdentity !== null,
-      );
-      const input = { commandId: CommandId.make("command:delete-retry:delete"), projectId };
-      const deleted = yield* service.delete(input);
-      assert.deepEqual(yield* service.delete(input), deleted);
-      const events = yield* sql<{ readonly command_id: string }>`
-        SELECT command_id FROM orchestration_events
-        WHERE stream_id = ${projectId} AND event_type = 'project.deleted'
-      `;
-      assert.deepEqual(events, [{ command_id: input.commandId }]);
-    }),
+  it.effect.each([
+    { metadata: "resolved", layer: layerTest },
+    {
+      metadata: "absent",
+      layer: layerTestFor(
+        Layer.merge(
+          Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+            resolve: () => Effect.succeed(null),
+          }),
+          Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+            invalidate: () => Effect.void,
+            resolvePath: () => Effect.succeed(null),
+          }),
+        ),
+      ),
+    },
+  ])(
+    "returns the deleted project when a completed delete is retried ($metadata metadata)",
+    ({ metadata, layer }) =>
+      Effect.gen(function* () {
+        const service = yield* ProjectService.ProjectService;
+        const sql = yield* SqlClient.SqlClient;
+        const projectId = ProjectId.make("project:delete-retry");
+        yield* service.create({
+          commandId: CommandId.make("command:delete-retry:create"),
+          projectId,
+          title: "Delete retry",
+          workspaceRoot: "/work/delete-retry",
+        });
+        if (metadata === "resolved") {
+          yield* waitForProject(
+            service,
+            projectId,
+            (project) => project.faviconPath !== null && project.repositoryIdentity !== null,
+          );
+        }
+        const input = { commandId: CommandId.make("command:delete-retry:delete"), projectId };
+        const deleted = yield* service.delete(input);
+        assert.deepEqual(yield* service.delete(input), deleted);
+        const events = yield* sql<{ readonly command_id: string }>`
+          SELECT command_id FROM orchestration_events
+          WHERE stream_id = ${projectId} AND event_type = 'project.deleted'
+        `;
+        assert.deepEqual(events, [{ command_id: input.commandId }]);
+      }).pipe(Effect.provide(layer)),
   );
 
   it.effect("treats a deleted project as missing for updates and new deletes", () =>
@@ -989,4 +1016,49 @@ it.effect("rejects an update that waited on the lock while its project was delet
       "Update race",
     );
   }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
+it.effect("project deletion removes its override and repairs settings on receipt replay", () =>
+  Effect.gen(function* () {
+    const deletedId = ProjectId.make("deleted-grant-project");
+    const activeId = ProjectId.make("active-grant-project");
+    const initial = {
+      ...DEFAULT_SERVER_SETTINGS,
+      enableAgentDeviceAccess: false,
+      projectSettingsOverrides: {
+        [deletedId]: { enableAgentDeviceAccess: true },
+        [activeId]: { enableAgentDeviceAccess: true },
+      },
+    };
+    const current = yield* Ref.make<ServerSettingsValue>(initial);
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(ServerSettings.ServerSettingsService, {
+        ...settings,
+        getSettings: Ref.get(current),
+        updateSettings: (patch) =>
+          Ref.updateAndGet(current, (value) => applyServerSettingsPatch(value, patch)),
+      }),
+    );
+    yield* service.create({
+      commandId: CommandId.make("grant-project-create"),
+      projectId: deletedId,
+      title: "Deleted grant",
+      workspaceRoot: "/work/deleted-grant",
+    });
+    const input = { commandId: CommandId.make("grant-project-delete"), projectId: deletedId };
+    yield* service.delete(input);
+    assert.isUndefined((yield* Ref.get(current)).projectSettingsOverrides[deletedId]);
+    assert.deepEqual(
+      (yield* Ref.get(current)).projectSettingsOverrides[activeId],
+      initial.projectSettingsOverrides[activeId],
+    );
+    yield* Ref.set(current, initial);
+    yield* service.delete(input);
+    assert.isUndefined((yield* Ref.get(current)).projectSettingsOverrides[deletedId]);
+    assert.deepEqual(
+      (yield* Ref.get(current)).projectSettingsOverrides[activeId],
+      initial.projectSettingsOverrides[activeId],
+    );
+  }).pipe(Effect.provide(layerProjectServiceDependencies), Effect.scoped),
 );

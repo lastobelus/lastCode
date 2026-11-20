@@ -4,8 +4,9 @@ import type { MFunctionType } from "gt-i18n/types";
 
 import {
   formatThreadLink,
+  linkReference,
   replaceThreadLinks,
-  threadLinkCandidates,
+  resolveThreadLinkReference,
   type ThreadLink,
 } from "./threadLinks.ts";
 
@@ -15,7 +16,9 @@ export function unknownThreadLinkLabel(
   messageEnvironmentId: EnvironmentId,
   resolve: MFunctionType = mFallback,
 ): string {
-  return link.environmentId === null || link.environmentId === messageEnvironmentId
+  return link.legacyThreadId !== undefined ||
+    link.environmentId === null ||
+    link.environmentId === messageEnvironmentId
     ? resolve(msg("Thread no longer available"))
     : resolve(msg("Thread on another machine"));
 }
@@ -32,15 +35,18 @@ export function relabelThreadLinks(
   resolve: MFunctionType = mFallback,
 ): string {
   return replaceThreadLinks(markdown, (written, label) => {
-    for (const ref of threadLinkCandidates(written, messageEnvironmentId)) {
-      const current = title(ref);
-      if (current === undefined) continue;
-      return formatThreadLink(
-        { environmentId: written.environmentId, threadId: ref.threadId },
-        current.trim() || label || ref.threadId,
-      );
+    const reference = linkReference(written);
+    const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) =>
+      title({ threadId, environmentId: environmentId ?? messageEnvironmentId }),
+    );
+    const current = resolved.value;
+    if (current === undefined) {
+      if (label !== undefined && reference.version === 1) return undefined;
+      return label?.trim() || unknownThreadLinkLabel(written, messageEnvironmentId, resolve);
     }
-    if (label !== undefined && written.environmentId === null) return undefined;
-    return label?.trim() || unknownThreadLinkLabel(written, messageEnvironmentId, resolve);
+    return formatThreadLink(
+      { environmentId: resolved.environmentId ?? null, threadId: resolved.threadId },
+      current.trim() || label || resolved.threadId,
+    );
   });
 }
