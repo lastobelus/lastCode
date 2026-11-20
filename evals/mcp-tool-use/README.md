@@ -291,21 +291,21 @@ After the change, the first reference to a file is an absolute link. The remaini
 
 ## Scheduled-task model cases
 
-`cases/scheduled-task-models.ndjson` checks that an agent asked for a model sets `schedule_task`'s `modelSelection` instead of writing the model into the task prompt, launching a proxy thread, or giving up. The cases use interval schedules, and their `schedule_task` mocks omit `prompt` and `title`: a mocked clock time or prompt that differs from the request makes models "correct" the task with a second call.
+`cases/scheduled-task-models.ndjson` checks that an agent asked for a model sets `schedule_task`'s `modelSelection` instead of writing the model into the task prompt, launching a proxy thread, or giving up. The cases use interval schedules, and their `schedule_task` mocks omit `prompt` and `title` and report `freshSession: true` as the server does: a mocked clock time, prompt or setting that differs from the request makes models "correct" the task with a second call.
 
 ### Results
 
 Passes per case, main's text → `modelSelection` without description text, 3 samples each, with GPT-6.1 Terra playing the shell. Terra ran at medium effort; the others at the runner's default.
 
-| Case                                 | Terra     | Sonnet 5.5 | Opus 5.5  | GPT-6.2 Astra |
-| ------------------------------------ | --------- | ---------- | --------- | ------------- |
-| schedule-task-picks-model            | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     |
-| schedule-task-other-provider-options | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     |
-| update-scheduled-task-model          | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     |
-| schedule-task-default-model          | 3/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3 | 2/3 → 3/3     |
-| schedule-task-model-bound-conflict   | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     |
+| Case                                 | Terra     | Sonnet 5.5 | Opus 5.5  | GPT-6.2 Astra | Fable 5.2 |
+| ------------------------------------ | --------- | ---------- | --------- | ------------- | --------- |
+| schedule-task-picks-model            | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
+| schedule-task-other-provider-options | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
+| update-scheduled-task-model          | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
+| schedule-task-default-model          | 3/3 → 3/3 | 3/3 → 3/3  | 3/3 → 3/3 | 2/3 → 3/3     | 3/3 → 3/3 |
+| schedule-task-model-bound-conflict   | 0/3 → 3/3 | 0/3 → 3/3  | 0/3 → 3/3 | 0/3 → 3/3     | 0/3 → 3/3 |
 
-The seven earlier scheduling cases passed 3/3 on every model, except Opus on `schedule-runs-job-first`: 1/6 on both texts, because Opus asks to redo the test run before scheduling. Fable 5.2 was not run: the eval proxy identified itself as a Claude Code version too old for Fable.
+The seven earlier scheduling cases passed 3/3 on every model, except Opus on `schedule-runs-job-first`: 1/6 on both texts, because Opus asks to redo the test run before scheduling. Fable's other-provider and picks-model results come from a rerun after the `freshSession` mock fix.
 
 ## Where T3's text lives
 
