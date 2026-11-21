@@ -11,7 +11,7 @@ const git = (cwd: string, ...args: string[]) =>
   NodeChildProcess.spawnSync("git", args, { cwd, encoding: "utf8" }).stdout.trim();
 
 describe("markOriginAsGhDefault", () => {
-  it("moves gh's default from upstream to origin, and leaves a checkout without origin alone", () => {
+  it("moves gh's default from upstream to a GitHub origin, and leaves it when origin is missing or elsewhere", () => {
     const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "gh-default-"));
     try {
       git(repo, "init", "-q");
@@ -23,7 +23,13 @@ describe("markOriginAsGhDefault", () => {
         "remote.upstream.gh-resolved base",
       );
 
-      git(repo, "remote", "add", "origin", "git@github.com:fork/repo.git");
+      git(repo, "remote", "add", "origin", "https://git.example/fork/repo.git");
+      markOriginAsGhDefault(repo);
+      expect(git(repo, "config", "--get-regexp", "gh-resolved")).toBe(
+        "remote.upstream.gh-resolved base",
+      );
+
+      git(repo, "remote", "set-url", "origin", "git@github.com:fork/repo.git");
       markOriginAsGhDefault(repo);
       expect(git(repo, "config", "--get-regexp", "gh-resolved")).toBe(
         "remote.origin.gh-resolved base",
