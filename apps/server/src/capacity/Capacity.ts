@@ -20,12 +20,13 @@ import {
   SAMPLE_INTERVAL_MS,
   STALE_AFTER_MS,
   unknownCapacitySnapshot,
+  unreadableCapacitySnapshot,
 } from "./logic.ts";
 import { nativeSource, type CapacitySource } from "./source.ts";
 
 export type { CapacitySource } from "./source.ts";
 
-const unwired = Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now)));
+const unwired = Clock.currentTimeMillis.pipe(Effect.map(unreadableCapacitySnapshot));
 /** Reports `unknown` without sampling: the default, and the fallback when capacity can't start. */
 const unwiredCapacity = { read: unwired, readWithActivity: unwired };
 
@@ -152,7 +153,24 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
   });
   yield* sample().pipe(
     // One defective sample must not end sampling and leave every later read stale.
-    Effect.catchDefect((defect) => Effect.logWarning("capacity.sample-failed", { defect })),
+    Effect.catchDefect((defect) =>
+      Effect.logWarning("capacity.sample-failed", { defect }).pipe(
+        // Report the failed sample as unreadable now, not only once the last good one is stale.
+        Effect.andThen(Clock.currentTimeMillis),
+        Effect.flatMap((now) =>
+          Ref.update(
+            state,
+            (current) =>
+              evaluateCapacity(
+                recordCapacitySample(current, failedMeasurements(now), null),
+                now,
+                "observe",
+              ).state,
+          ),
+        ),
+        Effect.catchDefect(() => Effect.void),
+      ),
+    ),
     Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)),
     Effect.forkScoped,
   );
