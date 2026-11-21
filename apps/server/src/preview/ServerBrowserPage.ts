@@ -25,6 +25,11 @@ import * as Schema from "effect/Schema";
 import type { CDPSession, ConsoleMessage, Frame, Locator, Page, Route } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
+import {
+  describeClickAmbiguity,
+  readMatchingControls,
+  strictClickMatchCount,
+} from "./ServerBrowserClickAmbiguity.ts";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
 
 const isBrowserControlInterrupted = Schema.is(BrowserControlInterrupted);
@@ -476,23 +481,31 @@ const SNAPSHOT_TIMEOUT_MS = 10_000;
 const FRAME_ANSWER_MS = 1_000;
 
 // Include password and CSS-masked text in open shadow roots, normalized like accessible text.
-const DOTTED_SCRIPT = `(() => {
+const fieldValuesScript = (includeUnmasked: boolean) => `(() => {
   const values = [];
   const visit = (root) => {
     for (const element of root.querySelectorAll("*")) {
       if (element.shadowRoot) visit(element.shadowRoot);
       const field = element.localName === "input" || element.localName === "textarea";
-      if (!field && !element.isContentEditable) continue;
-      const dots = getComputedStyle(element).getPropertyValue("-webkit-text-security");
-      if (element.type !== "password" && (dots === "none" || dots === "")) continue;
+      const select = ${includeUnmasked} && element.localName === "select";
+      if (!field && !select && !element.isContentEditable) continue;
+      if (!${includeUnmasked}) {
+        const dots = getComputedStyle(element).getPropertyValue("-webkit-text-security");
+        if (element.type !== "password" && (dots === "none" || dots === "")) continue;
+      }
       // Raw as page text shows it, and normalized as the tree does.
-      for (const value of field ? [element.value, element.defaultValue] : [element.textContent ?? ""])
+      const entries = field ? [element.value, element.defaultValue]
+        : select ? Array.from(element.selectedOptions, (option) => option.value)
+        : [element.textContent ?? ""];
+      for (const value of entries)
         values.push(value, value.replace(/[\\u200b\\u00ad]/g, "").trim().replace(/\\s+/g, " "));
     }
   };
   visit(document);
   return [...new Set(values.filter((value) => value.trim()))];
 })()`;
+const DOTTED_SCRIPT = fieldValuesScript(false);
+const FIELD_VALUES_SCRIPT = fieldValuesScript(true);
 
 const pageChanged = () =>
   new ServerBrowserOperationError({
@@ -544,8 +557,13 @@ const answered = <A>(promise: Promise<A>) => {
   return Promise.race([promise.catch(() => undefined), late]).finally(() => clearTimeout(timer));
 };
 
-/** Isolated worlds prevent spoofing; desktop out-of-process frames use page worlds. Missing own-frame reads or changed frames fail; other missing reads return undefined. */
-const openReaders = async (page: Page, cdp: CDPSession) => {
+/** Desktop out-of-process frames may use page worlds for snapshots. A caller can require isolated reads. */
+const openReaders = async (
+  page: Page,
+  cdp: CDPSession,
+  options?: { script: string; isolatedOnly: boolean },
+) => {
+  const script = options?.script ?? DOTTED_SCRIPT;
   const frames = page.frames();
   const owners = new Map<Frame, CDPSession | null | undefined>(
     await Promise.all(
@@ -597,7 +615,7 @@ const openReaders = async (page: Page, cdp: CDPSession) => {
           ids.map(async (contextId) => {
             const { result, exceptionDetails } = await session.send("Runtime.evaluate", {
               contextId,
-              expression: DOTTED_SCRIPT,
+              expression: script,
               returnByValue: true,
             });
             if (exceptionDetails) throw pageChanged();
@@ -623,7 +641,8 @@ const openReaders = async (page: Page, cdp: CDPSession) => {
     ...frames.flatMap((frame) => {
       const owner = owners.get(frame);
       if (owner) return owner === cdp ? [] : [sessionReader(frame, owner)];
-      const own = () => frame.evaluate(DOTTED_SCRIPT) as Promise<Array<string>>;
+      const own = () =>
+        options?.isolatedOnly ? Promise.reject(pageChanged()) : frame.evaluate<string[]>(script);
       return ownerOf(frame) === null ? [{ frames: [frame], read: own }] : [];
     }),
   ];
@@ -1172,6 +1191,48 @@ export const snapshotMetadata = (input: SnapshotInput) =>
 
 export type ClickTimeoutDiagnostic = () => Promise<ServerBrowserOperationError>;
 
+const clickAmbiguity = async (
+  page: Page,
+  cdp: CDPSession | undefined,
+  locator: Locator,
+  count: number,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+) => {
+  const fallback = describeClickAmbiguity(count, [], (name) => name);
+  const message =
+    cdp === undefined || timeoutMs <= 0
+      ? fallback
+      : await withReadBudget(
+          { timeoutMs, signal },
+          async (read) => {
+            const fields = await read("candidate readers", () =>
+              openReaders(page, cdp, { script: FIELD_VALUES_SCRIPT, isolatedOnly: true }),
+            );
+            const before = await read("field values before candidate read", () => fields.read());
+            if (before.some((values) => values === undefined)) return fallback;
+            const controls = await read("matching controls", () =>
+              readMatchingControls(locator, count),
+            );
+            const after = await read("field values after candidate read", () =>
+              fields.read(before),
+            );
+            // Accessible names can include a field's value. Only use the names if every
+            // frame answered consistently on both sides of the read.
+            if (JSON.stringify(after) !== JSON.stringify(before)) return fallback;
+            const pattern = dottedPattern(after.flatMap((values) => values ?? []));
+            return describeClickAmbiguity(count, controls, (name) =>
+              pattern ? name.replace(pattern, MASKED_VALUE) : name,
+            );
+          },
+          500,
+        ).catch((cause) => {
+          if (signal?.aborted) throw cause;
+          return fallback;
+        });
+  return new ServerBrowserOperationError({ tag: "PreviewAutomationExecutionError", message });
+};
+
 /** Return when a dialog opens; waiting for the action to finish would block until dialog resolution. */
 export const click = async (
   page: Page,
@@ -1179,6 +1240,7 @@ export const click = async (
   pointer: PointerReporter = noPointer,
   signal?: AbortSignal,
   onTimeout?: (diagnose: ClickTimeoutDiagnostic) => void,
+  cdp?: CDPSession,
 ): Promise<{ readonly x: number; readonly y: number }> => {
   signal?.throwIfAborted();
   // One deadline across steps keeps the reply inside the broker's grace; Playwright reads 0 as none.
@@ -1230,7 +1292,12 @@ export const click = async (
     }
     return point;
   } catch (cause) {
-    throw locator === null ? cause : await namedTargetTimeout(locator, input, cause, stage);
+    if (locator === null) throw cause;
+    const count = strictClickMatchCount(cause);
+    // Leave enough of the action budget to return the refusal even if the optional read stalls.
+    if (count !== undefined)
+      throw await clickAmbiguity(page, cdp, locator, count, signal, deadline - Date.now() - 25);
+    throw await namedTargetTimeout(locator, input, cause, stage);
   }
 };
 

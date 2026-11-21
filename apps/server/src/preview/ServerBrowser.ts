@@ -4914,7 +4914,14 @@ const make = Effect.gen(function* () {
           ),
         };
         await recordAction(tab, "click", () =>
-          ServerBrowserPage.click(tab.page, clickInput, pointerFor(tab), signal, onClickTimeout),
+          ServerBrowserPage.click(
+            tab.page,
+            clickInput,
+            pointerFor(tab),
+            signal,
+            onClickTimeout,
+            tab.cdp,
+          ),
         );
         return undefined;
       }
