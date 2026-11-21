@@ -36,7 +36,8 @@ repository `AGENTS.md` on both branches.
    downstream automation, and `docs/lastcode` changes.
 6. Run the smallest relevant tests and checks required by `AGENTS.md`.
 7. Fetch and rebase onto the latest `upstream/main` immediately before opening
-   the PR. Push to `origin` and target `pingdotgg/t3code:main`.
+   the PR. Push to `origin` and target `pingdotgg/t3code:main` with
+   `gh pr create -R pingdotgg/t3code`; gh's default repository is the fork.
 8. Follow upstream CI and review conventions. Verify review findings against the
    source, address real issues, and explain false positives.
 
