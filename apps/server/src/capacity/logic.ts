@@ -117,12 +117,13 @@ function applyRecovery(
     return {
       recovery: { held: true, healthySince: null },
       verdict: {
-        // A measured breach is a hold even when another signal is unreadable.
-        state: reasons.every(
-          (reason) => reason.comparison === "unreadable" || reason.comparison === "stale",
-        )
-          ? "unknown"
-          : "hold",
+        // A fresh measured breach is a hold even when another signal is unreadable;
+        // a stale sample's old breach is not current, so staleness is unknown.
+        state:
+          reasons.some((reason) => reason.comparison === "stale") ||
+          reasons.every((reason) => reason.comparison === "unreadable")
+            ? "unknown"
+            : "hold",
         reasons,
       },
     };

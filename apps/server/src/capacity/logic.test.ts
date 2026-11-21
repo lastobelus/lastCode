@@ -246,6 +246,19 @@ describe("capacity verdicts", () => {
     expect(verdicts.agent.state).toBe("unknown");
   });
 
+  it("reports a stale sample's old breach as unknown", () => {
+    const { verdicts } = evaluateCapacity(
+      pair({ memoryPressure: "warning" }),
+      40_000,
+      "observe",
+    ).snapshot;
+    expect(verdicts.agent.state).toBe("unknown");
+    expect(verdicts.background.state).toBe("unknown");
+    expect(verdicts.agent.reasons).toContainEqual(
+      expect.objectContaining({ signal: "measurement", comparison: "stale" }),
+    );
+  });
+
   it("holds a previously open verdict after an unobserved gap until it recovers", () => {
     const open = evaluateCapacity(pair(), 5_000, "observe");
     expect(open.snapshot.verdicts.background.state).toBe("open");
