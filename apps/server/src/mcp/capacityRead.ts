@@ -3,14 +3,19 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Capacity from "../capacity/Capacity.ts";
-import { unknownCapacitySnapshot } from "../capacity/logic.ts";
+import { unreadableCapacitySnapshot } from "../capacity/logic.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 
 const unavailableCapacity: Effect.Effect<ReportedCapacitySnapshot> = Clock.currentTimeMillis.pipe(
-  Effect.map((now) => unknownCapacitySnapshot(now)),
+  Effect.map(unreadableCapacitySnapshot),
 );
+// Capacity is advice: a defect while reading a peer reports unknown, never fails the result.
+const unavailableOnDefect = <A>(fallback: Effect.Effect<A>) =>
+  Effect.catchDefect((defect) =>
+    Effect.logWarning("capacity.peer-read-failed", { defect }).pipe(Effect.andThen(fallback)),
+  );
 
 export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
   scope: McpInvocationScope,
@@ -22,15 +27,19 @@ export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
   if (Option.isNone(forwarding)) return yield* unavailableCapacity;
   // Publication must never turn an accepted launch into a failure, or use this host's
   // reading for a different machine. An unavailable target stays explicitly unknown.
-  return yield* forwarding.value
-    .call(scope, EnvironmentToolkit.tools.t3_environment_read, remote, { includeLinked: false })
-    .pipe(
-      Effect.flatMap(({ capacity }) =>
-        capacity === undefined ? unavailableCapacity : Effect.succeed(capacity),
-      ),
-      Effect.timeout("2 seconds"),
-      Effect.catch(() => unavailableCapacity),
-    );
+  // Suspended so a call that throws while building its effect is caught below too.
+  return yield* Effect.suspend(() =>
+    forwarding.value.call(scope, EnvironmentToolkit.tools.t3_environment_read, remote, {
+      includeLinked: false,
+    }),
+  ).pipe(
+    Effect.flatMap(({ capacity }) =>
+      capacity === undefined ? unavailableCapacity : Effect.succeed(capacity),
+    ),
+    Effect.timeout("2 seconds"),
+    Effect.catch(() => unavailableCapacity),
+    unavailableOnDefect(unavailableCapacity),
+  );
 });
 
 export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (
@@ -66,6 +75,10 @@ export const readEnvironmentCapacity = Effect.fn("mcp.readEnvironmentCapacity")(
     // Each linked read can cost up to 2 s, so only an explicit request fans out.
     ...(includeLinked !== true
       ? { linkedObservation: "not-requested" as const, linked: [] }
-      : yield* linkedCapacity(scope)),
+      : yield* linkedCapacity(scope).pipe(
+          unavailableOnDefect(
+            Effect.succeed({ linkedObservation: "unknown" as const, linked: [] }),
+          ),
+        )),
   };
 });

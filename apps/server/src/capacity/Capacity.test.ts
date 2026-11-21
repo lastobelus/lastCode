@@ -387,6 +387,71 @@ describe("Capacity service", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("starts unwired when the capacity layer fails to build", () =>
+    Effect.gen(function* () {
+      const capacity = yield* Effect.flatMap(Capacity.Capacity, (service) => service.read).pipe(
+        Effect.provide(Capacity.orUnwired(Layer.effect(Capacity.Capacity, Effect.die("broken")))),
+      );
+      expect(capacity).toMatchObject({ mode: "unknown", measurements: null });
+    }),
+  );
+
+  it.effect("reports unknown instead of failing when a read defects", () =>
+    Effect.gen(function* () {
+      const broken = yield* Ref.make(false);
+      const service = yield* Capacity.make({
+        mode: Ref.get(broken).pipe(
+          Effect.flatMap((isBroken) =>
+            isBroken ? Effect.die("settings defect") : Effect.succeed("observe" as const),
+          ),
+        ),
+        worktreesDir: Effect.succeed(null),
+        activity,
+        ownerPower: Effect.succeed(power),
+      });
+      yield* Ref.set(broken, true);
+      expect((yield* service.read).mode).toBe("unknown");
+      expect((yield* service.readWithActivity).verdicts.agent.state).toBe("unknown");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reports a defective sample as unknown right away", () =>
+    Effect.gen(function* () {
+      const broken = yield* Ref.make(false);
+      const service = yield* Capacity.make({
+        mode: Effect.succeed("observe"),
+        worktreesDir: Effect.succeed("/unused"),
+        activity,
+        ownerPower: Effect.succeed(power),
+        source: {
+          read: Ref.get(broken).pipe(
+            Effect.flatMap((isBroken) =>
+              isBroken
+                ? Effect.die("source defect")
+                : Clock.currentTimeMillis.pipe(
+                    Effect.map((sampledAt) => ({
+                      sampledAt,
+                      physicalCores: 8,
+                      load1: 1,
+                      load5: 1,
+                      memoryPressure: "normal" as const,
+                      swapUsedBytes: 0,
+                      worktreesFreeBytes: 100 * GB,
+                      worktreeFoldersByProject: null,
+                    })),
+                  ),
+            ),
+          ),
+        },
+      });
+      yield* TestClock.adjust("70 seconds");
+      expect((yield* service.read).verdicts.background.state).toBe("open");
+      yield* Ref.set(broken, true);
+      yield* TestClock.adjust("5 seconds");
+      expect((yield* service.read).verdicts.background.state).toBe("unknown");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("keeps sampling after a defective sample", () =>
     Effect.gen(function* () {
       const modeReads = yield* Ref.make(0);
