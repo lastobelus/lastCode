@@ -72,13 +72,18 @@ it.effect(
 
 it.effect("reports a peer read that defects as unknown", () =>
   Effect.gen(function* () {
-    const missing = yield* capacityForTarget(scope, targetId).pipe(
-      Effect.provide(
-        Layer.mock(PeerForwarding.PeerForwarding)({ call: () => Effect.die("peer defect") }),
-      ),
-    );
-    expect(missing.mode).toBe("unknown");
-    expect(missing.verdicts.agent.state).toBe("unknown");
+    for (const call of [
+      () => Effect.die("peer defect"),
+      () => {
+        throw new Error("peer threw");
+      },
+    ]) {
+      const missing = yield* capacityForTarget(scope, targetId).pipe(
+        Effect.provide(Layer.mock(PeerForwarding.PeerForwarding)({ call })),
+      );
+      expect(missing.mode).toBe("unknown");
+      expect(missing.verdicts.agent.state).toBe("unknown");
+    }
   }),
 );
 

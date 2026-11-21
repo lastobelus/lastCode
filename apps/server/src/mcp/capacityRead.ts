@@ -27,16 +27,19 @@ export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
   if (Option.isNone(forwarding)) return yield* unavailableCapacity;
   // Publication must never turn an accepted launch into a failure, or use this host's
   // reading for a different machine. An unavailable target stays explicitly unknown.
-  return yield* forwarding.value
-    .call(scope, EnvironmentToolkit.tools.t3_environment_read, remote, { includeLinked: false })
-    .pipe(
-      Effect.flatMap(({ capacity }) =>
-        capacity === undefined ? unavailableCapacity : Effect.succeed(capacity),
-      ),
-      Effect.timeout("2 seconds"),
-      Effect.catch(() => unavailableCapacity),
-      unavailableOnDefect(unavailableCapacity),
-    );
+  // Suspended so a call that throws while building its effect is caught below too.
+  return yield* Effect.suspend(() =>
+    forwarding.value.call(scope, EnvironmentToolkit.tools.t3_environment_read, remote, {
+      includeLinked: false,
+    }),
+  ).pipe(
+    Effect.flatMap(({ capacity }) =>
+      capacity === undefined ? unavailableCapacity : Effect.succeed(capacity),
+    ),
+    Effect.timeout("2 seconds"),
+    Effect.catch(() => unavailableCapacity),
+    unavailableOnDefect(unavailableCapacity),
+  );
 });
 
 export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (

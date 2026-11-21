@@ -86,6 +86,8 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
     return yield* source.read;
   });
   const paused = yield* Ref.make(false);
+  // Set by a defective sample and cleared by the next good one; reads report unknown meanwhile.
+  const sampleFailed = yield* Ref.make(false);
   const loggedVerdicts = yield* Ref.make("");
   const sample = Effect.fn("capacity.sample")(function* () {
     const mode = yield* inputs.mode;
@@ -133,6 +135,7 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       const next = evaluateCapacity(recordCapacitySample(base, measurements, idle), now, mode);
       return [next.snapshot, next.state] as const;
     });
+    yield* Ref.set(sampleFailed, false);
     const { agent, background } = snapshot.verdicts;
     // Log a held verdict once per change of state or reasons, not on every sample.
     const verdicts = [agent, background]
@@ -154,21 +157,9 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
   yield* sample().pipe(
     // One defective sample must not end sampling and leave every later read stale.
     Effect.catchDefect((defect) =>
-      Effect.logWarning("capacity.sample-failed", { defect }).pipe(
-        // Report the failed sample as unreadable now, not only once the last good one is stale.
-        Effect.andThen(Clock.currentTimeMillis),
-        Effect.flatMap((now) =>
-          Ref.update(
-            state,
-            (current) =>
-              evaluateCapacity(
-                recordCapacitySample(current, failedMeasurements(now), null),
-                now,
-                "observe",
-              ).state,
-          ),
-        ),
-        Effect.catchDefect(() => Effect.void),
+      // Report the failure now, not only once the last good sample goes stale.
+      Ref.set(sampleFailed, true).pipe(
+        Effect.andThen(Effect.logWarning("capacity.sample-failed", { defect })),
       ),
     ),
     Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)),
@@ -187,6 +178,7 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
     }
     const activity = yield* activityOf;
     const now = yield* Clock.currentTimeMillis;
+    if (yield* Ref.get(sampleFailed)) return { ...unreadableCapacitySnapshot(now), mode, activity };
     // Until the first sample after Off, earlier readings and recovery no longer apply.
     const snapshot = (yield* Ref.get(paused))
       ? unknownCapacitySnapshot(now, mode)
