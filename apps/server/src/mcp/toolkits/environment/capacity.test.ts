@@ -76,7 +76,10 @@ it.effect("publishes local and linked capacity for a read-only environment clien
     const result = yield* invoke(scope, true).pipe(
       Effect.provide(
         Layer.mergeAll(
-          Layer.succeed(Capacity.Capacity, { read: Effect.succeed(local) }),
+          Layer.succeed(Capacity.Capacity, {
+            read: Effect.die("environment reads count activity"),
+            readWithActivity: Effect.succeed(local),
+          }),
           Layer.mock(PeerForwarding.PeerForwarding)({
             links: (caller) => {
               expect(caller.client?.access).toBe("read-only");
@@ -120,6 +123,9 @@ it.effect("checks the credential's environment before reading capacity", () =>
     const result = yield* invoke({ ...scope, environmentId: remoteId }).pipe(
       Effect.provideService(Capacity.Capacity, {
         read: Ref.update(reads, (count) => count + 1).pipe(Effect.as(unknownCapacitySnapshot(0))),
+        readWithActivity: Ref.update(reads, (count) => count + 1).pipe(
+          Effect.as(unknownCapacitySnapshot(0)),
+        ),
       }),
     );
     expect(result).toMatchObject({ code: "capability_denied" });

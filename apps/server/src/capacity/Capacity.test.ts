@@ -90,14 +90,18 @@ describe("Capacity service", () => {
       yield* TestClock.adjust("10 seconds");
       expect(logs).toHaveLength(0);
       expect(yield* Ref.get(activityReads)).toBe(0);
-      const firstRead = yield* service.read;
+      // A launch's read never waits on the activity scan.
+      const launchRead = yield* service.read;
+      expect(launchRead.activity).toBeNull();
+      expect(yield* Ref.get(activityReads)).toBe(0);
+      const firstRead = yield* service.readWithActivity;
       expect(firstRead.verdicts.agent.state).toBe("open");
       expect(firstRead.verdicts.background.state).toBe("open");
       expect(firstRead.activity).toEqual(yield* activity);
 
       // Activity is informational, so a failed read reports null without gating verdicts.
       yield* Ref.set(activityFailure, true);
-      const failedRead = yield* service.read;
+      const failedRead = yield* service.readWithActivity;
       expect(failedRead.activity).toBeNull();
       expect(failedRead.verdicts.agent).toEqual({ state: "open", reasons: [] });
       expect(failedRead.verdicts.background).toEqual({ state: "open", reasons: [] });
@@ -105,7 +109,7 @@ describe("Capacity service", () => {
       expect((yield* service.read).verdicts.agent.state).toBe("open");
       yield* Ref.set(mode, "off");
       const readsBeforeOff = yield* Ref.get(activityReads);
-      yield* service.read;
+      yield* service.readWithActivity;
       expect(yield* Ref.get(activityReads)).toBe(readsBeforeOff);
       // A read that saw Off makes earlier readings and recovery stale until a fresh sample.
       yield* Ref.set(mode, "observe");
@@ -392,11 +396,11 @@ describe("Capacity service", () => {
       });
       yield* Deferred.await(entered);
       expect(yield* Ref.get(activityReads)).toBe(0);
-      expect((yield* service.read).sampledAt).toBeNull();
+      expect((yield* service.readWithActivity).sampledAt).toBeNull();
       expect(yield* Ref.get(activityReads)).toBe(1);
       yield* TestClock.adjust("15 seconds");
       expect(yield* Ref.get(activityReads)).toBe(1);
-      expect((yield* service.read).activity).toEqual(yield* activity);
+      expect((yield* service.readWithActivity).activity).toEqual(yield* activity);
       expect(yield* Ref.get(activityReads)).toBe(2);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

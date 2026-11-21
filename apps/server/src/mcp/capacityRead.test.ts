@@ -27,7 +27,10 @@ it.effect(
       const remote = unknownCapacitySnapshot(2);
       const provide = (response: "available" | "unavailable" | "older") =>
         Layer.mergeAll(
-          Layer.succeed(Capacity.Capacity, { read: Effect.succeed(local) }),
+          Layer.succeed(Capacity.Capacity, {
+            read: Effect.succeed(local),
+            readWithActivity: Effect.die("a launch reads capacity without activity"),
+          }),
           Layer.mock(PeerForwarding.PeerForwarding)({
             call: (_scope, tool, target, params) => {
               expect(tool.name).toBe("t3_environment_read");
@@ -88,6 +91,7 @@ it.effect("one read includes linked capacity and keeps unreachable machines unkn
         Layer.mergeAll(
           Layer.succeed(Capacity.Capacity, {
             read: Effect.die("must not substitute local capacity"),
+            readWithActivity: Effect.die("must not substitute local capacity"),
           }),
           Layer.mock(PeerForwarding.PeerForwarding)({
             links: () =>

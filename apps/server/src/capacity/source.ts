@@ -176,6 +176,8 @@ export const nativeSource = Effect.fn("capacity.nativeSource")(function* (worktr
       ),
     ),
     Effect.map(Object.fromEntries),
+    // Folder counts are informational; a slow volume must not delay the rule signals.
+    Effect.timeout("1 second"),
     Effect.orElseSucceed(() => null),
   );
   // The core count never changes, so read it until it is known and then reuse it.

@@ -33,6 +33,16 @@ export const initialCapacityState = (): CapacityState => ({
 const valid = (value: number | null): value is number =>
   value !== null && Number.isFinite(value) && value >= 0;
 
+const restartedRecovery = (state: CapacityState) => ({
+  agent: { ...state.agent, healthySince: null },
+  background: { ...state.background, healthySince: null },
+});
+// Nothing was observed during a gap, so both classes must earn open again.
+const gapRecovery = {
+  agent: { held: true, healthySince: null },
+  background: { held: true, healthySince: null },
+};
+
 export function recordCapacitySample(
   state: CapacityState,
   sample: CapacityMeasurements,
@@ -53,8 +63,7 @@ export function recordCapacitySample(
       sample,
     ],
     ownerIdleSeconds: valid(ownerIdleSeconds) ? ownerIdleSeconds : null,
-    agent: continuous ? state.agent : { ...state.agent, healthySince: null },
-    background: continuous ? state.background : { ...state.background, healthySince: null },
+    ...(continuous ? {} : previous === undefined ? restartedRecovery(state) : gapRecovery),
   };
 }
 
@@ -225,8 +234,10 @@ export function evaluateCapacity(
       value: smooth.freeBytesChangePerMinute,
       limit: -2 * GB,
     });
-  const agent = applyRecovery(state.agent, agentReasons, now);
-  const background = applyRecovery(state.background, backgroundReasons, now);
+  // Recovery advances only with new samples: a later read is no more evidence of health.
+  const observedAt = latest?.sampledAt ?? now;
+  const agent = applyRecovery(state.agent, agentReasons, observedAt);
+  const background = applyRecovery(state.background, backgroundReasons, observedAt);
   return {
     state: { ...state, agent: agent.recovery, background: background.recovery },
     snapshot: {
