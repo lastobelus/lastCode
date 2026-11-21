@@ -264,6 +264,31 @@ export function evaluateCapacity(
   };
 }
 
+// Built without the evaluation logic, so a defect there can't also break this fallback.
+export function unreadableCapacitySnapshot(now: number): CapacitySnapshot {
+  const unknown: CapacityVerdict = {
+    state: "unknown",
+    reasons: [{ signal: "measurement", comparison: "unreadable", value: null, limit: null }],
+  };
+  return {
+    mode: "unknown",
+    sampledAt: null,
+    readAt: now,
+    stale: true,
+    measurements: null,
+    smoothed: {
+      windowMs: 0,
+      sampleCount: 0,
+      load1PerCore: null,
+      load5PerCore: null,
+      freeBytesChangePerMinute: null,
+    },
+    activity: null,
+    ownerIdleSeconds: null,
+    verdicts: { owner: { state: "open", reasons: [] }, agent: unknown, background: unknown },
+  };
+}
+
 export function unknownCapacitySnapshot(
   now: number,
   mode: CapacitySnapshot["mode"] = "unknown",
