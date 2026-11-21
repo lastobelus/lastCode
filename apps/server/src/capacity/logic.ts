@@ -117,7 +117,8 @@ function applyRecovery(
     return {
       recovery: { held: true, healthySince: null },
       verdict: {
-        state: reasons.some(
+        // A measured breach is a hold even when another signal is unreadable.
+        state: reasons.every(
           (reason) => reason.comparison === "unreadable" || reason.comparison === "stale",
         )
           ? "unknown"

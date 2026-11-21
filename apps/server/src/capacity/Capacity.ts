@@ -146,7 +146,12 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       yield* Effect.logInfo("capacity.would-hold", { capacity: snapshot });
     }
   });
-  yield* sample().pipe(Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)), Effect.forkScoped);
+  yield* sample().pipe(
+    // One defective sample must not end sampling and leave every later read stale.
+    Effect.catchDefect((defect) => Effect.logWarning("capacity.sample-failed", { defect })),
+    Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)),
+    Effect.forkScoped,
+  );
 
   const readWith = Effect.fn("capacity.read")(function* (
     activityOf: Effect.Effect<CapacityActivity | null>,
@@ -171,7 +176,8 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
     // Activity is informational: no rule reads it, so a failed read never gates a verdict.
     readWithActivity: readWith(
       inputs.activity.pipe(
-        Effect.timeout("3 seconds"),
+        // Shorter than a peer's 2 s forwarded read, so a slow scan drops only activity.
+        Effect.timeout("1 second"),
         Effect.orElseSucceed(() => null),
       ),
     ),

@@ -233,6 +233,19 @@ describe("capacity verdicts", () => {
     ]);
   });
 
+  it("holds on a measured breach even when another signal is unreadable", () => {
+    const { verdicts } = evaluateCapacity(
+      pair({ memoryPressure: "unknown", load5: 8 }),
+      5_000,
+      "observe",
+    ).snapshot;
+    expect(verdicts.background.state).toBe("hold");
+    expect(verdicts.background.reasons).toContainEqual(
+      expect.objectContaining({ signal: "memoryPressure", comparison: "unreadable" }),
+    );
+    expect(verdicts.agent.state).toBe("unknown");
+  });
+
   it("holds a previously open verdict after an unobserved gap until it recovers", () => {
     const open = evaluateCapacity(pair(), 5_000, "observe");
     expect(open.snapshot.verdicts.background.state).toBe("open");

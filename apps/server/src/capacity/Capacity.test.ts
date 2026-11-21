@@ -218,7 +218,11 @@ describe("Capacity service", () => {
         const retargeted = yield* service.read;
         expect(retargeted.smoothed.sampleCount).toBe(1);
         expect(retargeted.smoothed.freeBytesChangePerMinute).toBeNull();
-        expect(retargeted.verdicts.agent.state).toBe("unknown");
+        // The missing rate is unreadable, but this source's measured breach still holds.
+        expect(retargeted.verdicts.agent.state).toBe("hold");
+        expect(retargeted.verdicts.agent.reasons).toContainEqual(
+          expect.objectContaining({ signal: "freeBytesChangePerMinute", comparison: "unreadable" }),
+        );
 
         yield* Ref.set(directory, null);
         yield* TestClock.adjust("5 seconds");
@@ -380,6 +384,38 @@ describe("Capacity service", () => {
         physicalCores: 8,
         swapUsedBytes: 1024 ** 2,
       });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps sampling after a defective sample", () =>
+    Effect.gen(function* () {
+      const modeReads = yield* Ref.make(0);
+      const service = yield* Capacity.make({
+        mode: Ref.getAndUpdate(modeReads, (count) => count + 1).pipe(
+          Effect.flatMap((count) =>
+            count === 0 ? Effect.die("settings defect") : Effect.succeed("observe" as const),
+          ),
+        ),
+        worktreesDir: Effect.succeed("/unused"),
+        activity,
+        ownerPower: Effect.succeed(power),
+        source: {
+          read: Clock.currentTimeMillis.pipe(
+            Effect.map((sampledAt) => ({
+              sampledAt,
+              physicalCores: 8,
+              load1: 1,
+              load5: 1,
+              memoryPressure: "normal" as const,
+              swapUsedBytes: 0,
+              worktreesFreeBytes: 100 * GB,
+              worktreeFoldersByProject: null,
+            })),
+          ),
+        },
+      });
+      yield* TestClock.adjust("5 seconds");
+      expect((yield* service.read).sampledAt).toBe(5_000);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
