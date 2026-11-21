@@ -10,7 +10,9 @@ const git = (cwd: string, args: ReadonlyArray<string>) =>
  * `upstream` and open PRs on the public parent.
  */
 export function markOriginAsGhDefault(cwd: string): void {
-  if (git(cwd, ["remote", "get-url", "origin"]).status !== 0) return;
+  const origin = git(cwd, ["remote", "get-url", "origin"]);
+  // gh ignores a mark on a non-GitHub origin, such as a forge mirror; keep the existing default.
+  if (origin.status !== 0 || !/(?:^|[@/])github\.com[:/]/iu.test(origin.stdout.trim())) return;
   const marks = git(cwd, ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"])
     .stdout.split("\n")
     .filter(Boolean)
