@@ -1,4 +1,5 @@
 import { readArchiveFamilyThreadIds } from "./ThreadArchiveReader.ts";
+import { CLEANUP_EFFECT_TYPES } from "./EffectOutbox.ts";
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
 import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
 import { interactiveThreadParentSql } from "./InteractiveThreadParentSql.ts";
@@ -910,6 +911,16 @@ export interface ProjectionStoreV2Shape {
   readonly getHeldQueuedRuns: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2Run>, ProjectionStoreV2Error>;
+  readonly getToolMaintenanceSnapshot: Effect.Effect<
+    {
+      readonly shell: OrchestrationV2ThreadShellSnapshot;
+      readonly work: ReadonlyArray<{
+        readonly threadId: ThreadId;
+        readonly kind: "active-run" | "background" | "cleanup";
+      }>;
+    },
+    ProjectionStoreV2Error
+  >;
   readonly getRecoveryThreadIds: (
     kind: ProjectionRecoveryKind,
     projects?: {
@@ -9211,6 +9222,48 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       )
     `;
 
+    const outstandingActionInShell = (thread: Statement.Fragment) => sql`
+      ${outstandingAction(sql`json_extract(owner.payload_json, '$.actionResume')`, thread)}
+      -- The ledger commits before shell publication, including disposal and completion.
+      AND NOT EXISTS (
+        SELECT 1 FROM action_resume_runs recorded
+        WHERE recorded.thread_id = owner.thread_id
+          AND recorded.run_id = json_extract(owner.payload_json, '$.actionResume.runId')
+      )
+    `;
+
+    const getToolMaintenanceWork = sql<{
+      readonly thread_id: string;
+      readonly kind: "active-run" | "background" | "cleanup";
+    }>`
+      SELECT run.thread_id, 'active-run' AS kind FROM orchestration_v2_projection_runs run
+      JOIN orchestration_v2_projection_threads owner ON owner.thread_id = run.thread_id
+      WHERE run.status IN ('preparing', 'queued', 'starting', 'running', 'waiting')
+        AND owner.deleted_at IS NULL
+      UNION
+      SELECT action.thread_id, 'background' AS kind FROM action_resume_runs action
+      LEFT JOIN orchestration_v2_projection_threads owner ON owner.thread_id = action.thread_id
+      WHERE json_extract(action.state_json, '$.outcome') = 'running'
+        OR (owner.thread_id IS NOT NULL AND owner.deleted_at IS NULL
+          AND ${outstandingAction(sql`action.state_json`, sql`action.thread_id`)})
+      UNION
+      SELECT owner.thread_id, 'background' AS kind FROM orchestration_v2_projection_threads owner
+      WHERE owner.deleted_at IS NULL AND ${outstandingActionInShell(sql`owner.thread_id`)}
+      UNION
+      SELECT effect.thread_id,
+        CASE WHEN effect.effect_type IN ${sql.in(CLEANUP_EFFECT_TYPES)} THEN 'cleanup' ELSE 'background' END AS kind
+      FROM orchestration_v2_effect_outbox effect
+      WHERE effect.status IN ('pending', 'running')
+        -- A saved watch wake cannot start a turn during maintenance. Its retry
+        -- relinquishes this outbox row while keeping the obligation for recovery.
+        AND effect.effect_type != 'pull-request-watch.deliver'
+    `.pipe(
+      Effect.map((rows) =>
+        rows.map((row) => ({ threadId: ThreadId.make(row.thread_id), kind: row.kind })),
+      ),
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
     const outstandingOwnedWork = (thread: Statement.Fragment) => sql`
       (EXISTS (
         SELECT 1 FROM orchestration_v2_projection_subagents task
@@ -9248,13 +9301,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       ) OR EXISTS (
         SELECT 1 FROM orchestration_v2_projection_threads owner
         WHERE owner.thread_id = ${thread}
-          AND ${outstandingAction(sql`json_extract(owner.payload_json, '$.actionResume')`, thread)}
-          -- The ledger commits before shell publication, including disposal and completion.
-          AND NOT EXISTS (
-            SELECT 1 FROM action_resume_runs recorded
-            WHERE recorded.thread_id = owner.thread_id
-              AND recorded.run_id = json_extract(owner.payload_json, '$.actionResume.runId')
-          )
+          AND ${outstandingActionInShell(thread)}
       ))
     `;
 
@@ -9546,6 +9593,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ThreadId,
           ReadonlyArray<OrchestrationV2TurnItem>
         >;
+        readonly excludePullRequestWatchTasks?: boolean;
       }) {
         const {
           row,
@@ -9664,7 +9712,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
             activeProviderThreadId: thread.activeProviderThreadId,
             hasActiveRun: row.active_run_id !== null,
-            pullRequests: thread.pullRequests,
+            pullRequests: input.excludePullRequestWatchTasks ? undefined : thread.pullRequests,
           }),
         ];
         return {
@@ -9797,16 +9845,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       };
     });
 
-    const decodeShellSnapshot = Effect.fn("ProjectionStore.decodeShellSnapshot")(function* ({
-      targetThreadIds,
-      threadRows,
-      runRows,
-      itemCountRows,
-      shellItemCountRows,
-      sequenceRows,
-      providerThreadRows,
-      pendingTurnItemRows,
-    }: Effect.Success<ReturnType<typeof readShellSnapshotRows>>) {
+    const decodeShellSnapshot = Effect.fn("ProjectionStore.decodeShellSnapshot")(function* (
+      {
+        targetThreadIds,
+        threadRows,
+        runRows,
+        itemCountRows,
+        shellItemCountRows,
+        sequenceRows,
+        providerThreadRows,
+        pendingTurnItemRows,
+      }: Effect.Success<ReturnType<typeof readShellSnapshotRows>>,
+      excludePullRequestWatchTasks = false,
+    ) {
       const { runsByThreadId, itemCountsByThreadId } = runMapsByThreadId({
         runRows,
         itemCountRows,
@@ -9822,6 +9873,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           shellItemCountsByThreadId,
           providerThreadsByThreadId,
           pendingTurnItemsByThreadId,
+          excludePullRequestWatchTasks,
         }),
       );
       const statesByThreadId = new Map(states.map((state) => [state.thread.id, state]));
@@ -9964,6 +10016,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql
         .withTransaction(readShellSnapshotRows(options))
         .pipe(Effect.mapError(shellSnapshotReadError), Effect.flatMap(decodeShellSnapshot));
+
+    const getToolMaintenanceSnapshot = Effect.gen(function* () {
+      // A held turn can finish and leave background work or effects. Observe
+      // both sides of that handoff from one committed database snapshot.
+      const [rows, work] = yield* sql
+        .withTransaction(Effect.all([readShellSnapshotRows(undefined), getToolMaintenanceWork]))
+        .pipe(Effect.mapError(shellSnapshotReadError));
+      const shell = yield* decodeShellSnapshot(rows, true);
+      return { shell, work };
+    }).pipe(NodeSqliteClient.readOnly);
 
     const listActiveSubagentThreadIds = Effect.fn("ProjectionStore.listActiveSubagentThreadIds")(
       function* () {
@@ -10420,6 +10482,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getLimitRecoveryCandidates: readOnReader(getLimitRecoveryCandidates),
       getLimitRecoveryWakeAt: readOnReader(getLimitRecoveryWakeAt),
       getRecoveryThreadIds: readOnReader(getRecoveryThreadIds),
+      getToolMaintenanceSnapshot,
       getUnreadableThreadIds: readOnReader(getUnreadableThreadIds),
       getThreadSnapshot: readOnReader(getThreadSnapshot),
       getThreadSnapshotWindow: readOnReader(getThreadSnapshotWindow),

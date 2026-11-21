@@ -1,5 +1,11 @@
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
-import { CommandId, type MessageId, type ThreadId, type RunId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type MessageId,
+  type ThreadId,
+  type RunId,
+  UpdateDrainAdmissionError,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -14,6 +20,7 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlError from "effect/sql/SqlError";
+import { TOOL_MAINTENANCE_TARGET } from "../updateDrain/UpdateDrainAdmission.ts";
 
 import {
   increment,
@@ -43,6 +50,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
 const isProviderTurnControlError = Schema.is(ProviderTurnControlService.ProviderTurnControlError);
+const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -274,6 +282,15 @@ export const layerExecutor: Layer.Layer<
                   effect.request.generation,
                 ),
                 Effect.asVoid,
+                // The watch obligation still owns the saved message. The reactor
+                // retries it after this row settles, without blocking thread cleanup.
+                Effect.catchIf(
+                  (error) =>
+                    error._tag === "OrchestratorDispatchError" &&
+                    isUpdateDrainAdmissionError(error.cause) &&
+                    error.cause.targetVersion === TOOL_MAINTENANCE_TARGET,
+                  () => Effect.void,
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({

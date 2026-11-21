@@ -6,4 +6,6 @@ import * as UpdateDrainAdmission from "./UpdateDrainAdmission.ts";
 export const layerOpen = Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
   admit: (_kind, effect) => effect,
   admitOrElse: (_kind, effect) => effect,
+  admitPullRequestWatchWake: (effect) => effect,
+  admitPullRequestWatchProcess: (effect) => effect,
 });
