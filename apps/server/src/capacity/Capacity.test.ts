@@ -90,14 +90,18 @@ describe("Capacity service", () => {
       yield* TestClock.adjust("10 seconds");
       expect(logs).toHaveLength(0);
       expect(yield* Ref.get(activityReads)).toBe(0);
-      const firstRead = yield* service.read;
+      // A launch's read never waits on the activity scan.
+      const launchRead = yield* service.read;
+      expect(launchRead.activity).toBeNull();
+      expect(yield* Ref.get(activityReads)).toBe(0);
+      const firstRead = yield* service.readWithActivity;
       expect(firstRead.verdicts.agent.state).toBe("open");
       expect(firstRead.verdicts.background.state).toBe("open");
       expect(firstRead.activity).toEqual(yield* activity);
 
       // Activity is informational, so a failed read reports null without gating verdicts.
       yield* Ref.set(activityFailure, true);
-      const failedRead = yield* service.read;
+      const failedRead = yield* service.readWithActivity;
       expect(failedRead.activity).toBeNull();
       expect(failedRead.verdicts.agent).toEqual({ state: "open", reasons: [] });
       expect(failedRead.verdicts.background).toEqual({ state: "open", reasons: [] });
@@ -105,7 +109,7 @@ describe("Capacity service", () => {
       expect((yield* service.read).verdicts.agent.state).toBe("open");
       yield* Ref.set(mode, "off");
       const readsBeforeOff = yield* Ref.get(activityReads);
-      yield* service.read;
+      yield* service.readWithActivity;
       expect(yield* Ref.get(activityReads)).toBe(readsBeforeOff);
       // A read that saw Off makes earlier readings and recovery stale until a fresh sample.
       yield* Ref.set(mode, "observe");
@@ -214,7 +218,11 @@ describe("Capacity service", () => {
         const retargeted = yield* service.read;
         expect(retargeted.smoothed.sampleCount).toBe(1);
         expect(retargeted.smoothed.freeBytesChangePerMinute).toBeNull();
-        expect(retargeted.verdicts.agent.state).toBe("unknown");
+        // The missing rate is unreadable, but this source's measured breach still holds.
+        expect(retargeted.verdicts.agent.state).toBe("hold");
+        expect(retargeted.verdicts.agent.reasons).toContainEqual(
+          expect.objectContaining({ signal: "freeBytesChangePerMinute", comparison: "unreadable" }),
+        );
 
         yield* Ref.set(directory, null);
         yield* TestClock.adjust("5 seconds");
@@ -379,6 +387,38 @@ describe("Capacity service", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("keeps sampling after a defective sample", () =>
+    Effect.gen(function* () {
+      const modeReads = yield* Ref.make(0);
+      const service = yield* Capacity.make({
+        mode: Ref.getAndUpdate(modeReads, (count) => count + 1).pipe(
+          Effect.flatMap((count) =>
+            count === 0 ? Effect.die("settings defect") : Effect.succeed("observe" as const),
+          ),
+        ),
+        worktreesDir: Effect.succeed("/unused"),
+        activity,
+        ownerPower: Effect.succeed(power),
+        source: {
+          read: Clock.currentTimeMillis.pipe(
+            Effect.map((sampledAt) => ({
+              sampledAt,
+              physicalCores: 8,
+              load1: 1,
+              load5: 1,
+              memoryPressure: "normal" as const,
+              swapUsedBytes: 0,
+              worktreesFreeBytes: 100 * GB,
+              worktreeFoldersByProject: null,
+            })),
+          ),
+        },
+      });
+      yield* TestClock.adjust("5 seconds");
+      expect((yield* service.read).sampledAt).toBe(5_000);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("does not wait for the first sample or read activity in the sampler", () =>
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
@@ -392,11 +432,11 @@ describe("Capacity service", () => {
       });
       yield* Deferred.await(entered);
       expect(yield* Ref.get(activityReads)).toBe(0);
-      expect((yield* service.read).sampledAt).toBeNull();
+      expect((yield* service.readWithActivity).sampledAt).toBeNull();
       expect(yield* Ref.get(activityReads)).toBe(1);
       yield* TestClock.adjust("15 seconds");
       expect(yield* Ref.get(activityReads)).toBe(1);
-      expect((yield* service.read).activity).toEqual(yield* activity);
+      expect((yield* service.readWithActivity).activity).toEqual(yield* activity);
       expect(yield* Ref.get(activityReads)).toBe(2);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

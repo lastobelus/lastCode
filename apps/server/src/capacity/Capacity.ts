@@ -25,14 +25,16 @@ import { nativeSource, type CapacitySource } from "./source.ts";
 
 export type { CapacitySource } from "./source.ts";
 
-export class Capacity extends Context.Reference<{ readonly read: Effect.Effect<CapacitySnapshot> }>(
-  "t3/capacity/Capacity",
-  {
-    defaultValue: () => ({
-      read: Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now))),
-    }),
-  },
-) {}
+const unwired = Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now)));
+
+export class Capacity extends Context.Reference<{
+  /** The current verdicts, without activity, so a launch never waits on a thread scan. */
+  readonly read: Effect.Effect<CapacitySnapshot>;
+  /** The same reading with turn activity counted, for environment reads. */
+  readonly readWithActivity: Effect.Effect<CapacitySnapshot>;
+}>("t3/capacity/Capacity", {
+  defaultValue: () => ({ read: unwired, readWithActivity: unwired }),
+}) {}
 
 export interface CapacityInputs {
   readonly mode: Effect.Effect<CapacitySnapshot["mode"]>;
@@ -119,6 +121,8 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
         ? {
             ...current,
             samples: [],
+            // Off was chosen, not a stall: resuming starts like server start.
+            lastSampledAt: null,
             agent: { ...current.agent, healthySince: null },
             background: { ...current.background, healthySince: null },
           }
@@ -144,9 +148,16 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       yield* Effect.logInfo("capacity.would-hold", { capacity: snapshot });
     }
   });
-  yield* sample().pipe(Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)), Effect.forkScoped);
+  yield* sample().pipe(
+    // One defective sample must not end sampling and leave every later read stale.
+    Effect.catchDefect((defect) => Effect.logWarning("capacity.sample-failed", { defect })),
+    Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)),
+    Effect.forkScoped,
+  );
 
-  const read = Effect.gen(function* () {
+  const readWith = Effect.fn("capacity.read")(function* (
+    activityOf: Effect.Effect<CapacityActivity | null>,
+  ) {
     const mode = yield* inputs.mode;
     if (mode === "off") {
       // A read can see Off between sampler ticks; the next sample must still start afresh.
@@ -154,11 +165,7 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       yield* Ref.set(loggedVerdicts, "");
       return offCapacitySnapshot(yield* Clock.currentTimeMillis);
     }
-    // Activity is informational: no rule reads it, so a failed read never gates a verdict.
-    const activity = yield* inputs.activity.pipe(
-      Effect.timeout("3 seconds"),
-      Effect.orElseSucceed(() => null),
-    );
+    const activity = yield* activityOf;
     const now = yield* Clock.currentTimeMillis;
     // Until the first sample after Off, earlier readings and recovery no longer apply.
     const snapshot = (yield* Ref.get(paused))
@@ -166,7 +173,17 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       : evaluateCapacity(yield* Ref.get(state), now, mode).snapshot;
     return { ...snapshot, activity } satisfies CapacitySnapshot;
   });
-  return Capacity.of({ read });
+  return Capacity.of({
+    read: readWith(Effect.succeed(null)),
+    // Activity is informational: no rule reads it, so a failed read never gates a verdict.
+    readWithActivity: readWith(
+      inputs.activity.pipe(
+        // Shorter than a peer's 2 s forwarded read, so a slow scan drops only activity.
+        Effect.timeout("1 second"),
+        Effect.orElseSucceed(() => null),
+      ),
+    ),
+  });
 });
 
 export const layer = (inputs: CapacityInputs) => Layer.effect(Capacity, make(inputs));

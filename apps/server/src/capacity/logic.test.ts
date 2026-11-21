@@ -233,6 +233,73 @@ describe("capacity verdicts", () => {
     ]);
   });
 
+  it("holds on a measured breach even when another signal is unreadable", () => {
+    const { verdicts } = evaluateCapacity(
+      pair({ memoryPressure: "unknown", load5: 8 }),
+      5_000,
+      "observe",
+    ).snapshot;
+    expect(verdicts.background.state).toBe("hold");
+    expect(verdicts.background.reasons).toContainEqual(
+      expect.objectContaining({ signal: "memoryPressure", comparison: "unreadable" }),
+    );
+    expect(verdicts.agent.state).toBe("unknown");
+  });
+
+  it("reports a stale sample's old breach as unknown", () => {
+    const { verdicts } = evaluateCapacity(
+      pair({ memoryPressure: "warning" }),
+      40_000,
+      "observe",
+    ).snapshot;
+    expect(verdicts.agent.state).toBe("unknown");
+    expect(verdicts.background.state).toBe("unknown");
+    expect(verdicts.agent.reasons).toContainEqual(
+      expect.objectContaining({ signal: "measurement", comparison: "stale" }),
+    );
+  });
+
+  it("holds a previously open verdict after an unobserved gap until it recovers", () => {
+    const open = evaluateCapacity(pair(), 5_000, "observe");
+    expect(open.snapshot.verdicts.background.state).toBe("open");
+    const afterGap = evaluateCapacity(
+      recordCapacitySample(open.state, measurement(40_000), null),
+      40_000,
+      "observe",
+    );
+    expect(afterGap.snapshot.verdicts.background.reasons).toEqual([
+      { signal: "recovery", comparison: "recovering", value: 0, limit: 60_000 },
+    ]);
+  });
+
+  it("still sees a gap after the smoothing window was reset", () => {
+    const open = evaluateCapacity(pair(), 5_000, "observe").state;
+    // A directory change resets the window but keeps the last sample time.
+    const retargeted = { ...open, samples: [] };
+    const afterGap = evaluateCapacity(
+      recordCapacitySample(retargeted, measurement(40_000), null),
+      40_000,
+      "observe",
+    );
+    expect(afterGap.snapshot.verdicts.background.reasons).toEqual([
+      { signal: "recovery", comparison: "recovering", value: 0, limit: 60_000 },
+    ]);
+  });
+
+  it("advances recovery only with new samples, not with later reads", () => {
+    const held = evaluateCapacity(pair({ memoryPressure: "warning" }), 5_000, "observe").state;
+    const healthy = evaluateCapacity(
+      recordCapacitySample(held, measurement(10_000), null),
+      10_000,
+      "observe",
+    ).state;
+    // A read 25 s later, with no new sample, is still only 0 s of observed health.
+    const read = evaluateCapacity(healthy, 35_000, "observe").snapshot;
+    expect(read.verdicts.background.reasons).toEqual([
+      { signal: "recovery", comparison: "recovering", value: 0, limit: 60_000 },
+    ]);
+  });
+
   it("restarts the disk-rate window after a failed read without delaying recovery another minute", () => {
     let state = evaluateCapacity(pair(), 5_000, "observe").state;
     state = evaluateCapacity(

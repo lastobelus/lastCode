@@ -18,6 +18,8 @@ interface Recovery {
 
 export interface CapacityState {
   readonly samples: ReadonlyArray<CapacityMeasurements>;
+  /** Survives a reset of the smoothing window, so a gap across it is still seen. */
+  readonly lastSampledAt: number | null;
   readonly ownerIdleSeconds: number | null;
   readonly agent: Recovery;
   readonly background: Recovery;
@@ -25,6 +27,7 @@ export interface CapacityState {
 
 export const initialCapacityState = (): CapacityState => ({
   samples: [],
+  lastSampledAt: null,
   ownerIdleSeconds: null,
   agent: { held: false, healthySince: null },
   background: { held: false, healthySince: null },
@@ -33,17 +36,27 @@ export const initialCapacityState = (): CapacityState => ({
 const valid = (value: number | null): value is number =>
   value !== null && Number.isFinite(value) && value >= 0;
 
+const restartedRecovery = (state: CapacityState) => ({
+  agent: { ...state.agent, healthySince: null },
+  background: { ...state.background, healthySince: null },
+});
+// Nothing was observed during a gap, so both classes must earn open again.
+const gapRecovery = {
+  agent: { held: true, healthySince: null },
+  background: { held: true, healthySince: null },
+};
+
 export function recordCapacitySample(
   state: CapacityState,
   sample: CapacityMeasurements,
   ownerIdleSeconds: number | null,
 ): CapacityState {
+  const follows = (earlier: number) =>
+    sample.sampledAt - earlier <= STALE_AFTER_MS && sample.sampledAt > earlier;
   const previous = state.samples.at(-1);
   // A gap cannot count toward either a smoothing window or healthy recovery.
-  const continuous =
-    previous !== undefined &&
-    sample.sampledAt - previous.sampledAt <= STALE_AFTER_MS &&
-    sample.sampledAt > previous.sampledAt;
+  const continuous = previous !== undefined && follows(previous.sampledAt);
+  const gap = state.lastSampledAt !== null && !follows(state.lastSampledAt);
   return {
     ...state,
     samples: [
@@ -52,9 +65,9 @@ export function recordCapacitySample(
         : []),
       sample,
     ],
+    lastSampledAt: sample.sampledAt,
     ownerIdleSeconds: valid(ownerIdleSeconds) ? ownerIdleSeconds : null,
-    agent: continuous ? state.agent : { ...state.agent, healthySince: null },
-    background: continuous ? state.background : { ...state.background, healthySince: null },
+    ...(gap ? gapRecovery : continuous ? {} : restartedRecovery(state)),
   };
 }
 
@@ -108,11 +121,13 @@ function applyRecovery(
     return {
       recovery: { held: true, healthySince: null },
       verdict: {
-        state: reasons.some(
-          (reason) => reason.comparison === "unreadable" || reason.comparison === "stale",
-        )
-          ? "unknown"
-          : "hold",
+        // A fresh measured breach is a hold even when another signal is unreadable;
+        // a stale sample's old breach is not current, so staleness is unknown.
+        state:
+          reasons.some((reason) => reason.comparison === "stale") ||
+          reasons.every((reason) => reason.comparison === "unreadable")
+            ? "unknown"
+            : "hold",
         reasons,
       },
     };
@@ -225,8 +240,10 @@ export function evaluateCapacity(
       value: smooth.freeBytesChangePerMinute,
       limit: -2 * GB,
     });
-  const agent = applyRecovery(state.agent, agentReasons, now);
-  const background = applyRecovery(state.background, backgroundReasons, now);
+  // Recovery advances only with new samples: a later read is no more evidence of health.
+  const observedAt = latest?.sampledAt ?? now;
+  const agent = applyRecovery(state.agent, agentReasons, observedAt);
+  const background = applyRecovery(state.background, backgroundReasons, observedAt);
   return {
     state: { ...state, agent: agent.recovery, background: background.recovery },
     snapshot: {

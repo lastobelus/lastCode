@@ -62,7 +62,7 @@ export const readEnvironmentCapacity = Effect.fn("mcp.readEnvironmentCapacity")(
 ) {
   const scope = yield* McpInvocationContext;
   return {
-    ...(yield* (yield* Capacity.Capacity).read),
+    ...(yield* (yield* Capacity.Capacity).readWithActivity),
     // Each linked read can cost up to 2 s, so only an explicit request fans out.
     ...(includeLinked !== true
       ? { linkedObservation: "not-requested" as const, linked: [] }
