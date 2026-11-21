@@ -2549,16 +2549,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       mountReads,
       mode === "final-mount-unchanged" ? 5 : mode === "final-mount-late-dependency-use" ? 4 : 2,
     );
-    // Prepared eligibility now rechecks the owner after each native proof.
+    // Preparation and canRemove each read the owner once after Git. Any
+    // callback that reaches isStillEligible still rechecks the owner.
     assert.equal(
       targetedReads.length,
       mode === "final-mount-unchanged"
-        ? 6
+        ? 4
         : mode === "final-mount-queued-run" ||
             mode === "final-mount-candidate-event" ||
             mode === "final-mount-late-dependency-use"
-          ? 5
-          : 4,
+          ? 3
+          : 2,
     );
     assert.equal(processReads, 3);
     assert.equal(reads, 3);
