@@ -24,6 +24,7 @@ import type { SourceControlProcessInput } from "@t3tools/source-control-core/ser
 
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { WatchProcessAdmission } from "../updateDrain/WatchProcessAdmission.ts";
 
 export interface VcsProcessInput {
   readonly operation: string;
@@ -385,13 +386,14 @@ export const make = Effect.gen(function* () {
   });
 
   const run = Effect.fn("VcsProcess.run")(function* (input: VcsProcessInput) {
+    const admit = yield* WatchProcessAdmission;
     const bounded = vcsProcesses.withPermits(1)(runUnbounded(input));
     if (
       input.command === "git" &&
       input.operation === CHECKPOINT_CAPTURE_OPERATION &&
       input.onStdoutChunk === undefined
     ) {
-      return yield* bounded.pipe(
+      return yield* admit(input, bounded).pipe(
         Effect.tapError((error) =>
           Effect.logDebug("checkpoint Git command failed", {
             operation: input.operation,
@@ -408,9 +410,11 @@ export const make = Effect.gen(function* () {
     const shared = input.command === "git" ? bounded : nonGitProcesses.withPermits(1)(bounded);
     const keyed = input.concurrency === undefined ? shared : keyedPermit(input.concurrency)(shared);
     // Taken first, so a background call still waiting holds no permit another call needs.
-    return yield* input.command !== "git" && (yield* Background)
-      ? backgroundProcesses.withPermits(1)(keyed)
-      : keyed;
+    const execution =
+      input.command !== "git" && (yield* Background)
+        ? backgroundProcesses.withPermits(1)(keyed)
+        : keyed;
+    return yield* admit(input, execution);
   });
 
   return VcsProcess.of({ run });

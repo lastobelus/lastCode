@@ -20564,27 +20564,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ): Effect.fn.Return<A, OrchestratorV2Error> {
     // Replay still uses normal receipt validation under its command locks.
     // Fresh intake takes admission first, then rechecks the receipt while locked.
-    const receipt = yield* commandReceipts
-      .getByCommandId(command.commandId)
-      .pipe(mapDispatchError(command));
-    if (Option.isSome(receipt) || (acceptedReplay !== undefined && (yield* acceptedReplay))) {
+    // Explicit queue-start replays retry the start after reading the receipt.
+    const canReplay = Effect.gen(function* () {
+      if (kind === "thread-queue-start") return false;
+      const receipt = yield* commandReceipts
+        .getByCommandId(command.commandId)
+        .pipe(mapDispatchError(command));
+      return Option.isSome(receipt) || (acceptedReplay !== undefined && (yield* acceptedReplay));
+    });
+    if (yield* canReplay) {
       return yield* dispatch;
     }
-    return yield* updateDrainAdmission.admit(kind, dispatch).pipe(
+    const admitted =
+      kind === "pull-request-watch-wake"
+        ? updateDrainAdmission.admitPullRequestWatchWake(dispatch)
+        : updateDrainAdmission.admit(kind, dispatch);
+    return yield* admitted.pipe(
       Effect.catchTags({
         UpdateDrainAdmissionError: Effect.fn("Orchestrator.admitNewExecution.admissionRefused")(
           function* (cause) {
             // Intake may have queued behind an original commit and then a drain.
             // Its newly committed receipt must replay through the normal locks.
-            const recorded = yield* commandReceipts
-              .getByCommandId(command.commandId)
-              .pipe(mapDispatchError(command));
-            if (
-              Option.isSome(recorded) ||
-              (acceptedReplay !== undefined && (yield* acceptedReplay))
-            ) {
-              return yield* dispatch;
-            }
+            if (yield* canReplay) return yield* dispatch;
             if (completeMetadata !== undefined)
               return yield* completeMetadata(
                 new OrchestratorDispatchError({
@@ -20820,6 +20821,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return yield* withThreadDispatchLocks(threadIds, dispatchAccepted());
         }),
       );
+      if (
+        command.type === "thread.pull-request-watch.sync" &&
+        command.generation === undefined &&
+        command.wake !== undefined
+      )
+        return yield* admitNewExecution(command, "pull-request-watch-wake", dispatch);
+      if (command.type === "queue.resume" || command.type === "queued-run.start")
+        return yield* admitNewExecution(command, "thread-queue-start", dispatch);
       if (
         command.type === "message.dispatch" ||
         (command.type === "thread.create" && command.initialMessage !== undefined) ||

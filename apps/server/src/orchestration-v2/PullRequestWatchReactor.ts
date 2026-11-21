@@ -44,6 +44,8 @@ import {
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import { WatchProcessAdmission, guardWatchProcess } from "../updateDrain/WatchProcessAdmission.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { isTerminalRunStatus } from "./ThreadManagementService.ts";
@@ -261,6 +263,7 @@ export const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const random = yield* SecureRandom.SecureRandom;
+  const admission = yield* Effect.serviceOption(UpdateDrainAdmission.UpdateDrainAdmission);
   const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
   const automationPaused = Option.isSome(pauseStore)
     ? pauseStore.value.get.pipe(
@@ -990,7 +993,16 @@ export const make = Effect.gen(function* () {
     yield* sendHeld;
   }, passes.withPermit);
 
-  const sweep = pass(undefined).pipe(
+  const withWatchProcessAdmission = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Option.isSome(admission)
+      ? Effect.provideService(
+          effect,
+          WatchProcessAdmission,
+          guardWatchProcess(admission.value.admitPullRequestWatchProcess),
+        )
+      : effect;
+
+  const sweep = withWatchProcessAdmission(pass(undefined)).pipe(
     Effect.catchCause(logFailure("pull request watch sweep failed", {})),
     Effect.withSpan("PullRequestWatchReactor.sweep"),
   );
@@ -998,7 +1010,7 @@ export const make = Effect.gen(function* () {
   const pullRequestOf = (group: WatchGroup) => threadPullRequestKeyOf(group.targets[0]!.link);
 
   const readOnChange = (pullRequest: string) =>
-    pass(pullRequest).pipe(
+    withWatchProcessAdmission(pass(pullRequest)).pipe(
       Effect.catchCause(logFailure("pull request watch change read failed", { pullRequest })),
       Effect.withSpan("PullRequestWatchReactor.readOnChange"),
     );
@@ -1085,10 +1097,12 @@ export const make = Effect.gen(function* () {
       for (const [pullRequest, group] of wanted) {
         // An ended feed restarts here, so a host that refused it is asked again each sweep.
         yield* FiberMap.run(feeds, pullRequest, { onlyIfMissing: true })(
-          pullRequests.changes(referenceOf(group)).pipe(
-            // A review sends an event per comment; those landing during a read make one more.
-            Stream.buffer({ capacity: 1, strategy: "sliding" }),
-            Stream.runForEach(() => readOnChange(pullRequest)),
+          withWatchProcessAdmission(
+            pullRequests.changes(referenceOf(group)).pipe(
+              // A review sends an event per comment; those landing during a read make one more.
+              Stream.buffer({ capacity: 1, strategy: "sliding" }),
+              Stream.runForEach(() => readOnChange(pullRequest)),
+            ),
           ),
         );
       }
@@ -1119,4 +1133,7 @@ export const make = Effect.gen(function* () {
   return { start, sweep } satisfies PullRequestWatchReactor["Service"];
 });
 
-export const layer = Layer.effect(PullRequestWatchReactor, make);
+export const layer = Layer.effect(
+  PullRequestWatchReactor,
+  Effect.andThen(UpdateDrainAdmission.UpdateDrainAdmission, make),
+);

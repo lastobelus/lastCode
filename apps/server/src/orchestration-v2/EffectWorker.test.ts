@@ -16,6 +16,9 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  UpdateDrainAdmissionError,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
   VcsProcessExitError,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
@@ -36,6 +39,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import { OrchestratorDispatchError } from "./Orchestrator.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { PullRequestWatchDeliveryAuthorization } from "./Orchestrator.ts";
@@ -1339,4 +1343,56 @@ it.effect(
       assert.lengthOf(commands, 2);
       assert.notEqual(commands[0], commands[1]);
     }),
+);
+
+it.effect("lets cleanup pass a watch wake refused by maintenance admission", () =>
+  Effect.gen(function* () {
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const layerExecutor = layerExecutorFor({
+      events,
+      threads: {
+        dispatch: (command) =>
+          Effect.fail(
+            new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: new UpdateDrainAdmissionError({
+                reason: "update_draining",
+                requestId: UpdateDrainRequestId.make("test-maintenance"),
+                targetVersion: UpdateDrainTargetVersion.make("tool-maintenance"),
+                message: "Maintenance holds admission.",
+              }),
+            }),
+          ),
+      },
+    });
+    yield* outbox.enqueue([
+      {
+        id: "test:watch-wake",
+        commandId: CommandId.make("test:watch-wake"),
+        threadId,
+        request: {
+          type: "pull-request-watch.deliver",
+          generation: "watch",
+          messageId: MessageId.make("test-wake"),
+        },
+      },
+      {
+        id: "test:watch-cleanup",
+        commandId: CommandId.make("test:watch-cleanup"),
+        threadId,
+        request: { type: "terminal.cleanup" },
+      },
+    ]);
+    yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+      Effect.flatMap((worker) => Effect.andThen(worker.runOnce(), worker.runOnce())),
+      Effect.provide(
+        EffectWorker.layerWithOptions({ workerId: "test-watch-cleanup" }).pipe(
+          Layer.provide(layerExecutor),
+        ),
+      ),
+    );
+    assert.isEmpty(yield* outbox.pendingCleanup);
+  }).pipe(Effect.provide(layerReceiptTest)),
 );

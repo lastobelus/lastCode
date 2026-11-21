@@ -1,5 +1,7 @@
 import {
   CommandId,
+  ProjectId,
+  ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
   RunId,
@@ -9,21 +11,28 @@ import {
   type OrchestrationV2ThreadShellSnapshot,
   type TerminalSummary,
 } from "@t3tools/contracts";
+import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import { v2PullRequestThread } from "../orchestration-v2/testkit/pullRequestFixtures.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { UpdateDrain, layer as updateDrainLayer } from "./UpdateDrain.ts";
 import { makeOfflineAdmission, makeUpdateDrainAdmission } from "./UpdateDrainAdmission.ts";
+import { WatchProcessAdmission, guardWatchProcess } from "./WatchProcessAdmission.ts";
 
 const requestId = UpdateDrainRequestId.make("update-1");
 const targetVersion = UpdateDrainTargetVersion.make("1.2.3");
@@ -86,6 +95,9 @@ const makeHarness = Effect.fn("UpdateDrainAdmissionTest.makeHarness")(function* 
     Layer.mock(EffectOutbox.EffectOutboxV2)({ pendingCleanup: Ref.get(cleanup) }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
       getShellSnapshot: () => Ref.get(shell),
+      getToolMaintenanceSnapshot: Ref.get(shell).pipe(
+        Effect.map((snapshot) => ({ shell: snapshot, work: [] })),
+      ),
       getThreadRecords: () => Effect.die("Drain must not scan per-thread provider history"),
     }),
     Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
@@ -98,6 +110,149 @@ const makeHarness = Effect.fn("UpdateDrainAdmissionTest.makeHarness")(function* 
   );
   return { shell, terminals, runtimeWork, cleanup, dependencies } as const;
 });
+
+it.effect("keeps a command-backed monitor as a maintenance blocker", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    const pendingBackgroundTasks = [
+      ...derivePendingBackgroundWork({
+        latestRun: { id: turnId, ordinal: 1, status: "completed" },
+        providerThreads: [],
+        turnItems: [
+          {
+            id: "pull-request-watch:example.com/acme/app#1",
+            type: "command_execution",
+            status: "running",
+            monitor: true,
+            title: "Check build output",
+          },
+        ],
+      }),
+    ];
+    yield* Ref.set(harness.shell, {
+      ...emptyShell(),
+      threads: [
+        {
+          ...v2PullRequestThread({
+            id: threadId,
+            projectId: ProjectId.make("maintenance-test"),
+            title: "Monitor test",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "example" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            pullRequests: [],
+            latestUserMessageAt: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+          }),
+          status: "completed",
+          pendingBackgroundTasks,
+        },
+      ],
+    });
+    yield* Effect.gen(function* () {
+      const admission = yield* makeUpdateDrainAdmission();
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("maintenance:start-monitor"),
+        requestId,
+        targetVersion: UpdateDrainTargetVersion.make("tool-maintenance"),
+        createdAt: now,
+      });
+      assert.deepEqual((yield* admission.status).blockers, [
+        { type: "thread-background", threadId, status: "monitoring" },
+      ]);
+      const refusal = yield* Effect.flip(admission.claimActivation({ requestId }));
+      assert.equal(refusal.reason, "not_quiescent");
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.effect.each(["released", "cancelled"] as const)(
+  "holds a watch credential subprocess until %s",
+  (outcome) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* Effect.gen(function* () {
+        const admission = yield* makeUpdateDrainAdmission();
+        const drain = yield* UpdateDrain;
+        const requested = yield* Deferred.make<void>();
+        const vcs = yield* VcsProcess.make.pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, {
+            run: () =>
+              drain.status.pipe(
+                Effect.orDie,
+                Effect.map(({ intent }) => {
+                  assert.equal(intent?.status, "cancelled");
+                  return {
+                    code: ChildProcessSpawner.ExitCode(0),
+                    stdout: "ok",
+                    stderr: "",
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                    timedOut: false,
+                    stdoutInvalidUtf8: false,
+                    stderrInvalidUtf8: false,
+                  };
+                }),
+              ),
+          }),
+        );
+        yield* admission.dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("maintenance:start-vcs"),
+          requestId,
+          targetVersion: UpdateDrainTargetVersion.make("tool-maintenance"),
+          createdAt: now,
+        });
+        const reading = yield* vcs
+          .run({
+            operation: "watch.credentials",
+            command: "gh",
+            args: ["auth", "token"],
+            cwd: "/tmp/project",
+          })
+          .pipe(
+            Effect.provideService(
+              WatchProcessAdmission,
+              guardWatchProcess((effect) =>
+                Deferred.succeed(requested, undefined).pipe(
+                  Effect.andThen(admission.admitPullRequestWatchProcess(effect)),
+                ),
+              ),
+            ),
+            // Watch subscription acquisition and cleanup mask interruption around their effects.
+            Effect.uninterruptible,
+            Effect.forkChild({ startImmediately: true }),
+          );
+        yield* Deferred.await(requested);
+        const interrupting =
+          outcome === "cancelled"
+            ? yield* Fiber.interrupt(reading).pipe(Effect.forkChild({ startImmediately: true }))
+            : null;
+        const exitBeforeRelease = reading.pollUnsafe();
+        yield* admission.dispatch({
+          type: "update-drain.cancel",
+          commandId: CommandId.make("maintenance:cancel-vcs"),
+          requestId,
+          createdAt: now,
+        });
+        if (interrupting === null) {
+          assert.isUndefined(exitBeforeRelease);
+          assert.equal((yield* Fiber.join(reading)).stdout, "ok");
+        } else {
+          yield* Fiber.join(interrupting);
+          assert.isDefined(exitBeforeRelease);
+          assert.isTrue(Exit.hasInterrupts(exitBeforeRelease));
+        }
+      }).pipe(Effect.provide(harness.dependencies));
+    }),
+);
 
 it.effect.each(["thread-turn", "thread-archive", "thread-delete"] as const)(
   "orders %s admission before closing the drain",

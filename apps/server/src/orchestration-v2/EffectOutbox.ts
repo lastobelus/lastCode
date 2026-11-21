@@ -176,6 +176,13 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 ]);
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
+export const CLEANUP_EFFECT_TYPES = [
+  "provider-session.detach",
+  "terminal.cleanup",
+  "terminal.archive-cleanup",
+  "preview.cleanup",
+] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "pull-request-watch.deliver",
   "environment-pause.record-delivery",
@@ -685,7 +692,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         SELECT DISTINCT thread_id
         FROM orchestration_v2_effect_outbox
         WHERE status IN ('pending', 'running')
-          AND effect_type IN ('provider-session.detach', 'terminal.cleanup', 'terminal.archive-cleanup', 'preview.cleanup')
+          AND effect_type IN ${sql.in(CLEANUP_EFFECT_TYPES)}
         ORDER BY thread_id
       `.pipe(
         Effect.map((rows) => rows.map((row) => ({ threadId: ThreadId.make(row.thread_id) }))),

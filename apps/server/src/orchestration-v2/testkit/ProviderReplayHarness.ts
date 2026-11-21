@@ -1,4 +1,5 @@
 import * as UpdateDrainAdmission from "../../updateDrain/UpdateDrainAdmission.ts";
+import * as UpdateDrainAdmissionTestkit from "../../updateDrain/UpdateDrainAdmission.testkit.ts";
 import type { MigrationHistoryError } from "../../persistence/DatabaseMigrations.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
@@ -572,11 +573,7 @@ export function layerWithRegistry<Error, SettingsError = never>(
   const layerOrchestratorProvided = Orchestrator.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        options.admissionLayer ??
-          Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
-            admit: (_kind, effect) => effect,
-            admitOrElse: (_kind, effect) => effect,
-          }),
+        options.admissionLayer ?? UpdateDrainAdmissionTestkit.layerOpen,
         layerCheckpointServiceProvided,
         CommandPolicy.layer,
         layerContextHandoffServiceProvided,
