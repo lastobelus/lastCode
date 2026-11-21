@@ -198,6 +198,7 @@ const makeHarness = Effect.gen(function* () {
   const followUpDispatches = yield* Queue.unbounded<ThreadId>();
   const closeRequests: Array<{ readonly deleteHistory?: boolean | undefined }> = [];
   const closed: string[] = [];
+  const disposedActionRunIds: string[] = [];
   const otherThreads = new Map<ThreadId, OrchestrationV2ThreadShell>();
   const archiveOnOtherMetadata = new Set<ThreadId>();
   const shellReads: ThreadId[] = [];
@@ -233,6 +234,7 @@ const makeHarness = Effect.gen(function* () {
     history: "retained terminal detail",
     failWrite: false,
     failDelivery: false,
+    failActionRunRead: false,
     missingHistory: false,
     alreadyDelivered: false,
     followUpRun: null as OrchestrationV2ThreadProjection["runs"][number] | null,
@@ -318,7 +320,23 @@ const makeHarness = Effect.gen(function* () {
     ),
   );
   const dependencies = Layer.mergeAll(
+    Layer.succeed(ActionRunStore.ActionRunStore, {
+      ...store,
+      get: (threadId, runId) =>
+        state.failActionRunRead
+          ? Effect.fail(
+              new ActionRunStore.ActionRunStoreError({
+                operation: "load",
+                cause: "read unavailable",
+              }),
+            )
+          : store.get(threadId, runId),
+    }),
     Layer.mock(ThreadManagement.ThreadManagementService)({
+      disposeActionObligation: (_threadId, _owner, actionRunId) =>
+        Effect.sync(() => {
+          disposedActionRunIds.push(actionRunId);
+        }),
       getThreadShell: (id) =>
         Effect.sync(() => {
           shellReads.push(id);
@@ -543,6 +561,7 @@ const makeHarness = Effect.gen(function* () {
     followUpDispatches,
     closeRequests,
     closed,
+    disposedActionRunIds,
     otherThreads,
     archiveOnOtherMetadata,
     shellReads,
@@ -1308,30 +1327,126 @@ it.effect(
     }).pipe(Effect.provide(StoreTestLayer)),
 );
 
-it.effect("recovers interrupted running Actions only after explicit resume", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness;
-    yield* h.store.save(retained("lost"), "saved output");
-    h.state.metadataReceipt = yield* Deferred.make<void>();
-    yield* Effect.gen(function* () {
-      const actions = yield* ActionResume.ActionResume;
-      yield* Deferred.await(h.state.metadataReceipt!);
-      assert.equal(h.state.latest?.outcome, "process_lost");
-      assert.equal(h.state.latest?.delivery, "available");
-      assert.equal(h.followUps().length, 0);
-      assert.equal(h.opened.length, 0);
-      h.state.request = "command";
-      assert.equal((yield* Effect.result(actions.resumeInterrupted(threadId)))._tag, "Failure");
-      assert.equal(h.state.latest?.delivery, "available");
-      h.state.request = null;
-      yield* actions.resumeInterrupted(threadId);
-      assert.equal(h.followUps().length, 1);
-      assert.equal(
-        (yield* actions.inspectActionRun(invocation, "lost")).outputTail,
+it.effect.each([
+  { tool: "resume_interrupted_action", ownerEnded: false },
+  { tool: "discard_interrupted_action", ownerEnded: false },
+  { tool: "resume_interrupted_action", ownerEnded: true },
+] as const)(
+  "recovers through $tool with ownerEnded=$ownerEnded without rerunning the command",
+  ({ tool, ownerEnded }) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      h.state.callerRunId = RunId.make("run-mcp-recovery");
+      yield* h.store.save(
+        retained(
+          "lost",
+          ownerEnded
+            ? {
+                owner: {
+                  parentEnvironmentId: EnvironmentId.make("environment-action"),
+                  parentThreadId: ThreadId.make("parent-action"),
+                  taskId: NodeId.make("ended-task"),
+                  sourceRunId: RunId.make("ended-child-run"),
+                },
+              }
+            : {},
+        ),
         "saved output",
       );
-    }).pipe(Effect.provide(h.layer));
-  }).pipe(Effect.provide(StoreTestLayer)),
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        const toolkit = yield* ActionResumeToolkit.pipe(
+          Effect.provide(McpToolAccess.HandlersLayer.layer(ActionResumeHandlers.layer)),
+        );
+        const scope: McpInvocationContext.McpInvocationScope = {
+          environmentId: EnvironmentId.make("environment-action"),
+          thread: { threadId, providerSessionId: "session-action", providerInstanceId },
+          client: undefined,
+          requestNamespace: "thread:action",
+          capabilities: new Set(["action-resume"] as const),
+          issuedAt: 0,
+        };
+        const recover = (caller = scope) =>
+          toolkit
+            .handle(tool, {})
+            .pipe(
+              Stream.unwrap,
+              Stream.runCollect,
+              Effect.provideService(McpInvocationContext.McpInvocationContext, caller),
+              Effect.result,
+            );
+        yield* Deferred.await(h.state.metadataReceipt!);
+        assert.equal(h.state.latest?.outcome, "process_lost");
+        assert.equal(h.state.latest?.delivery, "available");
+        assert.isFalse((yield* actions.listProjectActions(invocation))[0]?.resumeEligible);
+        assert.equal(h.followUps().length, 0);
+        assert.equal(h.opened.length, 0);
+        for (const caller of [
+          { ...scope, capabilities: new Set<McpInvocationContext.McpCapability>() },
+          { ...scope, thread: undefined },
+          {
+            ...scope,
+            client: { sessionId: "read-only", label: "Reader", access: "read-only" as const },
+          },
+        ]) {
+          assert.equal((yield* recover(caller))._tag, "Failure");
+          assert.equal(h.state.latest?.delivery, "available");
+        }
+        if (tool === "resume_interrupted_action" && !ownerEnded) {
+          h.state.request = "command";
+          for (const failRead of [false, true]) {
+            h.state.failActionRunRead = failRead;
+            assert.equal((yield* recover())._tag, "Failure");
+            assert.equal(h.state.latest?.delivery, "available");
+          }
+          h.state.failActionRunRead = false;
+          h.state.request = null;
+        }
+        const recovered = yield* recover();
+        assert.equal(recovered._tag, ownerEnded ? "Failure" : "Success");
+        if (ownerEnded && recovered._tag === "Failure") {
+          assert.deepInclude(recovered.failure, { reason: "action_not_recoverable" });
+          assert.include(h.disposedActionRunIds, "lost");
+        }
+        if (recovered._tag === "Success")
+          assert.deepEqual(
+            recovered.success.at(-1)?.result,
+            tool === "resume_interrupted_action" ? { resumed: true } : { discarded: true },
+          );
+        assert.equal(
+          h.state.latest?.delivery,
+          tool === "resume_interrupted_action" && !ownerEnded ? "delivered" : "disposed",
+        );
+        assert.equal(
+          h.followUps().length,
+          tool === "resume_interrupted_action" && !ownerEnded ? 1 : 0,
+        );
+        assert.isTrue((yield* actions.listProjectActions(invocation))[0]?.resumeEligible);
+        assert.equal(h.opened.length, 0);
+        assert.equal(h.state.latest?.outcome, "process_lost");
+        // The same interruption can be acknowledged only once.
+        assert.equal((yield* recover())._tag, "Failure");
+        assert.equal(
+          (yield* actions.inspectActionRun(invocation, "lost")).outputTail,
+          "saved output",
+        );
+        const next = yield* actions.runProjectActionAndResume(invocation, "qa");
+        assert.equal((yield* recover())._tag, "Failure");
+        assert.equal(h.state.latest?.delivery, "armed");
+        h.state.request = "command";
+        yield* h.emit({
+          type: "exited",
+          threadId,
+          terminalId: next.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        assert.equal(h.state.latest?.delivery, "pending");
+        assert.equal((yield* recover())._tag, "Failure");
+        assert.equal(h.state.latest?.delivery, "pending");
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
 );
 
 it.effect.each(["failed", "dismissed"] as const)(

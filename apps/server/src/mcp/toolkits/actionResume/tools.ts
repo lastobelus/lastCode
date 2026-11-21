@@ -28,7 +28,7 @@ const ListedProjectAction = Schema.Struct({
 
 const ListProjectActionsTool = Tool.make("list_project_actions", {
   description:
-    "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id. A delegated child lists Actions to name one in its handoff request, or to launch one when its brief says it owns its Actions.",
+    "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id. A delegated child lists Actions to name one in its handoff request, or to launch one when its brief says it owns its Actions. If an interrupted Action continuation blocks new launches, recover it with resume_interrupted_action or discard_interrupted_action.",
   parameters: Schema.Record(Schema.String, Schema.Never),
   success: Schema.Struct({ actions: Schema.Array(ListedProjectAction) }),
   failure: ActionResumeToolError,
@@ -71,8 +71,38 @@ const InspectActionRunTool = Tool.make("inspect_action_run", {
   .annotate(Tool.Idempotent, true)
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
+const ResumeInterruptedActionTool = Tool.make("resume_interrupted_action", {
+  description:
+    "Recover this thread's interrupted Project Action continuation, like the composer's Resume agent button: queue the retained Action result and its follow-up in this thread. The command does not run again. Takes no arguments and acts only on the calling thread's own Action: a mediated Action belongs to the parent's thread, a child-owned one to the child's. Refused unless result delivery is available, and it cannot clear a follow-up that is already running or pending. After success, end your turn; the follow-up continues the work.",
+  parameters: Schema.Record(Schema.String, Schema.Never),
+  success: Schema.Struct({ resumed: Schema.Literal(true) }),
+  failure: ActionResumeToolError,
+  dependencies: [...dependencies, ThreadManagementService.ThreadManagementService],
+})
+  .annotate(Tool.Title, "Resume interrupted Project Action")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+
+const DiscardInterruptedActionTool = Tool.make("discard_interrupted_action", {
+  description:
+    "Abandon this thread's interrupted Project Action continuation, like the composer's Discard button: drop the retained follow-up so new Actions can launch. Discarding does not mean the command succeeded; use inspect_action_run or rerun the Action before relying on its result. Takes no arguments and acts only on the calling thread's own Action: a mediated Action belongs to the parent's thread, a child-owned one to the child's. Refused unless result delivery is available, and it cannot clear a follow-up that is already running or pending. Use resume_interrupted_action instead when you still need the result.",
+  parameters: Schema.Record(Schema.String, Schema.Never),
+  success: Schema.Struct({ discarded: Schema.Literal(true) }),
+  failure: ActionResumeToolError,
+  dependencies: [...dependencies, ThreadManagementService.ThreadManagementService],
+})
+  .annotate(Tool.Title, "Discard interrupted Project Action")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+
 export const ActionResumeToolkit = Toolkit.make(
   ListProjectActionsTool,
   RunProjectActionAndResumeTool,
   InspectActionRunTool,
+  ResumeInterruptedActionTool,
+  DiscardInterruptedActionTool,
 );

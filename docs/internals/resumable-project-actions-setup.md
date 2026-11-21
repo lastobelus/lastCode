@@ -202,7 +202,19 @@ it in **Settings → Projects**, then verify again.
 
 Read `disabledReason`. The usual cause is that **Allow Codex and Claude to run and resume** is off.
 The provider may also be unsupported, or the thread may already have an Action continuation in
-progress.
+progress. For an interrupted continuation, see [An interrupted Action blocks new launches](#an-interrupted-action-blocks-new-launches).
+
+### An interrupted Action blocks new launches
+
+When an Action's continuation is interrupted, it stays open and new Actions in that thread are
+disabled until someone recovers it. Recover it in the thread that owns the Action. Use **Resume
+agent** in the composer to queue the retained result and follow-up, or **Discard** to drop the
+follow-up and allow new launches. Agents use `resume_interrupted_action` or
+`discard_interrupted_action`. Both act only on the calling thread, so a mediated Action is
+recovered in the parent's thread and a child-owned one in the child's; neither reaches another
+thread or environment. Resume does not rerun the command, and Discard does not record that it
+succeeded. Neither works until result delivery is available, and neither clears a follow-up that
+is already running or pending.
 
 ### The import menu does not show the new definition
 

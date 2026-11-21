@@ -156,6 +156,8 @@ const MAX_ACTION_OUTPUT_CHARS = 12_000;
 // Shell startup slows under heavy load; a stuck rc-file prompt still fails within a minute.
 const ACTION_SHELL_READY_SECONDS = 60;
 const ACTION_START_SECONDS = 30;
+const INTERRUPTED_ACTION_RECOVERY_HINT =
+  "If it was interrupted, recover it with Resume agent or Discard in the composer, or with resume_interrupted_action or discard_interrupted_action.";
 const ACTION_PROGRESS_MIN_INTERVAL_MS = 1_000;
 const ACTION_PROGRESS_MAX_UPDATES = 128;
 const ACTION_OUTPUT_OSC = "777;T3ActionOutput";
@@ -900,7 +902,7 @@ const make = Effect.gen(function* () {
         : script.allowAgentResume !== true
           ? "This Action has not been opted in for agent-triggered resume."
           : launchBlocked
-            ? "This thread must finish its current Action continuation first."
+            ? `This thread must finish its current Action continuation first. ${INTERRUPTED_ACTION_RECOVERY_HINT}`
             : null;
       return {
         id: script.id,
@@ -944,7 +946,7 @@ const make = Effect.gen(function* () {
     if (actionBlocksNewLaunch(existing)) {
       return yield* new ActionResumeError({
         reason: "action_already_running",
-        message: `This thread must finish the continuation for ${existing?.actionName ?? "the current Action"} first.`,
+        message: `This thread must finish the continuation for ${existing?.actionName ?? "the current Action"} first. ${INTERRUPTED_ACTION_RECOVERY_HINT}`,
       });
     }
     const { thread, project } = yield* resolveProjectContext(invocation.threadId);
@@ -1353,25 +1355,26 @@ const make = Effect.gen(function* () {
           });
         }
         yield* persistState({ ...current, delivery: "pending" });
-      }),
-    );
-    const delivered = yield* Effect.exit(attemptDeliverPending(threadId));
-    const current = registry.getLatest(threadId);
-    if (delivered._tag === "Failure" || current?.delivery === "pending") {
-      yield* mutex.withPermits(1)(
-        Effect.gen(function* () {
-          const latest = registry.getLatest(threadId);
+        const delivered = yield* Effect.exit(deliverPendingUnlocked(threadId));
+        const latest = registry.getLatest(threadId);
+        if (delivered._tag === "Failure" || latest?.delivery === "pending") {
           if (latest?.delivery === "pending") {
             yield* persistState({ ...latest, delivery: "available" });
           }
-        }),
-      );
-      if (delivered._tag === "Failure") return yield* Effect.failCause(delivered.cause);
-      return yield* new ActionResumeError({
-        reason: "internal_error",
-        message: "The interrupted Action follow-up cannot resume while this thread is busy.",
-      });
-    }
+          if (delivered._tag === "Failure") return yield* Effect.failCause(delivered.cause);
+          return yield* new ActionResumeError({
+            reason: "internal_error",
+            message: "The interrupted Action follow-up cannot resume while this thread is busy.",
+          });
+        }
+        if (latest?.delivery !== "delivered") {
+          return yield* new ActionResumeError({
+            reason: "action_not_recoverable",
+            message: "This thread has no interrupted Action follow-up to resume.",
+          });
+        }
+      }),
+    );
   });
 
   const discardInterruptedImpl = Effect.fn("ActionResume.discardInterrupted")(function* (
