@@ -18,6 +18,8 @@ interface Recovery {
 
 export interface CapacityState {
   readonly samples: ReadonlyArray<CapacityMeasurements>;
+  /** Survives a reset of the smoothing window, so a gap across it is still seen. */
+  readonly lastSampledAt: number | null;
   readonly ownerIdleSeconds: number | null;
   readonly agent: Recovery;
   readonly background: Recovery;
@@ -25,6 +27,7 @@ export interface CapacityState {
 
 export const initialCapacityState = (): CapacityState => ({
   samples: [],
+  lastSampledAt: null,
   ownerIdleSeconds: null,
   agent: { held: false, healthySince: null },
   background: { held: false, healthySince: null },
@@ -48,12 +51,12 @@ export function recordCapacitySample(
   sample: CapacityMeasurements,
   ownerIdleSeconds: number | null,
 ): CapacityState {
+  const follows = (earlier: number) =>
+    sample.sampledAt - earlier <= STALE_AFTER_MS && sample.sampledAt > earlier;
   const previous = state.samples.at(-1);
   // A gap cannot count toward either a smoothing window or healthy recovery.
-  const continuous =
-    previous !== undefined &&
-    sample.sampledAt - previous.sampledAt <= STALE_AFTER_MS &&
-    sample.sampledAt > previous.sampledAt;
+  const continuous = previous !== undefined && follows(previous.sampledAt);
+  const gap = state.lastSampledAt !== null && !follows(state.lastSampledAt);
   return {
     ...state,
     samples: [
@@ -62,8 +65,9 @@ export function recordCapacitySample(
         : []),
       sample,
     ],
+    lastSampledAt: sample.sampledAt,
     ownerIdleSeconds: valid(ownerIdleSeconds) ? ownerIdleSeconds : null,
-    ...(continuous ? {} : previous === undefined ? restartedRecovery(state) : gapRecovery),
+    ...(gap ? gapRecovery : continuous ? {} : restartedRecovery(state)),
   };
 }
 

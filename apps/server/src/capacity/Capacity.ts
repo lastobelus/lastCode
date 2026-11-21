@@ -121,6 +121,8 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
         ? {
             ...current,
             samples: [],
+            // Off was chosen, not a stall: resuming starts like server start.
+            lastSampledAt: null,
             agent: { ...current.agent, healthySince: null },
             background: { ...current.background, healthySince: null },
           }

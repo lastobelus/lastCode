@@ -272,6 +272,20 @@ describe("capacity verdicts", () => {
     ]);
   });
 
+  it("still sees a gap after the smoothing window was reset", () => {
+    const open = evaluateCapacity(pair(), 5_000, "observe").state;
+    // A directory change resets the window but keeps the last sample time.
+    const retargeted = { ...open, samples: [] };
+    const afterGap = evaluateCapacity(
+      recordCapacitySample(retargeted, measurement(40_000), null),
+      40_000,
+      "observe",
+    );
+    expect(afterGap.snapshot.verdicts.background.reasons).toEqual([
+      { signal: "recovery", comparison: "recovering", value: 0, limit: 60_000 },
+    ]);
+  });
+
   it("advances recovery only with new samples, not with later reads", () => {
     const held = evaluateCapacity(pair({ memoryPressure: "warning" }), 5_000, "observe").state;
     const healthy = evaluateCapacity(
