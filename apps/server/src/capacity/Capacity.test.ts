@@ -387,6 +387,34 @@ describe("Capacity service", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("starts unwired when the capacity layer fails to build", () =>
+    Effect.gen(function* () {
+      const capacity = yield* Effect.flatMap(Capacity.Capacity, (service) => service.read).pipe(
+        Effect.provide(Capacity.orUnwired(Layer.effect(Capacity.Capacity, Effect.die("broken")))),
+      );
+      expect(capacity).toMatchObject({ mode: "unknown", measurements: null });
+    }),
+  );
+
+  it.effect("reports unknown instead of failing when a read defects", () =>
+    Effect.gen(function* () {
+      const broken = yield* Ref.make(false);
+      const service = yield* Capacity.make({
+        mode: Ref.get(broken).pipe(
+          Effect.flatMap((isBroken) =>
+            isBroken ? Effect.die("settings defect") : Effect.succeed("observe" as const),
+          ),
+        ),
+        worktreesDir: Effect.succeed(null),
+        activity,
+        ownerPower: Effect.succeed(power),
+      });
+      yield* Ref.set(broken, true);
+      expect((yield* service.read).mode).toBe("unknown");
+      expect((yield* service.readWithActivity).verdicts.agent.state).toBe("unknown");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("keeps sampling after a defective sample", () =>
     Effect.gen(function* () {
       const modeReads = yield* Ref.make(0);
