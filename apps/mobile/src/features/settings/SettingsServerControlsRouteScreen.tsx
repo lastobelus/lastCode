@@ -30,6 +30,7 @@ import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoi
 import { ListRowLayout } from "../../components/ui/ListRowLayout";
 import { RetentionDaysField } from "./components/RetentionDaysField";
 import { SettingsSection } from "./components/SettingsSection";
+import { StorageCleanupScheduleSection } from "./components/StorageCleanupScheduleSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { IssueTrackerSection } from "./components/IssueTrackerSection";
 import { SourceControlProvidersSection } from "./components/SourceControlProvidersSection";
@@ -673,6 +674,27 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                     />
                   </View>
                 </SettingsSection>
+                {!projectSelected &&
+                hasConnectedSelection &&
+                targets.every(
+                  (target) =>
+                    target.environment.serverConfig.environment.capabilities
+                      .storageCleanupScheduling === true,
+                ) ? (
+                  <StorageCleanupScheduleSection
+                    key={targetsKey}
+                    settings={displayTargets.map(
+                      (target) => target.settings.storageCleanupSchedule,
+                    )}
+                    timeMachineAvailable={targets.every(
+                      (target) =>
+                        target.environment.serverConfig.environment.platform.os === "darwin",
+                    )}
+                    disabled={disabled}
+                    managed={managed}
+                    onChange={(storageCleanupSchedule) => write({ storageCleanupSchedule })}
+                  />
+                ) : null}
                 {supportsDependencies ? (
                   <>
                     {projectSelected ? (

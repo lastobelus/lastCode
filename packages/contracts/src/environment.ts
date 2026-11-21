@@ -118,6 +118,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server persists the environment-owned Local CI policy. */
   lastcodeLocalCi: Schema.optionalKey(Schema.Boolean),
   storageCleanup: Schema.optionalKey(Schema.Boolean),
+  storageCleanupScheduling: Schema.optionalKey(Schema.Boolean),
   storageCleanupRun: Schema.optionalKey(Schema.Boolean),
   databaseStorage: Schema.optionalKey(Schema.Boolean),
   otlpEndpointCheck: Schema.optionalKey(Schema.Boolean),

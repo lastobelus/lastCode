@@ -196,6 +196,25 @@ describe("ServerSettings local CI limits", () => {
 });
 
 describe("storage cleanup settings", () => {
+  it("defaults to a full hourly sweep and accepts a partial schedule update", () => {
+    expect(decodeServerSettings({}).storageCleanupSchedule).toEqual({
+      intervalMinutes: 60,
+      alternateGroups: false,
+      deferDuringTimeMachine: false,
+    });
+    expect(
+      decodeServerSettingsPatch({
+        storageCleanupSchedule: { intervalMinutes: 15, alternateGroups: true },
+      }),
+    ).toEqual({ storageCleanupSchedule: { intervalMinutes: 15, alternateGroups: true } });
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanupSchedule: { intervalMinutes: 0 } }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanupSchedule: { intervalMinutes: 1.5 } }),
+    ).toThrow();
+  });
+
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
     expect(decodeServerSettings({}).storageCleanup).toEqual({

@@ -5636,5 +5636,11 @@
   "316f8522bfd81a31": "Precisa de revisão",
   "90585f4150afc7b3": "Arquivado",
   "3e1e0b6403613eb7": "Restaurado",
-  "b6faf2dda56a211c": "A família de conversas mudou. Revise novamente a confirmação de arquivamento."
+  "b6faf2dda56a211c": "A família de conversas mudou. Revise novamente a confirmação de arquivamento.",
+  "8889777aa07548c9": "Minutos entre limpezas",
+  "b04a9aab9f32773a": "Alternar o que é limpo",
+  "bac896cff1757092": "Limpa as dependências e os arquivos de compilação em uma execução e o restante na seguinte.",
+  "b11a5a9cdadd6fd9": "Aguardar o Time Machine",
+  "0ae8309282491222": "A limpeza automática aguarda a conclusão do backup do Time Machine.",
+  "4b7fa11e6142029c": "Limpeza automática"
 }

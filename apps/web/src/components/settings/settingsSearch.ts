@@ -391,6 +391,17 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("worktree location folder directory path drive external disk")],
   },
   {
+    id: "storage-cleanup-schedule",
+    title: msg("Automatic cleanup"),
+    to: "/settings/maintenance",
+    scope: "environment-defaults",
+    searchTerms: [
+      msg("Minutes between cleanups"),
+      msg("Alternate what gets cleaned"),
+      msg("Wait for Time Machine"),
+    ],
+  },
+  {
     id: "storage-artifacts",
     title: msg("Artifacts and logs"),
     to: "/settings/maintenance",

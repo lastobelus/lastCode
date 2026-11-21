@@ -13245,5 +13245,11 @@
   "316f8522bfd81a31": "Prüfung erforderlich",
   "90585f4150afc7b3": "Archiviert",
   "3e1e0b6403613eb7": "Wiederhergestellt",
-  "b6faf2dda56a211c": "Die Thread-Familie hat sich geändert. Prüfe die Archivierung erneut."
+  "b6faf2dda56a211c": "Die Thread-Familie hat sich geändert. Prüfe die Archivierung erneut.",
+  "8889777aa07548c9": "Minuten zwischen Bereinigungen",
+  "b04a9aab9f32773a": "Abwechselnd bereinigen",
+  "bac896cff1757092": "Bei einem Durchlauf werden Abhängigkeiten und Build-Artefakte bereinigt, beim nächsten alles andere.",
+  "b11a5a9cdadd6fd9": "Auf Time Machine warten",
+  "0ae8309282491222": "Die automatische Bereinigung wartet, bis das Time Machine-Backup abgeschlossen ist.",
+  "4b7fa11e6142029c": "Automatische Bereinigung"
 }
