@@ -2627,13 +2627,15 @@ const make = Effect.gen(function* () {
           serverSettings,
           thread.projectId,
         ).worktreeDependenciesAfterDays;
-        if (!generatedBuilds && !(yield* outputExists(thread.cleanupPath))) return [];
+        const outputPresent =
+          !generatedBuilds && days !== null ? yield* outputExists(thread.cleanupPath) : undefined;
+        if (outputPresent === false) return [];
         const savedProtection = yield* savedWorkspaceProtection(
           thread.cleanupPath,
           protectionResource,
         );
         if (savedProtection !== null) {
-          if (!generatedBuilds || (yield* outputExists(thread.cleanupPath)))
+          if (outputPresent ?? (yield* outputExists(thread.cleanupPath)))
             noteCandidate(
               thread,
               thread.cleanupPath,

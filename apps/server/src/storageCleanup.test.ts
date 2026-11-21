@@ -20,6 +20,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Path from "effect/Path";
@@ -4367,6 +4368,57 @@ describe("provider protection during storage cleanup", () => {
 });
 
 describe("dependency cleanup reports", () => {
+  it.live("cleans enabled dependencies beside an unreadable install with cleanup off", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        let unreadableInstall: string | undefined;
+        const fixture = yield* cleanupFixture().pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: (path) =>
+              path === unreadableInstall
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      module: "FileSystem",
+                      method: "access",
+                      pathOrDescriptor: path,
+                      _tag: "PermissionDenied",
+                    }),
+                  )
+                : fs.exists(path),
+          }),
+        );
+        yield* fixture.enableDependencies;
+        const disabled = `${fixture.config.baseDir}/disabled-checkout`;
+        unreadableInstall = `${disabled}/node_modules`;
+        yield* fs.makeDirectory(unreadableInstall, { recursive: true });
+        const projects = projectShells([
+          fixture.repo,
+          `${fixture.config.baseDir}/disabled-project`,
+        ]);
+        yield* fs.makeDirectory(projects[1]!.workspaceRoot);
+        fixture.setProjectRoots(projects);
+        fixture.setProjectWorktreeCleanupOff(projects[1]!.id);
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree }),
+          shell({
+            id: ThreadId.make("disabled-owner"),
+            projectId: projects[1]!.id,
+            branch: "disabled-feature",
+            worktreePath: disabled,
+          }),
+        ]);
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+        ).toMatchObject([{ path: `${fixture.worktree}/node_modules`, outcome: "removed" }]);
+        expect(yield* fs.exists(`${fixture.worktree}/node_modules`)).toBe(false);
+        expect(yield* fs.exists(unreadableInstall)).toBe(true);
+      }),
+    ),
+  );
+
   it.live.each(["dependencies", "worktree"] as const)(
     "cleans an owned %s when an unrelated project directory is unavailable",
     (resource) =>
@@ -6136,6 +6188,7 @@ it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () =>
       const workspaceCount = 12;
       const installCount = 7;
       const oldInstallCount = 2;
+      const installPaths: string[] = [];
       const projectId = ProjectId.make("project-1");
       yield* sql`INSERT INTO projection_projects ${sql.insert({
         project_id: projectId,
@@ -6152,6 +6205,7 @@ it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () =>
           yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, cwd, "feature"]);
         }
         if (index < installCount) {
+          installPaths.push(`${cwd}/node_modules`);
           yield* fixture.fs.makeDirectory(`${cwd}/node_modules/package`, { recursive: true });
           yield* fixture.fs.writeFileString(`${cwd}/node_modules/.package-lock.json`, "{}\n");
           yield* fixture.fs.writeFileString(`${cwd}/node_modules/package/index.js`, "export {};\n");
@@ -6198,6 +6252,13 @@ it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () =>
         const spansNamed = (name: string) =>
           dependencySpans.filter((span) => span.name === name).length;
         const statements = dependencySpans.filter((span) => span.name === "sqlite");
+        expect(
+          statements.some((span) =>
+            String(span.attributes.get("db.query.text")).includes(
+              "SELECT payload_json FROM orchestration_v2_projection_provider_sessions",
+            ),
+          ),
+        ).toBe(true);
         const providerEventReads = statements.filter((span) =>
           String(span.attributes.get("db.query.text")).includes(
             "event_type LIKE 'provider-session.%'",
@@ -6238,10 +6299,15 @@ it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () =>
       const installs = disposableEntries(manual).filter(
         (entry) => entry.worktreeResource === "dependencies",
       );
-      expect(installs.filter((entry) => entry.outcome === "removed")).toHaveLength(oldInstallCount);
-      expect(installs.filter((entry) => entry.outcome === "kept")).toHaveLength(
-        installCount - oldInstallCount,
-      );
+      expect(
+        installs
+          .filter((entry) => entry.outcome === "removed")
+          .map((entry) => entry.path)
+          .sort(),
+      ).toEqual(installPaths.slice(0, oldInstallCount).sort());
+      for (const target of installPaths.slice(oldInstallCount)) {
+        expect(yield* fixture.fs.exists(target)).toBe(true);
+      }
     }).pipe(
       Effect.provide(ProjectionStore.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
       Effect.withTracer(tracer),
