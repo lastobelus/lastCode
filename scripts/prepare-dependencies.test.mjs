@@ -146,11 +146,13 @@ it("bare setup works from an older target checkout without dependencies and pres
   NodeFS.mkdirSync(target);
   const source = NodePath.join(root, "primary checkout");
   NodeFS.mkdirSync(NodePath.join(source, "infra", "relay"), { recursive: true });
-  NodeFS.mkdirSync(NodePath.join(source, "scripts"));
-  NodeFS.copyFileSync(
-    NodePath.join(import.meta.dirname, "setup-worktree.ts"),
-    NodePath.join(source, "scripts", "setup-worktree.ts"),
-  );
+  NodeFS.mkdirSync(NodePath.join(source, "scripts", "lib"), { recursive: true });
+  for (const file of ["setup-worktree.ts", NodePath.join("lib", "lastcode-gh-default.ts")]) {
+    NodeFS.copyFileSync(
+      NodePath.join(import.meta.dirname, file),
+      NodePath.join(source, "scripts", file),
+    );
+  }
   NodeFS.writeFileSync(NodePath.join(source, ".env"), "fixture source\n");
   NodeFS.writeFileSync(NodePath.join(source, "infra", "relay", ".env"), "fixture relay\n");
   NodeFS.writeFileSync(NodePath.join(target, ".env"), "fixture target\n");
