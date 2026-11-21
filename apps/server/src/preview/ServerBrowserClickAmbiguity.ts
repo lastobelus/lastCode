@@ -1,7 +1,9 @@
 import type { Locator } from "playwright-core";
 
 const MAX_CANDIDATES = 4;
-const MAX_NAME_LENGTH = 120;
+const MAX_NAME_LENGTH = 60;
+// The MCP broker clips longer execution errors.
+const MAX_DIAGNOSTIC_LENGTH = 500;
 const ARIA_CONTROLS = [
   "button",
   "checkbox",
@@ -118,14 +120,19 @@ export const describeClickAmbiguity = (
     const container = label(context);
     return [kind, control, container && `in ${container}`].filter(Boolean).join(" ");
   });
-  const details =
-    descriptions.length > 1 &&
-    descriptions.every(Boolean) &&
-    new Set(descriptions).size === descriptions.length
-      ? ` Current matches include:\n${descriptions.map((description) => `- ${description}`).join("\n")}`
-      : "";
-  return (
-    `Click refused because the locator matched ${count} elements.${details}\n` +
-    "Take a fresh snapshot with preview_snapshot, then use its ref for the intended control or scope the locator to its container."
-  );
+  const message =
+    `Click refused: the locator matched ${count} elements.\n` +
+    "Take a fresh snapshot with preview_snapshot. Use its ref or scope the locator to the intended container.";
+  if (!descriptions.every(Boolean) || new Set(descriptions).size !== descriptions.length)
+    return message;
+  const heading = "\nCurrent matches include:";
+  let remaining = MAX_DIAGNOSTIC_LENGTH - message.length - heading.length;
+  const lines: string[] = [];
+  for (const description of descriptions) {
+    const line = `\n- ${description}`;
+    if (line.length > remaining) break;
+    lines.push(line);
+    remaining -= line.length;
+  }
+  return lines.length > 1 ? message + heading + lines.join("") : message;
 };

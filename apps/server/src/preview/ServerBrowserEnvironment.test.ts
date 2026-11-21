@@ -347,10 +347,13 @@ it.live.each([
                   : target === "ambiguous"
                     ? `<!doctype html>
                       <input type="password" value="fixture-dotted-secret">
+                      <input type="password" value="AB">
                       <input value="fixture-field-value">
                       ${["A", "B", "C", "D", "E", "F", "G"]
                         .map(
-                          (row) => `<div role="row" aria-label="Row ${row} fixture-dotted-secret">
+                          (
+                            row,
+                          ) => `<div role="row" aria-label="Row ${row} fixture-dotted-secret key-AB1234">
                             <button class="submit" data-row="${row}" data-private="fixture-dom-attribute"
                               aria-label="${row === "D" ? "Archive " + "x".repeat(140) + " end-marker" : "Remove fixture-field-value"}"
                               onclick="this.dataset.clicked = 'yes'">Remove</button>
@@ -454,9 +457,10 @@ it.live.each([
           expect(text).toMatch(/Archive.*Row D/);
           expect(text.match(/^- button /gm)).toHaveLength(4);
           expect(text).not.toMatch(
-            /Row [EFG]|end-marker|fixture-(?:dotted-secret|field-value|dom-attribute)|aria-ref=/,
+            /Row [EFG]|end-marker|AB1234|fixture-(?:dotted-secret|field-value|dom-attribute)|aria-ref=/,
           );
           expect(text).toContain("fresh snapshot");
+          expect(text).toContain("scope the locator");
           const ref = String(before?.accessibilityTree ?? "").match(
             /button "Remove[^\n]+\[ref=([^\]]+)\]/,
           )?.[1];

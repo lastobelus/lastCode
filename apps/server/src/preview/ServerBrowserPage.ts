@@ -663,8 +663,11 @@ const openReaders = async (
   };
 };
 
-/** Short values need word boundaries to avoid masking unrelated text. */
-const dottedPattern = (values: ReadonlyArray<string>) => {
+/** Snapshots use word boundaries for short values to avoid masking unrelated text. */
+const dottedPattern = (
+  values: ReadonlyArray<string>,
+  options?: { readonly maskShortSubstrings: boolean },
+) => {
   const sources = values
     .flatMap((value) => {
       const json = JSON.stringify(value).slice(1, -1);
@@ -675,7 +678,10 @@ const dottedPattern = (values: ReadonlyArray<string>) => {
           : `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
       );
       const forms = [value, json, quoted].flatMap((form) => [form, form.replaceAll("'", "''")]);
-      return [...new Set(forms)].map((form) => ({ form, word: value.length < 4 }));
+      return [...new Set(forms)].map((form) => ({
+        form,
+        word: value.length < 4 && !options?.maskShortSubstrings,
+      }));
     })
     // Longest first, so a form inside another never leaves the rest showing.
     .toSorted((a, b) => b.form.length - a.form.length)
@@ -1220,7 +1226,10 @@ const clickAmbiguity = async (
             // Accessible names can include a field's value. Only use the names if every
             // frame answered consistently on both sides of the read.
             if (JSON.stringify(after) !== JSON.stringify(before)) return fallback;
-            const pattern = dottedPattern(after.flatMap((values) => values ?? []));
+            const pattern = dottedPattern(
+              after.flatMap((values) => values ?? []),
+              { maskShortSubstrings: true },
+            );
             return describeClickAmbiguity(count, controls, (name) =>
               pattern ? name.replace(pattern, MASKED_VALUE) : name,
             );
