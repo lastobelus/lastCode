@@ -762,6 +762,7 @@ const make = Effect.gen(function* () {
       return Effect.fn("StorageCleanup.hasLiveProviderSession")(function* (
         worktreePath: string,
         threadId?: ThreadId,
+        check: "current" | "inventory" = "current",
       ) {
         // Dependency cohorts call this guard concurrently; each check keeps
         // its own snapshot while a sibling may refresh the shared cache.
@@ -770,8 +771,10 @@ const make = Effect.gen(function* () {
           snapshot = yield* capture();
           return true;
         }
+        // Inventory can defer a deletion or pass it on to the fresh guard. The
+        // same durable snapshot is sufficient for this first look at each path.
         if (
-          (yield* providerEventsSince(current.sequence)) ||
+          (check === "current" && (yield* providerEventsSince(current.sequence))) ||
           (yield* providerSessions.ownershipRevision) !== current.runtimeRevision
         ) {
           current = yield* capture();
@@ -1973,7 +1976,11 @@ const make = Effect.gen(function* () {
                 ? "A terminal is still using this worktree"
                 : (yield* previewUsesDependencies(cwd, owner.recordedWorktreePath))
                   ? "A preview is using this worktree, or preview ownership could not be checked"
-                  : (yield* hasLiveProviderSession(cwd, owner.id))
+                  : (yield* hasLiveProviderSession(
+                        cwd,
+                        owner.id,
+                        generatedBuilds ? "current" : "inventory",
+                      ))
                     ? "A provider session is still open"
                     : null;
         const activity = yield* observe(
@@ -2620,12 +2627,15 @@ const make = Effect.gen(function* () {
           serverSettings,
           thread.projectId,
         ).worktreeDependenciesAfterDays;
+        const outputPresent =
+          !generatedBuilds && days !== null ? yield* outputExists(thread.cleanupPath) : undefined;
+        if (outputPresent === false) return [];
         const savedProtection = yield* savedWorkspaceProtection(
           thread.cleanupPath,
           protectionResource,
         );
         if (savedProtection !== null) {
-          if (yield* outputExists(thread.cleanupPath))
+          if (outputPresent ?? (yield* outputExists(thread.cleanupPath)))
             noteCandidate(
               thread,
               thread.cleanupPath,
@@ -2689,7 +2699,7 @@ const make = Effect.gen(function* () {
         const activityAt = deleted ? thread.dependencyActivityAt : storageCleanupActivityAt(thread);
         const worktreePath = thread.cleanupPath;
         const recordedWorktreePath = thread.recordedWorktreePath;
-        if (!(yield* outputExists(worktreePath))) return [];
+        if (generatedBuilds && !(yield* outputExists(worktreePath))) return [];
         const entry =
           reports.get(worktreePath) ??
           noteCandidate(
@@ -2733,7 +2743,12 @@ const make = Effect.gen(function* () {
         const managedWorktreesRoot = roots.find((root) => inside(root, worktreePath));
         if (managedWorktreesRoot === undefined)
           return keep("Worktree is outside the configured cleanup locations");
-        if (yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch))
+        // Dependency candidates get a fresh ownership check under the workspace
+        // lease after the observation and inactivity checks have passed.
+        if (
+          generatedBuilds &&
+          (yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch))
+        )
           return keep("Workspace ownership changed during cleanup");
         if (processCwds === null) return keep("Could not check running processes safely");
         if (!deleted && !storageCleanupThreadIdle(thread, now, serverSettings))
@@ -3034,7 +3049,8 @@ const make = Effect.gen(function* () {
                 },
               );
               const revalidate = Effect.fn("StorageCleanup.revalidateDependencies")(function* () {
-                if (!(yield* candidateStillIdle())) return false;
+                // For dependencies, read policy and thread activity once after Git.
+                if (generatedBuilds && !(yield* candidateStillIdle())) return false;
                 if (yield* hasLiveProviderSession(worktreePath, thread.id))
                   return keep("A provider session is still open");
                 if (!(yield* revalidateGit())) return false;

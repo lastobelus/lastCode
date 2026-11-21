@@ -20,11 +20,13 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 import { SCAN_CACHE_FILE_NAME } from "./usage/usageScanCache.ts";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -445,6 +447,10 @@ const cleanupFixture = (
   realSuspension = false,
   worktreeDevHome = false,
   sqlOverride?: SqlClient.SqlClient,
+  projectionOverride?: Pick<
+    ProjectionStore.ProjectionStoreV2["Service"],
+    "getShellSnapshot" | "getThreadShell"
+  >,
 ) =>
   Effect.gen(function* () {
     const fixtureNow = yield* Clock.currentTimeMillis;
@@ -906,6 +912,7 @@ const cleanupFixture = (
               ? Effect.fail(new ProjectionStore.ProjectionStoreThreadNotFoundError({ threadId }))
               : Effect.succeed(thread);
           }),
+        ...projectionOverride,
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
       Effect.provideService(ThreadManagement.ThreadManagementService, {
         getShellSnapshot: (input?: { threadIds?: ReadonlyArray<ThreadId> }) =>
@@ -4361,6 +4368,57 @@ describe("provider protection during storage cleanup", () => {
 });
 
 describe("dependency cleanup reports", () => {
+  it.live("cleans enabled dependencies beside an unreadable install with cleanup off", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        let unreadableInstall: string | undefined;
+        const fixture = yield* cleanupFixture().pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: (path) =>
+              path === unreadableInstall
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      module: "FileSystem",
+                      method: "access",
+                      pathOrDescriptor: path,
+                      _tag: "PermissionDenied",
+                    }),
+                  )
+                : fs.exists(path),
+          }),
+        );
+        yield* fixture.enableDependencies;
+        const disabled = `${fixture.config.baseDir}/disabled-checkout`;
+        unreadableInstall = `${disabled}/node_modules`;
+        yield* fs.makeDirectory(unreadableInstall, { recursive: true });
+        const projects = projectShells([
+          fixture.repo,
+          `${fixture.config.baseDir}/disabled-project`,
+        ]);
+        yield* fs.makeDirectory(projects[1]!.workspaceRoot);
+        fixture.setProjectRoots(projects);
+        fixture.setProjectWorktreeCleanupOff(projects[1]!.id);
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree }),
+          shell({
+            id: ThreadId.make("disabled-owner"),
+            projectId: projects[1]!.id,
+            branch: "disabled-feature",
+            worktreePath: disabled,
+          }),
+        ]);
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+        ).toMatchObject([{ path: `${fixture.worktree}/node_modules`, outcome: "removed" }]);
+        expect(yield* fs.exists(`${fixture.worktree}/node_modules`)).toBe(false);
+        expect(yield* fs.exists(unreadableInstall)).toBe(true);
+      }),
+    ),
+  );
+
   it.live.each(["dependencies", "worktree"] as const)(
     "cleans an owned %s when an unrelated project directory is unavailable",
     (resource) =>
@@ -6085,6 +6143,174 @@ describe("one initial process observation per storage sweep", () => {
         expect(captures).toBe(beforeNextSweep + 1);
         expect(yield* fixture.fs.exists(output)).toBe(true);
       }),
+    ),
+  );
+});
+
+it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () => {
+  const outputPasses: Tracer.Span[] = [];
+  const dependencySpans: Tracer.Span[] = [];
+  const tracer = Tracer.make({
+    span(options) {
+      const span = new Tracer.NativeSpan(options);
+      if (span.name === "StorageCleanup.cleanDisposableOutputs") outputPasses.push(span);
+      let parent = Option.getOrUndefined(span.parent);
+      while (parent?._tag === "Span" && parent.name !== "StorageCleanup.cleanDisposableOutputs") {
+        parent = Option.getOrUndefined(parent.parent);
+      }
+      if (parent !== undefined && parent === outputPasses[0]) dependencySpans.push(span);
+      return span;
+    },
+  });
+  return runCleanupTest(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const sql = yield* SqlClient.SqlClient;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      let mountInspectionAvailable = false;
+      const fixture = yield* cleanupFixture(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sql,
+        projections,
+      ).pipe(
+        Effect.provideService(
+          DependencyMounts.MountPoints,
+          Effect.sync(() => (mountInspectionAvailable ? [] : null)),
+        ),
+      );
+      yield* fixture.enableDependencies;
+      const workspaceCount = 12;
+      const installCount = 7;
+      const oldInstallCount = 2;
+      const installPaths: string[] = [];
+      const projectId = ProjectId.make("project-1");
+      yield* sql`INSERT INTO projection_projects ${sql.insert({
+        project_id: projectId,
+        title: "Cleanup query test",
+        workspace_root: fixture.repo,
+        scripts_json: "[]",
+        created_at: DateTime.formatIso(at(0)),
+        updated_at: DateTime.formatIso(at(0)),
+      })}`;
+      for (let index = 0; index < workspaceCount; index++) {
+        const branch = index === 0 ? "feature" : `quiet-${index}`;
+        const cwd = `${fixture.config.worktreesDir}/${branch}`;
+        if (index > 0) {
+          yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, cwd, "feature"]);
+        }
+        if (index < installCount) {
+          installPaths.push(`${cwd}/node_modules`);
+          yield* fixture.fs.makeDirectory(`${cwd}/node_modules/package`, { recursive: true });
+          yield* fixture.fs.writeFileString(`${cwd}/node_modules/.package-lock.json`, "{}\n");
+          yield* fixture.fs.writeFileString(`${cwd}/node_modules/package/index.js`, "export {};\n");
+          const location = yield* fixture.command(cwd, ["rev-parse", "--absolute-git-dir"]);
+          observeDependencyActivity(
+            location.stdout.trim(),
+            cwd,
+            NOW_MS - (index < oldInstallCount ? 30 : 4) * DAY_MS,
+            true,
+          );
+        }
+        const threadId = ThreadId.make(`quiet-owner-${index}`);
+        const thread = shell({ id: threadId, projectId, branch, worktreePath: cwd });
+        yield* projections.apply({
+          id: EventId.make(`quiet-owner-created-${index}`),
+          type: "thread.created",
+          threadId,
+          occurredAt: at(-30 * DAY_MS),
+          payload: { ...thread, lastVisitedAt: thread.lastVisitedAt ?? null },
+        });
+      }
+      const reports = yield* Queue.unbounded<StorageCleanupReport>();
+      yield* fixture.service.reports.pipe(
+        Stream.filter((report): report is StorageCleanupReport => report?.trigger === "automatic"),
+        Stream.runForEach((report) => Queue.offer(reports, report)),
+        Effect.forkScoped,
+      );
+      yield* fixture.activate();
+      const measurements = [];
+      for (let sweep = 0; sweep < 2; sweep++) {
+        const report = yield* Queue.take(reports);
+        yield* fixture.service.drain;
+        const dependencies = disposableEntries(report).filter(
+          (entry) => entry.worktreeResource === "dependencies",
+        );
+        expect(dependencies).toHaveLength(installCount);
+        expect(
+          dependencies.filter((entry) => entry.reason?.includes("inactivity period")),
+        ).toHaveLength(installCount - oldInstallCount);
+        expect(
+          dependencies.filter((entry) => entry.reason?.includes("safely recognized and measured")),
+        ).toHaveLength(oldInstallCount);
+        expect(dependencies.every((entry) => entry.outcome === "kept")).toBe(true);
+        const spansNamed = (name: string) =>
+          dependencySpans.filter((span) => span.name === name).length;
+        const statements = dependencySpans.filter((span) => span.name === "sqlite");
+        expect(
+          statements.some((span) =>
+            String(span.attributes.get("db.query.text")).includes(
+              "SELECT payload_json FROM orchestration_v2_projection_provider_sessions",
+            ),
+          ),
+        ).toBe(true);
+        const providerEventReads = statements.filter((span) =>
+          String(span.attributes.get("db.query.text")).includes(
+            "event_type LIKE 'provider-session.%'",
+          ),
+        ).length;
+        const ownershipEventReads = statements.filter((span) =>
+          String(span.attributes.get("db.query.text")).includes(
+            "SELECT DISTINCT aggregate_kind AS kind",
+          ),
+        ).length;
+        measurements.push({
+          statements: statements.length,
+          transactions: spansNamed("sql.transaction"),
+          begin: spansNamed("BEGIN"),
+          commit: spansNamed("COMMIT"),
+          providerChecks: spansNamed("StorageCleanup.hasLiveProviderSession"),
+          savedWorkspaceChecks: spansNamed("StorageCleanup.savedWorkspaceProtection"),
+          providerEventReads,
+          ownershipEventReads,
+        });
+        if (sweep === 0) {
+          outputPasses.length = 0;
+          dependencySpans.length = 0;
+          yield* TestClock.adjust("1 hour");
+        }
+      }
+      for (const counts of measurements) {
+        expect(counts.statements, JSON.stringify(measurements)).toBeLessThanOrEqual(31);
+        expect(counts.transactions).toBeLessThanOrEqual(1 + oldInstallCount);
+        expect(counts.providerEventReads).toBeLessThanOrEqual(1 + 3 * oldInstallCount);
+        expect(counts.ownershipEventReads).toBeLessThanOrEqual(2 * oldInstallCount);
+        expect(counts.savedWorkspaceChecks).toBeLessThanOrEqual(
+          2 * (installCount + oldInstallCount),
+        );
+      }
+      mountInspectionAvailable = true;
+      const manual = yield* fixture.service.runNow;
+      const installs = disposableEntries(manual).filter(
+        (entry) => entry.worktreeResource === "dependencies",
+      );
+      expect(
+        installs
+          .filter((entry) => entry.outcome === "removed")
+          .map((entry) => entry.path)
+          .sort(),
+      ).toEqual(installPaths.slice(0, oldInstallCount).sort());
+      for (const target of installPaths.slice(oldInstallCount)) {
+        expect(yield* fixture.fs.exists(target)).toBe(true);
+      }
+    }).pipe(
+      Effect.provide(ProjectionStore.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
+      Effect.withTracer(tracer),
     ),
   );
 });
