@@ -26,6 +26,8 @@ import { nativeSource, type CapacitySource } from "./source.ts";
 export type { CapacitySource } from "./source.ts";
 
 const unwired = Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now)));
+/** Reports `unknown` without sampling: the default, and the fallback when capacity can't start. */
+const unwiredCapacity = { read: unwired, readWithActivity: unwired };
 
 export class Capacity extends Context.Reference<{
   /** The current verdicts, without activity, so a launch never waits on a thread scan. */
@@ -33,7 +35,7 @@ export class Capacity extends Context.Reference<{
   /** The same reading with turn activity counted, for environment reads. */
   readonly readWithActivity: Effect.Effect<CapacitySnapshot>;
 }>("t3/capacity/Capacity", {
-  defaultValue: () => ({ read: unwired, readWithActivity: unwired }),
+  defaultValue: () => unwiredCapacity,
 }) {}
 
 export interface CapacityInputs {
@@ -173,17 +175,37 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       : evaluateCapacity(yield* Ref.get(state), now, mode).snapshot;
     return { ...snapshot, activity } satisfies CapacitySnapshot;
   });
+  // Results carry capacity as advice: a defect here reports unknown, never fails the result.
+  const guarded = (read: Effect.Effect<CapacitySnapshot>) =>
+    read.pipe(
+      Effect.catchDefect((defect) =>
+        Effect.logWarning("capacity.read-failed", { defect }).pipe(Effect.andThen(unwired)),
+      ),
+    );
   return Capacity.of({
-    read: readWith(Effect.succeed(null)),
+    read: guarded(readWith(Effect.succeed(null))),
     // Activity is informational: no rule reads it, so a failed read never gates a verdict.
-    readWithActivity: readWith(
-      inputs.activity.pipe(
-        // Shorter than a peer's 2 s forwarded read, so a slow scan drops only activity.
-        Effect.timeout("1 second"),
-        Effect.orElseSucceed(() => null),
+    readWithActivity: guarded(
+      readWith(
+        inputs.activity.pipe(
+          // Shorter than a peer's 2 s forwarded read, so a slow scan drops only activity.
+          Effect.timeout("1 second"),
+          Effect.orElseSucceed(() => null),
+        ),
       ),
     ),
   });
 });
 
 export const layer = (inputs: CapacityInputs) => Layer.effect(Capacity, make(inputs));
+
+/** Capacity is advisory: if it can't start, the server still starts and reports unknown. */
+export const orUnwired = <A, E, R>(capacity: Layer.Layer<A, E, R>) =>
+  capacity.pipe(
+    Layer.catchCause((cause) =>
+      Layer.effect(
+        Capacity,
+        Effect.logWarning("capacity.unavailable", { cause }).pipe(Effect.as(unwiredCapacity)),
+      ),
+    ),
+  );
