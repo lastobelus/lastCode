@@ -705,7 +705,7 @@ describe("server browser element refs", () => {
         selector: 'button[data-testid="delete-row"]',
         timeoutMs: 1_000,
       }),
-    ).rejects.toThrow(/strict mode violation/);
+    ).rejects.toThrow(/Click refused.*5 elements/);
     expect(await page.locator("li").count()).toBe(5);
   });
 

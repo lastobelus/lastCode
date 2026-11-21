@@ -331,6 +331,7 @@ it.live.each([
   { target: "disabled", timeoutMs: 1_000, budgetMax: 900 },
   { target: "absent", timeoutMs: undefined, budgetMax: 10_000 },
   { target: "hidden", timeoutMs: 30_000, budgetMax: 10_000 },
+  { target: "ambiguous", timeoutMs: undefined, budgetMax: 10_000 },
 ])(
   "keeps the $target click diagnostic through the environment host (caller budget $timeoutMs)",
   ({ target, timeoutMs, budgetMax }) =>
@@ -343,7 +344,25 @@ it.live.each([
               response.end(
                 target === "absent"
                   ? "<!doctype html><title>Missing target</title>"
-                  : `<!doctype html><button id="submit" ${target === "hidden" ? "hidden" : "disabled"}>Submit</button>`,
+                  : target === "ambiguous"
+                    ? `<!doctype html>
+                      <input type="password" value="fixture-dotted-secret">
+                      <input type="password" value="AB">
+                      <input value="fixture-field-value">
+                      ${["A", "B", "C", "D", "E", "F", "G"]
+                        .map(
+                          (
+                            row,
+                          ) => `<div role="row" aria-label="Row ${row} fixture-dotted-secret key-AB1234">
+                            <button class="submit" data-row="${row}" data-private="fixture-dom-attribute"
+                              aria-label="${row === "D" ? "Archive " + "x".repeat(140) + " end-marker" : "Remove fixture-field-value"}"
+                              onclick="this.dataset.clicked = 'yes'">Remove</button>
+                          </div>`,
+                        )
+                        .join("")}
+                      <button class="same" onclick="this.dataset.clicked = 'yes'">Remove</button>
+                      <button class="same" onclick="this.dataset.clicked = 'yes'">Remove</button>`
+                    : `<!doctype html><button class="submit" ${target === "hidden" ? "hidden" : "disabled"}>Submit</button>`,
               );
             });
             await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -367,6 +386,16 @@ it.live.each([
             reuseExistingTab: false,
           },
         });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        const before =
+          target === "ambiguous"
+            ? yield* broker.invoke<PreviewAutomationSnapshot>({
+                scope,
+                tabId,
+                operation: "snapshot",
+                input: { includeImage: false },
+              })
+            : undefined;
         const mcp = yield* McpServer.McpServer;
         const result = yield* mcp
           .callTool({
@@ -374,7 +403,7 @@ it.live.each([
             arguments: {
               action: "click",
               tabId: opened.tabId,
-              selector: "#submit",
+              selector: ".submit",
               ...(timeoutMs === undefined ? {} : { timeoutMs }),
             },
           })
@@ -401,7 +430,59 @@ it.live.each([
           .filter((part) => part.type === "text")
           .map((part) => part.text)
           .join("\n");
-        if (target !== "disabled") {
+        if (target === "ambiguous") {
+          const indistinguishable = yield* broker
+            .invoke<void>({
+              scope,
+              tabId,
+              operation: "click",
+              input: { selector: ".same" },
+            })
+            .pipe(Effect.flip);
+          expect(indistinguishable._tag).toBe("PreviewAutomationExecutionError");
+          expect(indistinguishable.message).toContain("matched 2 elements");
+          expect(indistinguishable.message).toContain("fresh snapshot");
+          expect(indistinguishable.message).not.toContain('button "Remove"');
+          const clicked = yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: 'document.querySelectorAll("[data-clicked]").length' },
+          });
+          expect(clicked).toBe(0);
+          expect(text).toContain("7 elements");
+          expect(text).toMatch(/Remove.*Row A/);
+          expect(text).toMatch(/Remove.*Row B/);
+          expect(text).toMatch(/Remove.*Row C/);
+          expect(text).toMatch(/Archive.*Row D/);
+          expect(text.match(/^- button /gm)).toHaveLength(4);
+          expect(text).not.toMatch(
+            /Row [EFG]|end-marker|AB1234|fixture-(?:dotted-secret|field-value|dom-attribute)|aria-ref=/,
+          );
+          expect(text).toContain("fresh snapshot");
+          expect(text).toContain("scope the locator");
+          const ref = String(before?.accessibilityTree ?? "").match(
+            /button "Remove[^\n]+\[ref=([^\]]+)\]/,
+          )?.[1];
+          expect(ref).toBeTruthy();
+          yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "click",
+            input: { locator: `aria-ref=${ref}` },
+          });
+          expect(
+            yield* broker.invoke({
+              scope,
+              tabId,
+              operation: "evaluate",
+              input: {
+                expression:
+                  'Array.from(document.querySelectorAll("[data-clicked]"), button => button.dataset.row)',
+              },
+            }),
+          ).toEqual(["A"]);
+        } else if (target !== "disabled") {
           expect(text).toContain("Click not attempted");
           expect(text).toContain("target layout");
           const budget = Number(text.match(/timed out after (\d+)ms/)?.[1]);
