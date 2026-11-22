@@ -376,7 +376,7 @@ type SidebarOptimisticDrop = {
 
 interface SidebarThreadPartitionInput {
   readonly threads: readonly EnvironmentThreadShell[];
-  readonly routeThreadKey: string | null;
+  readonly routeRowThreadKey: string | null;
   readonly scopedProjectKeys: ReadonlySet<string> | null;
   /** Tasks linked environments run for a listed thread; they show under it. */
   readonly delegatedUnderParent: ReadonlySet<string>;
@@ -450,7 +450,6 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
-  readonly routeThreadKey: string | null;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
@@ -465,7 +464,6 @@ function useSidebarThreads(input: {
     optimisticDrop,
     threads,
     delegatedUnderParent,
-    routeThreadKey,
     routeRowThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
@@ -510,7 +508,7 @@ function useSidebarThreads(input: {
 
   const partition = partitionSidebarThreads({
     threads,
-    routeThreadKey,
+    routeRowThreadKey,
     scopedProjectKeys,
     delegatedUnderParent,
     serverConfigs,
@@ -662,7 +660,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     scopedProjectKeys,
     delegatedUnderParent,
   );
-  const visible = filterLastCodeAnnotationInboxRows(candidates, input.routeThreadKey);
+  const visible = filterLastCodeAnnotationInboxRows(candidates, input.routeRowThreadKey);
   const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
@@ -1401,7 +1399,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
-    routeThreadKey,
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
       ? scopedProjectGroups.length === 0

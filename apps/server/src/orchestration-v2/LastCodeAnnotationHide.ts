@@ -95,7 +95,7 @@ const armTrigger = Effect.fn("LastCodeAnnotationHide.armTrigger")(function* (
       }
       return { ...common, ...input, baselineVersion: version, seenBuilds: [] };
     case "date":
-      if (Date.parse(input.at) <= Date.parse(hiddenAt)) {
+      if (!(Date.parse(input.at) > Date.parse(hiddenAt))) {
         return yield* Effect.fail("Choose a future date to reveal this thread.");
       }
       return { ...common, ...input };

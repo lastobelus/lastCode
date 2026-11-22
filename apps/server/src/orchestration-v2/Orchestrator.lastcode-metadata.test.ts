@@ -259,6 +259,15 @@ it.effect(
         }),
       );
       assert.equal(invalid._tag, "Failure");
+      const beforeInvalidDate = yield* read;
+      const invalidDate = yield* Effect.exit(
+        orchestrator.dispatch({
+          ...upsert("malformed-date"),
+          hideUntil: { kind: "date", at: "not a date" },
+        }),
+      );
+      assert.equal(invalidDate._tag, "Failure");
+      assert.deepEqual(yield* read, beforeInvalidDate);
       yield* orchestrator.dispatch({
         type: "thread.unarchive",
         threadId: targetId,
