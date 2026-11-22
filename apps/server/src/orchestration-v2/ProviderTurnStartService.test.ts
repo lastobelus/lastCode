@@ -1172,7 +1172,7 @@ function makeLocalCommandHarness(input: {
       : (input: ProviderAdapter.ProviderAdapterV2ResumeTurnInput) =>
           startTurn(ProviderAdapter.resumeTurnInput(input)),
   };
-  const open = vi.fn(() =>
+  const open = vi.fn<ProviderSessionManager.ProviderSessionManagerV2Shape["open"]>(() =>
     input.sideChat !== undefined
       ? Effect.succeed(sideChatSession as never)
       : input.interruptOpen === true
@@ -2806,12 +2806,12 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
           .pipe(Effect.as({} as never), Effect.orDie),
       );
       const open = harness.open.getMockImplementation()!;
-      harness.open.mockImplementation(() =>
+      harness.open.mockImplementation((input) =>
         Effect.gen(function* () {
           expect(yield* fileSystem.exists(worktreePath).pipe(Effect.orDie)).toBe(true);
           yield* Deferred.succeed(openEntered, undefined);
           if (order === "startup-first") yield* Deferred.await(release);
-          return yield* open();
+          return yield* open(input);
         }),
       );
       let cleanupEntered = false;
