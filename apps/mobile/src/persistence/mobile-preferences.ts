@@ -183,6 +183,8 @@ export interface Preferences {
   readonly workspaceSelections?: WorkspaceSelections;
   readonly pullRequestSavedViews?: ReadonlyArray<PullRequestSavedView>;
   readonly issueSavedViews?: ReadonlyArray<IssueSavedView>;
+  /** Device-local counterpart of web's `roundedProjectIcons` appearance preference. */
+  readonly roundedProjectIcons?: boolean;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -270,6 +272,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     workspaceSelections?: WorkspaceSelections;
     pullRequestSavedViews?: ReadonlyArray<PullRequestSavedView>;
     issueSavedViews?: ReadonlyArray<IssueSavedView>;
+    roundedProjectIcons?: boolean;
   } = {};
 
   if (Array.isArray(parsed.hiddenNavigationTabs)) {
@@ -434,6 +437,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (Array.isArray(parsed.issueSavedViews)) {
     preferences.issueSavedViews = parsed.issueSavedViews.filter(isIssueSavedView);
+  }
+  if (typeof parsed.roundedProjectIcons === "boolean") {
+    preferences.roundedProjectIcons = parsed.roundedProjectIcons;
   }
   return preferences;
 }

@@ -21,6 +21,10 @@ vi.mock("../state/assets", async () => {
   const url = Atom.make<string | null>("https://example.test/favicon.png");
   return { projectFaviconUrlAtom: () => url };
 });
+vi.mock("../state/preferences", async () => {
+  const { AsyncResult, Atom } = await import("effect/reactivity");
+  return { mobilePreferencesAtom: Atom.make(AsyncResult.success({})) };
+});
 
 import { EnvironmentId } from "@t3tools/contracts";
 

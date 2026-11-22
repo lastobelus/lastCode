@@ -18,6 +18,7 @@ import {
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
   resolveSidebarSweepKeys,
+  resolveSidebarRowThreadId,
   resolveSidebarRowStatus,
   resolveSidebarThreadStatus,
   filterSidebarV2VisibleThreads,
