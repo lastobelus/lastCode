@@ -13388,5 +13388,6 @@
   "bac896cff1757092": "Clean dependencies and build outputs on one run, and everything else on the next.",
   "b11a5a9cdadd6fd9": "Wait for Time Machine",
   "0ae8309282491222": "Hold automatic cleanup until a Time Machine backup finishes.",
-  "4b7fa11e6142029c": "Automatic cleanup"
+  "4b7fa11e6142029c": "Automatic cleanup",
+  "b4b98a0287c282e2": "On another machine, so this machine's agent can't read it. Remove it or switch back to send."
 }

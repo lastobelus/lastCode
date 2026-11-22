@@ -13379,5 +13379,6 @@
   "bac896cff1757092": "Limpa as dependências e os arquivos de compilação em uma execução e o restante na seguinte.",
   "b11a5a9cdadd6fd9": "Aguardar o Time Machine",
   "0ae8309282491222": "A limpeza automática aguarda a conclusão do backup do Time Machine.",
-  "4b7fa11e6142029c": "Limpeza automática"
+  "4b7fa11e6142029c": "Limpeza automática",
+  "b4b98a0287c282e2": "Está em outra máquina, então o agente desta máquina não consegue lê-la. Remova-a ou volte para aquela máquina para enviar."
 }

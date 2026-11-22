@@ -13379,5 +13379,6 @@
   "bac896cff1757092": "Bei einem Durchlauf werden Abhängigkeiten und Build-Artefakte bereinigt, beim nächsten alles andere.",
   "b11a5a9cdadd6fd9": "Auf Time Machine warten",
   "0ae8309282491222": "Die automatische Bereinigung wartet, bis das Time Machine-Backup abgeschlossen ist.",
-  "4b7fa11e6142029c": "Automatische Bereinigung"
+  "4b7fa11e6142029c": "Automatische Bereinigung",
+  "b4b98a0287c282e2": "Liegt auf einem anderen Rechner, daher kann der Agent dieses Rechners ihn nicht lesen. Entferne ihn oder wechsle zum Senden zurück zum anderen Rechner."
 }

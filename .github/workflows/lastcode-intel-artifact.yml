@@ -34,6 +34,8 @@ jobs:
       needs_build: ${{ steps.release.outputs.needs_build }}
       version: ${{ steps.target.outputs.version }}
     env:
+      # The image defaults to Xcode 16; the Apple Speech helper needs the macOS 26 SDK.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       INSTALLABLE_TAG: ${{ inputs.installable_tag }}
       INSTALLABLE_COMMIT: ${{ inputs.installable_commit }}
       REQUEST_TOKEN: ${{ inputs.request_token }}
