@@ -8505,6 +8505,72 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
+  it.live(
+    "keeps the tracking ref and a stale checkout when the fetch candidate gains protection",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture({
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            worktreeUnchanged: true,
+            worktreeOnDelete: true,
+          });
+          const { service, fs, repo, worktree, command } = fixture;
+          const remote = yield* fs.makeTempDirectoryScoped({ prefix: "cleanup-remote-" });
+          yield* command(remote, ["init", "--bare", "-b", "main"]);
+          yield* command(repo, ["remote", "add", "origin", remote]);
+          yield* command(repo, ["push", "origin", "main"]);
+          yield* command(repo, ["remote", "set-head", "origin", "main"]);
+          const trackingRef = "refs/remotes/origin/main";
+          const original = (yield* command(repo, ["rev-parse", trackingRef])).stdout.trim();
+
+          const branch = "retained-feature";
+          const retained = `${worktree}-retained`;
+          yield* command(repo, ["worktree", "add", "-b", branch, retained]);
+          yield* fs.writeFileString(`${retained}/tracked.txt`, "later commit\n");
+          yield* command(retained, ["commit", "-am", "later commit"]);
+          yield* command(retained, ["push", "origin", "HEAD:main"]);
+          yield* command(retained, ["switch", "--detach"]);
+          yield* command(repo, ["branch", "-D", branch]);
+          yield* command(repo, ["update-ref", trackingRef, original]);
+          fixture.setThreads([
+            shell({ branch: "feature", worktreePath: worktree, archivedAt: at(-DAY_MS) }),
+          ]);
+          fixture.setDeletedThreads([
+            shell({
+              id: ThreadId.make("retained-owner"),
+              branch,
+              worktreePath: retained,
+              deletedAt: at(-DAY_MS),
+            }),
+          ]);
+          fixture.onDependencyInspection(
+            Effect.sync(() =>
+              fixture.protectSavedWorkspace(worktree, "Keep workspace is enabled."),
+            ),
+            "StorageCleanup.listRemotes",
+          );
+
+          const report = yield* service.runNow;
+          expect(yield* fs.exists(retained)).toBe(true);
+          expect((yield* command(repo, ["rev-parse", trackingRef])).stdout.trim()).toBe(original);
+          expect(checkoutEntries(report)).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                path: worktree,
+                outcome: "kept",
+                reason: "Keep workspace is enabled.",
+              }),
+              expect.objectContaining({
+                path: retained,
+                outcome: "kept",
+                reason: "Repository or branch changed",
+              }),
+            ]),
+          );
+        }),
+      ),
+  );
   it.live("fetches a failing default branch once per sweep and names the broken local ref", () =>
     runCleanupTest(
       Effect.gen(function* () {

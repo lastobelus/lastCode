@@ -4308,6 +4308,9 @@ const make = Effect.gen(function* () {
               new Map<string, Exit.Exit<void, GitCommandError>>();
             let refresh = refreshed.get(defaultRef);
             if (refresh === undefined) {
+              // A fetch can make another checkout eligible by advancing the shared ref.
+              const protectedReason = yield* savedWorkspaceProtection(worktreePath);
+              if (protectedReason !== null) return keep(protectedReason);
               refresh = yield* Effect.exit(
                 git.fetchRemoteTrackingBranch({
                   cwd: repositoryCwd,
