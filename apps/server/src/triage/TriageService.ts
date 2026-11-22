@@ -4,10 +4,12 @@ import {
   type ServerPrepareTriageInput,
   type ServerPrepareTriageResult,
 } from "@t3tools/contracts";
+import { DESKTOP_CLI_SHIM_MARKER } from "@t3tools/shared/desktopDistribution";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -16,7 +18,13 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { buildTriageAppPrompt, type TriageSourceClone } from "./triagePrompt.ts";
 import { triageSourceCacheDir, writeTriageSession } from "./triageSession.ts";
 
-const T3CODE_REPOSITORY_URL = "https://github.com/pingdotgg/t3code";
+const LASTCODE_REPOSITORY_URL = "https://github.com/lastobelus/lastCode";
+const LASTCODE_SOURCE_BRANCH = "lastcode/main";
+
+const sourceTags = (version: string) => [
+  `lastcode/revision/v${version}`,
+  `lastcode/checkpoint/v${version}`,
+];
 
 // No tty: a credential prompt would hang until the timeout, so git must fail
 // instead. An empty GIT_ASKPASS also skips core.askPass and SSH_ASKPASS helpers.
@@ -31,6 +39,7 @@ const GIT_ENV = {
 export class TriageService extends Context.Service<
   TriageService,
   {
+    readonly getCliCommand: () => Effect.Effect<Option.Option<string>>;
     readonly prepare: (
       input: ServerPrepareTriageInput,
     ) => Effect.Effect<ServerPrepareTriageResult, ServerPrepareTriageError>;
@@ -48,7 +57,7 @@ const describeClient = (client: AuthClientPresentationMetadata) =>
     .filter((part) => part !== undefined)
     .join(" ");
 
-/** Picks the release tag for `version`, or `main` when the build has no tag. */
+/** Picks the LastCode installable tag, or the downstream branch when the build has no tag. */
 export const pickSourceRef = (lsRemoteOutput: string, version: string) => {
   const commits = new Map(
     lsRemoteOutput
@@ -57,12 +66,13 @@ export const pickSourceRef = (lsRemoteOutput: string, version: string) => {
       .filter((fields): fields is [string, string] => fields.length === 2)
       .map(([commit, ref]) => [ref, commit]),
   );
-  const tag = `v${version}`;
-  // Annotated tags list the tag object first and the commit as `^{}`.
-  const tagCommit = commits.get(`refs/tags/${tag}^{}`) ?? commits.get(`refs/tags/${tag}`);
-  if (tagCommit !== undefined) return { ref: tag, commit: tagCommit };
-  const mainCommit = commits.get("refs/heads/main");
-  return mainCommit === undefined ? undefined : { ref: "main", commit: mainCommit };
+  for (const tag of sourceTags(version)) {
+    // Annotated tags list the tag object first and the commit as `^{}`.
+    const tagCommit = commits.get(`refs/tags/${tag}^{}`) ?? commits.get(`refs/tags/${tag}`);
+    if (tagCommit !== undefined) return { ref: tag, commit: tagCommit };
+  }
+  const mainCommit = commits.get(`refs/heads/${LASTCODE_SOURCE_BRANCH}`);
+  return mainCommit === undefined ? undefined : { ref: LASTCODE_SOURCE_BRANCH, commit: mainCommit };
 };
 
 const make = Effect.gen(function* () {
@@ -77,6 +87,22 @@ const make = Effect.gen(function* () {
   const stagingDir = `${sourceDir}-staging`;
   const serverVersion = packageJson.version;
 
+  const getCliCommand = Effect.fn("TriageService.getCliCommand")(
+    function* () {
+      const launcher = path.join(config.baseDir, "bin", "t3");
+      const info = yield* fs.stat(launcher);
+      if (info.type !== "File" || (info.mode & 0o111) === 0 || Number(info.size) > 16_384) {
+        return Option.none<string>();
+      }
+      if (!(yield* fs.readFileString(launcher)).includes(DESKTOP_CLI_SHIM_MARKER)) {
+        return Option.none<string>();
+      }
+      const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+      return Option.some(`${quote(launcher)} triage --base-dir ${quote(config.baseDir)}`);
+    },
+    Effect.orElseSucceed(() => Option.none<string>()),
+  );
+
   const runGit = (operation: string, cwd: string, args: ReadonlyArray<string>, timeoutMs: number) =>
     git.execute({ operation: `TriageService.${operation}`, cwd, args, timeoutMs, env: GIT_ENV });
 
@@ -87,7 +113,7 @@ const make = Effect.gen(function* () {
   yield* fs.remove(stagingDir, { recursive: true }).pipe(Effect.ignore);
 
   // Fetches the exact commit `ls-remote` resolved, so the folder the session
-  // names is the one that appears even when main moves meanwhile.
+  // names is the one that appears even when lastcode/main moves meanwhile.
   const cloneSource = Effect.fn("TriageService.cloneSource")(function* (commit: string) {
     yield* fs.makeDirectory(stagingDir, { recursive: true });
     const staging = yield* fs.makeTempDirectory({ directory: stagingDir, prefix: "clone-" });
@@ -97,7 +123,7 @@ const make = Effect.gen(function* () {
       yield* runGit(
         "addSourceRemote",
         staging,
-        ["remote", "add", "origin", T3CODE_REPOSITORY_URL],
+        ["remote", "add", "origin", LASTCODE_REPOSITORY_URL],
         10_000,
       );
       yield* runGit(
@@ -122,20 +148,23 @@ const make = Effect.gen(function* () {
   });
 
   // Release tags never move, so one lookup serves every later session. Builds
-  // with no tag track main, which does move, so they look it up each time.
+  // with no tag track lastcode/main, which does move, so they look it up each time.
   let releaseSource: { readonly ref: string; readonly commit: string } | undefined;
   const resolveSource = Effect.fn("TriageService.resolveSource")(function* () {
     if (releaseSource !== undefined) return releaseSource;
-    const tag = `refs/tags/v${serverVersion}`;
+    const tags = sourceTags(serverVersion).flatMap((tag) => [
+      `refs/tags/${tag}`,
+      `refs/tags/${tag}^{}`,
+    ]);
     const listed = yield* runGit(
       "resolveSourceRef",
       sourceDir,
-      ["ls-remote", T3CODE_REPOSITORY_URL, tag, `${tag}^{}`, "refs/heads/main"],
+      ["ls-remote", LASTCODE_REPOSITORY_URL, ...tags, `refs/heads/${LASTCODE_SOURCE_BRANCH}`],
       // Triage still starts without source; a dead network should not stall it.
       5_000,
     );
     const source = pickSourceRef(listed.stdout, serverVersion);
-    if (source?.ref !== "main") releaseSource = source;
+    if (source?.ref !== LASTCODE_SOURCE_BRANCH) releaseSource = source;
     return source;
   });
 
@@ -152,7 +181,7 @@ const make = Effect.gen(function* () {
       return {
         _tag: "failed",
         serverVersion,
-        reason: "the repository listed neither the release tag nor main.",
+        reason: "the repository listed neither a LastCode installable tag nor lastcode/main.",
       } satisfies TriageSourceClone;
     }
     const directory = path.join(sourceDir, source.commit);
@@ -211,7 +240,7 @@ const make = Effect.gen(function* () {
     },
   );
 
-  return TriageService.of({ prepare });
+  return TriageService.of({ prepare, getCliCommand });
 });
 
 export const layer = Layer.effect(TriageService, make);

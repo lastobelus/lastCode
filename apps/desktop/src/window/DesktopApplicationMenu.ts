@@ -80,7 +80,22 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
   const result = yield* updates.check("menu");
   const updateState = result.state;
 
-  if (updateState.status === "up-to-date") {
+  if (result.error) {
+    yield* electronDialog.showMessageBox({
+      type: "warning",
+      title: m(msg("Update check failed")),
+      message: m(msg("Could not check for updates.")),
+      detail: result.error,
+      buttons: [m(msg("OK"))],
+    });
+  } else if (result.checkpointRequested) {
+    yield* electronDialog.showMessageBox({
+      type: "info",
+      title: m(msg("Checkpoint requested")),
+      message: m(DesktopUpdates.checkpointRequestedMessage),
+      buttons: [m(msg("OK"))],
+    });
+  } else if (updateState.status === "up-to-date") {
     yield* electronDialog.showMessageBox({
       type: "info",
       title: m(msg("You're up to date!")),
@@ -135,23 +150,24 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
       cancelId: 1,
     });
     if (response === 0) yield* updates.install;
-  } else if (updateState.status === "error") {
+  } else if (
+    result.checked &&
+    updateState.status === "error" &&
+    updateState.trackMismatch !== undefined
+  ) {
     yield* electronDialog.showMessageBox({
       type: "warning",
       title: m(msg("Update check failed")),
       message: m(msg("Could not check for updates.")),
-      detail:
-        updateState.trackMismatch !== undefined
-          ? m(
-              msg(
-                "This {build} build can't update from the {saved} track on its own. Switch the update track back to {build}, or use Review beside Update track to retry the switch to {saved}.",
-              ),
-              {
-                build: trackLabel(updateState.trackMismatch.buildChannel),
-                saved: trackLabel(updateState.channel),
-              },
-            )
-          : (updateState.message ?? m(msg("An unknown error occurred. Please try again later."))),
+      detail: m(
+        msg(
+          "This {build} build can't update from the {saved} track on its own. Switch the update track back to {build}, or use Review beside Update track to retry the switch to {saved}.",
+        ),
+        {
+          build: trackLabel(updateState.trackMismatch.buildChannel),
+          saved: trackLabel(updateState.channel),
+        },
+      ),
       buttons: [m(msg("OK"))],
     });
   }
