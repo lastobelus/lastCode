@@ -8,6 +8,10 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import {
+  STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+  emptyStorageCleanupInventoryTrace,
+} from "../observability/StorageCleanupInventoryTrace.ts";
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
 import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
@@ -412,6 +416,7 @@ const targetIdentities = async (
   root: string,
   collectIdentities: boolean,
   paths: ReadonlyArray<string>,
+  measurement?: InventoryMeasurement,
 ) => {
   const deadline = performance.now() + 30_000;
   const rootStat = await targetStat(root);
@@ -440,6 +445,7 @@ const targetIdentities = async (
   const visit = async (path: string, depth: number): Promise<void> => {
     if (++objects > MAX_TARGET_OBJECTS || depth > 128 || performance.now() > deadline)
       throw new Error("Consumer target inventory limit exceeded");
+    if (measurement !== undefined) measurement.objectsVisited++;
     const stat = await targetStat(path);
     if (
       typeof stat.dev !== "bigint" ||
@@ -491,14 +497,145 @@ type TargetEntry = {
   unavailable: boolean;
   cause?: unknown;
 };
-export type TargetObservation = WeakMap<ReadonlyArray<string>, Map<string, TargetEntry>>;
+type InventoryMeasurement = ReturnType<typeof emptyStorageCleanupInventoryTrace>;
 
-/**
- * Evidence reused only for the inventory array it was collected for. A sweep
- * shares one across its activity pass; a removal proof creates one per fresh
- * capture and never reuses a sweep's.
- */
-export const createTargetObservation = (): TargetObservation => new WeakMap();
+type CaptureResolutions = {
+  readonly sharedPaths: ReadonlyMap<string, { readonly parent: string; token?: string }>;
+};
+
+type SweepObservation = {
+  readonly captures: WeakMap<ReadonlyArray<string>, CaptureResolutions>;
+  readonly resolvedPaths: Set<string>;
+  readonly measurement: InventoryMeasurement;
+};
+
+export type TargetObservation = {
+  readonly targets: WeakMap<ReadonlyArray<string>, Map<string, TargetEntry>>;
+  readonly sweep?: SweepObservation;
+};
+
+/** Native tree evidence is scoped to the capture that supplied its object identities. */
+export const createTargetObservation = (): TargetObservation => ({ targets: new WeakMap() });
+
+export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObservation")(function* (
+  capture: Effect.Effect<ReadonlyArray<string> | null>,
+) {
+  const measurement = emptyStorageCleanupInventoryTrace();
+  const sweep: SweepObservation = {
+    captures: new WeakMap(),
+    resolvedPaths: new Set(),
+    measurement,
+  };
+  const paths = yield* Effect.cached(
+    Effect.suspend(() => {
+      const start = performance.now();
+      measurement.processCaptures++;
+      return capture.pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            measurement.processCaptureMs += performance.now() - start;
+          }),
+        ),
+      );
+    }),
+  );
+  const targets: TargetObservation = { targets: new WeakMap(), sweep };
+  return {
+    paths,
+    targets,
+    annotate: Effect.suspend(() =>
+      measurement.processCaptures === 0
+        ? Effect.void
+        : Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
+            ...measurement,
+            uniquePaths: sweep.resolvedPaths.size,
+          }),
+    ),
+  };
+});
+
+const sweepResolutions = (sweep: SweepObservation, paths: readonly string[]) => {
+  const previous = sweep.captures.get(paths);
+  if (previous !== undefined) return previous;
+  const byParent = Map.groupBy(
+    [...new Set(paths)].filter(
+      (path) => NodePath.isAbsolute(path) && NodePath.resolve(path) === path,
+    ),
+    NodePath.dirname,
+  );
+  const sharedPaths = new Map<string, { readonly parent: string; token?: string }>();
+  for (const [parent, children] of byParent) {
+    // A directory check uses two lookups. Leave sparse directories on the original path.
+    if (children.length < 4) continue;
+    for (const child of children) sharedPaths.set(child, { parent });
+  }
+  const capture: CaptureResolutions = { sharedPaths };
+  sweep.captures.set(paths, capture);
+  return capture;
+};
+
+const canonicalParentToken = async (parent: string, measurement: InventoryMeasurement) => {
+  const start = performance.now();
+  measurement.directoryChecks++;
+  try {
+    const stat = await targetStat(parent);
+    if (
+      !stat.isDirectory() ||
+      typeof stat.mtimeNs !== "bigint" ||
+      typeof stat.ctimeNs !== "bigint" ||
+      (await NodeFSP.realpath(parent)) !== parent
+    )
+      return null;
+    return directoryToken(stat);
+  } catch {
+    return null;
+  } finally {
+    measurement.pathResolutionMs += performance.now() - start;
+  }
+};
+
+type PathResolution = { readonly path: string } | { readonly error: unknown };
+
+const resolveProcessPath = async (
+  path: string,
+  sweep?: SweepObservation,
+): Promise<PathResolution> => {
+  const start = sweep === undefined ? 0 : performance.now();
+  if (sweep !== undefined) {
+    sweep.measurement.pathResolutions++;
+    sweep.resolvedPaths.add(path);
+  }
+  try {
+    return { path: await NodeFSP.realpath(path) };
+  } catch (error) {
+    return { error };
+  } finally {
+    if (sweep !== undefined) sweep.measurement.pathResolutionMs += performance.now() - start;
+  }
+};
+
+const makeProcessPathResolver = (paths: readonly string[], sweep?: SweepObservation) => {
+  if (sweep === undefined) return resolveProcessPath;
+  const capture = sweepResolutions(sweep, paths);
+  const checkedParents = new Map<string, string | null>();
+  return async (path: string): Promise<PathResolution> => {
+    const entry = capture.sharedPaths.get(path);
+    if (entry === undefined) return resolveProcessPath(path, sweep);
+    const { parent } = entry;
+    let token = checkedParents.get(parent);
+    if (token === undefined) {
+      token = await canonicalParentToken(parent, sweep.measurement);
+      checkedParents.set(parent, token);
+    }
+    if (token !== null && entry.token === token) return { path };
+    const resolution = await resolveProcessPath(path, sweep);
+    // Alias chains and failed lookups need fresh resolution. Descriptor identities
+    // stay indexed by the original array, even when names repeat.
+    if (token !== null && "path" in resolution && resolution.path === path) entry.token = token;
+    else delete entry.token;
+    return resolution;
+  };
+};
 
 const targetUnchanged = async (root: string, evidence: TargetEvidence) => {
   const deadline = performance.now() + 30_000;
@@ -562,15 +699,24 @@ const targetEvidence = async (
   collectIdentities: boolean,
   observation?: TargetObservation,
 ): Promise<TargetEvidence> => {
-  if (observation === undefined) return targetIdentities(root, collectIdentities, paths);
-  let targets = observation.get(paths);
+  const measurement = observation?.sweep?.measurement;
+  const walk = (identities: boolean) => {
+    if (measurement === undefined) return targetIdentities(root, identities, paths);
+    const start = performance.now();
+    measurement.treeWalks++;
+    return targetIdentities(root, identities, paths, measurement).finally(() => {
+      measurement.treeWalkMs += performance.now() - start;
+    });
+  };
+  if (observation === undefined) return walk(collectIdentities);
+  let targets = observation.targets.get(paths);
   if (!targets) {
     targets = new Map();
-    observation.set(paths, targets);
+    observation.targets.set(paths, targets);
   }
   const collect = (identities: boolean) => {
     const entry: TargetEntry = {
-      proof: targetIdentities(root, identities, paths),
+      proof: walk(identities),
       collectIdentities: identities,
       unavailable: false,
     };
@@ -626,7 +772,8 @@ export const processPathsUseRoot = async (
   const captured = (paths as CapturedPaths)[nativeIdentities];
   const unresolved: ObjectIdentity[] = [];
   // Inventories repeat paths (shared libraries, one entry per descriptor).
-  const resolutions = new Map<string, { readonly path: string } | { readonly error: unknown }>();
+  const resolutions = new Map<string, PathResolution>();
+  const resolvePath = makeProcessPathResolver(paths, observation?.sweep);
   let vanishedSocket = false;
   let matched = false;
   for (const [index, path] of paths.entries()) {
@@ -638,11 +785,7 @@ export const processPathsUseRoot = async (
     }
     let resolution = resolutions.get(path);
     if (resolution === undefined) {
-      try {
-        resolution = { path: await NodeFSP.realpath(path) };
-      } catch (error) {
-        resolution = { error };
-      }
+      resolution = await resolvePath(path);
       resolutions.set(path, resolution);
     }
     try {

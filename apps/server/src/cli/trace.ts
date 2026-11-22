@@ -12,6 +12,11 @@ import { Command, Flag } from "effect/cli";
 
 import * as ServerConfig from "../config.ts";
 import { streamTraceFileLines, toRotatedTracePaths } from "../diagnostics/TraceDiagnostics.ts";
+import {
+  formatStorageCleanupInventory,
+  makeStorageCleanupInventorySummary,
+  STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+} from "../observability/StorageCleanupInventoryTrace.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import { baseDirFlag, DurationFromString, traceFileConfig, traceMaxFilesConfig } from "./config.ts";
 
@@ -30,7 +35,10 @@ const decodeTraceSpanLine = Schema.decodeUnknownOption(
         }),
       ),
       attributes: Schema.optional(
-        Schema.Struct({ "effect.fiber.interrupted": Schema.optional(Schema.Unknown) }),
+        Schema.Struct({
+          "effect.fiber.interrupted": Schema.optional(Schema.Unknown),
+          [STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]: Schema.optional(Schema.Unknown),
+        }),
       ),
     }),
   ),
@@ -38,6 +46,7 @@ const decodeTraceSpanLine = Schema.decodeUnknownOption(
 
 export function makeTraceSpanSummary(sinceMs = -Infinity) {
   const byName = new Map<string, { durations: number[]; interrupted: number; failures: number }>();
+  const cleanupInventory = makeStorageCleanupInventorySummary();
   let spanCount = 0;
   let skippedLineCount = 0;
   let firstEndMs = Infinity;
@@ -58,6 +67,7 @@ export function makeTraceSpanSummary(sinceMs = -Infinity) {
     }
     if (endMs < sinceMs) return;
 
+    cleanupInventory.add(span.name, span.attributes?.[STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]);
     spanCount += 1;
     firstEndMs = Math.min(firstEndMs, endMs);
     lastEndMs = Math.max(lastEndMs, endMs);
@@ -93,7 +103,15 @@ export function makeTraceSpanSummary(sinceMs = -Infinity) {
       })
       .toSorted((left, right) => right.count - left.count || left.name.localeCompare(right.name));
 
-    return { spanCount, skippedLineCount, firstEndMs, lastEndMs, minutes, spans };
+    return {
+      spanCount,
+      skippedLineCount,
+      firstEndMs,
+      lastEndMs,
+      minutes,
+      spans,
+      cleanupInventory: cleanupInventory.finish(),
+    };
   };
 
   return { addLine, finish };
@@ -142,6 +160,7 @@ export function formatTraceSummary(
     ...(summary.spans.length > limit
       ? ["", `${summary.spans.length - limit} more span names. Use --limit to show more.`]
       : []),
+    ...formatStorageCleanupInventory(summary.cleanupInventory, formatMs),
   ].join("\n");
 }
 

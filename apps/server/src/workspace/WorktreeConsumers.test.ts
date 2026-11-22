@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import { it } from "@effect/vitest";
 import { beforeEach, describe, expect, vi } from "vite-plus/test";
 
+import { STORAGE_CLEANUP_INVENTORY_ATTRIBUTE } from "../observability/StorageCleanupInventoryTrace.ts";
 import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
@@ -972,6 +973,98 @@ describe("Observation-scoped target evidence", () => {
         native.realpath.mock.calls.filter(([path]) => path === "/system/example/library"),
       ).toHaveLength(1);
     }),
+  );
+
+  const sweepInventory = () => {
+    const libraries = Array.from({ length: 6 }, (_, index) => `/system/example/library-${index}`);
+    darwinFixture(
+      "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+        libraries
+          .map((path, index) => `f${index}\0tREG\0D0x12\0i${index + 1}\0n${path}\0\n`)
+          .join("") +
+        `f8\0tREG\0D0x12\0i9007199254740993\0n${libraries[0]}\0\n`,
+    );
+    return libraries;
+  };
+
+  it.effect("reuses stable captured file resolutions across four dependency installs", () =>
+    Effect.gen(function* () {
+      const libraries = sweepInventory();
+      targetFixture().set("/system/example", objectStat(51n, true));
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const installs = ["one", "two", "three", "four"].map(
+        (name) => `/workspace/${name}/node_modules`,
+      );
+      for (const install of installs) {
+        expect(yield* prove((yield* sweep.paths)!, sweep.targets, install)).toBe(false);
+      }
+      expect(native.execFile).toHaveBeenCalledOnce();
+      expect(native.realpath).toHaveBeenCalledTimes(14);
+      expect(native.lstat).toHaveBeenCalledTimes(4);
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        processCaptures: 1,
+        processCaptureMs: expect.any(Number),
+        uniquePaths: 7,
+        pathResolutions: 10,
+        directoryChecks: 4,
+        pathResolutionMs: expect.any(Number),
+        treeWalks: 0,
+        treeWalkMs: 0,
+        objectsVisited: 0,
+      });
+      const paths = (yield* sweep.paths)!;
+      const libraryResolutions = () =>
+        native.realpath.mock.calls.filter(([path]) => libraries.includes(path)).length;
+      expect(libraryResolutions()).toBe(libraries.length);
+      const nextCapture = (yield* inventory("darwin"))!;
+      expect(yield* prove(nextCapture, sweep.targets, installs[0])).toBe(false);
+      expect(libraryResolutions()).toBe(libraries.length * 2);
+      expect(yield* prove(paths, WorktreeConsumers.createTargetObservation(), installs[0])).toBe(
+        false,
+      );
+      expect(libraryResolutions()).toBe(libraries.length * 3);
+      const nextSweep = yield* WorktreeConsumers.makeSweepObservation(Effect.succeed(paths));
+      expect(yield* prove(paths, nextSweep.targets, installs[0])).toBe(false);
+      expect(libraryResolutions()).toBe(libraries.length * 4);
+    }).pipe(Effect.withSpan("sweep fixture")),
+  );
+
+  it.effect.each(["retargeted alias", "replaced file", "vanished vnode"] as const)(
+    "still finds a consumer after a %s changes during the sweep",
+    (change) =>
+      Effect.gen(function* () {
+        const [library] = sweepInventory();
+        const stats = targetFixture();
+        stats.set("/system/example", objectStat(51n, true));
+        if (change === "retargeted alias") {
+          native.realpath.mockImplementation(async (path: string) =>
+            path === library ? "/elsewhere/library" : path,
+          );
+        }
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = (yield* sweep.paths)!;
+        expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+        if (change !== "retargeted alias") {
+          stats.set("/system/example", objectStat(51n, true, 18n, 2n));
+        }
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path !== library) return path;
+          if (change === "vanished vnode") throw missing();
+          return `${root}/dist/output.js`;
+        });
+        expect(yield* prove(paths, sweep.targets)).toBe(true);
+        expect(native.realpath.mock.calls.filter(([path]) => path === library)).toHaveLength(2);
+        expect(native.opendir).toHaveBeenCalledTimes(change === "vanished vnode" ? 2 : 0);
+        if (change === "vanished vnode") {
+          yield* sweep.annotate;
+          expect(
+            (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+          ).toMatchObject({ treeWalks: 1, treeWalkMs: expect.any(Number), objectsVisited: 4 });
+        }
+      }).pipe(Effect.withSpan("sweep fixture")),
   );
 
   it.effect("does not share a target walk with another native capture or observation", () =>
