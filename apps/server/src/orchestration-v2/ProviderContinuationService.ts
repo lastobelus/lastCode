@@ -1,14 +1,17 @@
 import {
   CommandId,
   type MessageId,
+  UpdateDrainAdmissionError,
   type OrchestrationV2ThreadProjection,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -16,8 +19,18 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import type * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
+import { OrchestratorDispatchError } from "./Orchestrator.ts";
 
 const CONTINUATION_MESSAGE_TEXT = "Background task completed.";
+const isDispatchError = Schema.is(OrchestratorDispatchError);
+const isAdmissionError = Schema.is(UpdateDrainAdmissionError);
+
+function admissionClosed(cause: Cause.Cause<unknown>): boolean {
+  const error = Cause.findErrorOption(cause);
+  return (
+    Option.isSome(error) && isDispatchError(error.value) && isAdmissionError(error.value.cause)
+  );
+}
 
 function delegatedCompletionText(taskIds: ReadonlyArray<string>): string {
   const taskList = taskIds.join(", ");
@@ -64,10 +77,11 @@ export const layer = Layer.effectDiscard(
     const ids = yield* IdAllocator.IdAllocatorV2;
     const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
     const threads = yield* ThreadManagementService.ThreadManagementService;
-    const retryAttempts = yield* Ref.make(new Map<string, number>());
+    type RetryKey = string | ProviderContinuationRequests.ProviderContinuationRequest;
+    const retryAttempts = yield* Ref.make(new Map<RetryKey, number>());
     const continuations = yield* KeyedLock.makeRunner<ThreadId>();
 
-    const clearRetryAttempt = (key: string) =>
+    const clearRetryAttempt = (key: RetryKey) =>
       Ref.update(retryAttempts, (current) => {
         if (!current.has(key)) return current;
         const updated = new Map(current);
@@ -75,7 +89,7 @@ export const layer = Layer.effectDiscard(
         return updated;
       });
 
-    const nextRetryDelay = (key: string) =>
+    const nextRetryDelay = (key: RetryKey) =>
       Ref.modify(retryAttempts, (current) => {
         const attempt = current.get(key) ?? 0;
         const updated = new Map(current);
@@ -152,6 +166,8 @@ export const layer = Layer.effectDiscard(
             yield* clearRetryAttempt(
               delegatedCompletionRetryKey(request, request.delegatedCompletion),
             );
+          } else {
+            yield* clearRetryAttempt(request);
           }
           if (request.clearIfCurrent !== undefined) {
             yield* request.clearIfCurrent();
@@ -251,6 +267,7 @@ export const layer = Layer.effectDiscard(
             threadId: request.threadId,
             messageId,
             text: request.detail ?? CONTINUATION_MESSAGE_TEXT,
+            backgroundResultContinuation: request.backgroundResultContinuation,
             notification: request.notification ?? {
               source: { kind: "background_task" },
               outcome: "updated",
@@ -283,6 +300,7 @@ export const layer = Layer.effectDiscard(
               ThreadManagementProviderInstanceDisabledError: logInstanceDisabled,
             }),
           );
+          yield* clearRetryAttempt(request);
           return;
         }
         yield* request.dispatchIfCurrent(dispatch).pipe(
@@ -290,6 +308,7 @@ export const layer = Layer.effectDiscard(
             ThreadManagementProviderInstanceDisabledError: logInstanceDisabled,
           }),
         );
+        yield* clearRetryAttempt(request);
       },
     );
 
@@ -298,17 +317,32 @@ export const layer = Layer.effectDiscard(
         dispatchContinuation(request).pipe(
           Effect.catchCause((cause) =>
             Effect.gen(function* () {
-              yield* Effect.logWarning("orchestration-v2.provider-continuation.dispatch-failed", {
-                threadId: request.threadId,
-                providerThreadId: request.providerThreadId,
-                cause,
-              });
-              if (request.delegatedCompletion !== undefined) {
+              const deferred = admissionClosed(cause);
+              yield* (deferred ? Effect.logInfo : Effect.logWarning)(
+                deferred
+                  ? "orchestration-v2.provider-continuation.deferred-for-update"
+                  : "orchestration-v2.provider-continuation.dispatch-failed",
+                {
+                  threadId: request.threadId,
+                  providerThreadId: request.providerThreadId,
+                  cause,
+                },
+              );
+              if (request.delegatedCompletion !== undefined || deferred) {
                 const completion = request.delegatedCompletion;
-                const retryKey = delegatedCompletionRetryKey(request, completion);
+                const retryKey =
+                  completion === undefined
+                    ? request
+                    : delegatedCompletionRetryKey(request, completion);
                 const retryDelay = yield* nextRetryDelay(retryKey);
                 yield* Effect.gen(function* () {
                   yield* Effect.sleep(`${retryDelay} millis`);
+                  // Keep the adapter's ownership guard on the same request. A
+                  // newer wake can supersede it while update intake is closed.
+                  if (completion === undefined) {
+                    yield* requests.offer(request);
+                    return;
+                  }
                   const projection = yield* threads.getThreadRecords(
                     request.threadId,
                     ["messages", "runs", "providerTurns"],

@@ -1,5 +1,6 @@
+import { GTProvider, initializeGT } from "gt-react";
 import { describe, expect, it } from "vite-plus/test";
-import { createElement } from "react";
+import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
@@ -11,6 +12,14 @@ import {
   resolveSidebarUpdateButtonToneClassName,
   SidebarLocalBuildFailurePopover,
 } from "./SidebarUpdatePill.tsx";
+
+function renderWithI18n(node: ReactNode) {
+  return renderToStaticMarkup(
+    createElement(GTProvider, { locale: "en", translations: { en: {} }, children: node }),
+  );
+}
+
+initializeGT({ defaultLocale: "en" });
 
 describe("SidebarUpdatePill release notes", () => {
   it("prefers explicit local headings and preserves hosted fallbacks", () => {
@@ -64,7 +73,7 @@ describe("SidebarUpdatePill release notes", () => {
   });
 
   it("renders ordered sections, summaries outside bullets, separators, and scrolling", () => {
-    const markup = renderToStaticMarkup(
+    const markup = renderWithI18n(
       createElement(SidebarUpdateReleaseNotes, {
         shell: undefined,
         tooltip: "Update available",
@@ -142,7 +151,7 @@ describe("SidebarUpdatePill local failure", () => {
     ).not.toContain("hover:");
   });
   it("renders persistent failure context and an accessible copy action", () => {
-    const markup = renderToStaticMarkup(
+    const markup = renderWithI18n(
       createElement(SidebarLocalBuildFailurePopover, {
         failure: {
           checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.4",

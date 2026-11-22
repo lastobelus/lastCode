@@ -294,11 +294,30 @@ export function applyOrchestrationV2ProjectionEvent(
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
+    case "thread.group-marked":
+      return { ...projection, thread: { ...projection.thread, groupThread: true } };
+    case "thread.creator-repaired":
+      return {
+        ...projection,
+        thread: {
+          ...projection.thread,
+          creatorOrigin: event.payload.origin,
+          ...(event.payload.kind === "local"
+            ? { creatorThreadId: event.payload.creatorThreadId }
+            : {}),
+        },
+      };
     case "thread.pull-request-link-updated":
       return {
         ...base,
         thread: applyThreadPullRequestLinkUpdate(projection.thread, event.payload),
       };
+    case "thread.persistence-changed":
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+    case "thread.attention-set":
+    case "thread.attention-cleared":
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":

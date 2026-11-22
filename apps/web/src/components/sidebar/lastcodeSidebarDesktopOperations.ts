@@ -1,8 +1,11 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
 import { ensureLocalApi } from "../../localApi";
 import {
   getDesktopUpdateActionError,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   shouldToastDesktopUpdateActionResult,
 } from "../desktopUpdate.logic";
 import { showDesktopUpdateDownloadedToast } from "../desktopUpdate.toast";
@@ -24,7 +27,7 @@ export function downloadLastCodeSidebarUpdate(
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not download update",
+          title: m(msg("Could not download update")),
           description: actionError,
         }),
       );
@@ -33,8 +36,9 @@ export function downloadLastCodeSidebarUpdate(
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not start update download",
-          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          title: m(msg("Could not start update download")),
+          description:
+            error instanceof Error ? error.message : m(msg("An unexpected error occurred.")),
         }),
       );
     })
@@ -55,8 +59,8 @@ export async function installLastCodeSidebarUpdate(
     toastManager.add(
       stackedThreadToast({
         type: "error",
-        title: "Could not confirm update",
-        description: error instanceof Error ? error.message : "Update confirmation failed.",
+        title: m(msg("Could not confirm update")),
+        description: error instanceof Error ? error.message : m(msg("Update confirmation failed.")),
       }),
     );
     return;
@@ -66,15 +70,20 @@ export async function installLastCodeSidebarUpdate(
     return;
   }
   void bridge
-    .installUpdate()
+    .installUpdate(desktopUpdateState.downloadedVersion ?? undefined)
     .then((result) => {
-      if (!shouldToastDesktopUpdateActionResult(result)) return;
-      const actionError = getDesktopUpdateActionError(result);
+      const refusal = getDesktopUpdateInstallRefusal(
+        result,
+        desktopUpdateState.downloadedVersion ?? undefined,
+      );
+      const actionError =
+        refusal ??
+        (shouldToastDesktopUpdateActionResult(result) ? getDesktopUpdateActionError(result) : null);
       if (!actionError) return;
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not install update",
+          title: refusal ? m(msg("Update not installed")) : m(msg("Could not install update")),
           description: actionError,
         }),
       );
@@ -83,8 +92,9 @@ export async function installLastCodeSidebarUpdate(
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not install update",
-          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          title: m(msg("Could not install update")),
+          description:
+            error instanceof Error ? error.message : m(msg("An unexpected error occurred.")),
         }),
       );
     })

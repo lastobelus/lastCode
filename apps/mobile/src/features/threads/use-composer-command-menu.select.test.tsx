@@ -3,10 +3,17 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
+vi.mock("@effect/atom-react", () => ({ useAtomRefresh: () => () => {} }));
+vi.mock("../../state/environments", () => ({
+  useEnvironments: () => ({ environments: [] }),
+}));
+vi.mock("../../state/session", () => ({
+  useEnvironmentsWithScope: () => new Set(),
+}));
 vi.mock("../../state/queries", () => ({
   useComposerPathSearch: () => ({ entries: [], isPending: false }),
   useComposerPullRequestSearch: () => ({ entries: [], isPending: false, error: null }),
-  useThreadSearch: () => undefined,
+  useThreadSearch: () => ({ mentionCandidates: [], isPending: false }),
 }));
 vi.mock("../../state/use-composer-drafts", () => ({
   getComposerDraftSnapshot: vi.fn(),

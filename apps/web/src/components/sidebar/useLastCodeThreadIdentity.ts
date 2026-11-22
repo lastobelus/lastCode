@@ -1,8 +1,10 @@
+import { msg, useMessages } from "gt-react";
+import type { MessageResolver } from "~/i18n/messages";
 import { useClientSetting } from "../../hooks/useSettings";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { shouldShowInstanceBadge } from "../../providerInstances";
-import { getTriggerDisplayModelLabel } from "../chat/providerIconUtils";
+import { getTriggerDisplayModelName } from "../chat/providerIconUtils";
 import {
   legacyThreadEnvironmentPresentation,
   resolveEnvironmentIconColor,
@@ -17,6 +19,7 @@ export function useLastCodeThreadIdentity(
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined,
   providerBadgePreferences: SidebarProviderBadgePreferences,
 ) {
+  const messages = useMessages();
   const thread = family.thread;
   const showLocalEnvironmentIcon = useClientSetting("showLocalEnvironmentIcon");
   const environment = useEnvironment(thread.environmentId);
@@ -29,17 +32,21 @@ export function useLastCodeThreadIdentity(
   // Label them Local and omit the row icon: the project header already identifies the container.
   const isDesktopLocalThread =
     environment !== null && isDesktopLocalConnectionTarget(environment.entry.target);
-  const environmentPresentation = legacyThreadEnvironmentPresentation({
-    isPrimary: !isRemoteThread,
-    isDesktopLocal: isDesktopLocalThread,
-    showLocalEnvironmentIcon: showLocalEnvironmentIcon || providerBadgePreferences.enabled,
-    environmentLabel: remoteEnvLabel,
-  });
+  const environmentPresentation = legacyThreadEnvironmentPresentation(
+    {
+      isPrimary: !isRemoteThread,
+      isDesktopLocal: isDesktopLocalThread,
+      showLocalEnvironmentIcon: showLocalEnvironmentIcon || providerBadgePreferences.enabled,
+      environmentLabel: remoteEnvLabel,
+    },
+    messages,
+  );
   const decoration = resolveThreadEnvironmentDecoration(
     family,
     environmentPresentation,
     providerBadgePreferences.enabled,
     remoteEnvLabel,
+    messages,
   );
   const environmentIconColor = resolveEnvironmentIconColor(
     configuredEnvironmentIconColor,
@@ -55,11 +62,15 @@ function resolveThreadEnvironmentDecoration(
   presentation: ReturnType<typeof legacyThreadEnvironmentPresentation>,
   showProviderBadge: boolean,
   remoteEnvLabel: string | null,
+  resolve: MessageResolver,
 ) {
   if (showProviderBadge) {
     return {
       showsThreadEnvironmentIcon: true,
-      threadEnvironmentLabel: presentation.hoverLabel ?? remoteEnvLabel ?? "Local",
+      threadEnvironmentLabel:
+        presentation.hoverLabel ??
+        remoteEnvLabel ??
+        resolve(msg("Local", { $context: "environment location" })),
     };
   }
   const thread = family.thread;
@@ -87,7 +98,7 @@ function resolveThreadProviderIdentity(
     (model) => model.slug === thread.modelSelection.model,
   );
   const modelLabel = selectedModel
-    ? getTriggerDisplayModelLabel(selectedModel)
+    ? getTriggerDisplayModelName(selectedModel, providerEntry?.driverKind)
     : thread.modelSelection.model;
   return { modelInstanceId, providerEntry, showInstanceBadge, modelLabel };
 }

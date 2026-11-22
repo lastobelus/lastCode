@@ -1,11 +1,16 @@
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
 import {
   type EnvironmentId,
   OrchestratorMcpFailure,
+  OrchestratorMcpCapabilitiesInput,
+  OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadSendInput,
+  OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitInput,
   OrchestratorMcpThreadWaitResult,
   type PeerLinkError,
@@ -44,6 +49,10 @@ type Scope = McpInvocationContext.McpInvocationScope;
 export class PeerForwarding extends Context.Service<
   PeerForwarding,
   {
+    readonly capabilities: (
+      scope: Scope,
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<OrchestratorMcpCapabilitiesResult, OrchestratorMcpFailure>;
     /**
      * Runs `tool` in the linked environment `environmentId` with `params`. A
      * `t3_thread_wait` goes in pieces short enough to survive any route.
@@ -54,6 +63,11 @@ export class PeerForwarding extends Context.Service<
       environmentId: EnvironmentId,
       params: Tool.Parameters<T>,
     ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
+    readonly sendThread: (
+      scope: Scope,
+      environmentId: EnvironmentId,
+      input: OrchestratorMcpThreadSendInput,
+    ) => Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure>;
     /** `t3_thread_read` there. */
     readonly readThread: (
       scope: Scope,
@@ -208,15 +222,46 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const readThread: PeerForwarding["Service"]["readThread"] = (scope, environmentId, input) =>
-    forward<OrchestratorMcpThreadReadResult>(
+  const capabilities: PeerForwarding["Service"]["capabilities"] = (scope, environmentId) =>
+    Effect.andThen(
+      requireEnabled,
+      forward<OrchestratorMcpCapabilitiesResult>(
+        scope,
+        "orchestrator_capabilities",
+        OrchestratorMcpCapabilitiesInput,
+        OrchestratorMcpCapabilitiesResult,
+        environmentId,
+        {},
+      ),
+    );
+
+  const sendThread: PeerForwarding["Service"]["sendThread"] = (scope, environmentId, input) =>
+    forward<OrchestratorMcpThreadSendResult>(
       scope,
-      "t3_thread_read",
-      OrchestratorMcpThreadReadInput,
-      OrchestratorMcpThreadReadResult,
+      "t3_thread_send",
+      OrchestratorMcpThreadSendInput,
+      OrchestratorMcpThreadSendResult,
       environmentId,
       input,
     );
+
+  const readThread: PeerForwarding["Service"]["readThread"] = (scope, environmentId, input) => {
+    const read = (args: unknown) =>
+      forward<OrchestratorMcpThreadReadResult>(
+        scope,
+        "t3_thread_read",
+        OrchestratorMcpThreadReadInput,
+        OrchestratorMcpThreadReadResult,
+        environmentId,
+        args,
+      );
+    // A peer pages a client's cursorless read forward. Agents start on the newest page.
+    return scope.thread !== undefined &&
+      input.afterPosition === undefined &&
+      input.beforePosition === undefined
+      ? readNewestOrRetry(read, { ...input, beforePosition: Number.MAX_SAFE_INTEGER }, input)
+      : read(input);
+  };
 
   const interruptThread: PeerForwarding["Service"]["interruptThread"] = (
     scope,
@@ -254,21 +299,7 @@ const make = Effect.gen(function* () {
     Effect.flatMap((enabled) => (enabled ? Effect.void : Effect.fail(linkedEnvironmentsOff))),
   );
 
-  // A peer pages a client's cursorless read forward; an agent's gets the newest page, as it does here.
-  const newestPageForAgent = (scope: Scope, toolName: string, params: unknown) => {
-    if (toolName !== "t3_thread_read" || scope.thread === undefined) return undefined;
-    const input = params as OrchestratorMcpThreadReadInput;
-    return input.afterPosition === undefined && input.beforePosition === undefined
-      ? { ...input, beforePosition: Number.MAX_SAFE_INTEGER }
-      : undefined;
-  };
-
   const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params) => {
-    const forwardTool = (
-      args: unknown,
-    ): Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure> =>
-      forward(scope, tool.name, tool.parametersSchema, tool.successSchema, environmentId, args);
-    const newest = newestPageForAgent(scope, tool.name, params);
     const forwarded: Effect.Effect<
       Tool.Success<typeof tool>,
       OrchestratorMcpFailure
@@ -278,10 +309,39 @@ const make = Effect.gen(function* () {
           environmentId,
           params as OrchestratorMcpThreadWaitInput,
         ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
-      : newest === undefined
-        ? forwardTool(params)
-        : readNewestOrRetry(forwardTool, newest, params);
-    return Effect.andThen(requireEnabled, forwarded);
+      : tool.name === "t3_thread_read"
+        ? (readThread(
+            scope,
+            environmentId,
+            params as OrchestratorMcpThreadReadInput,
+          ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
+        : forward(
+            scope,
+            tool.name,
+            tool.parametersSchema,
+            tool.successSchema,
+            environmentId,
+            params,
+          );
+    return Effect.andThen(
+      requireEnabled,
+      Effect.gen(function* () {
+        if (tool.name === "t3_thread_send" && scope.thread !== undefined) {
+          const service = yield* Effect.serviceOption(
+            OrchestratorMcpService.OrchestratorMcpService,
+          );
+          if (Option.isSome(service)) {
+            const owned = yield* service.value.sendToRemoteThread(
+              scope,
+              environmentId,
+              params as OrchestratorMcpThreadSendInput,
+            );
+            if (owned !== undefined) return owned as Tool.Success<typeof tool>;
+          }
+        }
+        return yield* forwarded;
+      }),
+    );
   };
 
   /**
@@ -312,6 +372,8 @@ const make = Effect.gen(function* () {
   );
 
   return PeerForwarding.of({
+    capabilities,
+    sendThread,
     call,
     readThread,
     interruptThread,

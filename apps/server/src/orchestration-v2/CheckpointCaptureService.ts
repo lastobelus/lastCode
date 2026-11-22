@@ -205,8 +205,14 @@ export const layer: Layer.Layer<
           ],
           { concurrency: 2 },
         );
-      // Omit delegatedCompletion to preserve cohort writes made after capture loaded the run.
-      const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } = run;
+      // These fields can change while Git captures the checkpoint; keep the committed ownership.
+      const {
+        delegatedCompletion: _delegatedCompletion,
+        actionObligations: _actionObligations,
+        pullRequestWatchObligations: _watchObligations,
+        pullRequestWatchContinuation: _watchContinuation,
+        ...runWithoutConcurrentObligations
+      } = run;
       const commandId = CommandId.make(`command:effect:checkpoint.capture:${run.id}`);
       const checkpointEvent = (payload: OrchestrationV2Checkpoint) =>
         Effect.map(ids.allocate.event({ threadId: input.threadId, commandId }), (id) => ({
@@ -317,9 +323,9 @@ export const layer: Layer.Layer<
             providerInstanceId: run.providerInstanceId,
             occurredAt: capturedAt,
             payload: stopped
-              ? { ...runWithoutDelegatedCompletion, checkpointId: checkpoint.id }
+              ? { ...runWithoutConcurrentObligations, checkpointId: checkpoint.id }
               : {
-                  ...runWithoutDelegatedCompletion,
+                  ...runWithoutConcurrentObligations,
                   status: "completed",
                   completedAt: capturedAt,
                   checkpointId: checkpoint.id,

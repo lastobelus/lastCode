@@ -1,8 +1,10 @@
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Struct from "effect/Struct";
+import { SavedWorkspaceDisposition } from "./workspaceLifecycle.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { projectRegistrationViewFields } from "./projectRegistration.lastcode.ts";
 import {
   CommandId,
   ForwardCompatibleUnion,
@@ -42,8 +44,11 @@ export const ProjectScript = Schema.Struct({
   runOnSettle: Schema.optional(Schema.Boolean),
   stopOnSettle: Schema.optional(Schema.Boolean),
   async: Schema.optional(Schema.Boolean),
+  /** Exact existing desktop browser profile name for links in this Action's dedicated terminal. */
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyString),
   previewUrl: Schema.optional(TrimmedNonEmptyString),
   autoOpenPreview: Schema.optional(Schema.Boolean),
+  allowAgentResume: Schema.optional(Schema.Boolean),
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
@@ -178,6 +183,15 @@ export const ReceivedProjectIcon = ForwardCompatibleUnion(projectIconMembers, "k
   ),
 );
 
+export const ProjectAutoPullStatus = Schema.Struct({
+  lastAttemptAt: IsoDateTime,
+  lastSuccessAt: Schema.NullOr(IsoDateTime),
+  result: Schema.Literals(["pulled", "up-to-date", "skipped", "failed"]),
+  // Why the last attempt left the checkout as it was; null after a pull or an up-to-date check.
+  reason: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ProjectAutoPullStatus = typeof ProjectAutoPullStatus.Type;
+
 export const Project = Schema.Struct({
   id: ProjectId,
   title: TrimmedNonEmptyString,
@@ -189,11 +203,14 @@ export const Project = Schema.Struct({
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   // Opt-in because background sync performs network I/O and may move the checkout.
   autoPull: Schema.optional(Schema.Boolean),
+  // Kept in memory since server start; null until auto-pull checks this checkout.
+  autoPullStatus: Schema.optional(Schema.NullOr(ProjectAutoPullStatus)),
   scripts: Schema.Array(ProjectScript),
   // Absent from older servers; that means a single-folder project.
   trackedFolders: Schema.optional(ProjectTrackedFolders),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  ...projectRegistrationViewFields,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -217,6 +234,7 @@ export const ProjectCreatePayload = Schema.Struct({
 export type ProjectCreatePayload = typeof ProjectCreatePayload.Type;
 
 export const ProjectUpdatePayload = Schema.Struct({
+  keepTemporary: Schema.optional(Schema.Literal(true)),
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
@@ -239,7 +257,17 @@ export const ProjectUpdatePayload = Schema.Struct({
 });
 export type ProjectUpdatePayload = typeof ProjectUpdatePayload.Type;
 
+export const ProjectAutoPullStatusInput = Schema.Struct({ projectId: ProjectId });
+export type ProjectAutoPullStatusInput = typeof ProjectAutoPullStatusInput.Type;
+
 export const ProjectMutation = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("project.scripts.reconcile"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    expectedScripts: Schema.Array(ProjectScript),
+    scripts: Schema.Array(ProjectScript),
+  }),
   Schema.Struct({
     type: Schema.Literal("project.create"),
     commandId: CommandId,
@@ -260,6 +288,7 @@ export const ProjectMutation = Schema.Union([
     commandId: CommandId,
     projectId: ProjectId,
     force: Schema.optional(Schema.Boolean),
+    savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
   }),
 ]);
 export type ProjectMutation = typeof ProjectMutation.Type;
@@ -477,6 +506,8 @@ export class ProjectListEntriesError extends Schema.TaggedError<ProjectListEntri
 
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  /** Read only a file linked in this thread's stored assistant messages or plans. */
+  linkedThreadId: Schema.optionalKey(ThreadId),
   // Workspace-relative or absolute host path; only workspace-relative paths are writable.
   relativePath: Schema.NonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_PATH_MAX_LENGTH)),
   // Optional files can be absent without failing the read.

@@ -127,11 +127,13 @@ export class TailscaleCommandTimeoutError extends Schema.TaggedError<TailscaleCo
   }
 }
 
-type TailscaleCommandError =
-  | TailscaleCommandSpawnError
-  | TailscaleCommandOutputError
-  | TailscaleCommandExitError
-  | TailscaleCommandTimeoutError;
+const TailscaleCommandError = Schema.Union([
+  TailscaleCommandSpawnError,
+  TailscaleCommandOutputError,
+  TailscaleCommandExitError,
+  TailscaleCommandTimeoutError,
+]);
+type TailscaleCommandError = typeof TailscaleCommandError.Type;
 
 export class TailscaleStatusParseError extends Schema.TaggedError<TailscaleStatusParseError>()(
   "TailscaleStatusParseError",
@@ -665,17 +667,25 @@ export const disableTailscaleServe = Effect.fn("tailscale.disableTailscaleServe"
     readonly mount?: string;
     readonly localPort?: number;
     readonly localHost?: string;
+    readonly replaceVerifiedHandler?: boolean;
   } = {},
 ): Effect.fn.Return<void, TailscaleServeError, ChildProcessSpawner.ChildProcessSpawner> {
   const servePort = input.servePort ?? DEFAULT_TAILSCALE_SERVE_PORT;
   if (input.localPort !== undefined) {
+    if (input.mount !== undefined && input.mount !== "/") {
+      return yield* new TailscaleServePortOccupiedError({ servePort });
+    }
     const localHost = input.localHost ?? "127.0.0.1";
     const proxy = `http://${localHost}:${input.localPort}`;
     const state = yield* readTailscaleServePortState({ servePort, proxy });
     if (state === "absent") {
       return;
     }
-    if (state === "occupied" || state === "funnel" || state === "replaceable") {
+    if (
+      state === "occupied" ||
+      state === "funnel" ||
+      (state === "replaceable" && input.replaceVerifiedHandler !== true)
+    ) {
       return yield* new TailscaleServePortOccupiedError({ servePort });
     }
     yield* runTailscaleCommand(
@@ -861,7 +871,7 @@ export const parseTailscaleServeRootHolders = (
   servePort: number,
   target: { readonly host: string; readonly port: number },
 ): ReadonlyArray<TailscaleServeRootHolder> | undefined => {
-  const status = decodeTailscaleServeStatusJson(rawServeStatusJson);
+  const status = decodeTailscaleServeRouteStatusJson(rawServeStatusJson);
   if (Option.isNone(status)) return undefined;
   const config = status.value ?? undefined;
   const tcp: ReadonlyArray<TailscaleServeRootHolder> =

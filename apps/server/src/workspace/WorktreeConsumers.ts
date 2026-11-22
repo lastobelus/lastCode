@@ -1,6 +1,6 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - Process links, maps, and lstat are native safety boundaries.
-import * as NodeFSP from "node:fs/promises";
+import { promises as NodeFSP } from "@t3tools/shared/nativeFileSystem";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeBuffer from "node:buffer";
@@ -8,7 +8,12 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import {
+  STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+  emptyStorageCleanupInventoryTrace,
+} from "../observability/StorageCleanupInventoryTrace.ts";
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 
 const MAX_INVENTORY_BYTES = 16 * 1024 * 1024;
@@ -166,23 +171,49 @@ const decodeLsofPath = (printed: string): string | null => {
   return decoded.toString("utf8");
 };
 
-const lsofPaths = (output: string): ReadonlyArray<string> | null => {
+const lsofPaths = (
+  output: string,
+  emptyFdPids: ReadonlySet<number> = new Set(),
+): ReadonlyArray<string> | null => {
   if (!output.endsWith("\0\n") || output.includes("\uFFFD")) return null;
   const paths: string[] = [];
   const identities: CapturedObject[] = [];
   let processes = 0;
+  let pid = 0;
+  const recovered = new Set<number>();
+  const numericPids = new Set<number>();
   let cwdSeen = false;
   let file:
     | { descriptor: string; type?: string; name?: string; device?: string; inode?: string }
     | undefined;
   const finishFile = () => {
     if (!file) return true;
+    // Darwin's "err" record also covers successful empty FD lists with stale
+    // errno (darwin/libproc/dproc.c process_fds). Its text cannot distinguish
+    // that from a failed enumeration; accepting it needs independent OS proof.
+    if (file.descriptor === "err") {
+      if (
+        file.type !== undefined ||
+        file.device !== undefined ||
+        file.inode !== undefined ||
+        file.name !== "FD info error: Invalid argument" ||
+        !emptyFdPids.has(pid) ||
+        recovered.has(pid)
+      )
+        return false;
+      recovered.add(pid);
+      return true;
+    }
     // Darwin lsof emits this exact marker when its numeric-FD vnode-path query
     // returns ENOENT. It is a no-current-path observation, like a vanished Linux
     // fd, not proof of revocation. Keep cwd/text, fileport and other missing-type
     // evidence protected. Vendor source: lsof-org/lsof, darwin/dfile.c process_vnode.
     if (!file.type)
       return file.type === undefined && /^\d+$/.test(file.descriptor) && file.name === "(revoked)";
+    // POSIX shared-memory names belong to a kernel namespace, even when they
+    // start with '/'. Darwin reports these numeric descriptors without vnode D/i.
+    if (file.type === "PSXSHM")
+      return /^\d+$/.test(file.descriptor) && file.device === undefined && file.inode === undefined;
     if (file.name?.startsWith("/")) {
       // Hex escapes represent UTF-8 bytes, not individual Unicode characters.
       // Decode once so doubled backslashes keep literal escape-looking names.
@@ -221,7 +252,6 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       "NEXUS",
       "KQUEUE",
       "PSXSEM",
-      "PSXSHM",
       "systm",
     ].includes(file.type);
   };
@@ -233,11 +263,13 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       case "p":
         if (!/^\d+$/.test(value) || !finishFile() || (processes > 0 && !cwdSeen)) return null;
         if (++processes > MAX_PROCESS_PATHS) return null;
+        pid = Number(value);
         cwdSeen = false;
         file = undefined;
         break;
       case "f":
         if (processes === 0 || value === "" || !finishFile()) return null;
+        if (/^\d+$/.test(value)) numericPids.add(pid);
         file = { descriptor: value };
         break;
       case "t":
@@ -261,28 +293,87 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
     }
   }
   if (!finishFile() || !cwdSeen || processes === 0) return null;
+  if (recovered.size !== emptyFdPids.size || [...recovered].some((pid) => numericPids.has(pid)))
+    return null;
   Object.defineProperty(paths, nativeIdentities, { value: Object.freeze(identities) });
   return Object.freeze(paths);
 };
 
-const captureProcessPaths = async (platform: NodeJS.Platform, uid: number) => {
+const helperPaths = (output: string, uid: number): ReadonlyArray<string> | null => {
+  const boundary = output.indexOf("\n");
+  if (boundary < 0 || boundary > MAX_PROCESS_PATHS * 12 + 128) return null;
+  try {
+    const header = JSON.parse(output.slice(0, boundary)) as {
+      version?: unknown;
+      type?: unknown;
+      uid?: unknown;
+      emptyFdPids?: unknown;
+    } | null;
+    if (
+      header === null ||
+      header.version !== 1 ||
+      header.type !== "lsofCapture" ||
+      header.uid !== uid ||
+      !Array.isArray(header.emptyFdPids) ||
+      header.emptyFdPids.length > MAX_PROCESS_PATHS ||
+      header.emptyFdPids.some(
+        (pid) => !Number.isSafeInteger(pid) || pid <= 0 || pid > 2_147_483_647,
+      )
+    )
+      return null;
+    const pids = new Set<number>(header.emptyFdPids);
+    if (pids.size !== header.emptyFdPids.length) return null;
+    const capture = output.slice(boundary + 1);
+    if (NodeBuffer.Buffer.byteLength(capture) > MAX_INVENTORY_BYTES) return null;
+    return lsofPaths(capture, pids);
+  } catch {
+    return null;
+  }
+};
+
+const captureProcessPaths = async (
+  platform: NodeJS.Platform,
+  uid: number,
+  binary: string | null,
+) => {
   if (platform === "linux") return linuxPaths(uid);
   if (platform !== "darwin") return null;
   return await new Promise<ReadonlyArray<string> | null>((resolve) => {
     NodeChildProcess.execFile(
-      "lsof",
-      ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"],
-      { timeout: 10_000, maxBuffer: MAX_INVENTORY_BYTES },
-      (error, stdout, stderr) => resolve(error || stderr.trim() !== "" ? null : lsofPaths(stdout)),
+      binary ?? "lsof",
+      binary === null
+        ? ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"]
+        : ["capture-lsof-v1", String(uid)],
+      {
+        timeout: 10_000,
+        maxBuffer:
+          binary === null
+            ? MAX_INVENTORY_BYTES
+            : MAX_INVENTORY_BYTES + MAX_PROCESS_PATHS * 12 + 128,
+      },
+      (error, stdout, stderr) =>
+        resolve(
+          error || stderr.trim() !== ""
+            ? null
+            : binary === null
+              ? lsofPaths(stdout)
+              : helperPaths(stdout, uid),
+        ),
     );
   });
 };
 
-const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) => {
+const processPaths = async (
+  platform: NodeJS.Platform,
+  uid: number | undefined,
+  binary: string | null,
+  onAttempt: (() => void) | undefined,
+) => {
   if (uid === undefined || (platform !== "linux" && platform !== "darwin")) return null;
   const capture = async () => {
+    onAttempt?.();
     try {
-      return await captureProcessPaths(platform, uid);
+      return await captureProcessPaths(platform, uid, binary);
     } catch {
       return null;
     }
@@ -293,6 +384,11 @@ const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) 
   return first === null ? capture() : first;
 };
 
+class ProcessCaptureCounter extends Context.Reference<(() => void) | undefined>(
+  "t3/workspace/ProcessCaptureCounter",
+  { defaultValue: () => undefined },
+) {}
+
 /** Actual file consumers, observed afresh; generic startup does not renew usage clocks. */
 export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<string> | null>>(
   "t3/workspace/WorktreeProcessPaths",
@@ -300,8 +396,13 @@ export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<
     defaultValue: Effect.fn("defaultValue")(function* () {
       const platform = yield* HostProcess.Platform;
       const uid = yield* HostProcess.UserId;
+      const onAttempt = yield* ProcessCaptureCounter;
+      const binary =
+        platform === "darwin" && uid !== undefined
+          ? yield* yield* ResourceMonitorBinary.ProcessCaptureBinary
+          : null;
       return yield* Effect.tryPromise({
-        try: () => processPaths(platform, uid),
+        try: () => processPaths(platform, uid, binary, onAttempt),
         catch: () => null,
       }).pipe(Effect.orElseSucceed(() => null));
     }),
@@ -309,6 +410,12 @@ export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<
 ) {}
 
 const identityKey = ({ device, inode }: ObjectIdentity) => `${device}:${inode}`;
+type FoundObject = {
+  readonly path: string;
+  readonly identity: string | null;
+  readonly inode: bigint | null;
+  readonly socket: boolean;
+};
 const directoryToken = (stat: Awaited<ReturnType<typeof targetStat>>) =>
   `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
 const targetStat = (path: string) => NodeFSP.lstat(path, { bigint: true });
@@ -317,6 +424,7 @@ const targetIdentities = async (
   root: string,
   collectIdentities: boolean,
   paths: ReadonlyArray<string>,
+  measurement?: InventoryMeasurement,
 ) => {
   const deadline = performance.now() + 30_000;
   const rootStat = await targetStat(root);
@@ -324,8 +432,8 @@ const targetIdentities = async (
     throw new Error("Consumer target root is not a canonical directory");
   const directories: Array<{ path: string; token: string }> = [];
   // Socket absence needs complete type/device evidence, not every vnode identity.
-  const identities = collectIdentities ? new Set<string>() : null;
-  const inodes = collectIdentities ? new Set<bigint>() : null;
+  // Paths let a nested root reuse this walk (see scopedEvidence).
+  const found: FoundObject[] = [];
   // Keep only possible matches for this exact native capture, rather than
   // retaining every dependency inode for the lifetime of an observation.
   const wantedDevices = collectIdentities ? new Map<bigint, Set<bigint>>() : null;
@@ -341,11 +449,11 @@ const targetIdentities = async (
       }
     }
   }
-  let hasSockets = false;
   let objects = 0;
   const visit = async (path: string, depth: number): Promise<void> => {
     if (++objects > MAX_TARGET_OBJECTS || depth > 128 || performance.now() > deadline)
       throw new Error("Consumer target inventory limit exceeded");
+    if (measurement !== undefined) measurement.objectsVisited++;
     const stat = await targetStat(path);
     if (
       typeof stat.dev !== "bigint" ||
@@ -354,10 +462,12 @@ const targetIdentities = async (
       stat.dev !== rootStat.dev
     )
       throw new Error("Consumer target object identity is unavailable or crosses a device");
-    if (wantedDevices?.get(stat.dev)?.has(stat.ino))
-      identities!.add(identityKey({ device: stat.dev, inode: stat.ino }));
-    if (wantedInodes?.has(stat.ino)) inodes!.add(stat.ino);
-    if (stat.isSocket()) hasSockets = true;
+    const identity = wantedDevices?.get(stat.dev)?.has(stat.ino)
+      ? identityKey({ device: stat.dev, inode: stat.ino })
+      : null;
+    const inode = wantedInodes?.has(stat.ino) ? stat.ino : null;
+    if (identity !== null || inode !== null || stat.isSocket())
+      found.push({ path, identity, inode, socket: stat.isSocket() });
     if (!stat.isDirectory()) return; // Record links themselves; never traverse their targets.
     if (typeof stat.mtimeNs !== "bigint" || typeof stat.ctimeNs !== "bigint")
       throw new Error("Consumer target directory timestamps are unavailable");
@@ -385,7 +495,7 @@ const targetIdentities = async (
     (await NodeFSP.realpath(root)) !== root
   )
     throw new Error("Consumer target root changed during observation");
-  return { identities, inodes, hasSockets, directories, rootToken: directoryToken(rootStat) };
+  return { found, directories, rootToken: directoryToken(rootStat) };
 };
 
 type TargetEvidence = Awaited<ReturnType<typeof targetIdentities>>;
@@ -395,13 +505,193 @@ type TargetEntry = {
   unavailable: boolean;
   cause?: unknown;
 };
-export type TargetObservation = WeakMap<ReadonlyArray<string>, Map<string, TargetEntry>>;
+type InventoryMeasurement = ReturnType<typeof emptyStorageCleanupInventoryTrace>;
 
-/** A sweep owns this context; default and final removal proofs never use it. */
-export const createTargetObservation = (): TargetObservation => new WeakMap();
+type CaptureResolutions = {
+  readonly sharedPaths: ReadonlyMap<string, { readonly parent: string; token?: string }>;
+};
 
-const targetUnchanged = async (root: string, evidence: TargetEvidence) => {
-  const deadline = performance.now() + 30_000;
+type SweepObservation = {
+  readonly captures: WeakMap<ReadonlyArray<string>, CaptureResolutions>;
+  readonly resolvedPaths: Set<string>;
+  readonly measurement: InventoryMeasurement;
+};
+
+export type TargetObservation = {
+  readonly targets: WeakMap<ReadonlyArray<string>, Map<string, TargetEntry>>;
+  readonly sweep?: SweepObservation;
+};
+
+/** Native tree evidence is scoped to the capture that supplied its object identities. */
+export const createTargetObservation = (): TargetObservation => ({ targets: new WeakMap() });
+
+export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObservation")(function* (
+  capture: Effect.Effect<ReadonlyArray<string> | null>,
+) {
+  const measurement = emptyStorageCleanupInventoryTrace();
+  const sweep: SweepObservation = {
+    captures: new WeakMap(),
+    resolvedPaths: new Set(),
+    measurement,
+  };
+  const paths = yield* Effect.cached(
+    Effect.suspend(() => {
+      const start = performance.now();
+      return capture.pipe(
+        Effect.provideService(ProcessCaptureCounter, () => {
+          measurement.processCaptures++;
+        }),
+        Effect.ensuring(
+          Effect.sync(() => {
+            measurement.processCaptureMs += performance.now() - start;
+          }),
+        ),
+      );
+    }),
+  );
+  const targets: TargetObservation = { targets: new WeakMap(), sweep };
+  return {
+    paths,
+    targets,
+    annotate: Effect.suspend(() =>
+      Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
+        ...measurement,
+        uniquePaths: sweep.resolvedPaths.size,
+      }),
+    ),
+  };
+});
+
+const sweepResolutions = (sweep: SweepObservation, paths: readonly string[]) => {
+  const previous = sweep.captures.get(paths);
+  if (previous !== undefined) return previous;
+  const byParent = Map.groupBy(
+    [...new Set(paths)].filter(
+      (path) => NodePath.isAbsolute(path) && NodePath.resolve(path) === path,
+    ),
+    NodePath.dirname,
+  );
+  const sharedPaths = new Map<string, { readonly parent: string; token?: string }>();
+  for (const [parent, children] of byParent) {
+    // A directory check uses two lookups. Leave sparse directories on the original path.
+    if (children.length < 4) continue;
+    for (const child of children) sharedPaths.set(child, { parent });
+  }
+  const capture: CaptureResolutions = { sharedPaths };
+  sweep.captures.set(paths, capture);
+  return capture;
+};
+
+const canonicalParentToken = async (parent: string, measurement: InventoryMeasurement) => {
+  const start = performance.now();
+  measurement.directoryChecks++;
+  try {
+    const stat = await targetStat(parent);
+    if (
+      !stat.isDirectory() ||
+      typeof stat.mtimeNs !== "bigint" ||
+      typeof stat.ctimeNs !== "bigint" ||
+      (await NodeFSP.realpath(parent)) !== parent
+    )
+      return null;
+    return directoryToken(stat);
+  } catch {
+    return null;
+  } finally {
+    measurement.directoryCheckMs += performance.now() - start;
+  }
+};
+
+const cachedPathIsDirect = async (path: string, measurement: InventoryMeasurement) => {
+  const start = performance.now();
+  measurement.cachedPathChecks++;
+  try {
+    // Parent timestamps can stay equal when a child is removed or replaced.
+    return !(await NodeFSP.lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
+  } finally {
+    measurement.cachedPathCheckMs += performance.now() - start;
+  }
+};
+
+type PathResolution = { readonly path: string } | { readonly error: unknown };
+
+const resolveProcessPath = async (
+  path: string,
+  sweep?: SweepObservation,
+): Promise<PathResolution> => {
+  const start = sweep === undefined ? 0 : performance.now();
+  if (sweep !== undefined) {
+    sweep.measurement.pathResolutions++;
+    sweep.resolvedPaths.add(path);
+  }
+  try {
+    return { path: await NodeFSP.realpath(path) };
+  } catch (error) {
+    return { error };
+  } finally {
+    if (sweep !== undefined) sweep.measurement.pathResolutionMs += performance.now() - start;
+  }
+};
+
+const makeProcessPathResolver = (
+  paths: readonly string[],
+  sweep: SweepObservation,
+  reuse = true,
+) => {
+  const capture = sweepResolutions(sweep, paths);
+  const reusedParents = new Map<string, string | null>();
+  const checkedParents = new Map<string, string | null>();
+  return {
+    resolve: async (path: string): Promise<PathResolution> => {
+      const entry = capture.sharedPaths.get(path);
+      if (entry === undefined) return resolveProcessPath(path, sweep);
+      const { parent } = entry;
+      const cachedToken = entry.token;
+      if (
+        reuse &&
+        cachedToken !== undefined &&
+        (await cachedPathIsDirect(path, sweep.measurement))
+      ) {
+        const previous = reusedParents.get(parent);
+        reusedParents.set(
+          parent,
+          previous === undefined || previous === cachedToken ? cachedToken : null,
+        );
+        return { path };
+      }
+      let token = checkedParents.get(parent);
+      if (token === undefined) {
+        token = await canonicalParentToken(parent, sweep.measurement);
+        checkedParents.set(parent, token);
+      }
+      const resolution = await resolveProcessPath(path, sweep);
+      // Alias chains and failed lookups need fresh resolution. Descriptor identities
+      // stay indexed by the original array, even when names repeat.
+      if (token !== null && "path" in resolution && resolution.path === path) entry.token = token;
+      else delete entry.token;
+      return resolution;
+    },
+    isStillValid: async () => {
+      // A later lookup in the same scan can overlap a change to an earlier directory.
+      for (const [parent, token] of reusedParents) {
+        if (token === null || (await canonicalParentToken(parent, sweep.measurement)) !== token)
+          return false;
+      }
+      return true;
+    },
+  };
+};
+
+const targetUnchanged = async (
+  root: string,
+  evidence: TargetEvidence,
+  measurement?: InventoryMeasurement,
+) => {
+  const start = performance.now();
+  const deadline = start + 30_000;
+  if (measurement !== undefined) measurement.targetRevalidations++;
   try {
     for (const directory of evidence.directories) {
       if (performance.now() > deadline)
@@ -418,7 +708,46 @@ const targetUnchanged = async (root: string, evidence: TargetEvidence) => {
   } catch (cause) {
     if (gone(cause)) return false; // Removed directories require a new complete walk.
     throw cause;
+  } finally {
+    if (measurement !== undefined) measurement.targetRevalidationMs += performance.now() - start;
   }
+};
+
+// A complete no-follow walk of an ancestor visited every object a walk of this
+// nested directory would visit, on the same device and within the same limits.
+const scopedEvidence = (root: string, evidence: TargetEvidence): TargetEvidence | null => {
+  const rootToken = evidence.directories.find((directory) => directory.path === root)?.token;
+  if (rootToken === undefined) return null;
+  return {
+    found: evidence.found.filter((object) => within(root, object.path)),
+    directories: evidence.directories.filter((directory) => within(root, directory.path)),
+    rootToken,
+  };
+};
+
+const ancestorEvidence = async (
+  root: string,
+  collectIdentities: boolean,
+  targets: Map<string, TargetEntry>,
+  measurement?: InventoryMeasurement,
+): Promise<TargetEvidence | null> => {
+  for (const [ancestor, entry] of targets) {
+    if (
+      ancestor === root ||
+      !within(ancestor, root) ||
+      entry.unavailable ||
+      (collectIdentities && !entry.collectIdentities)
+    )
+      continue;
+    try {
+      const evidence = scopedEvidence(root, await entry.proof);
+      if (evidence !== null && (await targetUnchanged(root, evidence, measurement)))
+        return evidence;
+    } catch {
+      // The ancestor proof failed or cannot be revalidated; walk this root itself.
+    }
+  }
+  return null;
 };
 
 const targetEvidence = async (
@@ -427,15 +756,24 @@ const targetEvidence = async (
   collectIdentities: boolean,
   observation?: TargetObservation,
 ): Promise<TargetEvidence> => {
-  if (observation === undefined) return targetIdentities(root, collectIdentities, paths);
-  let targets = observation.get(paths);
+  const measurement = observation?.sweep?.measurement;
+  const walk = (identities: boolean) => {
+    if (measurement === undefined) return targetIdentities(root, identities, paths);
+    const start = performance.now();
+    measurement.treeWalks++;
+    return targetIdentities(root, identities, paths, measurement).finally(() => {
+      measurement.treeWalkMs += performance.now() - start;
+    });
+  };
+  if (observation === undefined) return walk(collectIdentities);
+  let targets = observation.targets.get(paths);
   if (!targets) {
     targets = new Map();
-    observation.set(paths, targets);
+    observation.targets.set(paths, targets);
   }
   const collect = (identities: boolean) => {
     const entry: TargetEntry = {
-      proof: targetIdentities(root, identities, paths),
+      proof: walk(identities),
       collectIdentities: identities,
       unavailable: false,
     };
@@ -443,6 +781,11 @@ const targetEvidence = async (
     return entry;
   };
   let entry = targets.get(root);
+  if (entry === undefined) {
+    const derived = await ancestorEvidence(root, collectIdentities, targets, measurement);
+    if (derived !== null) return derived;
+    entry = targets.get(root);
+  }
   const existing = entry !== undefined;
   entry ??= collect(collectIdentities);
   if (entry.unavailable) throw entry.cause;
@@ -450,7 +793,8 @@ const targetEvidence = async (
     let evidence = await entry.proof;
     if (
       existing &&
-      (!(await targetUnchanged(root, evidence)) || (collectIdentities && !entry.collectIdentities))
+      (!(await targetUnchanged(root, evidence, measurement)) ||
+        (collectIdentities && !entry.collectIdentities))
     ) {
       // Another concurrent observer may already have replaced this entry.
       entry =
@@ -471,25 +815,36 @@ const targetEvidence = async (
   }
 };
 
-/**
- * Darwin D/i identify vnodes; only unresolved objects may use complete unchanged no-follow inventories.
- * Socket paths come from sockaddr_un; vanished paths prove absence only for socket-free targets.
- * Callers retain fresh mount protection under the canonical workspace lease.
- */
-export const processPathsUseRoot = async (
+const scanProcessPaths = async (
   canonicalRoot: string,
   paths: ReadonlyArray<string>,
-  observation?: TargetObservation,
-): Promise<boolean> => {
-  if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
+  completeProof: boolean,
+  resolvePath: (path: string) => Promise<PathResolution>,
+) => {
   const captured = (paths as CapturedPaths)[nativeIdentities];
   const unresolved: ObjectIdentity[] = [];
+  // Inventories repeat paths (shared libraries, one entry per descriptor).
+  const resolutions = new Map<string, PathResolution>();
   let vanishedSocket = false;
+  let matched = false;
   for (const [index, path] of paths.entries()) {
     if (!NodePath.isAbsolute(path)) throw new Error("Process consumer path is not absolute");
-    if (within(canonicalRoot, path)) return true;
+    if (within(canonicalRoot, path)) {
+      if (!completeProof) return { matched: true, unresolved, vanishedSocket };
+      matched = true;
+      continue;
+    }
+    let resolution = resolutions.get(path);
+    if (resolution === undefined) {
+      resolution = await resolvePath(path);
+      resolutions.set(path, resolution);
+    }
     try {
-      if (within(canonicalRoot, await NodeFSP.realpath(path))) return true;
+      if ("error" in resolution) throw resolution.error;
+      if (within(canonicalRoot, resolution.path)) {
+        if (!completeProof) return { matched: true, unresolved, vanishedSocket };
+        matched = true;
+      }
     } catch (error) {
       if (
         !gone(error) &&
@@ -523,8 +878,44 @@ export const processPathsUseRoot = async (
       unresolved.push(identity);
     }
   }
-  if (unresolved.length === 0 && !vanishedSocket) return false;
-  const identities = await targetEvidence(
+  return { matched, unresolved, vanishedSocket };
+};
+
+/**
+ * Darwin D/i identify vnodes; only unresolved objects may use complete unchanged no-follow inventories.
+ * Socket paths come from sockaddr_un; vanished paths prove absence only for socket-free targets.
+ * Callers retain fresh mount protection under the canonical workspace lease.
+ */
+export const processPathsUseRoot = async (
+  canonicalRoot: string,
+  paths: ReadonlyArray<string>,
+  observation?: TargetObservation,
+  completeProof = false,
+): Promise<boolean> => {
+  if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
+  const scan = (resolvePath: (path: string) => Promise<PathResolution>) =>
+    scanProcessPaths(canonicalRoot, paths, completeProof, resolvePath);
+  const sweep = observation?.sweep;
+  let evidence;
+  if (sweep === undefined) {
+    evidence = await scan(resolveProcessPath);
+  } else {
+    const resolver = makeProcessPathResolver(paths, sweep);
+    const first = await scan(resolver.resolve).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    if (!(await resolver.isStillValid())) {
+      evidence = await scan(makeProcessPathResolver(paths, sweep, false).resolve);
+    } else {
+      if ("error" in first) throw first.error;
+      evidence = first.value;
+    }
+  }
+  const { matched, unresolved, vanishedSocket } = evidence;
+  if (matched && !completeProof) return true;
+  if (unresolved.length === 0 && !vanishedSocket) return matched;
+  const { found } = await targetEvidence(
     canonicalRoot,
     paths,
     unresolved.length > 0,
@@ -532,12 +923,13 @@ export const processPathsUseRoot = async (
   ).catch((cause: unknown) => {
     throw new ObjectProofUnavailable("Consumer target inventory could not be verified", { cause });
   });
+  const identities = new Set(found.flatMap((object) => object.identity ?? []));
+  const inodes = new Set(found.flatMap((object) => object.inode ?? []));
   return (
-    (vanishedSocket && identities.hasSockets) ||
+    matched ||
+    (vanishedSocket && found.some((object) => object.socket)) ||
     unresolved.some((identity) =>
-      identity.device === null
-        ? identities.inodes!.has(identity.inode)
-        : identities.identities!.has(identityKey(identity)),
+      identity.device === null ? inodes.has(identity.inode) : identities.has(identityKey(identity)),
     )
   );
 };
@@ -577,9 +969,42 @@ const runtimeKeptReason = async (root: string): Promise<string | null> => {
   return null;
 };
 
+/** Check whether consumer evidence is complete before stopping owned previews. */
+export const worktreeConsumerPreflightReason = Effect.fn(
+  "WorktreeConsumers.worktreeConsumerPreflightReason",
+)(function* (canonicalRoot: string) {
+  const paths = yield* yield* ProcessPaths;
+  if (paths === null) return "Process file-consumer inventory is unavailable.";
+  const mounts = yield* yield* DependencyMounts.MountPoints;
+  if (mounts === null) return "Mount inventory is unavailable.";
+  if (DependencyMounts.containsMount(canonicalRoot, mounts))
+    return "A mounted path is inside the worktree.";
+  return yield* Effect.tryPromise({
+    try: async (): Promise<string | null> => {
+      if (
+        !NodePath.isAbsolute(canonicalRoot) ||
+        (await NodeFSP.realpath(canonicalRoot)) !== canonicalRoot
+      )
+        return "Worktree root is not canonical.";
+      // An owned preview may itself be the runtime; the final removal guard
+      // checks runtime descriptors again after preview shutdown.
+      await processPathsUseRoot(canonicalRoot, paths, undefined, true);
+      return null;
+    },
+    catch: (cause) =>
+      cause instanceof ObjectProofUnavailable
+        ? "Process object identity or target inventory could not be verified."
+        : "Worktree consumer protection could not be verified.",
+  }).pipe(Effect.catch((reason) => Effect.succeed(reason)));
+});
+
 /** Call under the canonical workspace lease immediately before removing generated files or a checkout. */
 export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsumerReason")(
-  function* (canonicalRoot: string, capturedPaths?: ReadonlyArray<string> | null) {
+  function* (
+    canonicalRoot: string,
+    capturedPaths?: ReadonlyArray<string> | null,
+    observation?: TargetObservation,
+  ) {
     const paths = capturedPaths === undefined ? yield* yield* ProcessPaths : capturedPaths;
     if (paths === null) return "Process file-consumer inventory is unavailable.";
     const mounts = yield* yield* DependencyMounts.MountPoints;
@@ -593,7 +1018,7 @@ export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsu
           (await NodeFSP.realpath(canonicalRoot)) !== canonicalRoot
         )
           return "Worktree root is not canonical.";
-        if (await processPathsUseRoot(canonicalRoot, paths))
+        if (await processPathsUseRoot(canonicalRoot, paths, observation))
           return "A process is using a file or directory in the worktree.";
         return runtimeKeptReason(canonicalRoot);
       },

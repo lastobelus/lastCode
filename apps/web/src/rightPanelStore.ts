@@ -32,6 +32,7 @@ const RIGHT_PANEL_KINDS = [
   "issue",
   "thread",
   "linked-thread",
+  "handoffs",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -109,7 +110,8 @@ export type RightPanelSurface =
    */
   | ThreadSurface
   /** A linked environment's thread, read through `viaEnvironmentId`; it has no thread here. */
-  | LinkedThreadSurface;
+  | LinkedThreadSurface
+  | { id: "handoffs"; kind: "handoffs" };
 
 export type ThreadSurface = { id: `thread:${string}`; kind: "thread"; threadId: ThreadId };
 
@@ -199,7 +201,7 @@ interface RightPanelStoreState {
   setLinkedThreadTitle: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
-  openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
+  openBrowser: (ref: ScopedThreadRef, tabId: string | null, automatic?: boolean) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
   /** Moves in place; "" opens the root explorer. folderTrail keeps the return path; keepSource opens beside the source. */
   navigateFolder: (
@@ -301,6 +303,8 @@ const singletonSurface = (
       return { id: "files", kind };
     case "pull-requests":
       return { id: "pull-requests", kind };
+    case "handoffs":
+      return { id: "handoffs", kind };
     case "device":
       return { id: "device", kind };
   }
@@ -938,9 +942,9 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             ),
           })),
         ),
-      openBrowser: (ref, tabId) =>
+      openBrowser: (ref, tabId, automatic = false) =>
         set((state) =>
-          userAction(state, scopedThreadKey(ref), (current) => {
+          (automatic ? automaticUpdate : userAction)(state, scopedThreadKey(ref), (current) => {
             const surface = browserSurface(tabId);
             const withoutPlaceholder = tabId
               ? current.surfaces.filter((entry) => entry.id !== "browser:new")

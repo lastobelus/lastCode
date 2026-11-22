@@ -3,6 +3,7 @@ import {
   GitCommandError,
   type GitManagerServiceError,
   ProjectId,
+  type ProjectRegistration,
   type ThreadId,
   VcsProcessSpawnError,
 } from "@t3tools/contracts";
@@ -121,7 +122,10 @@ export class ManagedProjectFolders extends Context.Service<
     }) => Effect.Effect<Option.Option<string>, ScratchFolderError>;
     readonly namedProjectsRoot: string;
     /** Removes failed/cancelled creations' folders only while no project owns them. */
-    readonly createNamedProject: (input: { readonly name: string }) => Effect.Effect<
+    readonly createNamedProject: (
+      input: { readonly name: string },
+      registration?: ProjectRegistration,
+    ) => Effect.Effect<
       {
         readonly projectId: ProjectId;
         readonly workspaceRoot: string;
@@ -470,7 +474,7 @@ const make = Effect.gen(function* () {
 
   const createNamedProject: ManagedProjectFolders["Service"]["createNamedProject"] = Effect.fn(
     "ManagedProjectFolders.createNamedProject",
-  )(function* (input) {
+  )(function* (input, registration) {
     const workspaceRoot = yield* claimNamedFolder(input.name);
     const removeFolder = fileSystem.remove(workspaceRoot, { recursive: true }).pipe(Effect.ignore);
     const prepared = yield* Effect.all([
@@ -483,12 +487,15 @@ const make = Effect.gen(function* () {
     ]).pipe(Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : removeFolder)));
     const [commitError, id] = prepared;
     const project = yield* projects
-      .create({
-        commandId: CommandId.make(`named-project:${id}`),
-        projectId: ProjectId.make(id),
-        title: input.name,
-        workspaceRoot,
-      })
+      .create(
+        {
+          commandId: CommandId.make(`named-project:${id}`),
+          projectId: ProjectId.make(id),
+          title: input.name,
+          workspaceRoot,
+        },
+        registration,
+      )
       .pipe(
         // Re-check ownership before deleting rejected creations; interruption after commit or conflicts can leave an owner.
         Effect.tapError((error) =>

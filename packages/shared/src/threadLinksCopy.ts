@@ -45,7 +45,10 @@ export function relabelThreadLinks(
     if (current === undefined) {
       if (label !== undefined && reference.version === 1) return undefined;
       current = fallbackTitle?.(
-        { threadId: resolved.threadId, environmentId: resolved.environmentId ?? messageEnvironmentId },
+        {
+          threadId: resolved.threadId,
+          environmentId: resolved.environmentId ?? messageEnvironmentId,
+        },
         label,
       );
       if (current === undefined) {

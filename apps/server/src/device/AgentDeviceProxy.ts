@@ -129,6 +129,7 @@ const handler = Effect.gen(function* () {
         ? { kind: "upload" as const, id: directUploadId }
         : undefined;
   const target = yield* access.authorize(token, resource);
+  yield* (yield* DeviceService.DeviceService).recordActivity(target.hostId, target.deviceId);
   if (path.startsWith("/sessions/") && path.split("/")[2] !== encodeURIComponent(target.session))
     return HttpServerResponse.text("Forbidden", { status: 403 });
   const rpc = path === "/rpc" ? yield* decodeRpcRequest(yield* request.json) : undefined;

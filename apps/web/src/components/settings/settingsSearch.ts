@@ -34,6 +34,7 @@ export type SettingsPath =
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/worktrees"
+  | "/settings/connect"
   | "/settings/connections"
   | "/settings/access"
   | "/settings/secrets"
@@ -111,6 +112,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/scheduled-tasks": msg("Scheduled tasks"),
   "/settings/source-control": msg("Source control & issues"),
   "/settings/worktrees": msg("Worktrees"),
+  "/settings/connect": msg("T3 Connect"),
   "/settings/connections": msg("Environments"),
   "/settings/access": msg("Sharing & access"),
   "/settings/secrets": msg("Secrets"),
@@ -168,7 +170,7 @@ const ALL_SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
   },
   {
     heading: msg("Connections"),
-    paths: ["/settings/connections", "/settings/access", "/settings/secrets"],
+    paths: ["/settings/connect", "/settings/connections", "/settings/access", "/settings/secrets"],
   },
   {
     heading: msg("More"),
@@ -260,6 +262,42 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
 
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "connect-account",
+    title: msg("T3 Connect account"),
+    to: "/settings/connect",
+    searchTerms: [
+      msg("account sign in login log in sign out logout manage profile authentication"),
+    ],
+  },
+  {
+    id: "storage-suspension-policy",
+    targetId: "storage-suspension",
+    title: msg("Suspend worktrees automatically"),
+    to: "/settings/worktrees",
+    scope: "project-defaults",
+    searchTerms: [
+      msg(
+        "LastCode suspend settled worktrees restore saved workspace delay days subagents children untouched joined adopted keep workspace inherit off custom",
+      ),
+    ],
+  },
+  {
+    id: "storage-saved-workspaces",
+    title: msg("Saved workspaces"),
+    to: "/settings/worktrees",
+    scope: "project-defaults",
+    searchTerms: [msg("LastCode suspension recovery restore discard saved local work snapshot")],
+  },
+  {
+    id: "storage-dependencies",
+    title: msg("Dependencies and verified builds"),
+    to: "/settings/worktrees",
+    scope: "project-defaults",
+    searchTerms: [
+      msg("storage cleanup dependencies builds dist compiler cargo npm pnpm node_modules"),
+    ],
+  },
+  {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
     title: msg("Local work is preserved"),
@@ -288,11 +326,65 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("storage cleanup run now results report removed kept failed")],
   },
   {
+    id: "import-t3-settings",
+    title: msg("Import settings from T3 Code"),
+    to: "/settings/lastcode",
+  },
+  {
+    id: "larger-scrollbars",
+    title: msg("Larger scrollbars"),
+    to: "/settings/lastcode",
+    searchTerms: [msg("width margin resize handle pane drag thumb")],
+  },
+  {
+    id: "hover-current-work-details",
+    title: msg("Show work details on hover"),
+    to: "/settings/lastcode",
+    searchTerms: [msg("current work status full list info button tooltip")],
+  },
+  {
+    id: "page-scroll-overlap",
+    title: msg("Keep 1 line when scrolling page-at-a-time"),
+    to: "/settings/lastcode",
+    searchTerms: [msg("page up page down pageup pagedown overlap scrolling composer conversation")],
+  },
+  {
+    id: "expand-thread-annotations",
+    title: msg("Expand thread annotations by default"),
+    to: "/settings/lastcode",
+    searchTerms: [msg("annotation note composer eyebrow expand collapse edited")],
+  },
+  {
+    id: "incoming-message-style",
+    title: msg("Incoming message style"),
+    to: "/settings/lastcode",
+    searchTerms: [
+      msg("agent assistant messages neutral fill outline bubble background appearance"),
+    ],
+  },
+  {
+    id: "incoming-message-fill-color",
+    title: msg("Incoming message fill color"),
+    to: "/settings/lastcode",
+    // The color row is hidden for Outline, so always land on the style control.
+    targetId: "incoming-message-style",
+    searchTerms: [
+      msg("agent assistant messages neutral background color automatic experimental picker"),
+    ],
+  },
+  {
+    id: "handoffs-menu-limit",
+    title: msg("Handoffs shown in menus"),
+    to: "/settings/lastcode",
+    searchTerms: [msg("handoffs history recent links files menu count")],
+  },
+  {
     id: "storage-worktrees",
-    title: msg("Worktree cleanup"),
+    title: msg("Permanent deletion"),
     to: "/settings/worktrees",
     scope: "project-defaults",
     searchTerms: [
+      msg("Worktree cleanup"),
       msg(
         "disk storage automatic delete deleted archived threads old inactive merged settled unchanged worktrees retention days project inherit off custom",
       ),
@@ -307,6 +399,17 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/worktrees",
     scope: "environment-defaults",
     searchTerms: [msg("worktree location folder directory path drive external disk")],
+  },
+  {
+    id: "storage-cleanup-schedule",
+    title: msg("Automatic cleanup"),
+    to: "/settings/maintenance",
+    scope: "environment-defaults",
+    searchTerms: [
+      msg("Minutes between cleanups"),
+      msg("Alternate what gets cleaned"),
+      msg("Wait for Time Machine"),
+    ],
   },
   {
     id: "storage-artifacts",
@@ -775,6 +878,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "finished-thread-alerts",
+    title: msg("Finished thread alerts"),
+    to: "/settings/general",
+    searchTerms: [msg("notification toast completion finished agent mcp delegated eval mine all")],
+  },
+  {
     id: "time-format",
     title: msg("Time format"),
     to: "/settings/general",
@@ -855,6 +964,20 @@ export const SETTINGS_SEARCH_ITEMS = [
       msg("installed cli versions newer available codex claude cursor grok fx kiro opencode"),
     ],
     scope: "environment-defaults",
+  },
+  {
+    id: "environment-pause",
+    title: msg("Environment pause button"),
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: [msg("pause resume offline active threads sidebar environment")],
+  },
+  {
+    id: "pr-watch-quiet-deadline",
+    title: msg("PR watch quiet deadline"),
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: [msg("pull request review timeout stalled waiting minutes wake")],
   },
   {
     id: "continue-threads-after-server-update",
@@ -1507,76 +1630,76 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "local-nightlies",
-    title: "Show and install local nightlies",
+    title: msg("Show and install local nightlies"),
     to: "/settings/lastcode",
   },
   {
     id: "lastcode-sidebar",
-    title: "LastCode sidebar",
+    title: msg("LastCode sidebar"),
     to: "/settings/lastcode",
     searchTerms: ["navigation project tree override upstream legacy inbox"],
   },
   {
     id: "scale-legacy-sidebar",
-    title: "Scale LastCode sidebar",
+    title: msg("Scale LastCode sidebar"),
     searchTerms: ["scale legacy sidebar zoom compact rows"],
     to: "/settings/lastcode",
   },
   {
     id: "local-ci-quick-mode",
-    title: "Quick CI mode",
+    title: msg("Quick CI mode"),
     to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["automatic always local github only checks capacity wait"],
   },
   {
     id: "local-ci-runs",
-    title: "Concurrent CI runs",
+    title: msg("Concurrent CI runs"),
     to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["local quick full checks queue worktree concurrency limit"],
   },
   {
     id: "local-ci-packages",
-    title: "Packages checked at once",
+    title: msg("Packages checked at once"),
     to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["local ci quick full checks package parallel concurrency limit"],
   },
   {
     id: "local-ci-compiler-cpu",
-    title: "TypeScript compiler CPU limit",
+    title: msg("TypeScript compiler CPU limit"),
     to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["local ci compiler threads parallelism cpu native"],
   },
   {
     id: "local-ci-background-priority",
-    title: "Background CI priority",
+    title: msg("Background CI priority"),
     to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["local ci quick full cpu priority responsive nice"],
   },
   {
     id: "thread-grouping-style",
-    title: "Thread grouping style",
+    title: msg("Thread grouping style"),
     to: "/settings/lastcode",
     searchTerms: ["LastCode sidebar subagents agent-created minimal typed groups relationships"],
   },
   {
     id: "family-status-subheaders",
-    title: "Family status subheaders",
+    title: msg("Family status subheaders"),
     to: "/settings/lastcode",
     searchTerms: ["LastCode sidebar subagents count status density compact parent visibility"],
   },
   {
     id: "compact-status-indicators",
-    title: "Compact status indicators",
+    title: msg("Compact status indicators"),
     to: "/settings/lastcode",
   },
   {
     id: "status-icons",
-    title: "Status icons",
+    title: msg("Status icons"),
     to: "/settings/lastcode",
     searchTerms: [
       "sidebar status shape triangle right square diamond circle open solid outline color 50% fill",
@@ -1584,23 +1707,23 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "show-worktree-indicators",
-    title: "Show worktree indicators (LastCode sidebar)",
+    title: msg("Show worktree indicators (LastCode sidebar)"),
     to: "/settings/lastcode",
   },
   {
     id: "rounded-project-icons",
-    title: "Rounded project icons",
+    title: msg("Rounded project icons"),
     to: "/settings/lastcode",
   },
   {
     id: "show-thread-provider-badges",
-    title: "Show thread provider badges",
+    title: msg("Show thread provider badges"),
     to: "/settings/lastcode",
     searchTerms: ["sidebar provider logo badge environment machine local icon"],
   },
   {
     id: "thread-provider-badge-size",
-    title: "Provider badge size",
+    title: msg("Provider badge size"),
     to: "/settings/lastcode",
     // The toggle stays mounted when its size and transparency sliders are hidden.
     targetId: "show-thread-provider-badges",
@@ -1608,14 +1731,14 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "thread-provider-badge-transparency",
-    title: "Provider badge transparency",
+    title: msg("Provider badge transparency"),
     to: "/settings/lastcode",
     targetId: "show-thread-provider-badges",
     searchTerms: ["sidebar provider logo badge transparency opacity transparent"],
   },
   {
     id: "environment-icons",
-    title: "Environment icons",
+    title: msg("Environment icons"),
     to: "/settings/lastcode",
   },
   {
@@ -1646,6 +1769,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/devices": null,
   "/settings/source-control": "environment-defaults",
   "/settings/worktrees": "project-defaults",
+  "/settings/connect": null,
   "/settings/connections": "connections",
   "/settings/access": "connections",
   "/settings/secrets": null,

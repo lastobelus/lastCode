@@ -1521,9 +1521,7 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         commandId: CommandId.make("archive:late-steer-sender"),
         threadId: senderThreadId,
       });
-      assert.isNotNull(
-        (yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt,
-      );
+      assert.isNotNull((yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt);
       const accepted = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
         (message) => message.id === MessageId.make("message:steer"),
       )!;
@@ -1924,6 +1922,21 @@ it.effect("delivers agent messages queued behind /compact before a later one ste
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       const threadId = yield* startFirstTurn;
+      const senderThreadId = ThreadId.make("thread:orchestrator");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:orchestrator"),
+        threadId: senderThreadId,
+        projectId: ProjectId.make("project:agent-order-after-compact"),
+        title: "Orchestrator",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
       const nextRunning = Effect.fn("nextRunning")(function* () {
         return yield* orchestrator.streamDomainEvents.pipe(
           Stream.filter(
@@ -2006,7 +2019,7 @@ it.effect("delivers agent messages queued behind /compact before a later one ste
             deliveryIntent: "auto",
             createdBy: "agent",
             creationSource: "mcp",
-            senderThreadId: ThreadId.make("thread:orchestrator"),
+            senderThreadId,
           });
           yield* worker.drain();
         });
@@ -3343,7 +3356,7 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
         runId: started[0]!.runId,
         holdQueue: true,
       });
-      // The provider has not stopped yet, so a plain send still resolves to a steer.
+      // Stop has not reached the provider yet; plain send must queue instead of steering.
       yield* send("sent", "auto");
       // Once the stop settles, the run-update reactor promotes the queue on
       // its own fiber, so read the queue while the provider is still stopping.

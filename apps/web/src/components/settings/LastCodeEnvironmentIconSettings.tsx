@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import { ProviderDriverKind } from "@t3tools/contracts";
 import {
   MIN_THREAD_PROVIDER_BADGE_SIZE,
@@ -13,7 +14,7 @@ import { usePrimarySettings, updateClientSettings } from "../../hooks/useSetting
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { SidebarEnvironmentIcon } from "../sidebar/SidebarEnvironmentIcon";
 import { Switch } from "../ui/switch";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import {
   deriveLastCodeEnvironmentSettingEntries,
@@ -34,6 +35,7 @@ const PROVIDER_BADGE_PREVIEWS = [
 ] as const;
 
 function ProviderBadgePreview() {
+  const gt = useGT();
   const clientSettings = usePrimarySettings();
   return (
     <span className="inline-flex flex-wrap items-center gap-5 rounded-md bg-sidebar px-3 py-2 text-xs text-secondary-label">
@@ -48,7 +50,9 @@ function ProviderBadgePreview() {
             badgeTransparency={clientSettings.threadProviderBadgeTransparency}
           />
           <span>
-            {kind === "laptop" ? "Local" : "Remote"} · {provider.displayName}
+            {kind === "laptop"
+              ? gt("Local · {provider}", { provider: provider.displayName })
+              : gt("Remote · {provider}", { provider: provider.displayName })}
           </span>
         </span>
       ))}
@@ -57,12 +61,16 @@ function ProviderBadgePreview() {
 }
 
 function ProviderBadgeSettings() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
   const clientSettings = usePrimarySettings();
   return (
     <>
       <SettingsRow
         {...searchableSetting("show-thread-provider-badges")}
-        description="Show the thread's provider logo at the lower-right of its machine icon in the sidebar. Badges also show machine icons for local threads when Show local icon is off."
+        description={gt(
+          "Show the thread's provider logo at the lower-right of its machine icon in the sidebar. Badges also show machine icons for local threads when Show local icon is off.",
+        )}
         status={<ProviderBadgePreview />}
         control={
           <Switch
@@ -70,7 +78,7 @@ function ProviderBadgeSettings() {
             onCheckedChange={(checked) =>
               updateClientSettings({ showThreadProviderBadge: Boolean(checked) })
             }
-            aria-label="Show thread provider badges"
+            aria-label={gt("Show thread provider badges")}
           />
         }
       />
@@ -78,11 +86,11 @@ function ProviderBadgeSettings() {
         <>
           <SettingsRow
             {...searchableSetting("thread-provider-badge-size")}
-            description="Provider badge size as a percentage of the machine icon."
+            description={gt("Provider badge size as a percentage of the machine icon.")}
             control={
               <SettingsSlider
                 id="thread-provider-badge-size-slider"
-                label="Provider badge size"
+                label={gt("Provider badge size")}
                 min={MIN_THREAD_PROVIDER_BADGE_SIZE}
                 max={MAX_THREAD_PROVIDER_BADGE_SIZE}
                 value={clientSettings.threadProviderBadgeSize}
@@ -95,11 +103,11 @@ function ProviderBadgeSettings() {
           />
           <SettingsRow
             {...searchableSetting("thread-provider-badge-transparency")}
-            description="0% keeps the provider logo opaque; 100% makes it fully transparent."
+            description={gt("0% keeps the provider logo opaque; 100% makes it fully transparent.")}
             control={
               <SettingsSlider
                 id="thread-provider-badge-transparency-slider"
-                label="Provider badge transparency"
+                label={gt("Provider badge transparency")}
                 min={MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY}
                 max={MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY}
                 value={clientSettings.threadProviderBadgeTransparency}
@@ -117,6 +125,7 @@ function ProviderBadgeSettings() {
 }
 
 function EnvironmentIconSetting({ environment }: { environment: LastCodeEnvironmentSettingEntry }) {
+  const gt = useGT();
   const clientSettings = usePrimarySettings();
   const color = clientSettings.environmentIconColors[environment.environmentId];
   const isLocal = environment.kind === "local";
@@ -133,14 +142,14 @@ function EnvironmentIconSetting({ environment }: { environment: LastCodeEnvironm
           <span className="truncate">{environment.label}</span>
         </span>
       }
-      description={isLocal ? "Primary machine" : "Saved remote environment"}
+      description={isLocal ? gt("Primary machine") : gt("Saved remote environment")}
     >
       <div className="space-y-4 px-0 pb-3 sm:px-4">
         <ProviderAccentColorPicker
           displayName={environment.label}
           value={color}
-          label="Icon color"
-          defaultOptionLabel="Default"
+          label={gt("Icon color")}
+          defaultOptionLabel={gt("Default")}
           onCommit={(value) =>
             updateClientSettings((settings) => ({
               environmentIconColors: updateEnvironmentIconColors(
@@ -150,15 +159,17 @@ function EnvironmentIconSetting({ environment }: { environment: LastCodeEnvironm
               ),
             }))
           }
-          description="Used for this environment in sidebars and thread details."
+          description={gt("Used for this environment in sidebars and thread details.")}
         />
         {isLocal ? (
           <div className="flex items-center justify-between gap-6 border-border/70 border-t pt-4">
             <div className="min-w-0 space-y-1">
-              <div className="text-xs font-medium text-foreground">Show local icon</div>
+              <div className="text-xs font-medium text-foreground">{gt("Show local icon")}</div>
               <p className="max-w-xl text-xs leading-snug text-muted-foreground">
-                Show this environment's machine icon for local threads even when provider badges are
-                off.
+                <T>
+                  Show this environment's machine icon for local threads even when provider badges
+                  are off.
+                </T>
               </p>
             </div>
             <Switch
@@ -166,7 +177,7 @@ function EnvironmentIconSetting({ environment }: { environment: LastCodeEnvironm
               onCheckedChange={(checked) =>
                 updateClientSettings({ showLocalEnvironmentIcon: Boolean(checked) })
               }
-              aria-label="Show local icon"
+              aria-label={gt("Show local icon")}
             />
           </div>
         ) : null}
@@ -176,6 +187,7 @@ function EnvironmentIconSetting({ environment }: { environment: LastCodeEnvironm
 }
 
 export function LastCodeEnvironmentIconSettings() {
+  const gt = useGT();
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentSettings = deriveLastCodeEnvironmentSettingEntries({
@@ -186,7 +198,7 @@ export function LastCodeEnvironmentIconSettings() {
   return (
     <SettingsSection
       id="environment-icons"
-      title="Environments"
+      title={gt("Environments")}
       icon={<ServerIcon className="size-5" />}
     >
       <ProviderBadgeSettings />

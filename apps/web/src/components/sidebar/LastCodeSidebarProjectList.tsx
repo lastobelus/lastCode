@@ -40,6 +40,8 @@ function SortableProjectItem({
 }
 interface Props {
   projects: readonly SidebarProjectSnapshot[];
+  threadIndex?: ComponentProps<typeof LastCodeSidebarProject>["threadIndex"];
+  threadOnlyProjects?: readonly SidebarProjectSnapshot[];
   orderedProjectKeys: readonly string[];
   activeRoute: { projectKey: string | null; threadKey: string | null };
   expandedLists: ReadonlySet<string>;
@@ -64,9 +66,11 @@ export function LastCodeSidebarProjectList(props: Props) {
   const renderProject = (
     project: SidebarProjectSnapshot,
     dragHandle: LastCodeProjectDragHandle | null,
+    threadsOnly = false,
   ) => (
     <LastCodeSidebarProject
       project={project}
+      threadIndex={props.threadIndex}
       dragHandle={dragHandle}
       gestures={gestures}
       activeThreadKey={activeRoute.projectKey === project.projectKey ? activeRoute.threadKey : null}
@@ -74,8 +78,12 @@ export function LastCodeSidebarProjectList(props: Props) {
       onListExpandedChange={onExpandedChange}
       jumpLabels={jumpLabels}
       newThread={newThread}
+      threadsOnly={threadsOnly}
     />
   );
+  const threadOnlyRows = props.threadOnlyProjects?.map((project) => (
+    <SidebarMenuItem key={project.projectKey}>{renderProject(project, null, true)}</SidebarMenuItem>
+  ));
   if (sorting.manual)
     return (
       <DndContext
@@ -97,6 +105,7 @@ export function LastCodeSidebarProjectList(props: Props) {
               </SortableProjectItem>
             ))}
           </SortableContext>
+          {threadOnlyRows}
         </SidebarMenu>
       </DndContext>
     );
@@ -105,6 +114,7 @@ export function LastCodeSidebarProjectList(props: Props) {
       {projects.map((project) => (
         <SidebarMenuItem key={project.projectKey}>{renderProject(project, null)}</SidebarMenuItem>
       ))}
+      {threadOnlyRows}
     </SidebarMenu>
   );
 }

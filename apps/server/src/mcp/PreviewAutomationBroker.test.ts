@@ -17,6 +17,7 @@ import {
   type PreviewAutomationStreamEvent,
   SERVER_BROWSER_AUTOMATION_CLIENT_ID,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -286,6 +287,94 @@ it.effect("announces a live replacement stream before delivering requests", () =
     expect(receivedTypes).toEqual(["connected", "request"]);
     expect(result).toBe("ready");
   }),
+);
+
+it.effect.each(["open", "openWithProfile"] as const)(
+  "keeps a server-host %s alive for installation without extending other operations",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const received = yield* Deferred.make<RoutedRequest>();
+        const requests = requestsFrom(
+          yield* broker.connect(
+            makeHost({
+              supportedOperations: ["open", "openWithProfile", "status", "navigate", "profiles"],
+            }),
+            { preferred: true, disconnectOnTimeout: false },
+          ),
+        );
+        yield* Stream.runForEach(requests, (request) =>
+          request.operation === operation
+            ? Deferred.succeed(received, request)
+            : broker.respond({
+                clientId: "client-1",
+                connectionId: request.connectionId,
+                requestId: request.requestId,
+                ok: true,
+                result: request.timeoutMs,
+              }),
+        ).pipe(Effect.forkScoped);
+        const opening = yield* broker
+          .invoke({
+            scope,
+            operation,
+            input: operation === "openWithProfile" ? { profileId: "work" } : {},
+          })
+          .pipe(Effect.forkScoped);
+        const request = yield* Deferred.await(received);
+        expect(request.timeoutMs).toBe(660_000);
+        yield* TestClock.adjust(16_000);
+        yield* broker.respond({
+          clientId: "client-1",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: true,
+          result: "opened",
+        });
+        expect(yield* Fiber.join(opening)).toBe("opened");
+        expect(yield* broker.invoke({ scope, operation: "status", input: {} })).toBe(15_000);
+        expect(yield* broker.invoke({ scope, operation: "navigate", input: {} })).toBe(15_000);
+        expect(yield* broker.invoke({ scope, operation: "profiles", input: {} })).toBe(15_000);
+      }),
+    ),
+);
+
+it.effect.each([
+  { operation: "open", preferred: false },
+  { operation: "openWithProfile", preferred: false },
+  { operation: "profiles", preferred: true },
+  { operation: "open", preferred: true, timeoutMs: 15_000 },
+  { operation: "openWithProfile", preferred: true, timeoutMs: 15_000 },
+] as const)(
+  "retains the ordinary deadline for $operation (preferred: $preferred, override: $timeoutMs)",
+  ({ operation, preferred, ...override }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const received = yield* Deferred.make<RoutedRequest>();
+        const requests = requestsFrom(
+          yield* broker.connect(makeHost({ supportedOperations: [operation] }), {
+            preferred,
+            disconnectOnTimeout: false,
+          }),
+        );
+        yield* Stream.runForEach(requests, (request) => Deferred.succeed(received, request)).pipe(
+          Effect.forkScoped,
+        );
+        const pending = yield* broker
+          .invoke({ scope, operation, input: {}, ...override })
+          .pipe(Effect.exit, Effect.forkScoped);
+        const request = yield* Deferred.await(received);
+        expect(request.timeoutMs).toBe(15_000);
+        yield* TestClock.adjust(15_000);
+        const result = yield* Fiber.join(pending);
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result)) {
+          expect(Cause.squash(result.cause)).toBeInstanceOf(PreviewAutomationTimeoutError);
+        }
+      }),
+    ),
 );
 
 it.effect.each([
@@ -590,9 +679,7 @@ it.effect("pins a provider session to its initial host despite later focus chang
       focused: true,
       liveTabs: [{ threadId: scope.thread.threadId, tabId: PreviewTabId.make("stale-tab") }],
     });
-    expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
-      "second",
-    );
+    expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe("second");
     yield* broker.focusHost({
       clientId: "client-first",
       environmentId: scope.environmentId,
@@ -636,9 +723,8 @@ it.effect("prefers the live tab owner for new sessions without moving existing l
     const broker = yield* makeBroker;
     const connections = new Map<string, string>();
     for (const clientId of ["owner", "other"]) {
-      const requests = requestsFrom(
-        yield* broker.connect(makeHost({ clientId })),
-        (connectionId) => connections.set(clientId, connectionId),
+      const requests = requestsFrom(yield* broker.connect(makeHost({ clientId })), (connectionId) =>
+        connections.set(clientId, connectionId),
       );
       yield* Stream.runForEach(requests, (request) =>
         broker.respond({
@@ -678,9 +764,7 @@ it.effect("prefers the live tab owner for new sessions without moving existing l
         },
       ],
     });
-    expect(yield* broker.invoke<string>({ scope, operation: "evaluate", input: {} })).toBe(
-      "owner",
-    );
+    expect(yield* broker.invoke<string>({ scope, operation: "evaluate", input: {} })).toBe("owner");
     expect(
       yield* broker.invoke<string>({
         scope: { ...scope, thread: { ...scope.thread, providerSessionId: "explicit-owner" } },
@@ -705,9 +789,7 @@ it.effect("prefers the live tab owner for new sessions without moving existing l
       focused: false,
       liveTabs: [],
     });
-    expect(yield* broker.invoke<string>({ scope, operation: "evaluate", input: {} })).toBe(
-      "owner",
-    );
+    expect(yield* broker.invoke<string>({ scope, operation: "evaluate", input: {} })).toBe("owner");
     expect(
       yield* broker.invoke<string>({
         scope: { ...scope, thread: { ...scope.thread, providerSessionId: "after-tab-closed" } },
@@ -870,9 +952,7 @@ it.effect("ignores stale focus updates for a different environment", () =>
       focused: true,
     });
 
-    expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
-      "second",
-    );
+    expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe("second");
   }),
 );
 
@@ -927,9 +1007,7 @@ it.effect("fails over a pinned provider session only after its host disconnects"
     yield* Fiber.interrupt(firstConsumer);
     yield* Effect.yieldNow;
 
-    expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
-      "second",
-    );
+    expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe("second");
     expect(secondRoutedTabId).toBeUndefined();
   }),
 );
@@ -945,12 +1023,9 @@ it.effect("keeps a replacement stream authoritative when the old stream finalize
     yield* Stream.runDrain(firstRequests).pipe(Effect.forkScoped);
     yield* Effect.yieldNow;
 
-    const replacementRequests = requestsFrom(
-      yield* broker.connect(makeHost()),
-      (connectionId) => {
-        replacementConnectionId = connectionId;
-      },
-    );
+    const replacementRequests = requestsFrom(yield* broker.connect(makeHost()), (connectionId) => {
+      replacementConnectionId = connectionId;
+    });
     yield* Stream.runForEach(replacementRequests, (request) =>
       broker.respond({
         clientId: "client-1",
@@ -980,9 +1055,7 @@ it.effect("does not carry a tab id across a replacement automation stream", () =
         requestId: request.requestId,
         ok: true,
         result:
-          request.operation === "open"
-            ? { host: "first", tabId: openedTabId }
-            : { host: "first" },
+          request.operation === "open" ? { host: "first", tabId: openedTabId } : { host: "first" },
       }),
     ).pipe(Effect.forkScoped);
     yield* Effect.yieldNow;
@@ -1251,9 +1324,10 @@ it.effect.each(["snapshot", "evaluate"] as const)(
         host: "client-1",
         targetTabId: firstTabId,
       });
-      expect(yield* broker.invoke({ scope: otherScope, operation: "status", input: {} })).toEqual(
-        { host: "client-1", targetTabId: secondTabId },
-      );
+      expect(yield* broker.invoke({ scope: otherScope, operation: "status", input: {} })).toEqual({
+        host: "client-1",
+        targetTabId: secondTabId,
+      });
       expect(opening.pollUnsafe()).toBeUndefined();
       expect(openRequest.connectionId).toBe(timedOutRequest.connectionId);
       expect(openRequest.agentSessionId).not.toBe(timedOutRequest.agentSessionId);
@@ -1266,9 +1340,10 @@ it.effect.each(["snapshot", "evaluate"] as const)(
         result: { tabId: openedTabId },
       });
       expect(yield* Fiber.join(opening)).toEqual({ tabId: openedTabId });
-      expect(yield* broker.invoke({ scope: otherScope, operation: "status", input: {} })).toEqual(
-        { host: "client-1", targetTabId: openedTabId },
-      );
+      expect(yield* broker.invoke({ scope: otherScope, operation: "status", input: {} })).toEqual({
+        host: "client-1",
+        targetTabId: openedTabId,
+      });
       expect(routedRequests.filter((request) => request.operation === operation)).toEqual([
         timedOutRequest,
       ]);
@@ -1554,9 +1629,7 @@ it.effect.each(["timeout", "interrupt"] as const)(
         expect(Exit.hasInterrupts(yield* Fiber.await(caller))).toBe(true);
       }
       let executions = 0;
-      yield* broker.runRequest(identity, () =>
-        Effect.sync(() => executions++).pipe(Effect.asVoid),
-      );
+      yield* broker.runRequest(identity, () => Effect.sync(() => executions++).pipe(Effect.asVoid));
       expect(executions).toBe(0);
       let lateErrorRead = false;
       yield* broker.respond({
@@ -1572,9 +1645,7 @@ it.effect.each(["timeout", "interrupt"] as const)(
       });
       yield* broker.respond({ ...identity, ok: true, result: undefined });
       expect(lateErrorRead).toBe(false);
-      yield* broker.runRequest(identity, () =>
-        Effect.sync(() => executions++).pipe(Effect.asVoid),
-      );
+      yield* broker.runRequest(identity, () => Effect.sync(() => executions++).pipe(Effect.asVoid));
       expect(executions).toBe(0);
     }),
 );
@@ -1616,13 +1687,9 @@ it.effect.each(["timeout", "interrupt", "success", "error", "disconnect"] as con
                 queuedActions.push(() => {
                   if (!signal.aborted) executions++;
                 });
-                signal.addEventListener(
-                  "abort",
-                  () => Deferred.doneUnsafe(aborted, Effect.void),
-                  {
-                    once: true,
-                  },
-                );
+                signal.addEventListener("abort", () => Deferred.doneUnsafe(aborted, Effect.void), {
+                  once: true,
+                });
                 Deferred.doneUnsafe(started, Effect.succeed(signal));
               }),
             catch: () => ({ _tag: "GuardedHostError" as const }),
@@ -1662,9 +1729,7 @@ it.effect.each(["timeout", "interrupt", "success", "error", "disconnect"] as con
       queuedActions.forEach((action) => action());
       expect(executions).toBe(0);
       yield* broker.respond({ ...identity, ok: true, result: undefined });
-      yield* broker.runRequest(identity, () =>
-        Effect.sync(() => executions++).pipe(Effect.asVoid),
-      );
+      yield* broker.runRequest(identity, () => Effect.sync(() => executions++).pipe(Effect.asVoid));
       expect(executions).toBe(0);
     }),
 );

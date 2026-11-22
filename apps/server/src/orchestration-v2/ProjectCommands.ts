@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   type ProjectIconOverride,
   ProjectId,
+  type ProjectRegistration,
   ProjectScript,
   type ProjectTrackedFolder,
   type ThreadEnvMode,
@@ -15,6 +16,7 @@ import * as Schema from "effect/Schema";
 
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import type { ProjectRow } from "./ProjectStore.ts";
+import { planKeepProject } from "../project/projectRegistration.ts";
 
 export interface ProjectCreateCommand {
   readonly type: "project.create";
@@ -22,6 +24,7 @@ export interface ProjectCreateCommand {
   readonly projectId: ProjectId;
   readonly title: string;
   readonly workspaceRoot: string;
+  readonly registration?: ProjectRegistration;
   readonly scripts?: ReadonlyArray<ProjectScript>;
   readonly trackedFolders?: ReadonlyArray<ProjectTrackedFolder>;
 }
@@ -41,6 +44,7 @@ export interface ProjectMetaUpdateCommand {
   readonly trackedFolders?: ReadonlyArray<ProjectTrackedFolder>;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  readonly keepTemporary?: true;
 }
 
 export interface ProjectScriptsReconcileCommand {
@@ -180,6 +184,7 @@ export function planProjectCommand(input: {
           ...(command.trackedFolders === undefined || command.trackedFolders.length === 0
             ? {}
             : { trackedFolders: command.trackedFolders }),
+          ...(command.registration === undefined ? {} : { registration: command.registration }),
           createdAt: occurredAt,
           updatedAt: occurredAt,
         },
@@ -252,6 +257,7 @@ export function planProjectCommand(input: {
           ...(command.trackedFolders === undefined
             ? {}
             : { trackedFolders: command.trackedFolders }),
+          ...planKeepProject(command.keepTemporary, project.registration),
           // Repeating a pin or archive keeps the original time.
           ...(command.pinned === undefined
             ? {}

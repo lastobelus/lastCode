@@ -187,19 +187,17 @@ const launchdServiceTarget = "gui/501/com.t3tools.t3code.service";
 const launchdNotLoadedMessage =
   'Could not find service "com.t3tools.t3code.service" in domain for user gui: 501';
 
-const processResult = (input?: {
-  readonly code?: number;
-  readonly stdout?: string;
-  readonly stderr?: string;
-}): ProcessRunner.ProcessRunOutput => ({
+const processResult = (
+  input?: Partial<Omit<ProcessRunner.ProcessRunOutput, "code">> & { readonly code?: number },
+): ProcessRunner.ProcessRunOutput => ({
   stdout: input?.stdout ?? "",
   stderr: input?.stderr ?? "",
   code: ChildProcessSpawner.ExitCode(input?.code ?? 0),
-  timedOut: false,
-  stdoutTruncated: false,
-  stderrTruncated: false,
-  stdoutInvalidUtf8: false,
-  stderrInvalidUtf8: false,
+  timedOut: input?.timedOut ?? false,
+  stdoutTruncated: input?.stdoutTruncated ?? false,
+  stderrTruncated: input?.stderrTruncated ?? false,
+  stdoutInvalidUtf8: input?.stdoutInvalidUtf8 ?? false,
+  stderrInvalidUtf8: input?.stderrInvalidUtf8 ?? false,
 });
 
 it("recognizes only launchctl's exact service-not-loaded response", () => {
@@ -303,11 +301,12 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       const command = `${input.command} ${input.args.join(" ")}`;
       commands.push(command);
       const marker = path.join(baseDir, "runtime", DESKTOP_UPDATE_RESTART_MARKER_FILE);
+      const isLaunchdBootout = input.command === "launchctl" && input.args[0] === "bootout";
       if (
         command === "systemctl --user stop t3code.service" ||
         command === "systemctl --user disable --now t3code.service" ||
         command === "systemctl --user restart --no-block t3code.service" ||
-        command.startsWith("launchctl bootout --wait ") ||
+        isLaunchdBootout ||
         (input.command === "schtasks" && input.args[0] === "/End")
       ) {
         markersAtStop.push(yield* fs.exists(marker));
@@ -355,8 +354,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       if (command === "systemctl --user stop t3code.service") control.active = false;
       if (
         control.stateAfterStop !== undefined &&
-        (command === "systemctl --user stop t3code.service" ||
-          command.startsWith("launchctl bootout "))
+        (command === "systemctl --user stop t3code.service" || isLaunchdBootout)
       ) {
         yield* fs.writeFileString(statePath, control.stateAfterStop);
       }

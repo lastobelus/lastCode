@@ -1,9 +1,10 @@
+import { useGT, useMessages } from "gt-react";
 import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
 import { configurableThreadStatuses } from "../Sidebar.logic";
 import { ThreadStatusGlyph } from "../ThreadStatusGlyph";
 import { lastCodeStatusIcon } from "../../lastcodeStatusIcons";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
 
 const ICON_OPTIONS = (
@@ -17,15 +18,20 @@ const ICON_OPTIONS = (
 );
 
 export function LastCodeStatusIconSettings() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const resolve = useMessages();
   const { lastcodeStatusIcons } = usePrimarySettings();
   return (
     <SettingsRow
       {...searchableSetting("status-icons")}
-      description="Choose a shape for each agent status. Colors and meanings stay the same. New statuses start with a solid circle."
+      description={gt(
+        "Choose a shape for each agent status. Colors and meanings stay the same. New statuses start with a solid circle.",
+      )}
       resetAction={
         Object.keys(lastcodeStatusIcons).length > 0 ? (
           <SettingResetButton
-            label="status icons"
+            ariaLabel={gt("Reset status icons to default")}
             onClick={() => updateClientSettings({ lastcodeStatusIcons: {} })}
           />
         ) : null
@@ -33,6 +39,7 @@ export function LastCodeStatusIconSettings() {
     >
       <div className="divide-y divide-border/40">
         {configurableThreadStatuses.map((status) => {
+          const label = resolve(status.label);
           const icon = lastCodeStatusIcon(status.label, lastcodeStatusIcons);
           const value = `${icon.shape}-${icon.style}`;
           return (
@@ -41,7 +48,7 @@ export function LastCodeStatusIconSettings() {
                 <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
                   <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} />
                 </span>
-                {status.label}
+                {label}
               </span>
               <Select
                 value={value}
@@ -59,7 +66,7 @@ export function LastCodeStatusIconSettings() {
                 <SelectTrigger
                   size="sm"
                   className="w-44"
-                  aria-label={`${status.label} status icon`}
+                  aria-label={gt("{status} status icon", { status: label })}
                 >
                   <SelectValue>
                     {ICON_OPTIONS.find((option) => option.value === value)?.label}

@@ -3,9 +3,11 @@ import {
   AuthTerminalOperateScope,
   AuthTerminalReadScope,
   type ActionResumeState,
+  type ActionResumeStatus,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
+import { msg } from "gt-react";
 import { useState } from "react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -13,6 +15,8 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+
+import { m } from "~/i18n/messages";
 
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
@@ -22,8 +26,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { useTerminalUiStateStore } from "../../terminalUiStateStore";
 import {
-  heldActionBanner,
   interruptedActionBanner,
+  pendingActionBanner,
   runningActionBanner,
 } from "./ComposerActionResume";
 
@@ -33,6 +37,7 @@ interface ActionResumeBannerInput {
   readonly routeThreadRef: ScopedThreadRef;
   readonly threadRef: ScopedThreadRef | null;
   readonly action: ActionResumeState | null;
+  readonly status: ActionResumeStatus | null;
   readonly onRequestTerminalFocus: (terminalId: string) => void;
   readonly onThreadError: (threadId: ThreadId | null, error: string | null) => void;
 }
@@ -47,7 +52,7 @@ function reportActionFailure(
   if (result._tag !== "Failure") return;
   if (isAtomCommandInterrupted(result)) return;
   const error = squashAtomCommandFailure(result);
-  onThreadError(threadId, error instanceof Error ? error.message : fallback);
+  onThreadError(threadId, error instanceof Error ? error.message : m(fallback));
 }
 
 function useRunningActionControl({
@@ -59,16 +64,16 @@ function useRunningActionControl({
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
   const ensureTerminal = useTerminalUiStateStore((state) => state.ensureTerminal);
   const [cancellingRunId, setCancellingRunId] = useState<string | null>(null);
-  const running = action?.outcome === "running" ? action : null;
+  const running = action?.outcome === "running" && action.delivery === "armed" ? action : null;
   const environmentId = threadRef?.environmentId ?? null;
   const canRead = useEnvironmentScope(environmentId, AuthTerminalReadScope);
   const canOperate = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
 
   const openTerminal = useStableCallback(() => {
-    if (threadRef === null || running === null) return;
+    if (threadRef === null || action === null || action.threadId !== threadRef.threadId) return;
     if (!readEnvironmentScope(threadRef.environmentId, AuthTerminalReadScope)) return;
-    ensureTerminal(threadRef, running.terminalId, { open: true, active: true });
-    onRequestTerminalFocus(running.terminalId);
+    ensureTerminal(threadRef, action.terminalId, { open: true, active: true });
+    onRequestTerminalFocus(action.terminalId);
   });
   const cancel = useStableCallback(async () => {
     if (threadRef === null || running === null) return;
@@ -87,7 +92,7 @@ function useRunningActionControl({
         result,
         threadRef.threadId,
         onThreadError,
-        "Failed to cancel the running Action.",
+        msg("Failed to cancel the running Action."),
       );
     })().finally(() => {
       setCancellingRunId((current) => (current === runId ? null : current));
@@ -141,7 +146,9 @@ function useInterruptedActionDelivery({
       result,
       threadRef.threadId,
       onThreadError,
-      `Failed to ${operation} the interrupted Action.`,
+      operation === "resume"
+        ? msg("Failed to resume the interrupted Action.")
+        : msg("Failed to discard the interrupted Action."),
     );
   }
   const deliverStable = useStableCallback(deliver);
@@ -158,8 +165,13 @@ export function useActionResumeBanners(input: ActionResumeBannerInput) {
   const running = useRunningActionControl(input);
   const interrupted = useInterruptedActionDelivery(input);
   return {
-    runningBanner: runningActionBanner(running),
-    interruptedBanner: interruptedActionBanner(interrupted),
-    heldBanner: heldActionBanner(input.action),
+    runningBanner: runningActionBanner({ ...running, status: input.status }),
+    pendingBanner: pendingActionBanner({
+      action: input.action,
+      status: input.status,
+      canRead: running.canRead,
+      onOpenTerminal: running.onOpenTerminal,
+    }),
+    interruptedBanner: interruptedActionBanner({ ...interrupted, status: input.status }),
   };
 }

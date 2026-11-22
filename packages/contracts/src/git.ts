@@ -377,8 +377,10 @@ export const GitCommandFailureReason = Schema.Literals([
   "push_rejected_non_fast_forward",
   "ref_name_conflict",
   "ref_not_found",
+  "ref_update_rejected_by_hook",
   "remote_unreachable",
   "tag_would_be_clobbered",
+  "timed_out",
 ]);
 export type GitCommandFailureReason = typeof GitCommandFailureReason.Type;
 
@@ -396,7 +398,8 @@ export class GitCommandError extends Schema.TaggedError<GitCommandError>()("GitC
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
-    const reason = this.reason === undefined ? "" : ` (${this.reason})`;
+    const reason =
+      this.reason === undefined || this.reason === "timed_out" ? "" : ` (${this.reason})`;
     return `Git command failed in ${this.operation} (${this.cwd}): ${this.detail}${reason}`;
   }
 }
@@ -405,6 +408,7 @@ export class TextGenerationError extends Schema.TaggedError<TextGenerationError>
   "TextGenerationError",
   {
     operation: Schema.String,
+    reason: Schema.optional(Schema.Literal("prompt-mining-unsupported")),
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),
   },
