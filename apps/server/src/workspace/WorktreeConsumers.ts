@@ -6,6 +6,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeBuffer from "node:buffer";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import {
@@ -550,15 +551,19 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
     }),
   );
   const targets: TargetObservation = { targets: new WeakMap(), sweep };
-  return {
-    paths,
-    targets,
-    annotate: Effect.suspend(() =>
+  const annotate = (partial: boolean) =>
+    Effect.suspend(() =>
       Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
         ...measurement,
         uniquePaths: sweep.resolvedPaths.size,
+        partial,
       }),
-    ),
+    );
+  return {
+    paths,
+    targets,
+    annotate: annotate(false),
+    annotateOnExit: (exit: Exit.Exit<unknown, unknown>) => annotate(Exit.hasInterrupts(exit)),
   };
 });
 

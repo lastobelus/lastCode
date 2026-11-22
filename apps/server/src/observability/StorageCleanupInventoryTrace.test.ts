@@ -14,6 +14,7 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
     endTimeUnixNano: "1000000",
   };
   const metrics = {
+    partial: false,
     processCaptures: 1,
     processCaptureMs: 12,
     uniquePaths: 90,
@@ -30,7 +31,7 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
   summarizer.addLine(JSON.stringify(span));
   const measurements = [
     metrics,
-    { ...metrics, processCaptures: 2, pathResolutions: 123 },
+    { ...metrics, processCaptures: 2, pathResolutions: 123, partial: true },
     emptyStorageCleanupInventoryTrace(),
     "malformed",
   ];
@@ -60,6 +61,8 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
   );
   const formatted = formatTraceSummary(summary, 25);
   assert.include(formatted, "Storage cleanup usage inventory by sweep");
+  assert.include(formatted, "1970-01-01T00:00:02.000Z (partial)");
+  assert.notInclude(formatted, "1970-01-01T00:00:03.000Z (partial)");
   assert.include(formatted, "Native capture attempts  0 in 0ms");
   assert.include(formatted, "Native capture attempts  2 in 12ms");
   assert.include(formatted, "Native capture attempts  1 in 12ms");

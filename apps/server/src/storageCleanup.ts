@@ -4724,6 +4724,7 @@ const make = Effect.gen(function* () {
       paths: observationProcessPaths,
       targets: observationTargets,
       annotate: annotateInventory,
+      annotateOnExit: finalizeInventory,
     } = yield* WorktreeConsumers.makeSweepObservation(processPaths);
     yield* annotateInventory;
     const deletionsAtStart = deletions;
@@ -4825,9 +4826,8 @@ const make = Effect.gen(function* () {
       ),
       Effect.when(Effect.succeed(runOutputs)),
     );
-    yield* dependencyOutputs.pipe(
-      Effect.andThen(generatedOutputs),
-      Effect.ensuring(annotateInventory),
+    yield* Effect.onExit(dependencyOutputs.pipe(Effect.andThen(generatedOutputs)), (exit) =>
+      finalizeInventory(exit),
     );
     const deletedWorktrees = yield* cleanWorktrees(
       serverSettings,

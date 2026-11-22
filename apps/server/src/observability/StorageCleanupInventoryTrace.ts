@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 export const STORAGE_CLEANUP_INVENTORY_ATTRIBUTE = "storage_cleanup.inventory";
 
 const StorageCleanupInventoryTrace = Schema.Struct({
+  partial: Schema.Boolean,
   processCaptures: Schema.Finite,
   processCaptureMs: Schema.Finite,
   uniquePaths: Schema.Finite,
@@ -19,6 +20,7 @@ const StorageCleanupInventoryTrace = Schema.Struct({
 });
 
 export const emptyStorageCleanupInventoryTrace = () => ({
+  partial: false,
   processCaptures: 0,
   processCaptureMs: 0,
   uniquePaths: 0,
@@ -63,7 +65,7 @@ export const formatStorageCleanupInventory = (
         "",
         "Storage cleanup usage inventory by sweep",
         ...sweeps.flatMap(({ endMs, inventory }) => [
-          `  ${formatEnd(endMs)}`,
+          `  ${formatEnd(endMs)}${inventory.partial ? " (partial)" : ""}`,
           `    Native capture attempts  ${inventory.processCaptures} in ${formatMs(inventory.processCaptureMs)}`,
           `    Path resolutions         ${inventory.pathResolutions} for ${inventory.uniquePaths} distinct paths in ${formatMs(inventory.pathResolutionMs)}`,
           `    Cached path checks       ${inventory.cachedPathChecks} in ${formatMs(inventory.cachedPathCheckMs)}`,
