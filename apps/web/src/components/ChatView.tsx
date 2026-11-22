@@ -40,6 +40,7 @@ import { useComposerResume } from "./chat/useComposerResume";
 import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
+import { useActionResumeBanners } from "./chat/useActionResumeBanners";
 import { useUsageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   isThreadEnvironmentLocked,
@@ -238,7 +239,7 @@ import { useWorktreeRepositoryChoices } from "../hooks/useWorktreeRepositoryChoi
 import { useRememberedWorktreeRepositories } from "../worktreeRepositoryChoiceStore";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { isPreviewFocused } from "../lib/previewFocus";
-import { getTerminalFocusOwner } from "../lib/terminalFocus";
+import { focusTerminal, getTerminalFocusOwner } from "../lib/terminalFocus";
 import { draftModelSelectionApplies, threadHasStarted } from "../lib/chatThreadActions";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -2579,6 +2580,19 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     persistThreadSettingsForNextTurn,
   });
+  const {
+    runningBanner: runningResumableActionBannerItem,
+    interruptedBanner: interruptedActionBannerItem,
+    heldBanner: heldActionBannerItem,
+  } = useActionResumeBanners({
+    routeThreadRef,
+    threadRef: activeThreadRef,
+    action: activeThreadShell?.actionResume ?? null,
+    onRequestTerminalFocus: (terminalId) => {
+      if (activeThreadRef) focusTerminal(activeThreadRef, terminalId);
+    },
+    onThreadError: setThreadError,
+  });
   const activeThreadHasCompactableConversation = hasCompactableConversation({
     visibleTurnItems: serverVisibleTurnItems,
     hasMoreHistory: serverThreadHistory.hasMoreHistory,
@@ -2762,6 +2776,11 @@ export default function ChatView(props: ChatViewProps) {
       deriveProviderExtensionStatuses(serverProjection),
     );
     const extensionStatusItems = extensionStatusBanner === null ? [] : [extensionStatusBanner];
+    const interruptedActionItems =
+      interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
+    const heldActionItems = heldActionBannerItem === null ? [] : [heldActionBannerItem];
+    const runningActionItems =
+      runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     // An approval's feedback goes to that approval; the armed session waits for the next message.
@@ -2779,6 +2798,9 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...freshSessionItems,
         ...systemComposerBannerItems,
+        ...interruptedActionItems,
+        ...heldActionItems,
+        ...runningActionItems,
       ];
     }
     return [
@@ -2790,6 +2812,9 @@ export default function ChatView(props: ChatViewProps) {
       ...projectCloneItems,
       ...freshSessionItems,
       ...systemComposerBannerItems,
+      ...interruptedActionItems,
+      ...heldActionItems,
+      ...runningActionItems,
       branchMismatchBannerItem(
         {
           mismatchKey: activeBranchMismatchKey,

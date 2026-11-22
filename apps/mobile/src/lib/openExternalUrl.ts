@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import { Linking } from "react-native";
 
 const ExternalUrlTarget = Schema.Literals([
+  "action-report",
   "file-preview",
   "markdown-link",
   "pull-request",
