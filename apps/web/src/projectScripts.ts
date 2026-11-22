@@ -17,6 +17,7 @@ export interface ProjectScriptInput {
   readonly stopOnSettle?: boolean;
   readonly previewUrl: Exclude<ProjectScript["previewUrl"], undefined> | null;
   readonly autoOpenPreview: boolean;
+  readonly allowAgentResume?: boolean;
 }
 
 export function buildProjectScript(id: string, input: ProjectScriptInput): ProjectScript {
@@ -29,6 +30,7 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
     ...(input.runOnWorktreeCreate && input.waitForSetup ? { async: false } : {}),
     ...(input.runOnSettle ? { runOnSettle: true } : {}),
     ...(input.stopOnSettle ? { stopOnSettle: true } : {}),
+    ...(input.allowAgentResume ? { allowAgentResume: true } : {}),
     ...(input.previewUrl === null
       ? {}
       : {
