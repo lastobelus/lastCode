@@ -1085,6 +1085,7 @@ export function compileCarrySetSameBase(input: CompileCarrySetInput): CarryRepla
 interface RegroupConflict {
   readonly diagnosis: string;
   readonly advice: string;
+  readonly fileHistory: string;
 }
 
 // @effect-diagnostics-next-line extendsNativeError:off -- Plain Git orchestration; callers use instanceof.
@@ -1093,6 +1094,7 @@ export class CarryReplayConflictError extends Error {
   readonly diagnosis: string;
   // Retagging applies only to unmerged sources, so callers decide whether to show it.
   readonly advice: string;
+  readonly fileHistory: string;
   readonly gitOutput: string;
 
   constructor(conflict: RegroupConflict, gitOutput: string, options?: ErrorOptions) {
@@ -1100,6 +1102,7 @@ export class CarryReplayConflictError extends Error {
     super(`Git output:\n${gitOutput}\n${conflict.diagnosis}`, options);
     this.diagnosis = conflict.diagnosis;
     this.advice = conflict.advice;
+    this.fileHistory = conflict.fileHistory;
     this.gitOutput = gitOutput;
   }
 }
@@ -1205,7 +1208,8 @@ function describeRegroupConflict(
     .filter(Boolean);
   if (!current?.metadata || !parent || files.length === 0) return undefined;
   const rank = (group: CarryReplayGroup) => CARRY_REPLAY_GROUPS.indexOf(group);
-  const candidates = items.slice(0, index).filter((item) => rank(item.group) > rank(current.group));
+  const earlier = items.slice(0, index);
+  const candidates = earlier.filter((item) => rank(item.group) > rank(current.group));
   if (candidates.length === 0) return undefined;
 
   // History names a contribution by its source commit, or by the squash or compiled
@@ -1243,7 +1247,7 @@ function describeRegroupConflict(
   };
   const touchedBy = changedPaths(
     repo,
-    candidates.map((item) => item.commit),
+    earlier.map((item) => item.commit),
     files,
   );
 
@@ -1297,6 +1301,20 @@ function describeRegroupConflict(
   const following = followers.filter((item) => followerPaths.has(item.commit));
   const replaying = current.metadata.sourceCommit.slice(0, 12);
   return {
+    fileHistory: [
+      "Carry groups that previously changed each conflicted file:",
+      ...files.map((path) => {
+        const groups = new Set(
+          earlier
+            .filter((item) => touchedBy.get(item.commit)?.includes(path))
+            .map((item) => item.group),
+        );
+        const labels = CARRY_REPLAY_GROUPS.filter((group) => groups.has(group)).map((group) =>
+          rank(group) > rank(current.group) ? `${group} (replays after ${current.group})` : group,
+        );
+        return `- ${path}: ${labels.join(", ") || "none found"}`;
+      }),
+    ].join("\n"),
     diagnosis: [
       `Carry replay conflicted in ${files.join(", ")} while replaying ${label(current)}.`,
       "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
