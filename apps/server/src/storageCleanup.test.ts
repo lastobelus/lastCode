@@ -47,6 +47,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { ServerEnvironmentIdentity } from "./environment/ServerEnvironment.ts";
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import { BACKUP_RETRY_DELAY, TimeMachineBackupStatus } from "./storageCleanupSchedule.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as PreviewHosting from "./preview/Hosting.ts";
@@ -443,7 +444,7 @@ const cleanupFixture = (
   logsDir?: string,
   registry?: SuspensionRegistry.WorktreeSuspensionRegistry["Service"],
   // Most tests exercise the sweep itself, so they start it on activation.
-  firstSweepDelay: Duration.Duration = Duration.zero,
+  firstSweepDelay: Duration.Duration | null = Duration.zero,
   realSuspension = false,
   worktreeDevHome = false,
   sqlOverride?: SqlClient.SqlClient,
@@ -5595,6 +5596,106 @@ describe("saved workspace retention across cleanup resources", () => {
 });
 
 describe("automatic cleanup churn", () => {
+  it.effect("changes the running timer and alternates the periodic cleanup groups", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture(
+          {
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            worktreeDependenciesAfterDays: 8,
+            logsAfterDays: 8,
+          },
+          undefined,
+          undefined,
+          undefined,
+          null,
+        );
+        yield* fixture.enableDependencies;
+        const reports = yield* Queue.unbounded<StorageCleanupReport>();
+        yield* fixture.service.reports.pipe(
+          Stream.filter(
+            (report): report is StorageCleanupReport => report?.trigger === "automatic",
+          ),
+          Stream.runForEach((report) => Queue.offer(reports, report)),
+          Effect.forkScoped,
+        );
+        yield* fixture.activate();
+        yield* fixture.publishSettings({
+          ...fixture.settings,
+          storageCleanupSchedule: {
+            intervalMinutes: 10,
+            alternateGroups: true,
+            deferDuringTimeMachine: false,
+          },
+        });
+        yield* TestClock.adjust("9 minutes");
+        expect(yield* fixture.service.latestReport).toBeNull();
+        yield* TestClock.adjust("1 minute");
+        const outputs = yield* Queue.take(reports);
+        yield* fixture.service.drain;
+        expect(outputs.entries.some((entry) => entry.worktreeResource === "dependencies")).toBe(
+          true,
+        );
+        expect(outputs.entries.some((entry) => entry.kind === "logs")).toBe(false);
+        expect(fixture.suspensionSweeps()).toBe(0);
+        yield* TestClock.adjust("10 minutes");
+        const housekeeping = yield* Queue.take(reports);
+        yield* fixture.service.drain;
+        expect(housekeeping.entries.some((entry) => entry.kind === "logs")).toBe(true);
+        expect(
+          housekeeping.entries.some((entry) => entry.worktreeResource === "dependencies"),
+        ).toBe(false);
+        expect(fixture.suspensionSweeps()).toBe(1);
+      }),
+    ),
+  );
+
+  it.effect("defers automatic cleanup for backup and runs the same group after the backup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        let backupRunning = true;
+        const probes = yield* Queue.unbounded<void>();
+        const fixture = yield* cleanupFixture().pipe(
+          Effect.provideService(
+            TimeMachineBackupStatus,
+            Effect.gen(function* () {
+              yield* Queue.offer(probes, undefined);
+              return backupRunning ? "running" : "idle";
+            }),
+          ),
+        );
+        fixture.setSettings({
+          storageCleanupSchedule: {
+            intervalMinutes: 60,
+            alternateGroups: true,
+            deferDuringTimeMachine: true,
+          },
+        });
+        const reports = yield* Queue.unbounded<StorageCleanupReport>();
+        yield* fixture.service.reports.pipe(
+          Stream.filter(
+            (report): report is StorageCleanupReport => report?.trigger === "automatic",
+          ),
+          Stream.runForEach((report) => Queue.offer(reports, report)),
+          Effect.forkScoped,
+        );
+        yield* fixture.activate();
+        yield* Queue.take(probes);
+        yield* fixture.service.drain;
+        expect(yield* fixture.service.latestReport).toBeNull();
+        expect((yield* fixture.service.runNow).trigger).toBe("manual");
+        expect(fixture.suspensionSweeps()).toBe(1);
+        backupRunning = false;
+        yield* TestClock.adjust(BACKUP_RETRY_DELAY);
+        yield* Queue.take(probes);
+        expect((yield* Queue.take(reports)).trigger).toBe("automatic");
+        expect(fixture.suspensionSweeps()).toBe(1);
+      }),
+    ),
+  );
+
   it.live("does not start another pass for provider updates after cleanup becomes idle", () =>
     runCleanupTest(
       Effect.gen(function* () {

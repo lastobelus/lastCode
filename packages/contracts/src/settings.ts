@@ -5,6 +5,10 @@ import {
   LastCodePullRequestWatchQuietMinutes,
 } from "./lastcodePullRequestWatchSettings.ts";
 import {
+  StorageCleanupSchedule,
+  StorageCleanupSchedulePatch,
+} from "./lastcodeStorageCleanupSchedule.ts";
+import {
   AuthOrchestrationOperateScope,
   AuthAccessWriteScope,
   AuthSettingsWriteScope,
@@ -1593,6 +1597,9 @@ export const ServerSettings = Schema.Struct({
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
   ),
+  storageCleanupSchedule: StorageCleanupSchedule.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSchedule)({}))),
+  ),
 
   worktreesDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** macOS only, Labs beta: clone new worktrees from a cached checkout instead of writing every file. */
@@ -2087,6 +2094,7 @@ export const ServerSettingsPatch = Schema.Struct({
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
     }),
   ),
+  storageCleanupSchedule: Schema.optionalKey(StorageCleanupSchedulePatch),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   fastWorktreeCheckout: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),

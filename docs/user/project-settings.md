@@ -235,8 +235,15 @@ repositories whose checkout settings changed.
 ## Storage cleanup
 
 Open **Settings → Worktrees → Cleanup** to enable automatic cleanup on one machine or all connected
-environments. Policies are off by default and run on the server at startup, when changed, and
-hourly. Offline machines keep their existing policies.
+environments. Rules start off. The server runs enabled rules on a schedule and after relevant
+policy or worktree changes. Offline machines keep their existing policies.
+
+Use **Settings → Maintenance → Automatic cleanup** to set the minutes between scheduled runs.
+The default is a full sweep every 60 minutes. Turn on **Alternate what gets cleaned** to run
+dependency and build cleanup on one scheduled run and the rest on the next. On macOS,
+**Wait for Time Machine** delays automatic cleanup while a backup is running or macOS cannot
+report its status. LastCode checks again every five minutes. **Delete now** runs a full sweep
+when you ask for it.
 
 ### Suspend worktrees
 

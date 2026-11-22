@@ -5642,5 +5642,11 @@
   "316f8522bfd81a31": "Behöver granskas",
   "90585f4150afc7b3": "Arkiverad",
   "3e1e0b6403613eb7": "Återställd",
-  "b6faf2dda56a211c": "Trådfamiljen har ändrats. Granska arkivbekräftelsen igen."
+  "b6faf2dda56a211c": "Trådfamiljen har ändrats. Granska arkivbekräftelsen igen.",
+  "8889777aa07548c9": "Minuter mellan städningar",
+  "b04a9aab9f32773a": "Växla vad som städas",
+  "bac896cff1757092": "Städa beroenden och byggfiler vid en körning och resten vid nästa.",
+  "b11a5a9cdadd6fd9": "Vänta på Time Machine",
+  "0ae8309282491222": "Vänta med automatisk städning tills Time Machine har säkerhetskopierat klart.",
+  "4b7fa11e6142029c": "Automatisk städning"
 }

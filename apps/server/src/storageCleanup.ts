@@ -55,8 +55,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
 import type { PlatformError } from "effect/PlatformError";
-import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -96,6 +96,15 @@ import { WorktreeSuspension } from "./workspace/WorktreeSuspension.ts";
 import { WorktreeSuspensionRegistry } from "./workspace/WorktreeSuspensionRegistry.ts";
 import { canonicalProjectRoot, withProjectRootLease } from "./workspace/projectRootLease.ts";
 import { isDisposableFinderMetadata } from "./workspace/disposableFinderMetadata.ts";
+import {
+  BACKUP_RETRY_DELAY,
+  cleanupSweepGroup,
+  mergeSweepRequests,
+  runCleanupTimer,
+  TimeMachineBackupStatus,
+  type AutomaticSweepRequest,
+  type ScheduledSweepGroup,
+} from "./storageCleanupSchedule.ts";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -150,11 +159,6 @@ type CleanupWorkingEntry = {
 
 type AutomaticOutputWork = {
   readonly paths: ReadonlySet<string> | null;
-};
-
-type AutomaticSweepRequest = {
-  readonly full: boolean;
-  readonly targetPaths: ReadonlyArray<string>;
 };
 
 type OwnershipScope = {
@@ -410,12 +414,10 @@ export class StorageCleanup extends Context.Service<
   }
 >()("t3/storageCleanup") {}
 
-const SWEEP_INTERVAL = Duration.hours(1);
-
 /** Wait before the first automatic sweep. Launch already does heavy Git work, and relaunching must not restart a full sweep. */
-export class FirstAutomaticSweepDelay extends Context.Reference<Duration.Duration>(
+export class FirstAutomaticSweepDelay extends Context.Reference<Duration.Duration | null>(
   "t3/storageCleanup/FirstAutomaticSweepDelay",
-  { defaultValue: () => SWEEP_INTERVAL },
+  { defaultValue: () => null },
 ) {}
 
 const make = Effect.gen(function* () {
@@ -4711,6 +4713,7 @@ const make = Effect.gen(function* () {
   let deletions = 0;
   let sweptDeletions = 0;
   let sweepSequence = 0;
+  let nextScheduledGroup: ScheduledSweepGroup = "outputs";
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
     automaticRequest?: AutomaticSweepRequest,
@@ -4721,6 +4724,14 @@ const make = Effect.gen(function* () {
     const settings = serverSettings.storageCleanup;
     const runId = `${now}-${++sweepSequence}`;
     const entries: CleanupWorkingEntry[] = [];
+    const scheduled = automaticRequest?.scheduled === true;
+    const scheduledGroup = cleanupSweepGroup(
+      automaticRequest,
+      serverSettings.storageCleanupSchedule.alternateGroups,
+      nextScheduledGroup,
+    );
+    const runOutputs = scheduledGroup !== "housekeeping";
+    const runHousekeeping = scheduledGroup !== "outputs";
     // One lazy observation for both resource passes; retain the original array's
     // native identity metadata. Final removal scans remain independent and fresh.
     const observationProcessPaths = yield* Effect.cached(processPaths);
@@ -4729,7 +4740,7 @@ const make = Effect.gen(function* () {
       trigger === "automatic"
         ? {
             paths:
-              automaticRequest?.full === true
+              automaticRequest?.full === true || scheduled
                 ? null
                 : new Set(
                     yield* Effect.forEach(
@@ -4743,11 +4754,13 @@ const make = Effect.gen(function* () {
       event: "sweep-start",
       runId,
       trigger,
+      group: scheduledGroup,
       startedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
       settings,
     });
     yield* cleanCheckpointRefs().pipe(
       Effect.catch((cause) => Effect.logWarning("checkpoint ref cleanup failed", { cause })),
+      Effect.when(Effect.succeed(runHousekeeping)),
     );
     yield* cleanDisposableOutputs(
       serverSettings,
@@ -4778,6 +4791,7 @@ const make = Effect.gen(function* () {
           yield* Effect.logWarning("dependency cleanup failed", { error });
         }),
       ),
+      Effect.when(Effect.succeed(runOutputs)),
     );
     yield* cleanDisposableOutputs(
       serverSettings,
@@ -4805,6 +4819,7 @@ const make = Effect.gen(function* () {
           }),
         ),
       ),
+      Effect.when(Effect.succeed(runOutputs)),
     );
     const deletedWorktrees = yield* cleanWorktrees(
       serverSettings,
@@ -4832,15 +4847,18 @@ const make = Effect.gen(function* () {
           return { waiting: true, kept: [] };
         }),
       ),
+      Effect.when(Effect.succeed(runHousekeeping)),
     );
     // A targeted pass cannot replace retry knowledge for other deleted worktrees.
-    if (automaticWork?.paths == null) {
-      deletedWorktreeWaits = deletedWorktrees.waiting;
-      keptDeletedWorktrees = deletedWorktrees.kept;
+    if (Option.isSome(deletedWorktrees) && automaticWork?.paths == null) {
+      deletedWorktreeWaits = deletedWorktrees.value.waiting;
+      keptDeletedWorktrees = deletedWorktrees.value.kept;
       sweptDeletions = deletionsAtStart;
     }
-    if (trigger === "manual" || automaticRequest?.full === true) yield* savedWorkspaces.sweep;
+    if (runHousekeeping && (trigger === "manual" || automaticRequest?.full === true || scheduled))
+      yield* savedWorkspaces.sweep;
     if (
+      runHousekeeping &&
       automaticWork?.paths == null &&
       (trigger === "manual" ||
         anyWorktreePolicy(
@@ -4883,7 +4901,7 @@ const make = Effect.gen(function* () {
         label: "rotated logs",
       },
     ]) {
-      if (category.days === null || automaticWork?.paths != null) continue;
+      if (!runHousekeeping || category.days === null || automaticWork?.paths != null) continue;
       const removed = { files: 0, bytes: 0 };
       yield* cleanFiles(category.root, category.days, now, category.kind === "logs", removed).pipe(
         Effect.map(({ files, bytes }) =>
@@ -4973,60 +4991,71 @@ const make = Effect.gen(function* () {
       omittedCount: latestReport.omittedCount,
     });
     yield* SubscriptionRef.set(reportRef, latestReport);
+    if (scheduledGroup !== "all")
+      nextScheduledGroup = scheduledGroup === "outputs" ? "housekeeping" : "outputs";
     return latestReport;
   });
-  const automaticSweepState = yield* Ref.make<"idle" | "queued" | "running" | "followup">("idle");
+  const automaticSweepState = yield* Ref.make<
+    "idle" | "queued" | "running" | "followup" | "backup"
+  >("idle");
+  const backupRetries = yield* Queue.sliding<void>(1);
+  const timeMachineStatus = yield* TimeMachineBackupStatus;
   const emptyAutomaticRequest: AutomaticSweepRequest = {
     full: false,
+    scheduled: false,
     targetPaths: [],
   };
   const pendingAutomaticRequest = yield* Ref.make(emptyAutomaticRequest);
+  const automaticSweep = Effect.gen(function* () {
+    yield* Ref.set(automaticSweepState, "running");
+    const request = yield* Ref.getAndSet(pendingAutomaticRequest, emptyAutomaticRequest);
+    const { storageCleanupSchedule } = yield* settingsService.getSettings;
+    if (storageCleanupSchedule.deferDuringTimeMachine) {
+      const status = yield* timeMachineStatus;
+      if (status !== "idle") {
+        yield* Ref.update(pendingAutomaticRequest, (pending) =>
+          mergeSweepRequests(pending, request),
+        );
+        yield* Ref.set(automaticSweepState, "backup");
+        yield* Queue.offer(backupRetries, undefined);
+        yield* Effect.logDebug("Automatic cleanup deferred for Time Machine", { status });
+        return;
+      }
+    }
+    yield* sweep("automatic", request);
+  });
   const worker: DrainableWorker<
     Deferred.Deferred<StorageCleanupReport, ServerSettingsError> | undefined
   > = yield* makeDrainableWorker(
     (completion: Deferred.Deferred<StorageCleanupReport, ServerSettingsError> | undefined) =>
-      (completion === undefined
-        ? Effect.gen(function* () {
-            yield* Ref.set(automaticSweepState, "running");
-            const request = yield* Ref.getAndSet(pendingAutomaticRequest, emptyAutomaticRequest);
-            return yield* sweep("automatic", request);
-          })
-        : sweep("manual")
-      ).pipe(
-        Effect.exit,
-        Effect.flatMap((exit) =>
-          completion === undefined
-            ? exit.pipe(
-                Effect.asVoid,
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("storage cleanup failed", { cause }),
-                ),
-              )
-            : Deferred.done(completion, exit).pipe(Effect.asVoid),
-        ),
-        Effect.ensuring(
-          completion === undefined
-            ? Ref.modify(automaticSweepState, (state) =>
-                state === "followup" ? [true, "queued" as const] : [false, "idle" as const],
-              ).pipe(Effect.flatMap((again) => (again ? worker.enqueue(undefined) : Effect.void)))
-            : Effect.void,
-        ),
-      ),
+      completion === undefined
+        ? automaticSweep.pipe(
+            Effect.catchCause((cause) => Effect.logWarning("storage cleanup failed", { cause })),
+            Effect.ensuring(
+              Ref.modify(automaticSweepState, (state) =>
+                state === "followup"
+                  ? [true, "queued" as const]
+                  : [false, state === "backup" ? state : ("idle" as const)],
+              ).pipe(Effect.flatMap((again) => (again ? worker.enqueue(undefined) : Effect.void))),
+            ),
+          )
+        : sweep("manual").pipe(
+            Effect.exit,
+            Effect.flatMap((exit) => Deferred.done(completion, exit)),
+            Effect.asVoid,
+          ),
   );
   const requestSweep = Effect.fn("StorageCleanup.requestSweep")(function* (
     followup: boolean,
     request: Partial<AutomaticSweepRequest>,
   ) {
-    yield* Ref.update(pendingAutomaticRequest, (pending) => ({
-      full: pending.full || request.full === true,
-      targetPaths: [...new Set([...pending.targetPaths, ...(request.targetPaths ?? [])])],
-    }));
+    yield* Ref.update(pendingAutomaticRequest, (pending) => mergeSweepRequests(pending, request));
     const enqueue = yield* Ref.modify(automaticSweepState, (state) =>
       state === "idle"
         ? [true, "queued" as const]
         : [
             false,
-            (followup || request.full === true) && state === "running"
+            (followup || request.full === true || request.scheduled === true) && state === "running"
               ? ("followup" as const)
               : state,
           ],
@@ -5119,27 +5148,48 @@ const make = Effect.gen(function* () {
     const changes = yield* settingsService.subscribeChanges;
     const events = engine.streamDomainEvents;
     let lastSettings = yield* settingsService.getSettings.pipe(Effect.orDie);
+    const interval = () => Duration.minutes(lastSettings.storageCleanupSchedule.intervalMinutes);
+    const intervalChanges = yield* Queue.sliding<void>(1);
     const firstSweepDelay = yield* FirstAutomaticSweepDelay;
     yield* forkParked(
-      requestSweep(false, { full: true }).pipe(
-        Effect.andThen(worker.drain),
-        Effect.repeat(Schedule.spaced(SWEEP_INTERVAL)),
-        Effect.delay(firstSweepDelay),
-        Effect.asVoid,
+      runCleanupTimer(
+        firstSweepDelay ?? interval(),
+        interval,
+        intervalChanges,
+        requestSweep(false, { scheduled: true }).pipe(Effect.andThen(worker.drain)),
       ),
     );
     yield* forkParked(
-      Stream.runForEach(changes, (settings) => {
-        if (
-          Equal.equals(settings.storageCleanup, lastSettings.storageCleanup) &&
-          Equal.equals(settings.worktreeCleanup, lastSettings.worktreeCleanup) &&
-          Equal.equals(settings.worktreeSuspension, lastSettings.worktreeSuspension) &&
-          sameProjectWorktreePolicies(settings, lastSettings)
-        )
-          return Effect.void;
-        lastSettings = settings;
-        return requestSweep(true, { full: true });
-      }),
+      Queue.take(backupRetries).pipe(
+        Effect.andThen(Effect.sleep(BACKUP_RETRY_DELAY)),
+        Effect.andThen(
+          Ref.modify(automaticSweepState, (state) =>
+            state === "backup" ? [true, "queued" as const] : [false, state],
+          ),
+        ),
+        Effect.flatMap((retry) => (retry ? worker.enqueue(undefined) : Effect.void)),
+        Effect.forever,
+      ),
+    );
+    yield* forkParked(
+      Stream.runForEach(changes, (settings) =>
+        Effect.gen(function* () {
+          const previous = lastSettings;
+          lastSettings = settings;
+          if (
+            settings.storageCleanupSchedule.intervalMinutes !==
+            previous.storageCleanupSchedule.intervalMinutes
+          )
+            yield* Queue.offer(intervalChanges, undefined);
+          if (
+            !Equal.equals(settings.storageCleanup, previous.storageCleanup) ||
+            !Equal.equals(settings.worktreeCleanup, previous.worktreeCleanup) ||
+            !Equal.equals(settings.worktreeSuspension, previous.worktreeSuspension) ||
+            !sameProjectWorktreePolicies(settings, previous)
+          )
+            yield* requestSweep(true, { full: true });
+        }),
+      ),
     );
     yield* forkParked(
       Stream.runForEach(events, (event) =>

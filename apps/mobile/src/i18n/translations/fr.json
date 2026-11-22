@@ -5636,5 +5636,11 @@
   "316f8522bfd81a31": "À vérifier",
   "90585f4150afc7b3": "Archivé",
   "3e1e0b6403613eb7": "Restauré",
-  "b6faf2dda56a211c": "La famille de conversations a changé. Vérifiez à nouveau la confirmation d’archivage."
+  "b6faf2dda56a211c": "La famille de conversations a changé. Vérifiez à nouveau la confirmation d’archivage.",
+  "8889777aa07548c9": "Minutes entre les nettoyages",
+  "b04a9aab9f32773a": "Alterner les éléments à nettoyer",
+  "bac896cff1757092": "Nettoie les dépendances et les fichiers de compilation lors d’un passage, puis le reste au passage suivant.",
+  "b11a5a9cdadd6fd9": "Attendre Time Machine",
+  "0ae8309282491222": "Le nettoyage automatique attend la fin de la sauvegarde Time Machine.",
+  "4b7fa11e6142029c": "Nettoyage automatique"
 }

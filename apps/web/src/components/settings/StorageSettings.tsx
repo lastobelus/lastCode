@@ -53,6 +53,7 @@ import {
 import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
 import { LastCodeStorageSettings } from "./LastCodeStorageSettings";
 import { SavedWorkspacesSettings } from "./SavedWorkspacesSettings";
+import { StorageCleanupScheduleSettings } from "./StorageCleanupScheduleSettings";
 
 export function WorktreesDirectoryRow() {
   const setting = useSearchableSetting();
@@ -1098,6 +1099,7 @@ export function StorageCleanupSections() {
   return (
     <>
       {databaseStorageNotice}
+      <StorageCleanupScheduleSettings />
       <SettingsSection id="storage-artifacts" title={gt("Artifacts and logs")}>
         <AnimatedHeight>
           <SettingsRow
