@@ -1,0 +1,69 @@
+name: Advisory Server Pilot
+
+on:
+  pull_request:
+    branches: [lastcode/main]
+    paths:
+      - .github/workflows/server-test-pilot*.yml
+      - scripts/server-test-pilot*
+      - scripts/lib/server-test-pilot*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One bounded experiment per candidate. Superseding candidates cancel their
+# obsolete experiment; missing/cancelled receipts can never pass aggregation.
+concurrency:
+  group: server-pilot-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    uses: ./.github/workflows/server-test-pilot-worker.yml
+    with:
+      cohort: baseline
+
+  workers:
+    needs: baseline
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        cohort: ["1", "2"]
+    uses: ./.github/workflows/server-test-pilot-worker.yml
+    with:
+      cohort: ${{ matrix.cohort }}
+
+  aggregate:
+    name: Validate pilot evidence
+    needs: [baseline, workers]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pilot-*
+          path: pilot-results
+      - name: Require successful workers
+        env:
+          WORKERS_RESULT: ${{ needs.workers.result }}
+          BASELINE_RESULT: ${{ needs.baseline.result }}
+        run: |
+          test "$BASELINE_RESULT" = success
+          test "$WORKERS_RESULT" = success
+      - name: Verify coverage and compare results
+        run: node scripts/server-test-pilot-report.mjs pilot-results
+      - name: Retain combined evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pilot-evidence
+          path: pilot-results/
+          if-no-files-found: error
+          retention-days: 14

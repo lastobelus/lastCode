@@ -1,0 +1,48 @@
+name: Measure LastCode PR agent context
+description: Compare the exact proposed merge and base using their server source and dependencies.
+inputs:
+  base-sha:
+    description: Exact base commit of the proposed merge
+    required: true
+  allow-increase:
+    description: Whether the pull request has the agent-context-increase label
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Setup server dependencies
+      uses: ./.github/actions/setup-ci-deps
+      with:
+        install-args: --filter=t3...
+
+    - name: Measure proposed merge
+      shell: bash
+      working-directory: apps/server
+      run: node scripts/generate-agent-context-budget.ts
+
+    - name: Install base server dependencies
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+      run: |
+        test "$(git rev-parse HEAD^1)" = "$BASE_SHA"
+        base="$RUNNER_TEMP/agent-context-base"
+        git worktree add --quiet --detach "$base" "$BASE_SHA"
+        cd "$base"
+        base_node="$(jq -r '.engines.node' package.json)"
+        vp env exec --node "$base_node" pnpm install --frozen-lockfile --prefer-offline --filter=t3...
+
+    - name: Measure base
+      shell: bash
+      working-directory: ${{ runner.temp }}/agent-context-base/apps/server
+      run: |
+        base_node="$(jq -r '.engines.node' ../../package.json)"
+        vp env exec --node "$base_node" node scripts/generate-agent-context-budget.ts
+
+    - name: Compare measurements
+      shell: bash
+      env:
+        ALLOW_INCREASE: ${{ inputs.allow-increase }}
+      run: |
+        budget=apps/server/src/provider/agentContextBudget.json
+        node scripts/lastcode-agent-context-budget.ts "$RUNNER_TEMP/agent-context-base/$budget" "$budget"

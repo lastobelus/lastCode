@@ -7,8 +7,8 @@ import { lastCodeAction as defaultActionReporter } from "./lib/lastcode-action-k
 
 import { observeDependencyActivity } from "../packages/shared/src/dependencyActivity.ts";
 
-/** Install the target checkout's locked dependency graph without a separate readiness stamp. */
-export function prepareDependencies(cwd: string, execute = NodeChildProcess.spawnSync) {
+/** Check the target checkout's exact pnpm pin before a dependency operation. */
+export function verifyPnpmVersion(cwd: string, execute = NodeChildProcess.spawnSync) {
   const target = NodePath.resolve(cwd);
   const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(target, "package.json"), "utf8"));
   const pin =
@@ -21,9 +21,6 @@ export function prepareDependencies(cwd: string, execute = NodeChildProcess.spaw
     throw new Error("Expected an exact pnpm version in the target checkout's package.json.");
   }
   const packageManager = `pnpm@${pin[1]}`;
-  if (!NodeFS.existsSync(NodePath.join(target, "pnpm-lock.yaml"))) {
-    throw new Error("The target checkout has no pnpm-lock.yaml.");
-  }
   // oxlint-disable-next-line t3code/no-global-process-runtime -- This bootstrap must run without installed workspace dependencies.
   const options = { cwd: target, shell: process.platform === "win32" };
   const version = execute("pnpm", ["--version"], { ...options, encoding: "utf8" });
@@ -35,6 +32,16 @@ export function prepareDependencies(cwd: string, execute = NodeChildProcess.spaw
       `Dependency preparation requires ${packageManager}; found ${String(version.stdout).trim()}.`,
     );
   }
+  return options;
+}
+
+/** Install the target checkout's locked dependency graph without a separate readiness stamp. */
+export function prepareDependencies(cwd: string, execute = NodeChildProcess.spawnSync) {
+  const target = NodePath.resolve(cwd);
+  if (!NodeFS.existsSync(NodePath.join(target, "pnpm-lock.yaml"))) {
+    throw new Error("The target checkout has no pnpm-lock.yaml.");
+  }
+  const options = verifyPnpmVersion(target, execute);
   const recordUse = () => {
     if (!NodeFS.existsSync(NodePath.join(target, "node_modules"))) return;
     const location = execute("git", ["rev-parse", "--absolute-git-dir"], {

@@ -94,8 +94,12 @@ function initRepoWithCommit(
 > {
   return Effect.gen(function* () {
     yield* git(cwd, ["init"]);
-    yield* git(cwd, ["config", "user.email", "test@test.com"]);
-    yield* git(cwd, ["config", "user.name", "Test"]);
+    const fileSystem = yield* FileSystem.FileSystem;
+    yield* fileSystem.writeFileString(
+      NodePath.join(cwd, ".git", "config"),
+      "\n[user]\n\temail = test@test.com\n\tname = Test\n",
+      { flag: "a" },
+    );
     yield* writeTextFile(NodePath.join(cwd, "README.md"), "# test\n");
     yield* git(cwd, ["add", "."]);
     yield* git(cwd, ["commit", "-m", "initial commit"]);

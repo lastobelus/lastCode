@@ -10,7 +10,7 @@
     "build": "vp build",
     "i18n:generate": "gt generate",
     "preview": "vp preview",
-    "test": "vp test run --passWithNoTests --project unit --project browser",
+    "test": "VITEST_CHROMIUM_GC_FORCE=1 VITEST_CHROMIUM_GC_DISK_THRESHOLD_GB=Infinity vp test run --passWithNoTests --project unit --project browser",
     "i18n:translate": "gt translate"
   },
   "dependencies": {

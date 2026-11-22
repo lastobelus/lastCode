@@ -188,6 +188,66 @@ describe("checkpoint migration history", () => {
       assert.throws(check, /escapes server source/);
     }));
 
+  it("accepts the stable SqlClient import while protecting released SQL and upstream code", () =>
+    fixture((repo, git, write) => {
+      const commit = () => {
+        git("add", ".");
+        git("commit", "-qm", "Fixture migration import relocation");
+        return git("rev-parse", "HEAD");
+      };
+      const original = [
+        'import * as Effect from "effect/Effect";',
+        'import * as SqlClient from "effect/unstable/sql/SqlClient";',
+        "",
+        "export default Effect.gen(function* () {",
+        "  const sql = yield* SqlClient.SqlClient;",
+        "  yield* sql`ALTER TABLE example ADD COLUMN annotation_json TEXT`;",
+        "  yield* sql`SELECT '",
+        'import * as SqlClient from "effect/unstable/sql/SqlClient";',
+        "'`;",
+        "});",
+        "",
+      ].join("\n");
+      write(`${ROOT}Migrations.ts`, registry(["Initial"]));
+      write(`${ROOT}Migrations/Initial.ts`, original);
+      const upstream = commit();
+      write(`${ROOT}LastCodeMigrations.ts`, registry(["Annotation"], true));
+      write(`${ROOT}Migrations/Annotation.ts`, original);
+      write(`${ROOT}LegacyMigrationHistories.ts`, legacyHistories());
+      write(`${ROOT}DatabaseMigrations.ts`, "// conversion\n");
+      write(`${ROOT}DatabaseMigrations.test.ts`, "// upgrade fixtures\n");
+      const previous = commit();
+      const relocated = original.replace(
+        '"effect/unstable/sql/SqlClient"',
+        '"effect/sql/SqlClient"',
+      );
+      const check = () =>
+        assertMigrationHistory({
+          repoRoot: repo,
+          candidateRef: "HEAD",
+          upstreamRef: upstream,
+          previousRef: previous,
+        });
+      write(`${ROOT}Migrations/Annotation.ts`, relocated);
+      commit();
+      assert.doesNotThrow(check);
+      for (const changed of [
+        relocated.replace("annotation_json TEXT", "annotation_json INTEGER"),
+        relocated.replace("import * as SqlClient", "import * as OtherClient"),
+        relocated.replace('"effect/sql/SqlClient"', '"effect/sql/OtherClient"'),
+        relocated.replace('"effect/unstable/sql/SqlClient"', '"effect/sql/SqlClient"'),
+        relocated.replace('"effect/Effect"', '"effect/OtherEffect"'),
+      ]) {
+        write(`${ROOT}Migrations/Annotation.ts`, changed);
+        commit();
+        assert.throws(check, /changed after release/);
+      }
+      write(`${ROOT}Migrations/Annotation.ts`, relocated);
+      write(`${ROOT}Migrations/Initial.ts`, relocated);
+      commit();
+      assert.throws(check, /changed upstream migration/);
+    }));
+
   it("reconstructs successive upstream checkpoints without renumbering LastCode migrations", () =>
     fixture((repo, git, write) => {
       const commit = (name: string) => {
