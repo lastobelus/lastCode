@@ -197,6 +197,9 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
           "--remote-debugging-pipe",
           "--no-first-run",
           "--no-default-browser-check",
+          // Disposable render profiles must not open the operating system's credential store.
+          "--use-mock-keychain",
+          "--password-store=basic",
           "--disable-gpu",
           "--hide-scrollbars",
           "--mute-audio",

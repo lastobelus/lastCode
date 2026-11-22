@@ -155,6 +155,7 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
       layerProviderEventIngestorProvided,
       ProjectionStore.layer,
       ProviderInstallationGate.layer,
+      ProjectStore.layer,
     ),
   ),
 );

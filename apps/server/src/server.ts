@@ -100,9 +100,14 @@ import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as PeerThreadRelay from "./peer/PeerThreadRelay.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
+import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
+import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
+import * as DeviceAgentAccess from "./device/DeviceAgentAccess.ts";
+import * as DeviceAgentLifecycle from "./device/DeviceAgentLifecycle.ts";
+import * as AgentDeviceProxy from "./device/AgentDeviceProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as PreviewTunnel from "./preview/PreviewTunnel.ts";
@@ -548,7 +553,14 @@ const layerPreview = Layer.empty.pipe(
   Layer.provideMerge(layerPortScanner),
 );
 
+const layerDeviceAgentAccess = DeviceAgentAccess.layer.pipe(
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provide(ProjectStore.layer),
+  Layer.provide(layerServerSettings),
+);
+
 const layerDevice = DeviceService.layer.pipe(
+  Layer.provideMerge(layerDeviceAgentAccess),
   Layer.provide(layerServerSettings),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(NetService.layer),
@@ -889,10 +901,17 @@ const layerMakeRoutes = Layer.mergeAll(
     GuestHttp.layer,
     LinkThreadHttp.layer,
     DeviceHubProxy.layer,
+    AgentDeviceProxy.layer,
     ServerBrowserStream.routeLayer,
     PreviewTunnel.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
-    Ws.layer,
+    Ws.layer.pipe(
+      Layer.provide(
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+        ),
+      ),
+    ),
     speechStreamRouteLayer,
   ),
   McpHttpServer.layer.pipe(
@@ -916,6 +935,7 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(layerPullRequestService),
   Layer.provide(layerThreadIssueService),
   Layer.provide(layerIssueService),
+  Layer.provide(ProjectionStoreV2.layer),
   // The same activity instance RunExecutionService reports to, by layer memoization.
   Layer.provide(
     ServerBrowser.layer.pipe(
@@ -938,6 +958,7 @@ const layerMakeRoutes = Layer.mergeAll(
   ),
   Layer.provide(CloudSpeech.layer.pipe(Layer.provide(SecretResolver.layer))),
   Layer.provide(layerServerSettings),
+  Layer.provide(ThreadReadBroker.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),
@@ -1046,6 +1067,7 @@ const layerMakeServer = Layer.unwrap(
                 localPort,
                 servePort: config.tailscaleServePort,
                 localHost,
+                replaceVerifiedHandler: holder === "dead",
               }).pipe(
                 Effect.as(route),
                 Effect.tap(() =>
@@ -1070,7 +1092,7 @@ const layerMakeServer = Layer.unwrap(
                 ? Effect.all(
                     [
                       readTailscaleServeRoutesTo({
-                        host: configured.localHost,
+                        host: configured.localHost.replace(/^\[|\]$/gu, ""),
                         port: configured.localPort,
                       }),
                       readTailscaleStatus,
@@ -1092,7 +1114,11 @@ const layerMakeServer = Layer.unwrap(
                     Effect.orElseSucceed(() => false),
                     Effect.flatMap((ours) =>
                       ours
-                        ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
+                        ? disableTailscaleServe({
+                            localPort: configured.localPort,
+                            servePort: configured.servePort,
+                            localHost: configured.localHost,
+                          }).pipe(
                             Effect.tap(() =>
                               Effect.logInfo("Tailscale Serve disabled", {
                                 servePort: configured.servePort,
@@ -1133,6 +1159,7 @@ const layerMakeServer = Layer.unwrap(
                             localPort: configured.localPort,
                             servePort: configured.servePort,
                             localHost: configured.urlHost,
+                            replaceVerifiedHandler: true,
                           }).pipe(
                             Effect.andThen(
                               Effect.logInfo("Tailscale Serve repaired", {
@@ -1389,6 +1416,9 @@ const layerMakeServer = Layer.unwrap(
       layerTailscaleServe,
       layerCloudDesiredLinkReconcile,
       HeapSnapshot.layer,
+      DeviceAgentLifecycle.layer.pipe(
+        Layer.provide(Layer.merge(ProjectionStoreV2.layer, RuntimeLayer.layerEventSink)),
+      ),
     );
 
     return layerServerApplication.pipe(
