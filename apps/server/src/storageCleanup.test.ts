@@ -453,7 +453,8 @@ const cleanupFixture = (
   projectionOverride?: Pick<
     ProjectionStore.ProjectionStoreV2["Service"],
     "getShellSnapshot" | "getThreadShell"
-  >,
+  > &
+    Partial<Pick<ProjectionStore.ProjectionStoreV2["Service"], "getThreadWorktreePaths">>,
 ) =>
   Effect.gen(function* () {
     const fixtureNow = yield* Clock.currentTimeMillis;
@@ -618,6 +619,10 @@ const cleanupFixture = (
     const resourceGitCalls: Array<{ operation: string; cwd: string }> = [];
     const unavailableDependencyRoots = new Set<string>();
     const savedWorkspaceProtection = new Map<string, string | "unavailable">();
+    const protectionResult = (reason: string) =>
+      reason === "unavailable"
+        ? Effect.fail(new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }))
+        : Effect.succeed(reason);
     const terminalListeners: Parameters<
       TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
     >[0][] = [];
@@ -631,16 +636,28 @@ const cleanupFixture = (
       (workspacePath, resource) =>
         Effect.suspend(() => {
           const reason = savedWorkspaceProtection.get(workspacePath);
-          return reason === "unavailable"
-            ? Effect.fail(new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }))
-            : reason !== undefined
-              ? Effect.succeed(reason)
-              : (registry?.automaticProtection(workspacePath, resource) ?? Effect.succeed(null));
+          return reason === undefined
+            ? (registry?.automaticProtection(workspacePath, resource) ?? Effect.succeed(null))
+            : protectionResult(reason);
         }),
       Effect.sync(() => {
         suspensionSweeps++;
       }),
-      { unverifiedUse: () => Effect.succeed(null), ...registry },
+      {
+        unverifiedUse: () => Effect.succeed(null),
+        ...registry,
+        snapshotWorktreeProtection: (
+          registry?.snapshotWorktreeProtection ?? Effect.succeed(() => Effect.succeed(null))
+        ).pipe(
+          Effect.map((protect) => {
+            const snapshot = new Map(savedWorkspaceProtection);
+            return (workspacePath: string) => {
+              const reason = snapshot.get(workspacePath);
+              return reason === undefined ? protect(workspacePath) : protectionResult(reason);
+            };
+          }),
+        ),
+      },
     );
     const scratchServices = StorageCleanup.layer.pipe(
       Layer.provideMerge(
@@ -4388,6 +4405,124 @@ const checkoutEntries = (report: import("@t3tools/contracts").StorageCleanupRepo
     (entry) => entry.kind === "worktree" && entry.worktreeResource === undefined,
   );
 
+it.live("shares worktree screening reads across a cleanup pass", () => {
+  const spans: Tracer.Span[] = [];
+  const tracer = Tracer.make({
+    span(options) {
+      const span = new Tracer.NativeSpan(options);
+      let parent = Option.getOrUndefined(span.parent);
+      while (parent?._tag === "Span" && parent.name !== "StorageCleanup.cleanWorktrees") {
+        parent = Option.getOrUndefined(parent.parent);
+      }
+      if (parent?._tag === "Span") spans.push(span);
+      return span;
+    },
+  });
+  return runCleanupTest(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
+        Effect.provide(SuspensionRegistry.layer),
+      );
+      let captures = 0;
+      const fixture = yield* cleanupFixture(
+        undefined,
+        undefined,
+        undefined,
+        registry,
+        undefined,
+        undefined,
+        undefined,
+        sql,
+        projections,
+      ).pipe(
+        Effect.provideService(
+          WorktreeConsumers.ProcessPaths,
+          Effect.sync(() => {
+            captures++;
+            return [];
+          }),
+        ),
+      );
+      const projectId = ProjectId.make("project-1");
+      yield* sql`INSERT INTO projection_projects ${sql.insert({
+        project_id: projectId,
+        title: "Worktree screening",
+        workspace_root: fixture.repo,
+        scripts_json: "[]",
+        created_at: DateTime.formatIso(at(0)),
+        updated_at: DateTime.formatIso(at(0)),
+      })}`;
+      const workspaceCount = 4;
+      for (let index = 0; index < workspaceCount; index++) {
+        const branch = index === 0 ? "feature" : `screening-${index}`;
+        const worktreePath = `${fixture.config.worktreesDir}/${branch}`;
+        if (index > 0)
+          yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, worktreePath]);
+        yield* fixture.fs.writeFileString(`${worktreePath}/tracked.txt`, "local work\n");
+        const threadId = ThreadId.make(`screening-owner-${index}`);
+        const createdAt = fixture.at(-30 * DAY_MS);
+        const thread = shell({
+          id: threadId,
+          projectId,
+          branch,
+          worktreePath,
+          createdAt,
+          updatedAt: createdAt,
+        });
+        yield* projections.apply({
+          id: EventId.make(`screening-owner-created-${index}`),
+          type: "thread.created",
+          threadId,
+          occurredAt: createdAt,
+          payload: { ...thread, lastVisitedAt: thread.lastVisitedAt ?? null },
+        });
+      }
+      const report = yield* fixture.service.runNow;
+      const entries = checkoutEntries(report).filter((entry) => entry.threadId !== null);
+      expect(entries).toHaveLength(workspaceCount);
+      expect(entries.map((entry) => entry.outcome)).toEqual(Array(workspaceCount).fill("kept"));
+      const count = (name: string) => spans.filter((span) => span.name === name).length;
+      const counts = {
+        registryReads: count("WorktreeSuspensionRegistry.read"),
+        ownerSnapshots: count("StorageCleanup.readThreads"),
+        ownerPathQueries: spans.filter(
+          (span) =>
+            span.name === "sqlite" &&
+            String(span.attributes.get("db.query.text")).includes(
+              "SELECT thread_id, json_extract(payload_json, '$.worktreePath') AS worktree_path",
+            ),
+        ).length,
+        captures,
+        measurements: count("storageCleanup.measureWorktree"),
+        statements: count("sqlite"),
+        transactions: count("sql.transaction"),
+      };
+      const evidence = JSON.stringify(counts);
+      expect(counts, evidence).toMatchObject({
+        ownerSnapshots: 1,
+        ownerPathQueries: workspaceCount,
+        captures: workspaceCount,
+        measurements: workspaceCount,
+      });
+      expect(counts.registryReads, evidence).toBeLessThanOrEqual(1);
+      expect(counts.statements, evidence).toBeLessThanOrEqual(51);
+      expect(counts.transactions, evidence).toBeLessThanOrEqual(5);
+      const consumerCheck = "WorktreeConsumers.worktreeConsumerReason";
+      const measurement = "storageCleanup.measureWorktree";
+      expect(
+        spans
+          .filter((span) => span.name === consumerCheck || span.name === measurement)
+          .map((span) => span.name),
+      ).toEqual(Array.from({ length: workspaceCount }, () => [consumerCheck, measurement]).flat());
+    }).pipe(
+      Effect.provide(ProjectionStore.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
+      Effect.withTracer(tracer),
+    ),
+  );
+});
+
 describe("provider protection during storage cleanup", () => {
   it.live.each(["stopped", "error"] as const)(
     "keeps an unfinished runtime close even when the durable session is %s",
@@ -7960,6 +8095,29 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
+  it.live("keeps a branch binding when saved-workspace authority changes during measurement", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* pausedMeasurementFixture();
+        const sweep = yield* fixture.service.runNow.pipe(Effect.forkChild);
+        yield* Deferred.await(fixture.measuring);
+        yield* fixture.command(fixture.worktree, ["switch", "-c", "renamed"]);
+        yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "local work\n");
+        fixture.protectSavedWorkspace(
+          fixture.worktree,
+          "The workspace is protected by a saved-workspace operation.",
+        );
+        yield* Deferred.succeed(fixture.resume, undefined);
+        const report = yield* Fiber.join(sweep);
+        expect(fixture.threadBranches()).toEqual(["feature"]);
+        expect(fixture.metadataCommands).toEqual([]);
+        expect(checkoutEntries(report)[0]).toMatchObject({
+          outcome: "kept",
+          reason: "The workspace is protected by a saved-workspace operation.",
+        });
+      }),
+    ),
+  );
   it.live("does not measure a worktree kept for an open provider session", () =>
     runCleanupTest(
       Effect.gen(function* () {
@@ -8346,6 +8504,72 @@ describe("storage cleanup reports and local file policies", () => {
         expect(yield* fs.exists(worktree)).toBe(true);
       }),
     ),
+  );
+  it.live(
+    "keeps the tracking ref and a stale checkout when the fetch candidate gains protection",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture({
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            worktreeUnchanged: true,
+            worktreeOnDelete: true,
+          });
+          const { service, fs, repo, worktree, command } = fixture;
+          const remote = yield* fs.makeTempDirectoryScoped({ prefix: "cleanup-remote-" });
+          yield* command(remote, ["init", "--bare", "-b", "main"]);
+          yield* command(repo, ["remote", "add", "origin", remote]);
+          yield* command(repo, ["push", "origin", "main"]);
+          yield* command(repo, ["remote", "set-head", "origin", "main"]);
+          const trackingRef = "refs/remotes/origin/main";
+          const original = (yield* command(repo, ["rev-parse", trackingRef])).stdout.trim();
+
+          const branch = "retained-feature";
+          const retained = `${worktree}-retained`;
+          yield* command(repo, ["worktree", "add", "-b", branch, retained]);
+          yield* fs.writeFileString(`${retained}/tracked.txt`, "later commit\n");
+          yield* command(retained, ["commit", "-am", "later commit"]);
+          yield* command(retained, ["push", "origin", "HEAD:main"]);
+          yield* command(retained, ["switch", "--detach"]);
+          yield* command(repo, ["branch", "-D", branch]);
+          yield* command(repo, ["update-ref", trackingRef, original]);
+          fixture.setThreads([
+            shell({ branch: "feature", worktreePath: worktree, archivedAt: at(-DAY_MS) }),
+          ]);
+          fixture.setDeletedThreads([
+            shell({
+              id: ThreadId.make("retained-owner"),
+              branch,
+              worktreePath: retained,
+              deletedAt: at(-DAY_MS),
+            }),
+          ]);
+          fixture.onDependencyInspection(
+            Effect.sync(() =>
+              fixture.protectSavedWorkspace(worktree, "Keep workspace is enabled."),
+            ),
+            "StorageCleanup.listRemotes",
+          );
+
+          const report = yield* service.runNow;
+          expect(yield* fs.exists(retained)).toBe(true);
+          expect((yield* command(repo, ["rev-parse", trackingRef])).stdout.trim()).toBe(original);
+          expect(checkoutEntries(report)).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                path: worktree,
+                outcome: "kept",
+                reason: "Keep workspace is enabled.",
+              }),
+              expect.objectContaining({
+                path: retained,
+                outcome: "kept",
+                reason: "Repository or branch changed",
+              }),
+            ]),
+          );
+        }),
+      ),
   );
   it.live("fetches a failing default branch once per sweep and names the broken local ref", () =>
     runCleanupTest(

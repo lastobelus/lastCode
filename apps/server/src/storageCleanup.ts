@@ -1093,12 +1093,18 @@ const make = Effect.gen(function* () {
   const followBranch = Effect.fn("StorageCleanup.followBranch")(
     function* (worktreePath: string) {
       const cwd = yield* fs.realPath(worktreePath);
+      const protectedReason = yield* savedWorkspaceProtection(cwd);
+      if (protectedReason !== null) return protectedReason;
       yield* reconcileBranch({ cwd, refName: yield* gitWorkflow.currentBranch(cwd) });
+      return null;
     },
     (effect, worktreePath) =>
-      effect.pipe(
+      withWorkspaceLease(worktreePath, effect).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("Failed to reconcile worktree branch", { cwd: worktreePath, cause }),
+          Effect.logWarning("Failed to reconcile worktree branch", {
+            cwd: worktreePath,
+            cause,
+          }).pipe(Effect.as(null)),
         ),
       ),
   );
@@ -3391,6 +3397,20 @@ const make = Effect.gen(function* () {
     const threadsById = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
     const previewLeases = yield* previewsProtectingWorktrees();
     if (previewLeases === null) return { waiting: true, kept };
+    const worktreeProtectionInventory = yield* Effect.cached(
+      suspensionRegistry.snapshotWorktreeProtection,
+    );
+    const screenSavedWorkspace = Effect.fn("StorageCleanup.screenSavedWorkspace")(function* (
+      workspacePath: string,
+    ) {
+      const observed = yield* worktreeProtectionInventory.pipe(
+        Effect.flatMap((protect) => protect(workspacePath)),
+        Effect.option,
+      );
+      return Option.isSome(observed) && observed.value === null
+        ? null
+        : yield* savedWorkspaceProtection(workspacePath);
+    });
     // Failures are cached too, so one broken repository costs one fetch per sweep.
     const refreshedDefaultRefs = new Map<string, Map<string, Exit.Exit<void, GitCommandError>>>();
     const defaultBranches = new Map<string, string | null>();
@@ -3449,15 +3469,14 @@ const make = Effect.gen(function* () {
       FROM orchestration_v2_projection_threads
     `;
     const legacyRows = yield* worktreeCleanup.historicalWorktreeOwners;
-    const historicalPaths = yield* Effect.forEach([...historicalRows, ...legacyRows], (owner) =>
-      Effect.gen(function* () {
-        return {
-          id: owner.threadId,
-          cwd:
-            owner.worktreePath === null ? null : yield* canonicalWorkspacePath(owner.worktreePath),
-        };
-      }),
-    );
+    const historicalOwners = new Map<string, Set<string>>();
+    for (const owner of [...historicalRows, ...legacyRows]) {
+      if (owner.worktreePath === null) continue;
+      const cwd = yield* canonicalWorkspacePath(owner.worktreePath);
+      let ids = historicalOwners.get(cwd);
+      if (ids === undefined) historicalOwners.set(cwd, (ids = new Set()));
+      ids.add(owner.threadId);
+    }
     const hasLiveProviderSession = yield* makeProviderSessionGuard();
     for (const owners of candidates) {
       if (automaticWork?.paths != null && !automaticWork.paths.has(owners[0]!.canonicalPath))
@@ -3484,6 +3503,11 @@ const make = Effect.gen(function* () {
       const settings = resolveWorktreeCleanup(serverSettings, thread.projectId);
       if (!worktreeCleanupEnabled(settings)) continue;
       const worktreePath = owners[0]!.canonicalPath;
+      const liveOwners = owners.filter((owner) => !("workspaceRoot" in owner.thread));
+      const ownerIds = new Set<string>(owners.map((owner) => owner.thread.id));
+      const unresolvedHistoricalOwner = [...(historicalOwners.get(worktreePath) ?? [])].some(
+        (id) => !ownerIds.has(id),
+      );
       const worktreePaths = [
         ...new Set([worktreePath, ...owners.map((owner) => owner.recordedPath)]),
       ];
@@ -3655,7 +3679,9 @@ const make = Effect.gen(function* () {
           ),
         );
         if (!exists) return;
-        const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+        const savedProtection = scratch
+          ? yield* savedWorkspaceProtection(worktreePath)
+          : yield* screenSavedWorkspace(worktreePath);
         if (savedProtection !== null) return keep(savedProtection);
         const preserveScratch =
           scratch &&
@@ -3776,11 +3802,7 @@ const make = Effect.gen(function* () {
                   return "scratch workspace has an open terminal";
               }
               if (
-                historicalPaths.some(
-                  (owner) =>
-                    owner.cwd === worktreePath &&
-                    !owners.some((known) => known.thread.id === owner.id),
-                ) ||
+                unresolvedHistoricalOwner ||
                 (yield* ownershipChangedSince(sequence, {
                   cwd: worktreePath,
                   projectId: thread.projectId,
@@ -3839,12 +3861,7 @@ const make = Effect.gen(function* () {
           )
         )
           return keep("whole-worktree cleanup is off for an owner");
-        if (
-          historicalPaths.some(
-            (owner) =>
-              owner.cwd === worktreePath && !owners.some((known) => known.thread.id === owner.id),
-          )
-        )
+        if (unresolvedHistoricalOwner)
           return keep("historical thread ownership could not be resolved");
         if (owners.length > 1 && !allArchived && familyOwner === undefined)
           return keep(`shared by ${owners.length} threads`);
@@ -3921,11 +3938,13 @@ const make = Effect.gen(function* () {
         if (!eligible && !unchangedApplies && !settings.worktreeOnMerge) return keep(notDueReason);
         const recordedBranches = owners.map((owner) => owner.thread.branch);
         // Re-read this path's threads and sessions so new activity cancels removal; full per-worktree snapshots take seconds.
-        const blockedSinceCheck = Effect.fnUntraced(function* (checkedHead?: {
-          readonly branch: string | null;
-          readonly commitSha: string;
-        }) {
-          const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+        const blockedSinceCheck = Effect.fnUntraced(function* (
+          checkedHead?: { readonly branch: string | null; readonly commitSha: string },
+          screening = false,
+        ) {
+          const savedProtection = screening
+            ? yield* screenSavedWorkspace(worktreePath)
+            : yield* savedWorkspaceProtection(worktreePath);
           if (savedProtection !== null) return savedProtection;
           if (generatedBuildReviewProtection(worktreePath))
             return "reviewed build content protects this worktree";
@@ -3956,14 +3975,7 @@ const make = Effect.gen(function* () {
               ),
           )).filter((id) => id !== null);
           const latest = (yield* Effect.forEach(
-            [
-              ...new Set([
-                ...latestPaths,
-                ...owners
-                  .filter((owner) => !("workspaceRoot" in owner.thread))
-                  .map((owner) => owner.thread.id),
-              ]),
-            ],
+            [...new Set([...latestPaths, ...liveOwners.map((owner) => owner.thread.id)])],
             (id) => projections.getThreadShell(id),
           )).filter((entry) => entry !== null);
           if (yield* hasWorktreeTerminal(guardedPaths)) return waitForStop("open terminal");
@@ -3993,7 +4005,6 @@ const make = Effect.gen(function* () {
               }),
             ),
           );
-          const liveOwners = owners.filter((owner) => !("workspaceRoot" in owner.thread));
           const latestOwner = worktreeOwner(deleted ? [thread, ...latest] : latest);
           if (
             (familyOwner !== undefined &&
@@ -4230,8 +4241,10 @@ const make = Effect.gen(function* () {
         if (head === null) return keep("repository or branch changed");
         // Check stale refs without status here. The file proof runs only for an eligible checkout.
         if (!(yield* staleBranchesSafe(worktreePath, recordedBranches, head, true))) {
-          if (!deleted && (yield* branchChanged(worktreePath, thread.branch)))
-            yield* followBranch(worktreePath);
+          if (!deleted && (yield* branchChanged(worktreePath, thread.branch))) {
+            const protectedReason = yield* followBranch(worktreePath);
+            if (protectedReason !== null) return keep(protectedReason);
+          }
           return keep("repository or branch changed");
         }
         if (!eligible) {
@@ -4295,6 +4308,9 @@ const make = Effect.gen(function* () {
               new Map<string, Exit.Exit<void, GitCommandError>>();
             let refresh = refreshed.get(defaultRef);
             if (refresh === undefined) {
+              // A fetch can make another checkout eligible by advancing the shared ref.
+              const protectedReason = yield* savedWorkspaceProtection(worktreePath);
+              if (protectedReason !== null) return keep(protectedReason);
               refresh = yield* Effect.exit(
                 git.fetchRemoteTrackingBranch({
                   cwd: repositoryCwd,
@@ -4347,7 +4363,9 @@ const make = Effect.gen(function* () {
             return keep(integrated ? notDueReason : "has commits beyond the project branch");
         }
         if (!eligible) return keep(notDueReason);
-        const blocked = yield* blockedSinceCheck(head);
+        // Use the catalog inventory before the file inspection. Recheck current
+        // authority under the workspace lease before any removal.
+        const blocked = yield* blockedSinceCheck(head, true);
         if (blocked !== null) return keep(blocked);
         // Inspect before the lease; provider startup must not wait for directory traversal.
         const inspection = yield* measureWorktree(worktreePath, true);
@@ -4356,8 +4374,10 @@ const make = Effect.gen(function* () {
         // A full status walks the whole checkout, so only a removable worktree pays for it.
         const changes = yield* localChangesReason(worktreePath);
         if (changes !== null) {
-          if (!deleted && (yield* branchChanged(worktreePath, thread.branch)))
-            yield* followBranch(worktreePath);
+          if (!deleted && (yield* branchChanged(worktreePath, thread.branch))) {
+            const protectedReason = yield* followBranch(worktreePath);
+            if (protectedReason !== null) return keep(protectedReason);
+          }
           return keep(changes);
         }
         yield* Effect.gen(function* () {

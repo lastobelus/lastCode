@@ -1381,16 +1381,16 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       },
     });
   };
-  const automaticallyEligible = Effect.fn("WorktreeSuspension.automaticallyEligible")(function* (
+  const automaticOwners = Effect.fn("WorktreeSuspension.automaticallyEligible")(function* (
     record: CheckoutAuthority,
   ) {
-    if (record.kind === "scratch") return false;
+    if (record.kind === "scratch") return null;
     if (
       record.captureFailure !== undefined &&
       record.captureFailure.retryOnce !== true &&
       !needsCapturePolicyRetry(record)
     )
-      return false;
+      return null;
     const currentSettings = yield* settings.getSettings;
     const timestamp = yield* milliseconds;
     const owners = yield* checkOwners(record);
@@ -1400,8 +1400,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         .filter((value): value is string => value !== null)
         .sort()
         .at(-1) ?? null;
-    return (
-      owners.length > 0 &&
+    return owners.length > 0 &&
       owners.every(
         (thread) =>
           automaticEligibility(
@@ -1412,8 +1411,11 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             record.summary.keepWorkspace,
           ).eligible,
       )
-    );
+      ? owners
+      : null;
   });
+  const automaticallyEligible = (record: CheckoutAuthority) =>
+    automaticOwners(record).pipe(Effect.map((owners) => owners !== null));
   const savedEntry = Effect.fn("WorktreeSuspension.savedEntry")(function* (
     record: CheckoutAuthority,
     snapshotId: string,
@@ -3376,9 +3378,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         )
           return;
         let record = yield* refreshActiveOwners(identified);
-        if (!(yield* automaticallyEligible(record))) return;
-        const owners = yield* checkOwners(record);
-        if (owners.some(ownerHasUnfinishedWork)) return;
+        const owners = yield* automaticOwners(record);
+        if (owners === null || owners.some(ownerHasUnfinishedWork)) return;
         const leases = yield* previews.protectedWorkspaceLeases();
         const previewOwners = new Set<string>();
         for (const lease of leases) {
@@ -3443,14 +3444,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           );
         }
         record = yield* requireRecord(record.checkoutId);
-        if (!(yield* automaticallyEligible(record))) return;
-        if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
+        // acceptCapture repeats the ownership and eligibility proof under the lease.
         yield* acceptCapture(record, true);
         const running = liveOperations.get(record.checkoutId);
         if (running !== undefined) yield* Deferred.await(running.completed);
       }).pipe(Effect.ignoreCause);
     }
   }).pipe(
+    Effect.withSpan("WorktreeSuspension.sweep"),
     sweepPermit.withPermitsIfAvailable(1),
     Effect.asVoid,
     Effect.catchCause((cause) =>
