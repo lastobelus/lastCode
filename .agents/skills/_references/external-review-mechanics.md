@@ -7,8 +7,6 @@ skill defines review order, budgets, quiet/reopen rules, and what to do with fin
 
 - Prefer real external reviewers. Do not simulate reviewer output.
 - Available local reviewer commands may include `codex` and `opencode`.
-- If `ai-limit-checker` is available, run it before expensive review rounds and avoid
-  providers whose quota is clearly exhausted.
 - If no eligible reviewer can run after checking binary presence, auth/session state,
   cwd, flags, and prompt piping, stop and report the blocker.
 
