@@ -117,6 +117,11 @@ import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { buildCodexAdditionalContext } from "../../provider/CodexDeveloperInstructions.ts";
 import {
+  codexBackgroundWaitHook,
+  loadCodexBackgroundWaitReader,
+  readCodexBackgroundWait,
+} from "../../provider/LastCodeCodexBackgroundWait.ts";
+import {
   describeMcpElicitation,
   toMcpElicitationResponse,
 } from "../../provider/CodexMcpElicitation.ts";
@@ -840,6 +845,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly hasT3Mcp?: boolean;
     readonly browserToolsAvailable?: boolean;
     readonly deviceToolsAvailable?: boolean;
+    readonly backgroundWaitAvailable?: boolean;
     /** ChatGPT token sharing does not accept service tiers. */
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
@@ -898,6 +904,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
             {
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
+              backgroundWait: input.backgroundWaitAvailable === true,
             },
           )
         : undefined;
@@ -1985,6 +1992,7 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
     idAllocator,
     serverConfig,
     continuationRequests,
+    readBackgroundWait: yield* loadCodexBackgroundWaitReader,
     watchCommandStops: portDiscovery.watchAgentCommandStops,
     ...hooks,
   });
@@ -2006,6 +2014,7 @@ export interface CodexAdapterV2Options {
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly serverConfig: ServerConfig["Service"];
+  readonly readBackgroundWait?: Effect.Effect<boolean>;
   /** Omitting this leaves late completions projection-only. */
   readonly continuationRequests?: {
     readonly offer: (
@@ -2024,6 +2033,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     threadId === null ? Effect.undefined : mcpSessions.read(threadId);
   const { clientFactory, digest, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
+  const readBackgroundWait = adapterOptions.readBackgroundWait ?? readCodexBackgroundWait();
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
@@ -2038,6 +2048,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     openSession: Effect.fn("CodexAdapterV2.openSession")(
       function* (input) {
         const scope = yield* Scope.Scope;
+        const backgroundWaitEnabled = yield* readBackgroundWait;
         const resolvedRuntime =
           adapterOptions.resolveRuntime === undefined
             ? undefined
@@ -2520,6 +2531,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           nativeThreadId: string,
           providerThread: OrchestrationV2ProviderThread,
         ): OrchestrationV2ProviderThread => {
+          if (!backgroundWaitEnabled) return providerThread;
           const current = rootProviderThreads.get(nativeThreadId)?.pendingBackgroundTasks;
           return current === undefined
             ? providerThread
@@ -2944,7 +2956,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           if (items === undefined || items.size === 0) {
             return;
           }
-          if ([...items.values()].some((item) => item.awaited === true)) {
+          if (backgroundWaitEnabled && [...items.values()].some((item) => item.awaited === true)) {
             yield* Ref.update(runningCommandItemsByTurn, (current) => {
               const updated = new Map(current);
               updated.set(
@@ -5831,6 +5843,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               // Other tools can retain the context after thread closure.
               if (context.closedCommandItemIds?.has(payload.item.id)) return;
               const awaited =
+                backgroundWaitEnabled &&
                 (yield* Ref.get(runningCommandItemsByTurn))
                   .get(payload.turnId)
                   ?.get(payload.item.id)?.awaited === true;
@@ -7874,6 +7887,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               hasT3Mcp: mcpSession !== undefined,
               browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+              backgroundWaitAvailable: backgroundWaitEnabled,
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
               ...(configuredReasoningSummary === undefined ? {} : { configuredReasoningSummary }),
@@ -8331,45 +8345,48 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           normalizeThreadLoadModelSelection: normalizeCodexThreadLoadModelSelection,
           // Exec sessions, background terminals and subagents all live in the app-server process.
           backgroundTasksEndWithProcess: true,
-          awaitBackgroundTasks: Effect.fn("CodexAdapterV2.awaitBackgroundTasks")(
-            function* ({ providerThread, taskIds, awaited }) {
-              const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
-              if (nativeThreadId == null) return { matched: [] };
-              const contexts = [
-                ...(yield* Ref.get(activeTurns)).values(),
-                ...(yield* Ref.get(settledTurns)).values(),
-              ].filter(
-                (context) =>
-                  context.subagent === null &&
-                  context.providerThread.id === providerThread.id &&
-                  context.providerThread.nativeThreadRef?.nativeId === nativeThreadId,
-              );
-              const running = yield* Ref.get(runningCommandItemsByTurn);
-              const commands = contexts.flatMap((context) => [
-                ...(running.get(context.nativeTurnId)?.values() ?? []),
-              ]);
-              const matches = (item: TrackedRunningCommandItem, taskId: string) =>
-                item.processId === taskId || item.id === taskId;
-              const matched = [...new Set(taskIds)].filter((taskId) =>
-                commands.some((item) => matches(item, taskId)),
-              );
-              if (matched.length === 0) return { matched };
-              yield* Ref.update(runningCommandItemsByTurn, (current) => {
-                const updated = new Map(current);
-                for (const context of contexts) {
-                  const items = new Map(current.get(context.nativeTurnId));
-                  for (const [id, item] of items) {
-                    if (matched.some((taskId) => matches(item, taskId)))
-                      items.set(id, { ...item, awaited });
+          ...codexBackgroundWaitHook(
+            backgroundWaitEnabled,
+            Effect.fn("CodexAdapterV2.awaitBackgroundTasks")(
+              function* ({ providerThread, taskIds, awaited }) {
+                const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+                if (nativeThreadId == null) return { matched: [] };
+                const contexts = [
+                  ...(yield* Ref.get(activeTurns)).values(),
+                  ...(yield* Ref.get(settledTurns)).values(),
+                ].filter(
+                  (context) =>
+                    context.subagent === null &&
+                    context.providerThread.id === providerThread.id &&
+                    context.providerThread.nativeThreadRef?.nativeId === nativeThreadId,
+                );
+                const running = yield* Ref.get(runningCommandItemsByTurn);
+                const commands = contexts.flatMap((context) => [
+                  ...(running.get(context.nativeTurnId)?.values() ?? []),
+                ]);
+                const matches = (item: TrackedRunningCommandItem, taskId: string) =>
+                  item.processId === taskId || item.id === taskId;
+                const matched = [...new Set(taskIds)].filter((taskId) =>
+                  commands.some((item) => matches(item, taskId)),
+                );
+                if (matched.length === 0) return { matched };
+                yield* Ref.update(runningCommandItemsByTurn, (current) => {
+                  const updated = new Map(current);
+                  for (const context of contexts) {
+                    const items = new Map(current.get(context.nativeTurnId));
+                    for (const [id, item] of items) {
+                      if (matched.some((taskId) => matches(item, taskId)))
+                        items.set(id, { ...item, awaited });
+                    }
+                    updated.set(context.nativeTurnId, items);
                   }
-                  updated.set(context.nativeTurnId, items);
-                }
-                return updated;
-              });
-              yield* emitAwaitedCommands(providerThread);
-              return { matched };
-            },
-            (effect) => turnTerminalizationPermit.withPermits(1)(effect),
+                  return updated;
+                });
+                yield* emitAwaitedCommands(providerThread);
+                return { matched };
+              },
+              (effect) => turnTerminalizationPermit.withPermits(1)(effect),
+            ),
           ),
           // Idle release can beat delayed subagent resumes: Codex reports them completed between turns with no resume-expected signal.
           hasPendingBackgroundWork: Effect.gen(function* () {
@@ -8731,9 +8748,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               // unarchives it on the next turn.
               if (unloadInput.archive === true) {
                 yield* client.request("thread/archive", { threadId: nativeThreadId });
-                yield* turnTerminalizationPermit.withPermits(1)(
-                  clearSettledCommands(nativeThreadId),
-                );
+                if (backgroundWaitEnabled) {
+                  yield* turnTerminalizationPermit.withPermits(1)(
+                    clearSettledCommands(nativeThreadId),
+                  );
+                }
               } else {
                 // A resume may already wait on the pending entry; replacing it would strand that wait.
                 if (!threadClosings.has(nativeThreadId)) {

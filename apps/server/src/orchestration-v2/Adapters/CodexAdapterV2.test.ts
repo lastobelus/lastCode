@@ -1551,7 +1551,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   });
 
   const makeCodexReplayHarness = (
-    transcript: CodexReplay.CodexAppServerReplayTranscript,
+    transcript: CodexReplay.CodexAppServerReplayTranscript & { readonly backgroundWait?: true },
     onEvent: (event: ProviderAdapter.ProviderAdapterV2Event) => Effect.Effect<unknown> = () =>
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
@@ -1625,6 +1625,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         clientFactory,
         ...(onUsageLimits ? { onUsageLimits } : {}),
         ...(models ? { models } : {}),
+        ...(transcript.backgroundWait ? { readBackgroundWait: Effect.succeed(true) } : {}),
         digest: yield* Digest.Digest,
         fileSystem,
         idAllocator,
@@ -7011,6 +7012,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const harness = yield* makeCodexReplayHarness(
         {
           ...backgroundExecTranscript,
+          backgroundWait: true,
           entries: [
             ...backgroundExecTranscript.entries.slice(0, -1),
             nextTurn[0]!,
@@ -7208,6 +7210,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const harness = yield* makeCodexReplayHarness(
         {
           ...backgroundExecTranscript,
+          backgroundWait: true,
           entries: [
             ...backgroundExecTranscript.entries.slice(0, -1),
             {
@@ -7510,19 +7513,22 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         });
         const interrupted = yield* Deferred.make<void>();
         const monitorCompleted = yield* Deferred.make<void>();
-        const harness = yield* makeCodexReplayHarness(transcript, (event) => {
-          if (event.type !== "turn_item.updated") return Effect.void;
-          if (
-            event.turnItem.nativeItemRef?.nativeId === BG_COMMAND_ITEM &&
-            event.turnItem.status === "interrupted"
-          ) {
-            return Deferred.succeed(interrupted, undefined);
-          }
-          return event.turnItem.nativeItemRef?.nativeId === "persistent-monitor" &&
-            event.turnItem.status === "completed"
-            ? Deferred.succeed(monitorCompleted, undefined)
-            : Effect.void;
-        });
+        const harness = yield* makeCodexReplayHarness(
+          { ...transcript, backgroundWait: true },
+          (event) => {
+            if (event.type !== "turn_item.updated") return Effect.void;
+            if (
+              event.turnItem.nativeItemRef?.nativeId === BG_COMMAND_ITEM &&
+              event.turnItem.status === "interrupted"
+            ) {
+              return Deferred.succeed(interrupted, undefined);
+            }
+            return event.turnItem.nativeItemRef?.nativeId === "persistent-monitor" &&
+              event.turnItem.status === "completed"
+              ? Deferred.succeed(monitorCompleted, undefined)
+              : Effect.void;
+          },
+        );
         yield* harness.runtime.startTurn(
           makeCodexTestTurnInput({
             threadId: harness.threadId,
@@ -7796,12 +7802,14 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const transcript = makeBackgroundStopTranscript(terminated);
       return Effect.gen(function* () {
         const stopped = yield* Deferred.make<void>();
-        const harness = yield* makeCodexReplayHarness(transcript, (event) =>
-          event.type === "turn_item.updated" &&
-          event.turnItem.type === "command_execution" &&
-          event.turnItem.status === "interrupted"
-            ? Deferred.succeed(stopped, undefined)
-            : Effect.void,
+        const harness = yield* makeCodexReplayHarness(
+          { ...transcript, backgroundWait: true },
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "command_execution" &&
+            event.turnItem.status === "interrupted"
+              ? Deferred.succeed(stopped, undefined)
+              : Effect.void,
         );
         const now = yield* DateTime.now;
         yield* harness.runtime.startTurn(
