@@ -304,6 +304,7 @@ export const make = Effect.gen(function* () {
       cloudVoiceTranscription: true,
       threadAnnotations: true,
       threadAnnotationHistory: true,
+      threadAnnotationHideUntil: true,
       threadWorktreeCleanup: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverInstallation === null ? {} : { serverInstallation }),

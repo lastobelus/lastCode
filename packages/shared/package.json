@@ -31,6 +31,10 @@
       "types": "./src/threadAnnotation.ts",
       "import": "./src/threadAnnotation.ts"
     },
+    "./lastcodeVersionLabel": {
+      "types": "./src/lastcodeVersionLabel.ts",
+      "import": "./src/lastcodeVersionLabel.ts"
+    },
     "./orchestrationV2ThreadError": {
       "types": "./src/orchestrationV2ThreadError.ts",
       "import": "./src/orchestrationV2ThreadError.ts"

@@ -1,8 +1,15 @@
-import { MessageId, type ThreadAnnotation } from "@t3tools/contracts";
+import {
+  CommandId,
+  EnvironmentId,
+  MessageId,
+  ThreadId,
+  type ThreadAnnotation,
+} from "@t3tools/contracts";
 import { useState } from "react";
 import { act, render } from "../../../test/render";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
+import "~/index.css";
 
 import { ThreadAnnotationEditorDialog } from "./ThreadAnnotation";
 
@@ -14,10 +21,19 @@ const originalAnnotation: ThreadAnnotation = {
   updatedAt: "2026-09-03T00:00:00.000Z",
 };
 
+const hideUntil = {
+  threadRef: {
+    environmentId: EnvironmentId.make("annotation-environment"),
+    threadId: ThreadId.make("annotation-thread"),
+  },
+  serverVersion: "0.1.11-nightly.20261120.4979.1",
+};
+
 function EditorHarness(props: {
   annotation: ThreadAnnotation | null;
   onOpenChange?: (open: boolean) => void;
-  onSave: (body: string) => Promise<boolean>;
+  onSave: Parameters<typeof ThreadAnnotationEditorDialog>[0]["onSave"];
+  hideUntil?: Parameters<typeof ThreadAnnotationEditorDialog>[0]["hideUntil"];
 }) {
   const [open, setOpen] = useState(false);
 
@@ -28,6 +44,7 @@ function EditorHarness(props: {
       </button>
       <ThreadAnnotationEditorDialog
         annotation={props.annotation}
+        hideUntil={props.hideUntil}
         open={open}
         onOpenChange={(nextOpen) => {
           props.onOpenChange?.(nextOpen);
@@ -115,7 +132,56 @@ describe("ThreadAnnotationEditorDialog", () => {
     await clickButton("Save");
 
     expect(onSave).toHaveBeenCalledOnce();
-    expect(onSave).toHaveBeenCalledWith("## Updated note\n\nNew details");
+    expect(onSave).toHaveBeenCalledWith({ body: "## Updated note\n\nNew details" });
     expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+  it("arms a checkpoint trigger with an empty body", async () => {
+    const onSave = vi.fn(async () => true);
+    await using _screen = await render(
+      <EditorHarness annotation={null} onSave={onSave} hideUntil={hideUntil} />,
+    );
+    await clickButton("Open editor");
+    await expect.element(page.getByRole("button", { name: "Add annotation" })).toBeDisabled();
+    await page.getByRole("combobox", { name: "Hide thread until" }).click();
+    await page.getByRole("option", { name: /Checkpoints installed/ }).click();
+
+    expect(annotationTextarea().value).toBe("");
+    await expect
+      .element(page.getByText("This environment is on 2026-11-20 • 4979.1"))
+      .toBeInTheDocument();
+    await page.getByRole("button", { name: "Hide thread", exact: true }).click();
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({
+      hideUntil: { kind: "checkpoints", count: 1 },
+    });
+  });
+
+  it("shows a trigger-only thread from the editor without writing its generated body", async () => {
+    const onSave = vi.fn(async () => true);
+    const id = CommandId.make("armed-trigger");
+    await using _screen = await render(
+      <EditorHarness
+        annotation={{
+          ...originalAnnotation,
+          body: "Generated label",
+          bodyGenerated: true,
+          hideUntil: {
+            id,
+            hiddenAt: originalAnnotation.createdAt,
+            kind: "checkpoints",
+            count: 1,
+            baselineVersion: hideUntil.serverVersion,
+            seenBuilds: [],
+          },
+        }}
+        onSave={onSave}
+        hideUntil={hideUntil}
+      />,
+    );
+    await clickButton("Open editor");
+    expect(annotationTextarea().value).toBe("");
+    await page.getByRole("combobox", { name: "Hide thread until" }).click();
+    await page.getByRole("option", { name: "Don't hide" }).click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ hideUntil: null, expectedHideTriggerId: id });
   });
 });

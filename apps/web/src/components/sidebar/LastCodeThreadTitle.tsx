@@ -1,6 +1,10 @@
 import { T, useGT, useMessages } from "gt-react";
-import { MessageSquareLockIcon } from "lucide-react";
+import { EyeOffIcon, MessageSquareLockIcon, Undo2Icon } from "lucide-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  isThreadAnnotationHidden,
+  isThreadAnnotationRevealUnseen,
+} from "@t3tools/shared/threadAnnotation";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { useClientSetting } from "~/hooks/useSettings";
 import { LastCodeThreadStatusLabel } from "./LastCodeThreadStatusLabel";
@@ -115,11 +119,15 @@ function TitleText({
 }) {
   const thread = family.thread;
   const subagentLabel = presentation.subagentLabel;
+  const annotationHidden = isThreadAnnotationHidden(thread.annotation);
+  const automaticallyReappeared =
+    thread.annotation?.reveal?.by === "trigger" &&
+    isThreadAnnotationRevealUnseen(thread.annotation, thread.lastVisitedAt);
   const gt = useGT();
   const subagentStatus = lastcodeSidebarSubagentStatusLabel(thread, threadStatus);
   const title = (
     <span
-      className={`min-w-0 flex-1 truncate text-sm ${thread.persistent || thread.groupThread ? "italic" : ""}`}
+      className={`min-w-0 flex-1 truncate text-sm ${annotationHidden ? "italic text-sidebar-muted-foreground" : thread.persistent || thread.groupThread ? "italic" : ""}`}
       style={{ minWidth: "calc(32px * var(--lastcode-sidebar-content-zoom))" }}
       data-testid={`thread-title-${thread.id}`}
     >
@@ -128,6 +136,12 @@ function TitleText({
   );
   return (
     <>
+      {annotationHidden ? (
+        <EyeOffIcon aria-hidden className="size-3.5 shrink-0 text-warning-foreground" />
+      ) : null}
+      {automaticallyReappeared ? (
+        <Undo2Icon aria-hidden className="size-3.5 shrink-0 text-warning-foreground" />
+      ) : null}
       {thread.persistent && family.parentKey === null && !subagentLabel ? (
         <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
       ) : null}

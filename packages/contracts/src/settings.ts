@@ -1,7 +1,9 @@
 import { CapacityMode, CapacityModeSetting } from "./capacity.ts";
 import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
+  DEFAULT_LASTCODE_ANNOTATION_PR_CHECK_MINUTES,
   DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES,
+  LastCodeAnnotationPrCheckMinutes,
   LastCodePullRequestWatchQuietMinutes,
 } from "./lastcodePullRequestWatchSettings.ts";
 import {
@@ -1597,6 +1599,9 @@ export const ServerSettings = Schema.Struct({
   lastcodePullRequestWatchQuietMinutes: LastCodePullRequestWatchQuietMinutes.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES)),
   ),
+  lastcodeAnnotationPrCheckMinutes: LastCodeAnnotationPrCheckMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_ANNOTATION_PR_CHECK_MINUTES)),
+  ),
   lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
   ),
@@ -2062,6 +2067,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodePullRequestWatchQuietMinutes: Schema.optionalKey(LastCodePullRequestWatchQuietMinutes),
+  lastcodeAnnotationPrCheckMinutes: Schema.optionalKey(LastCodeAnnotationPrCheckMinutes),
   lastcodeLocalCi: Schema.optionalKey(
     Schema.Struct({
       quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),

@@ -1,3 +1,4 @@
+import { isThreadAnnotationRevealUnseen } from "@t3tools/shared/threadAnnotation";
 import { useAtomMount } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
 import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
@@ -697,7 +698,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
     : null;
 
-  const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
+  const isRevealUnread = isThreadAnnotationRevealUnseen(thread.annotation, lastVisitedAt);
+  const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt }) || isRevealUnread;
   const status = resolveSidebarRowStatus({ ...thread, lastVisitedAt });
   const archiveStatus = presentThreadArchive(thread, messages);
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
@@ -801,7 +803,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       };
     return isUnread
       ? {
-          label: gt("Done", { $context: "thread status" }),
+          label: isRevealUnread ? gt("Unread") : gt("Done", { $context: "thread status" }),
           icon: "done" as const,
           className: "text-success-foreground",
         }

@@ -7,6 +7,7 @@ import {
   OrchestrationV2Command,
   OrchestrationV2DomainEventJson,
   OrchestrationV2AppThreadJson,
+  OrchestrationV2ThreadShellJson,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -15,7 +16,12 @@ import {
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
 } from "@t3tools/contracts";
-import { threadAnnotationEntries, threadAnnotationId } from "@t3tools/shared/threadAnnotation";
+import {
+  isThreadAnnotationRevealUnseen,
+  threadAnnotationAuthoredBody,
+  threadAnnotationEntries,
+  threadAnnotationId,
+} from "@t3tools/shared/threadAnnotation";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -32,6 +38,7 @@ import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
+import { applyAnnotationEdit, applyAnnotationTriggerCommand } from "./LastCodeAnnotationHide.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionReplay from "./testkit/ProjectionReplay.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -87,6 +94,318 @@ const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
 const decodeEventJson = Schema.decodeUnknownEffect(OrchestrationV2DomainEventJson);
 const encodeThreadJson = Schema.encodeEffect(OrchestrationV2AppThreadJson);
 const decodeStoredThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
+
+const annotationFixture = Effect.fn("lastcodeMetadata.annotationFixture")(function* () {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const sink = yield* EventSink.EventSinkV2;
+  const threadId = ThreadId.make("hidden:carrier");
+  const projectId = ProjectId.make("hidden:project");
+  yield* orchestrator.dispatch(create(threadId, projectId));
+  const now = yield* DateTime.now;
+  const anchorMessageId = MessageId.make("hide:anchor");
+  yield* sink.write({
+    events: [
+      {
+        id: EventId.make("hidden:message-event"),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: anchorMessageId,
+          threadId,
+          runId: null,
+          nodeId: null,
+          role: "user",
+          text: "An anchor for the annotation",
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+          createdBy: "user",
+          creationSource: "web",
+        },
+      },
+    ],
+  });
+  const command = (id: string) => ({ commandId: CommandId.make(id), threadId });
+  const read = projections.getThread(threadId);
+  return { orchestrator, projections, sink, threadId, projectId, anchorMessageId, read, command };
+});
+
+const LegacyNote = Schema.Struct({
+  id: Schema.optional(Schema.String),
+  body: Schema.String.check(Schema.makeFilter((body) => body.trim().length > 0)),
+  anchorMessageId: MessageId,
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+  resolvedAt: Schema.NullOr(Schema.String),
+});
+const LegacyAnnotation = Schema.Struct({
+  ...LegacyNote.fields,
+  otherAnnotations: Schema.optional(Schema.Array(LegacyNote)),
+});
+const LegacyDetail = OrchestrationV2AppThreadJson.mapFields((fields) => ({
+  ...fields,
+  annotation: Schema.optional(Schema.NullOr(LegacyAnnotation)),
+}));
+const LegacyShell = OrchestrationV2ThreadShellJson.mapFields((fields) => ({
+  ...fields,
+  annotation: Schema.optional(Schema.NullOr(LegacyAnnotation)),
+}));
+const encodeShellJson = Schema.encodeEffect(OrchestrationV2ThreadShellJson);
+const decodeLegacyDetail = Schema.decodeUnknownEffect(LegacyDetail);
+const decodeLegacyShell = Schema.decodeUnknownEffect(LegacyShell);
+
+it.effect(
+  "keeps trigger-only annotations compatible while distinguishing generated and authored text",
+  () =>
+    Effect.gen(function* () {
+      const { orchestrator, projections, threadId, read, command } = yield* annotationFixture();
+      const upsert = (id: string) => ({
+        ...command(id),
+        type: "thread.annotation.upsert" as const,
+      });
+      const resolve = (id: string) =>
+        orchestrator.dispatch({ ...command(id), type: "thread.annotation.resolve" });
+      const hideUntil = { kind: "date" as const, at: "2027-01-01T00:00:00.000Z" };
+      assert.equal(
+        (yield* Effect.exit(orchestrator.dispatch({ ...upsert("empty"), body: "  " })))._tag,
+        "Failure",
+      );
+      yield* orchestrator.dispatch({ ...upsert("history"), body: "Previous annotation" });
+      yield* resolve("resolve:history");
+      const arm = { ...upsert("arm"), createNew: true, hideUntil };
+      yield* orchestrator.dispatch(arm);
+      const hidden = (yield* read).annotation!;
+      assert.isTrue(hidden.bodyGenerated);
+      assert.equal(threadAnnotationAuthoredBody(hidden), "");
+      const verifyOldDecoders = Effect.gen(function* () {
+        const detail = yield* encodeThreadJson(yield* read);
+        const shell = yield* projections.getThreadShell(threadId);
+        assert.isNotNull(shell);
+        const wireShell = yield* encodeShellJson(shell!);
+        assert.equal((yield* decodeLegacyDetail(detail)).annotation?.body, hidden.body);
+        assert.equal((yield* decodeLegacyShell(wireShell)).annotation?.body, hidden.body);
+      });
+      yield* verifyOldDecoders;
+      yield* orchestrator.dispatch({ ...upsert("legacy-echo"), body: hidden.body });
+      assert.isTrue((yield* read).annotation?.bodyGenerated);
+      yield* TestClock.adjust("1 second");
+      const show = yield* orchestrator.dispatch({
+        ...upsert("show-now"),
+        hideUntil: null,
+        expectedHideTriggerId: arm.commandId,
+      });
+      const shown = (yield* read).annotation!;
+      assert.isUndefined(shown.hideUntil);
+      assert.equal(shown.reveal?.by, "manual");
+      const shell = yield* projections.getThreadShell(threadId);
+      const delta = shellStreamItemFromThreadShell({ stored: show.storedEvents[0]!, shell });
+      assert.equal(delta.kind, "thread.updated");
+      if (delta.kind === "thread.updated") assert.deepEqual(delta.thread.annotation, shown);
+      yield* verifyOldDecoders;
+      yield* resolve("resolve:generated");
+      const history = (yield* read).annotation!;
+      assert.equal(history.body, "Previous annotation");
+      assert.isUndefined(history.otherAnnotations);
+      yield* orchestrator.dispatch({
+        ...upsert("gone-show"),
+        annotationId: hidden.id,
+        hideUntil: null,
+        expectedHideTriggerId: arm.commandId,
+      });
+      assert.deepEqual((yield* read).annotation, history);
+      const armAgain = { ...upsert("arm-again"), createNew: true, hideUntil };
+      yield* orchestrator.dispatch(armAgain);
+      yield* orchestrator.dispatch({
+        ...upsert("explicit-body"),
+        body: hidden.body,
+        bodyEdited: true,
+      });
+      assert.equal(threadAnnotationAuthoredBody((yield* read).annotation), hidden.body);
+      yield* resolve("resolve:authored");
+      const resolved = (yield* read).annotation!;
+      assert.equal(resolved.body, hidden.body);
+      assert.isUndefined(resolved.hideUntil);
+      assert.isUndefined(resolved.reveal);
+      assert.equal(resolved.otherAnnotations?.[0]?.body, history.body);
+    }).pipe(Effect.provide(annotationTestLayer)),
+);
+
+it.effect(
+  "guards reveals by trigger identity, preserves edits and broadcasts a reveal of an archived thread",
+  () =>
+    Effect.gen(function* () {
+      const { orchestrator, projections, threadId, projectId, read, command } =
+        yield* annotationFixture();
+      const upsert = (id: string) => ({
+        ...command(id),
+        type: "thread.annotation.upsert" as const,
+      });
+      const archive = (id: ThreadId) =>
+        orchestrator.dispatch({
+          type: "thread.archive",
+          threadId: id,
+          commandId: CommandId.make(`archive:${id}`),
+        });
+      const targetId = ThreadId.make("hidden:target");
+      yield* orchestrator.dispatch(create(targetId, projectId));
+      yield* archive(targetId);
+      const invalid = yield* Effect.exit(
+        orchestrator.dispatch({
+          ...upsert("already-archived"),
+          hideUntil: { kind: "thread-archived", threadId: targetId },
+        }),
+      );
+      assert.equal(invalid._tag, "Failure");
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        threadId: targetId,
+        commandId: CommandId.make("unarchive:target"),
+      });
+      yield* orchestrator.dispatch({
+        ...upsert("archive-trigger"),
+        hideUntil: { kind: "thread-archived", threadId: targetId },
+      });
+      const archiveTrigger = (yield* read).annotation?.hideUntil;
+      assert.equal(archiveTrigger?.kind, "thread-archived");
+      assert.equal(
+        archiveTrigger?.kind === "thread-archived" && archiveTrigger.targetTitle,
+        "Metadata thread",
+      );
+
+      const date = {
+        kind: "date" as const,
+        at: DateTime.formatIso(DateTime.add(yield* DateTime.now, { seconds: 5 })),
+      };
+      yield* orchestrator.dispatch({
+        ...upsert("first-trigger"),
+        hideUntil: date,
+        body: "First body",
+      });
+      const first = (yield* read).annotation!;
+      yield* orchestrator.dispatch({ ...upsert("body-edit"), body: "Concurrent edit" });
+      yield* orchestrator.dispatch({
+        ...upsert("manual-reveal"),
+        hideUntil: null,
+        expectedHideTriggerId: first.hideUntil!.id,
+      });
+      assert.equal((yield* read).annotation?.body, "Concurrent edit");
+      assert.equal((yield* read).annotation?.reveal?.by, "manual");
+
+      const arm = { ...upsert("replacement-trigger"), hideUntil: date };
+      yield* orchestrator.dispatch(arm);
+      yield* orchestrator.dispatch({
+        ...upsert("stale-standalone"),
+        hideUntil: null,
+        expectedHideTriggerId: first.hideUntil!.id,
+      });
+      assert.equal((yield* read).annotation?.body, "Concurrent edit");
+      yield* orchestrator.dispatch({
+        ...upsert("stale-combined"),
+        body: "Latest text",
+        hideUntil: null,
+        expectedHideTriggerId: first.hideUntil!.id,
+      });
+      assert.equal((yield* read).annotation?.body, "Latest text");
+      assert.equal((yield* read).annotation?.hideUntil?.id, arm.commandId);
+      assert.isUndefined((yield* read).annotation?.reveal);
+      yield* archive(threadId);
+      const archived = yield* read;
+      yield* TestClock.adjust("5 seconds");
+      const reveal = {
+        type: "thread.annotation.reveal" as const,
+        annotationId: first.id!,
+        outcome: "due" as const,
+      };
+      yield* orchestrator.dispatch({
+        ...reveal,
+        ...command("late-reveal"),
+        triggerId: first.hideUntil!.id,
+      });
+      assert.deepEqual(yield* read, archived);
+      const storedCommand = { ...reveal, ...command("actual-reveal"), triggerId: arm.commandId };
+      const result = yield* orchestrator.dispatch(storedCommand);
+      const updated = yield* read;
+      assert.deepEqual(updated.archivedAt, archived.archivedAt);
+      assert.deepEqual(updated.lastVisitedAt, archived.lastVisitedAt);
+      assert.equal(updated.annotation?.reveal?.at, DateTime.formatIso(updated.updatedAt));
+      assert.isTrue(isThreadAnnotationRevealUnseen(updated.annotation));
+      assert.equal((yield* projections.getThreadRecords(threadId, ["runs"])).runs.length, 0);
+      const shell = yield* projections.getThreadShell(threadId);
+      assert.deepEqual(shell?.annotation, updated.annotation);
+      const event = result.storedEvents.find(
+        (event) => event.event.type === "thread.annotation-upserted",
+      );
+      assert.isDefined(event);
+      const delta = shellStreamItemFromThreadShell({ stored: event!, shell });
+      assert.equal(delta.kind, "thread.removed");
+      yield* orchestrator.dispatch(storedCommand);
+      assert.deepEqual(yield* read, updated);
+      assert.isTrue((yield* (yield* ProjectionReplay.ProjectionReplay).rebuild).valid);
+      assert.deepEqual((yield* read).annotation, updated.annotation);
+    }).pipe(Effect.provide(annotationTestLayer)),
+);
+
+it.effect("counts only strictly newer observed checkpoint builds", () =>
+  Effect.gen(function* () {
+    const { anchorMessageId, projections, sink, read, command } = yield* annotationFixture();
+    const initial = yield* read;
+    const now = yield* DateTime.now;
+    const at = DateTime.formatIso(now);
+    const annotationId = "checkpoint:annotation";
+    const arm = {
+      ...command(annotationId),
+      type: "thread.annotation.upsert" as const,
+      hideUntil: { kind: "checkpoints" as const, count: 2 },
+    };
+    const base = {
+      id: annotationId,
+      anchorMessageId,
+      createdAt: at,
+      updatedAt: at,
+      resolvedAt: null,
+    };
+    const lookup = { latestSequence: sink.latestSequence, findThread: projections.findThread };
+    const blocked = yield* Effect.exit(applyAnnotationEdit(arm, base, null, lookup, "0.0.1"));
+    assert.equal(blocked._tag, "Failure");
+    const annotation = yield* applyAnnotationEdit(
+      arm,
+      base,
+      null,
+      lookup,
+      "0.0.1-nightly.20261120.4979",
+    );
+    const thread = { ...initial, annotation };
+    const progress = {
+      ...command("checkpoint:progress"),
+      type: "thread.annotation.hide-progress" as const,
+      annotationId,
+      triggerId: arm.commandId,
+    };
+    const observe = (state: typeof initial, version: string) =>
+      applyAnnotationTriggerCommand(state, progress, DateTime.add(now, { seconds: 1 }), version);
+    const first = observe(thread, "0.0.1-nightly.20261120.4979.1")!;
+    assert.deepEqual(
+      first.annotation?.hideUntil?.kind === "checkpoints" && first.annotation.hideUntil.seenBuilds,
+      ["20261120.4979.1"],
+    );
+    assert.deepEqual(first.updatedAt, thread.updatedAt);
+    for (const version of [
+      "0.0.1-nightly.20261120.4979.1",
+      "0.0.1-nightly.20261120.4979",
+      "0.0.1",
+    ]) {
+      assert.isNull(observe(first, version));
+    }
+    const finalVersion = "0.0.1-nightly.20261120.4980";
+    const shown = observe(first, finalVersion)!;
+    assert.isUndefined(shown.annotation?.hideUntil);
+    assert.equal(shown.annotation?.reveal?.installedVersion, finalVersion);
+    assert.equal(shown.annotation?.reveal?.outcome, "installed");
+  }).pipe(Effect.provide(annotationTestLayer)),
+);
 
 it.effect(
   "holds automatic settlement for a ledger-only Action and preserves explicit settlement",

@@ -40,6 +40,7 @@ import {
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
+import { filterLastCodeAnnotationThreadRows } from "./lastCodeAnnotationThreadLists";
 import { useThreadListV2 } from "./useThreadListV2";
 import { useSidebarRowThreadKey } from "./useSidebarRowThreadKey";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
@@ -130,7 +131,12 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   const insets = useSafeAreaInsets();
   const { fabClearance, fabSize } = useAndroidControlSizing();
   const projects = useProjects();
-  const threads = useAtomValue(steadyNavigationThreadShellsAtom);
+  const orderCandidates = useAtomValue(steadyNavigationThreadShellsAtom);
+  const retainedThreadKey = props.selectedThreadKey;
+  const threads = useMemo(
+    () => filterLastCodeAnnotationThreadRows(orderCandidates, retainedThreadKey),
+    [orderCandidates, retainedThreadKey],
+  );
   const selectedThreadKey = useSidebarRowThreadKey(props.selectedThreadKey);
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
@@ -149,7 +155,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     moveThread,
     renameThread,
     regenerateThreadTitle,
-  } = useThreadListActions();
+  } = useThreadListActions(retainedThreadKey);
   const pendingTasks = usePendingNewTasks();
   const launchingThreads = useLaunchingThreads(threads);
   const activeNewTask = useActiveNewTask();
@@ -279,6 +285,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     olderSettledShelf,
   } = useThreadListV2({
     threads: launchingThreads,
+    orderCandidates,
     pendingTasks,
     environmentId: options.selectedEnvironmentId,
     projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,

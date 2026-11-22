@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, MessageId, RunId, ThreadId } from "@t3tools/contracts";
 import { makeThreadFixture } from "../../test-fixtures";
 import { projectLastCodeProjectThreads } from "./lastcodeProjectThreads";
 
@@ -72,4 +72,42 @@ describe("project timestamp projection", () => {
       }).latestThreadTimestamp,
     ).toBeNull();
   });
+});
+
+it("puts a revealed thread first in activity order even when it has an older send", () => {
+  const original = "2026-01-01T00:00:00.000Z";
+  const revealAt = "2026-01-04T00:00:00.000Z";
+  const revealed = makeThreadFixture({
+    ...other,
+    createdAt: original,
+    updatedAt: revealAt,
+    latestUserMessageAt: original,
+    latestUserAuthoredMessageAt: original,
+    annotation: {
+      anchorMessageId: MessageId.make("anchor"),
+      body: "Wait",
+      createdAt: original,
+      updatedAt: revealAt,
+      resolvedAt: null,
+      reveal: {
+        at: revealAt,
+        by: "trigger",
+        trigger: { kind: "date", id: CommandId.make("hide"), hiddenAt: original, at: revealAt },
+      },
+    },
+  });
+  const result = projectLastCodeProjectThreads([parent, revealed], "updated_at", {
+    collapsedByKey: {},
+    activeThreadKey: null,
+    projectExpanded: true,
+    previewCount: 2,
+    listExpanded: false,
+    groupingStyle: "minimal",
+  });
+
+  expect(result.latestThreadTimestamp).toBe(revealAt);
+  expect(result.familyProjection.renderedRows.map(({ thread }) => thread.id)).toEqual([
+    revealed.id,
+    parent.id,
+  ]);
 });

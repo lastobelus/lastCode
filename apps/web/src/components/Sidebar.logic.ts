@@ -12,6 +12,7 @@ import {
 } from "@t3tools/client-runtime/state/models";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { isThreadAnnotationRevealUnseen } from "@t3tools/shared/threadAnnotation";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
 import { msg } from "gt-react";
@@ -906,6 +907,7 @@ type ThreadStatusInput = Pick<
   | "recovery"
   | "archivePending"
 > & {
+  annotation?: SidebarThreadSummary["annotation"];
   attention?: { readonly kind: "question"; readonly raisedAt: string } | null | undefined;
   lastVisitedAt?: string | null | undefined;
   pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
@@ -1318,7 +1320,10 @@ export function resolveSidebarFolderDot(
   if (statuses.has("failed")) return "failed";
   // Rows show Done only for ready threads, so the dot follows the same rule.
   const hasUnread = threads.some(
-    (thread) => resolveSidebarRowStatus(thread) === "ready" && hasUnseenCompletion(thread),
+    (thread) =>
+      resolveSidebarRowStatus(thread) === "ready" &&
+      (hasUnseenCompletion(thread) ||
+        isThreadAnnotationRevealUnseen(thread.annotation, thread.lastVisitedAt)),
   );
   if (hasUnread) return "unread";
   if (statuses.has("working") || statuses.has("preparing")) return "working";
@@ -1627,6 +1632,9 @@ export function resolveThreadStatusPill(
   if (hasUnseenCompletion(thread)) {
     return { label: msg("Completed"), ...THREAD_STATUS_PRIORITY["Completed"].presentation };
   }
+  if (isThreadAnnotationRevealUnseen(thread.annotation, thread.lastVisitedAt)) {
+    return { label: msg("Unread"), ...THREAD_STATUS_PRIORITY["Completed"].presentation };
+  }
 
   return null;
 }
@@ -1641,7 +1649,8 @@ export function resolveProjectStatusIndicator(
 
   for (const status of statuses) {
     if (status === null) continue;
-    const priority = priorities[status.label]?.priority ?? 0;
+    const priority =
+      priorities[status.label === "Unread" ? "Completed" : status.label]?.priority ?? 0;
     if (priority > highestPriority) {
       highestPriorityStatus = status;
       highestPriority = priority;

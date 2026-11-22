@@ -1,6 +1,38 @@
 import type { OrchestrationV2AppThread, ThreadAnnotation } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
+export function threadAnnotationAuthoredBody(annotation: ThreadAnnotation | null | undefined) {
+  return annotation?.bodyGenerated === true ? "" : (annotation?.body ?? "");
+}
+
+export function isThreadAnnotationHidden(annotation: ThreadAnnotation | null | undefined) {
+  return annotation?.resolvedAt === null && annotation.hideUntil !== undefined;
+}
+
+export function isThreadAnnotationVisibleInPalette(
+  thread: { readonly annotation?: ThreadAnnotation | null | undefined; readonly title: string },
+  query: string,
+): boolean {
+  if (!isThreadAnnotationHidden(thread.annotation)) return true;
+  const titleQuery = query.trim().toLowerCase();
+  return titleQuery.length > 0 && thread.title.toLowerCase().includes(titleQuery);
+}
+
+export function threadAnnotationRevealAt(annotation: ThreadAnnotation | null | undefined) {
+  return annotation?.resolvedAt === null ? annotation.reveal?.at : undefined;
+}
+
+export function isThreadAnnotationRevealUnseen(
+  annotation: ThreadAnnotation | null | undefined,
+  lastVisitedAt?: string | null,
+) {
+  const revealAt = threadAnnotationRevealAt(annotation);
+  return (
+    revealAt !== undefined &&
+    (lastVisitedAt == null || Date.parse(revealAt) > Date.parse(lastVisitedAt))
+  );
+}
+
 /** Unchanged notes predating a child were copied from its parent; later child writes remain independent. */
 export function threadAnnotationOf(
   thread: Pick<
