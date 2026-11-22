@@ -388,7 +388,7 @@ export function validateCarryPullRequest(
   } catch (error) {
     const detail =
       error instanceof CarryReplayConflictError
-        ? `${error.diagnosis}\n${error.advice}\nPush the corrected head and rerun carry validation before merging.\nGit output:\n${error.gitOutput}`
+        ? `Git output:\n${error.gitOutput}\n\n${error.fileHistory}\n${error.diagnosis}\n${error.advice}\nPush the corrected head and rerun carry validation before merging.`
         : `${error instanceof Error ? error.message : String(error)} Reconcile the source contributions with their owning groups and rerun carry validation before merging.`;
     throw new Error(
       `PR #${pullRequest.number} same-base carry compilation failed for ${base}..${head}: ${detail}`,

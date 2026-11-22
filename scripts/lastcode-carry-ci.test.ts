@@ -323,7 +323,7 @@ describe("LastCode carry CI", () => {
     }
   });
 
-  it("names the later carry groups whose changes a regrouped commit conflicts with", () => {
+  it("lists carry groups for each conflicted file and ends with replay guidance", () => {
     const { repo, cleanup } = fixture();
     try {
       const { base } = compactFixture(repo);
@@ -344,6 +344,14 @@ describe("LastCode carry CI", () => {
       expect((cause as CarryReplayConflictError).message).not.toContain("Likely fix");
       expect((cause as CarryReplayConflictError).advice).toContain("Likely fix");
       const short = (commit: string) => commit.slice(0, 12);
+      expect(message).toContain("CONFLICT (content): Merge conflict in shared.txt");
+      expect(message).toContain(
+        "Carry groups that previously changed each conflicted file:\n" +
+          "- shared.txt: resumable-actions (replays after tooling), legacy-sidebar (replays after tooling)",
+      );
+      expect(message.indexOf("Git output:")).toBeLessThan(
+        message.indexOf("Carry groups that previously changed each conflicted file:"),
+      );
       expect(message).toContain(
         [
           `Carry replay conflicted in shared.txt while replaying ${short(head)} "extend sidebar tooling" (Carry-Group: tooling).`,
@@ -351,7 +359,6 @@ describe("LastCode carry CI", () => {
           `- ${short(sidebar)} "show sidebar state" (Carry-Group: legacy-sidebar): shared.txt`,
           `Likely fix: retag ${short(head)}'s Carry-Group to legacy-sidebar so it replays after them, or split its changes to shared.txt into a separate legacy-sidebar commit.`,
           "Push the corrected head and rerun carry validation before merging.",
-          "Git output:",
         ].join("\n"),
       );
     } finally {
