@@ -62,12 +62,17 @@ it.each(["trigger", "manual"] as const)(
         },
       };
       expect(isThreadAnnotationRevealUnseen(annotation, original)).toBe(true);
-      registry.set(shellAtom, { ...initial, lastVisitedAt: original, annotation });
-      expect(visits[1]).toEqual({ threadId: id, visitedAt: revealAt });
       registry.set(shellAtom, {
         ...initial,
         updatedAt: revealAt,
         lastVisitedAt: original,
+        annotation,
+      });
+      expect(visits[1]).toEqual({ threadId: id, visitedAt: revealAt });
+      registry.set(shellAtom, {
+        ...initial,
+        updatedAt: revealAt,
+        lastVisitedAt: revealAt,
         annotation,
       });
       unmount();

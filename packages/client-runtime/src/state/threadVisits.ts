@@ -5,10 +5,7 @@ import type {
   ThreadAnnotation,
   ThreadId,
 } from "@t3tools/contracts";
-import {
-  isThreadAnnotationRevealUnseen,
-  threadAnnotationRevealAt,
-} from "@t3tools/shared/threadAnnotation";
+import { isThreadAnnotationRevealUnseen } from "@t3tools/shared/threadAnnotation";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { parseThreadKey, threadKey } from "./entities.ts";
@@ -144,16 +141,8 @@ export function createThreadVisitTracker(options: ThreadVisitTrackerOptions) {
         if (Number.isNaN(shellUpdatedAtMs)) return;
         const wokeAtMs = shell.wokeAt ? Date.parse(shell.wokeAt) : NaN;
         const wakeIsLatest = wokeAtMs > shellUpdatedAtMs;
-        const revealAt = threadAnnotationRevealAt(shell.annotation);
-        const revealAtMs = Date.parse(revealAt ?? "");
-        const latestActivityAtMs = wakeIsLatest ? wokeAtMs : shellUpdatedAtMs;
-        const revealIsLatest = revealAt !== undefined && revealAtMs > latestActivityAtMs;
-        const visitedAt = revealIsLatest
-          ? revealAt
-          : wakeIsLatest && shell.wokeAt
-            ? shell.wokeAt
-            : shell.updatedAt;
-        const updatedAtMs = revealIsLatest ? revealAtMs : latestActivityAtMs;
+        const visitedAt = wakeIsLatest && shell.wokeAt ? shell.wokeAt : shell.updatedAt;
+        const updatedAtMs = wakeIsLatest ? wokeAtMs : shellUpdatedAtMs;
         if (shell.lastVisitedAt === undefined) {
           options.markLocalVisit?.(ref, visitedAt);
           return;

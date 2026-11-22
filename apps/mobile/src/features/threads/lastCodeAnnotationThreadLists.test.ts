@@ -1,4 +1,5 @@
 import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
+import { resolveListedAncestorThreadRef } from "@t3tools/client-runtime/state/threads";
 import {
   CommandId,
   EnvironmentId,
@@ -7,6 +8,7 @@ import {
   type ThreadAnnotation,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import { scopedThreadKey } from "../../lib/scopedEntities";
 import { makeThreadShellFixture } from "../../test-fixtures";
 import {
   filterLastCodeAnnotationThreadRows,
@@ -79,7 +81,7 @@ describe("mobile annotation navigation", () => {
     ]);
   });
 
-  it("keeps a displayed hidden row in its own section during a move and reconciliation", () => {
+  it("keeps the hidden parent row selected by an open child in its section during a move", () => {
     const first = makeThreadShellFixture({
       environmentId,
       id: ThreadId.make("first"),
@@ -87,12 +89,30 @@ describe("mobile annotation navigation", () => {
       pinnedAt: now,
     });
     const open = { ...annotated, pinOrderKey: "m", pinnedAt: now };
+    const child = makeThreadShellFixture({
+      environmentId,
+      id: ThreadId.make("open-child"),
+      lineage: {
+        rootThreadId: open.id,
+        parentThreadId: open.id,
+        relationshipToParent: "subagent",
+      },
+    });
+    const drawerThreads = [first, open];
+    const row = resolveListedAncestorThreadRef({ environmentId, threadId: child.id }, [
+      ...drawerThreads,
+      child,
+    ]);
+    const retainedThreadKey = scopedThreadKey(row.environmentId, row.threadId);
+    expect(filterLastCodeAnnotationThreadRows(drawerThreads, retainedThreadKey)).toEqual(
+      drawerThreads,
+    );
     const input = {
-      threads: [first, open],
+      threads: drawerThreads,
       section: "pinned" as const,
       now,
       movedId: "local:annotated",
-      retainedThreadKey: "local:annotated",
+      retainedThreadKey,
       direction: "up" as const,
       reorderableEnvironmentIds: new Set([environmentId]),
     };

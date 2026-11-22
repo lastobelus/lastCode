@@ -131,13 +131,12 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   const insets = useSafeAreaInsets();
   const { fabClearance, fabSize } = useAndroidControlSizing();
   const projects = useProjects();
-  const orderCandidates = useAtomValue(steadyNavigationThreadShellsAtom);
-  const retainedThreadKey = props.selectedThreadKey;
-  const threads = useMemo(
-    () => filterLastCodeAnnotationThreadRows(orderCandidates, retainedThreadKey),
-    [orderCandidates, retainedThreadKey],
-  );
+  const orderCandidates = useLaunchingThreads(useAtomValue(steadyNavigationThreadShellsAtom));
   const selectedThreadKey = useSidebarRowThreadKey(props.selectedThreadKey);
+  const threads = useMemo(
+    () => filterLastCodeAnnotationThreadRows(orderCandidates, selectedThreadKey),
+    [orderCandidates, selectedThreadKey],
+  );
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
@@ -155,9 +154,8 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     moveThread,
     renameThread,
     regenerateThreadTitle,
-  } = useThreadListActions(retainedThreadKey);
+  } = useThreadListActions(selectedThreadKey);
   const pendingTasks = usePendingNewTasks();
-  const launchingThreads = useLaunchingThreads(threads);
   const activeNewTask = useActiveNewTask();
   const queuedThreadKeys = useQueuedThreadKeys();
   const selectDetail = useSelectWorkspaceDetail();
@@ -284,7 +282,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     contentOnlyThreadKeys,
     olderSettledShelf,
   } = useThreadListV2({
-    threads: launchingThreads,
+    threads,
     orderCandidates,
     pendingTasks,
     environmentId: options.selectedEnvironmentId,
