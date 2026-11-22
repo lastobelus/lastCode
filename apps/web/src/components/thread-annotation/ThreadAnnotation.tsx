@@ -10,6 +10,7 @@ import {
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { m, type MessageResolver } from "~/i18n/messages";
+import { cn } from "~/lib/utils";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { ChevronDownIcon, EyeOffIcon } from "lucide-react";
 import {
@@ -290,19 +291,18 @@ export function ThreadAnnotationBody(props: {
       ) : null}
       {reveal ? <ThreadAnnotationRevealLine reveal={reveal} threadRef={props.threadRef} /> : null}
       {body !== "" ? (
-        <div className={trigger || reveal ? "mt-2" : undefined}>
-          <ChatMarkdown
-            className={
-              props.compact ? "thread-annotation-compact" : "text-sm text-warning-foreground"
-            }
-            cwd={props.cwd}
-            onTaskListChange={onTaskListChange}
-            parseRawHtml={false}
-            taskListDisabled={bodyChangePending}
-            text={body}
-            threadRef={props.threadRef}
-          />
-        </div>
+        <ChatMarkdown
+          className={cn(
+            props.compact ? "thread-annotation-compact" : "text-sm text-warning-foreground",
+            (trigger || reveal) && "mt-2",
+          )}
+          cwd={props.cwd}
+          onTaskListChange={onTaskListChange}
+          parseRawHtml={false}
+          taskListDisabled={bodyChangePending}
+          text={body}
+          threadRef={props.threadRef}
+        />
       ) : null}
       {body !== "" && props.showTimestamp !== false ? (
         <ThreadAnnotationTimestamp annotation={props.annotation} />

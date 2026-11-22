@@ -31,7 +31,7 @@ export type HideUntilDraft =
   | { kind: "pull-request-merged"; pullRequest: PullRequestTrigger | null }
   | { kind: "date"; date: string; time: string };
 
-export function pacificDateFields(value: string | number) {
+function pacificDateFields(value: string | number) {
   const zoned = DateTime.makeZonedUnsafe(value, pacificOptions);
   const { year, month, day, hour, minute } = DateTime.toParts(zoned);
   const pad = (number: number) => String(number).padStart(2, "0");
