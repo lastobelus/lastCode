@@ -3,6 +3,8 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { markOriginAsGhDefault } from "./lib/lastcode-gh-default.ts";
+
 const ENV_FILES = [".env", NodePath.join("infra", "relay", ".env")];
 
 const projectRoot = process.env.T3CODE_PROJECT_ROOT;
@@ -28,5 +30,7 @@ for (const file of ENV_FILES) {
   if (existing) NodeFS.rmSync(target);
   NodeFS.symlinkSync(source, target);
 }
+
+markOriginAsGhDefault(worktree);
 
 console.log("[setup-worktree] Environment files linked. Dependencies are deferred until needed.");
