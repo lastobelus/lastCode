@@ -1,3 +1,4 @@
+import type { OrchestrationV2ProviderSession } from "@t3tools/contracts";
 import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderAdapterV2SessionRuntime } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
@@ -15,6 +16,31 @@ export function readCodexBackgroundWait(settings?: ProviderHost["Service"]["sett
 export const loadCodexBackgroundWaitReader = Effect.serviceOption(ProviderHost).pipe(
   Effect.map((host) => readCodexBackgroundWait(Option.getOrUndefined(host)?.settings.get)),
 );
+
+export function withCodexBackgroundWaitCapability(
+  capabilities: OrchestrationV2ProviderSession["capabilities"],
+  enabled: boolean,
+): OrchestrationV2ProviderSession["capabilities"] {
+  return enabled
+    ? { ...capabilities, tools: { ...capabilities.tools, supportsBackgroundWait: true } }
+    : capabilities;
+}
+
+export function codexBackgroundWaitForNewSession(
+  capabilities: ReadonlySet<string> | undefined,
+  readSetting: Effect.Effect<boolean>,
+) {
+  // Use the issued credential's decision even if the setting changed during open.
+  return capabilities === undefined
+    ? readSetting
+    : Effect.succeed(capabilities.has("background-wait"));
+}
+
+export function codexBackgroundWaitForAttachedSession(runtime: ProviderAdapterV2SessionRuntime) {
+  return runtime.driver === "codex"
+    ? runtime.providerSession.capabilities.tools.supportsBackgroundWait === true
+    : undefined;
+}
 
 export function codexBackgroundWaitHook(
   enabled: boolean,

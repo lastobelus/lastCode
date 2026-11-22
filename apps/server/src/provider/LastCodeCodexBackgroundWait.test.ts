@@ -2,11 +2,13 @@ import * as NodeAssert from "node:assert/strict";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { CodexSettings, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import { CodexSettings, EnvironmentId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { ProviderAdapterV2RuntimePolicy } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as CodexClient from "effect-codex-app-server/client";
+import { McpSchema } from "effect/ai";
+import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -15,6 +17,8 @@ import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import {
   buildCodexTurnStartParams,
   CODEX_DEFAULT_INSTANCE_ID,
@@ -23,11 +27,14 @@ import {
 import { makeReplayServerConfig } from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES } from "./CodexDeveloperInstructions.ts";
-import { readCodexBackgroundWait } from "./LastCodeCodexBackgroundWait.ts";
+import {
+  codexBackgroundWaitForAttachedSession,
+  readCodexBackgroundWait,
+} from "./LastCodeCodexBackgroundWait.ts";
 
 const defaultCodexSettings = Schema.decodeSync(CodexSettings)({});
 
-it.effect("applies the environment's background wait setting to new Codex sessions", () =>
+it.effect("advertises background wait only to opted-in Codex sessions", () =>
   Effect.gen(function* () {
     const settings = yield* ServerSettings.ServerSettingsService;
     const adapter = yield* makeCodexAdapterV2({
@@ -54,6 +61,7 @@ it.effect("applies the environment's background wait setting to new Codex sessio
       readBackgroundWait: readCodexBackgroundWait(settings.getSettings),
     });
     const threadId = ThreadId.make("thread-background-wait");
+    const environmentId = EnvironmentId.make("background-wait-environment");
     const modelSelection = { instanceId: CODEX_DEFAULT_INSTANCE_ID, model: "gpt-5.4" };
     const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
       runtimeMode: "full-access",
@@ -67,11 +75,62 @@ it.effect("applies the environment's background wait setting to new Codex sessio
         modelSelection,
         runtimePolicy,
       });
+    const mcpCapabilities = (supported: boolean) =>
+      new Set<McpInvocationContext.McpCapability>(
+        supported ? ["orchestration", "background-wait"] : ["orchestration"],
+      );
+    const enabledWhen = Context.getOrUndefined(
+      OrchestratorToolkit.tools.t3_background_wait.annotations,
+      McpSchema.EnabledWhen,
+    );
+    const toolVisible = (supported: boolean | undefined) =>
+      Effect.sync(
+        () => enabledWhen?.({ protocolVersion: "2025-06-18", capabilities: {} }) ?? true,
+      ).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          environmentId,
+          requestNamespace: "codex-background-wait",
+          issuedAt: 0,
+          thread: {
+            threadId,
+            providerSessionId: "codex-background-wait",
+            providerInstanceId: CODEX_DEFAULT_INSTANCE_ID,
+          },
+          client: undefined,
+          capabilities: mcpCapabilities(supported === true),
+        }),
+      );
+    const configuredSupport = adapter
+      .getCapabilities()
+      .pipe(Effect.map((capabilities) => capabilities.tools.supportsBackgroundWait === true));
+    const configuredToolVisible = configuredSupport.pipe(Effect.flatMap(toolVisible));
+    const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+    const prepareCredential = Effect.gen(function* () {
+      yield* mcpSessions.set({
+        environmentId,
+        threadId,
+        providerSessionId: "codex-background-wait-mcp",
+        providerInstanceId: CODEX_DEFAULT_INSTANCE_ID,
+        endpoint: "http://127.0.0.1/mcp",
+        authorizationHeader: "Bearer fixture",
+        browserToolsAvailable: false,
+        capabilities: mcpCapabilities(yield* configuredSupport),
+      });
+    });
+    NodeAssert.equal(yield* configuredToolVisible, false);
+    yield* prepareCredential;
+    yield* settings.updateSettings({ lastcodeCodexBackgroundWaitEnabled: true });
+    NodeAssert.equal(yield* configuredToolVisible, true);
+    // The first credential was issued before the setting changed.
     const before = yield* open("wait-disabled");
     NodeAssert.equal(before.awaitBackgroundTasks, undefined);
-    yield* settings.updateSettings({ lastcodeCodexBackgroundWaitEnabled: true });
+    NodeAssert.equal(yield* toolVisible(codexBackgroundWaitForAttachedSession(before)), false);
+    yield* prepareCredential;
     const after = yield* open("wait-enabled");
     NodeAssert.equal(typeof after.awaitBackgroundTasks, "function");
+    yield* settings.updateSettings({ lastcodeCodexBackgroundWaitEnabled: false });
+    NodeAssert.equal(yield* configuredToolVisible, false);
+    NodeAssert.equal(yield* toolVisible(codexBackgroundWaitForAttachedSession(after)), true);
 
     for (const session of [before, after]) {
       const enabled = session.awaitBackgroundTasks !== undefined;

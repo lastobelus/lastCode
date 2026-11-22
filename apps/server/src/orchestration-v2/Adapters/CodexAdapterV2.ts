@@ -117,9 +117,11 @@ import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { buildCodexAdditionalContext } from "../../provider/CodexDeveloperInstructions.ts";
 import {
+  codexBackgroundWaitForNewSession,
   codexBackgroundWaitHook,
   loadCodexBackgroundWaitReader,
   readCodexBackgroundWait,
+  withCodexBackgroundWaitCapability,
 } from "../../provider/LastCodeCodexBackgroundWait.ts";
 import {
   describeMcpElicitation,
@@ -955,6 +957,7 @@ function providerSession(input: {
   readonly cwd: string | null;
   readonly model: string;
   readonly now: DateTime.Utc;
+  readonly backgroundWaitEnabled: boolean;
 }): OrchestrationV2ProviderSession {
   return {
     id: input.providerSessionId,
@@ -963,7 +966,10 @@ function providerSession(input: {
     status: "ready",
     cwd: input.cwd ?? process.cwd(),
     model: input.model,
-    capabilities: CodexProviderCapabilitiesV2,
+    capabilities: withCodexBackgroundWaitCapability(
+      CodexProviderCapabilitiesV2,
+      input.backgroundWaitEnabled,
+    ),
     createdAt: input.now,
     updatedAt: input.now,
     lastError: null,
@@ -2040,7 +2046,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     driver: CODEX_PROVIDER,
     checksVersionAtHandshake: adapterOptions.compatibility !== undefined,
     getCapabilities: Effect.fn("CodexAdapterV2.getCapabilities")(function () {
-      return Effect.succeed(CodexProviderCapabilitiesV2);
+      return readBackgroundWait.pipe(
+        Effect.map((enabled) =>
+          withCodexBackgroundWaitCapability(CodexProviderCapabilitiesV2, enabled),
+        ),
+      );
     }),
     planSelectionTransition: Effect.fn("CodexAdapterV2.planSelectionTransition")(function () {
       return Effect.succeed(turnScopedSelectionTransition());
@@ -2048,7 +2058,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     openSession: Effect.fn("CodexAdapterV2.openSession")(
       function* (input) {
         const scope = yield* Scope.Scope;
-        const backgroundWaitEnabled = yield* readBackgroundWait;
+        const backgroundWaitEnabled = yield* codexBackgroundWaitForNewSession(
+          (yield* mcpSessions.read(input.threadId))?.capabilities,
+          readBackgroundWait,
+        );
         const resolvedRuntime =
           adapterOptions.resolveRuntime === undefined
             ? undefined
@@ -2209,6 +2222,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           cwd: input.runtimePolicy.cwd,
           model: input.modelSelection.model,
           now,
+          backgroundWaitEnabled,
         });
         // Drain final notifications before the session manager retires the dead process.
         // Queue.fail lets readers take items already buffered before they see the failure.
