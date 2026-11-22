@@ -4405,153 +4405,6 @@ const checkoutEntries = (report: import("@t3tools/contracts").StorageCleanupRepo
     (entry) => entry.kind === "worktree" && entry.worktreeResource === undefined,
   );
 
-it.live.each(["save failure", "corrupt catalog", "failed first write"] as const)(
-  "reports a mid-pass %s before measuring a later worktree",
-  (change) =>
-    runCleanupTest(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
-          Effect.provide(SuspensionRegistry.layer),
-          Effect.provideService(FileSystem.FileSystem, {
-            ...fs,
-            rename: (from, to) =>
-              fs.rename(change === "failed first write" ? `${from}.missing` : from, to),
-          }),
-        );
-        let firstWorktree: string | undefined;
-        let changeCatalog: Effect.Effect<void> | undefined;
-        const walked: string[] = [];
-        const fixture = yield* cleanupFixture(undefined, undefined, undefined, registry).pipe(
-          Effect.provideService(FileSystem.FileSystem, {
-            ...fs,
-            readDirectory: (directory, options) =>
-              Effect.gen(function* () {
-                if (directory === firstWorktree && changeCatalog !== undefined) {
-                  yield* changeCatalog;
-                  changeCatalog = undefined;
-                }
-                walked.push(directory);
-                return yield* fs.readDirectory(directory, options);
-              }),
-          }),
-        );
-        firstWorktree = fixture.worktree;
-        yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "local work\n");
-        const branch = "later-worktree";
-        const worktree = `${fixture.config.worktreesDir}/${branch}`;
-        yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, worktree]);
-        yield* fixture.fs.writeFileString(`${worktree}/tracked.txt`, "local work\n");
-        fixture.setThreads([
-          ...fixture.getThreads(),
-          shell({
-            id: ThreadId.make("later-owner"),
-            branch,
-            worktreePath: worktree,
-            ...(change === "save failure" ? { createdAt: fixture.at(0) } : {}),
-          }),
-        ]);
-        const reason = "Workspace needs review: the save could not be verified.";
-        const record: SuspensionRegistry.CheckoutAuthority = {
-          checkoutId: "later-checkout",
-          repositoryRoot: fixture.repo,
-          path: worktree,
-          aliases: [worktree],
-          owners: [],
-          summary: {
-            checkoutId: "later-checkout",
-            generation: 0,
-            state: "active",
-            snapshotId: null,
-            lastRestoredAt: null,
-            keepWorkspace: false,
-          },
-          history: [],
-          blockedReason: null,
-        };
-        if (change === "save failure") {
-          changeCatalog = registry
-            .put(
-              {
-                ...record,
-                blockedReason: reason,
-                captureFailure: { operationId: "failed-save", reason },
-              },
-              null,
-            )
-            .pipe(Effect.orDie);
-        } else if (change === "corrupt catalog") {
-          yield* registry.put(record, null);
-          changeCatalog = fs
-            .writeFileString(`${registry.root}/authority.json`, "{")
-            .pipe(Effect.orDie);
-        } else {
-          changeCatalog = registry.put(record, null).pipe(
-            Effect.flip,
-            Effect.tap((error) => Effect.sync(() => expect(error.operation).toBe("write"))),
-            Effect.asVoid,
-            Effect.orDie,
-          );
-        }
-        const report = yield* fixture.service.runNow;
-        expect(changeCatalog).toBeUndefined();
-        expect(checkoutEntries(report).find((entry) => entry.path === worktree)).toMatchObject({
-          outcome: change === "save failure" ? "failed" : "kept",
-          reason:
-            change === "save failure"
-              ? reason
-              : "Saved workspace authority could not be verified; files were retained.",
-        });
-        expect(walked).not.toContain(worktree);
-        expect(yield* fixture.fs.exists(worktree)).toBe(true);
-      }),
-    ),
-);
-
-it.live("rechecks a retargeted worktree owner alias before measurement", () =>
-  runCleanupTest(
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      let retarget: { gitFile: string; source: string; alias: string } | undefined;
-      const fixture = yield* cleanupFixture().pipe(
-        Effect.provideService(FileSystem.FileSystem, {
-          ...fs,
-          readLink: (target) =>
-            Effect.gen(function* () {
-              if (retarget?.gitFile === target) {
-                const { alias, source } = retarget;
-                retarget = undefined;
-                yield* fs.remove(alias);
-                yield* fs.symlink(source, alias);
-              }
-              return yield* fs.readLink(target);
-            }),
-        }),
-      );
-      const branch = "sibling-worktree";
-      const sibling = `${fixture.config.worktreesDir}/${branch}`;
-      const alias = `${fixture.config.baseDir}/owner-alias`;
-      yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, sibling]);
-      yield* fs.symlink(sibling, alias);
-      yield* fs.writeFileString(`${fixture.worktree}/tracked.txt`, "local work\n");
-      fixture.setThreads([
-        ...fixture.getThreads(),
-        shell({ id: ThreadId.make("aliased-owner"), branch, worktreePath: alias }),
-      ]);
-      retarget = { gitFile: `${fixture.worktree}/.git`, source: fixture.worktree, alias };
-      const report = yield* fixture.service.runNow;
-      expect(retarget).toBeUndefined();
-      expect(
-        checkoutEntries(report).find((entry) => entry.path === fixture.worktree),
-      ).toMatchObject({
-        outcome: "kept",
-        reason: "Thread activity or shared worktree changed since check",
-      });
-      expect(yield* fs.exists(fixture.worktree)).toBe(true);
-    }),
-  ),
-);
-
 it.live("shares worktree screening reads across a cleanup pass", () => {
   const spans: Tracer.Span[] = [];
   const tracer = Tracer.make({
@@ -4649,12 +4502,12 @@ it.live("shares worktree screening reads across a cleanup pass", () => {
       const evidence = JSON.stringify(counts);
       expect(counts, evidence).toMatchObject({
         ownerSnapshots: 1,
-        ownerPathQueries: 0,
+        ownerPathQueries: workspaceCount,
         captures: workspaceCount,
         measurements: workspaceCount,
       });
       expect(counts.registryReads, evidence).toBeLessThanOrEqual(1);
-      expect(counts.statements, evidence).toBeLessThanOrEqual(47);
+      expect(counts.statements, evidence).toBeLessThanOrEqual(51);
       expect(counts.transactions, evidence).toBeLessThanOrEqual(5);
       const consumerCheck = "WorktreeConsumers.worktreeConsumerReason";
       const measurement = "storageCleanup.measureWorktree";
