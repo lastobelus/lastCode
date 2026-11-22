@@ -160,6 +160,10 @@ export class SuspensionRegistryError extends Schema.TaggedError<SuspensionRegist
 
 const isRegistryError = Schema.is(SuspensionRegistryError);
 
+type WorktreeProtection = (
+  workspacePath: string,
+) => Effect.Effect<string | null, SuspensionRegistryError>;
+
 export class WorktreeSuspensionRegistry extends Context.Service<
   WorktreeSuspensionRegistry,
   {
@@ -176,6 +180,8 @@ export class WorktreeSuspensionRegistry extends Context.Service<
       workspacePath: string,
       resource?: "worktree" | "dependencies",
     ) => Effect.Effect<string | null, SuspensionRegistryError>;
+    /** For inventory screening. Removal must call automaticProtection again. */
+    readonly snapshotWorktreeProtection: Effect.Effect<WorktreeProtection, SuspensionRegistryError>;
     readonly recoveryDestinationProtection: (
       workspacePath: string,
     ) => Effect.Effect<string | null, SuspensionRegistryError>;
@@ -438,12 +444,20 @@ const make = Effect.gen(function* () {
     return null;
   });
 
+  const operationProtectsWorktree = (entry: CheckoutAuthority) =>
+    entry.pendingProjection !== undefined ||
+    (entry.operation !== undefined && entry.operation.kind !== "discard") ||
+    (entry.summary.state !== "active" && entry.summary.state !== "discarded");
   const automaticProtection = Effect.fn("WorktreeSuspensionRegistry.automaticProtection")(
-    function* (workspacePath: string, resource: "worktree" | "dependencies" = "worktree") {
+    function* (
+      workspacePath: string,
+      resource: "worktree" | "dependencies" = "worktree",
+      inventory?: readonly CheckoutAuthority[],
+    ) {
       const candidate = path.resolve(workspacePath);
       const overlaps = (other: string) => pathsOverlap(candidate, other);
       let canonicalCandidate: string | undefined;
-      for (const entry of yield* list) {
+      for (const entry of inventory ?? (yield* list)) {
         const destination = recoveryDestination(entry);
         let destinationMatches = destination !== undefined && overlaps(destination);
         if (destination !== undefined && !destinationMatches) {
@@ -460,16 +474,23 @@ const make = Effect.gen(function* () {
         )
           return entry.captureFailure.reason;
         if (entry.summary.keepWorkspace) return "Keep workspace is enabled.";
-        if (
-          entry.pendingProjection !== undefined ||
-          (entry.operation !== undefined && entry.operation.kind !== "discard")
-        )
-          return "The workspace is protected by a saved-workspace operation.";
-        if (entry.summary.state !== "active" && entry.summary.state !== "discarded")
+        if (operationProtectsWorktree(entry))
           return "The workspace is protected by a saved-workspace operation.";
       }
       return null;
     },
+  );
+  const snapshotWorktreeProtection = list.pipe(
+    Effect.map((entries): WorktreeProtection => {
+      const protective = entries.filter(
+        (entry) =>
+          entry.captureFailure !== undefined ||
+          entry.summary.keepWorkspace ||
+          operationProtectsWorktree(entry),
+      );
+      return (workspacePath) => automaticProtection(workspacePath, "worktree", protective);
+    }),
+    Effect.withSpan("WorktreeSuspensionRegistry.snapshotWorktreeProtection"),
   );
   const dependenciesRemoved = Effect.fn("WorktreeSuspensionRegistry.dependenciesRemoved")(
     function* (workspacePath: string) {
@@ -496,6 +517,7 @@ const make = Effect.gen(function* () {
     recordUnverifiedUse,
     unverifiedUse,
     automaticProtection,
+    snapshotWorktreeProtection,
     recoveryDestinationProtection,
     dependenciesRemoved,
   });

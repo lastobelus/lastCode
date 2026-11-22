@@ -38,6 +38,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 import { expect, vi } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { ChildProcessSpawner } from "effect/process";
@@ -5019,6 +5020,53 @@ it.live("waits for each automatic save and ignores overlapping sweep requests", 
       expect(records.every((record) => record.summary.state === "suspended")).toBe(true);
     }),
   ),
+);
+
+it.live("avoids duplicate owner and registry reads before automatic suspension", () =>
+  realGit((f) => {
+    const spans: Tracer.Span[] = [];
+    const tracer = Tracer.make({
+      span(options) {
+        const span = new Tracer.NativeSpan(options);
+        spans.push(span);
+        return span;
+      },
+    });
+    return Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: {
+          ...automaticSettings,
+          worktreeSuspension: {
+            ...automaticSettings.worktreeSuspension,
+            scopes: { subagents: false, untouchedChildren: false, otherThreads: true },
+          },
+        },
+      });
+      const workspaceCount = 4;
+      for (let index = 1; index < workspaceCount; index++) {
+        const branch = `screening-${index}`;
+        const workspace = NodePath.join(NodePath.dirname(f.workspace), branch);
+        yield* Effect.promise(() => git(f.repository, "worktree", "add", "-b", branch, workspace));
+        const id = ThreadId.make(`fixture:${branch}`);
+        h.threads.set(id, { ...shell(id, workspace), branch });
+      }
+      spans.length = 0;
+      yield* h.service.sweep;
+      const count = (name: string) => spans.filter((span) => span.name === name).length;
+      const counts = {
+        ownersFor: count("WorktreeSuspension.ownersFor"),
+        registryReads: count("WorktreeSuspensionRegistry.read"),
+      };
+      const saved = yield* h.registry.list;
+      expect(saved.map((record) => record.summary.state)).toEqual(
+        Array(workspaceCount).fill("suspended"),
+      );
+      expect(counts, JSON.stringify(counts)).toMatchObject({
+        ownersFor: 25 * workspaceCount,
+        registryReads: 1 + 16 * workspaceCount,
+      });
+    }).pipe(Effect.withTracer(tracer));
+  }),
 );
 
 it.live("prefilters ineligible shells before identifying or registering checkouts", () =>

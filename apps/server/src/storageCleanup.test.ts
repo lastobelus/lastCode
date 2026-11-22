@@ -453,7 +453,8 @@ const cleanupFixture = (
   projectionOverride?: Pick<
     ProjectionStore.ProjectionStoreV2["Service"],
     "getShellSnapshot" | "getThreadShell"
-  >,
+  > &
+    Partial<Pick<ProjectionStore.ProjectionStoreV2["Service"], "getThreadWorktreePaths">>,
 ) =>
   Effect.gen(function* () {
     const fixtureNow = yield* Clock.currentTimeMillis;
@@ -618,6 +619,10 @@ const cleanupFixture = (
     const resourceGitCalls: Array<{ operation: string; cwd: string }> = [];
     const unavailableDependencyRoots = new Set<string>();
     const savedWorkspaceProtection = new Map<string, string | "unavailable">();
+    const protectionResult = (reason: string) =>
+      reason === "unavailable"
+        ? Effect.fail(new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }))
+        : Effect.succeed(reason);
     const terminalListeners: Parameters<
       TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
     >[0][] = [];
@@ -631,16 +636,28 @@ const cleanupFixture = (
       (workspacePath, resource) =>
         Effect.suspend(() => {
           const reason = savedWorkspaceProtection.get(workspacePath);
-          return reason === "unavailable"
-            ? Effect.fail(new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }))
-            : reason !== undefined
-              ? Effect.succeed(reason)
-              : (registry?.automaticProtection(workspacePath, resource) ?? Effect.succeed(null));
+          return reason === undefined
+            ? (registry?.automaticProtection(workspacePath, resource) ?? Effect.succeed(null))
+            : protectionResult(reason);
         }),
       Effect.sync(() => {
         suspensionSweeps++;
       }),
-      { unverifiedUse: () => Effect.succeed(null), ...registry },
+      {
+        unverifiedUse: () => Effect.succeed(null),
+        ...registry,
+        snapshotWorktreeProtection: (
+          registry?.snapshotWorktreeProtection ?? Effect.succeed(() => Effect.succeed(null))
+        ).pipe(
+          Effect.map((protect) => {
+            const snapshot = new Map(savedWorkspaceProtection);
+            return (workspacePath: string) => {
+              const reason = snapshot.get(workspacePath);
+              return reason === undefined ? protect(workspacePath) : protectionResult(reason);
+            };
+          }),
+        ),
+      },
     );
     const scratchServices = StorageCleanup.layer.pipe(
       Layer.provideMerge(
@@ -4387,6 +4404,116 @@ const checkoutEntries = (report: import("@t3tools/contracts").StorageCleanupRepo
   report.entries.filter(
     (entry) => entry.kind === "worktree" && entry.worktreeResource === undefined,
   );
+
+it.live("shares worktree screening reads across a cleanup pass", () => {
+  const spans: Tracer.Span[] = [];
+  const tracer = Tracer.make({
+    span(options) {
+      const span = new Tracer.NativeSpan(options);
+      let parent = Option.getOrUndefined(span.parent);
+      while (parent?._tag === "Span" && parent.name !== "StorageCleanup.cleanWorktrees") {
+        parent = Option.getOrUndefined(parent.parent);
+      }
+      if (parent?._tag === "Span") spans.push(span);
+      return span;
+    },
+  });
+  return runCleanupTest(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
+        Effect.provide(SuspensionRegistry.layer),
+      );
+      let captures = 0;
+      const fixture = yield* cleanupFixture(
+        undefined,
+        undefined,
+        undefined,
+        registry,
+        undefined,
+        undefined,
+        undefined,
+        sql,
+        projections,
+      ).pipe(
+        Effect.provideService(
+          WorktreeConsumers.ProcessPaths,
+          Effect.sync(() => {
+            captures++;
+            return [];
+          }),
+        ),
+      );
+      const projectId = ProjectId.make("project-1");
+      yield* sql`INSERT INTO projection_projects ${sql.insert({
+        project_id: projectId,
+        title: "Worktree screening",
+        workspace_root: fixture.repo,
+        scripts_json: "[]",
+        created_at: DateTime.formatIso(at(0)),
+        updated_at: DateTime.formatIso(at(0)),
+      })}`;
+      const workspaceCount = 4;
+      for (let index = 0; index < workspaceCount; index++) {
+        const branch = index === 0 ? "feature" : `screening-${index}`;
+        const worktreePath = `${fixture.config.worktreesDir}/${branch}`;
+        if (index > 0)
+          yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, worktreePath]);
+        yield* fixture.fs.writeFileString(`${worktreePath}/tracked.txt`, "local work\n");
+        const threadId = ThreadId.make(`screening-owner-${index}`);
+        const createdAt = fixture.at(-30 * DAY_MS);
+        const thread = shell({
+          id: threadId,
+          projectId,
+          branch,
+          worktreePath,
+          createdAt,
+          updatedAt: createdAt,
+        });
+        yield* projections.apply({
+          id: EventId.make(`screening-owner-created-${index}`),
+          type: "thread.created",
+          threadId,
+          occurredAt: createdAt,
+          payload: { ...thread, lastVisitedAt: thread.lastVisitedAt ?? null },
+        });
+      }
+      const report = yield* fixture.service.runNow;
+      const entries = checkoutEntries(report).filter((entry) => entry.threadId !== null);
+      expect(entries).toHaveLength(workspaceCount);
+      expect(entries.map((entry) => entry.outcome)).toEqual(Array(workspaceCount).fill("kept"));
+      const count = (name: string) => spans.filter((span) => span.name === name).length;
+      const counts = {
+        registryReads: count("WorktreeSuspensionRegistry.read"),
+        ownerSnapshots: count("StorageCleanup.readThreads"),
+        ownerPathQueries: spans.filter(
+          (span) =>
+            span.name === "sqlite" &&
+            String(span.attributes.get("db.query.text")).includes(
+              "SELECT thread_id, json_extract(payload_json, '$.worktreePath') AS worktree_path",
+            ),
+        ).length,
+        captures,
+        measurements: count("storageCleanup.measureWorktree"),
+        statements: count("sqlite"),
+        transactions: count("sql.transaction"),
+      };
+      expect(counts, JSON.stringify(counts)).toMatchObject({
+        registryReads: 1,
+        ownerSnapshots: 1,
+        ownerPathQueries: 0,
+        captures: 1,
+        measurements: workspaceCount,
+        statements: 47,
+        transactions: 5,
+      });
+    }).pipe(
+      Effect.provide(ProjectionStore.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
+      Effect.withTracer(tracer),
+    ),
+  );
+});
 
 describe("provider protection during storage cleanup", () => {
   it.live.each(["stopped", "error"] as const)(

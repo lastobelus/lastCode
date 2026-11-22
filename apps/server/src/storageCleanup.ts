@@ -3391,6 +3391,21 @@ const make = Effect.gen(function* () {
     const threadsById = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
     const previewLeases = yield* previewsProtectingWorktrees();
     if (previewLeases === null) return { waiting: true, kept };
+    const savedWorkspaceInventory = yield* Effect.cached(
+      suspensionRegistry.snapshotWorktreeProtection,
+    );
+    const screeningProcessPaths = yield* Effect.cached(processPaths);
+    const screenSavedWorkspace = Effect.fn("StorageCleanup.screenSavedWorkspace")(function* (
+      workspacePath: string,
+    ) {
+      const observed = yield* savedWorkspaceInventory.pipe(
+        Effect.flatMap((protect) => protect(workspacePath)),
+        Effect.option,
+      );
+      return Option.isSome(observed) && observed.value === null
+        ? null
+        : yield* savedWorkspaceProtection(workspacePath);
+    });
     // Failures are cached too, so one broken repository costs one fetch per sweep.
     const refreshedDefaultRefs = new Map<string, Map<string, Exit.Exit<void, GitCommandError>>>();
     const defaultBranches = new Map<string, string | null>();
@@ -3449,15 +3464,14 @@ const make = Effect.gen(function* () {
       FROM orchestration_v2_projection_threads
     `;
     const legacyRows = yield* worktreeCleanup.historicalWorktreeOwners;
-    const historicalPaths = yield* Effect.forEach([...historicalRows, ...legacyRows], (owner) =>
-      Effect.gen(function* () {
-        return {
-          id: owner.threadId,
-          cwd:
-            owner.worktreePath === null ? null : yield* canonicalWorkspacePath(owner.worktreePath),
-        };
-      }),
-    );
+    const historicalOwners = new Map<string, Set<string>>();
+    for (const owner of [...historicalRows, ...legacyRows]) {
+      if (owner.worktreePath === null) continue;
+      const cwd = yield* canonicalWorkspacePath(owner.worktreePath);
+      let ids = historicalOwners.get(cwd);
+      if (ids === undefined) historicalOwners.set(cwd, (ids = new Set()));
+      ids.add(owner.threadId);
+    }
     const hasLiveProviderSession = yield* makeProviderSessionGuard();
     for (const owners of candidates) {
       if (automaticWork?.paths != null && !automaticWork.paths.has(owners[0]!.canonicalPath))
@@ -3484,6 +3498,11 @@ const make = Effect.gen(function* () {
       const settings = resolveWorktreeCleanup(serverSettings, thread.projectId);
       if (!worktreeCleanupEnabled(settings)) continue;
       const worktreePath = owners[0]!.canonicalPath;
+      const liveOwners = owners.filter((owner) => !("workspaceRoot" in owner.thread));
+      const ownerIds = new Set<string>(owners.map((owner) => owner.thread.id));
+      const unresolvedHistoricalOwner = [...(historicalOwners.get(worktreePath) ?? [])].some(
+        (id) => !ownerIds.has(id),
+      );
       const worktreePaths = [
         ...new Set([worktreePath, ...owners.map((owner) => owner.recordedPath)]),
       ];
@@ -3655,7 +3674,9 @@ const make = Effect.gen(function* () {
           ),
         );
         if (!exists) return;
-        const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+        const savedProtection = scratch
+          ? yield* savedWorkspaceProtection(worktreePath)
+          : yield* screenSavedWorkspace(worktreePath);
         if (savedProtection !== null) return keep(savedProtection);
         const preserveScratch =
           scratch &&
@@ -3776,11 +3797,7 @@ const make = Effect.gen(function* () {
                   return "scratch workspace has an open terminal";
               }
               if (
-                historicalPaths.some(
-                  (owner) =>
-                    owner.cwd === worktreePath &&
-                    !owners.some((known) => known.thread.id === owner.id),
-                ) ||
+                unresolvedHistoricalOwner ||
                 (yield* ownershipChangedSince(sequence, {
                   cwd: worktreePath,
                   projectId: thread.projectId,
@@ -3839,12 +3856,7 @@ const make = Effect.gen(function* () {
           )
         )
           return keep("whole-worktree cleanup is off for an owner");
-        if (
-          historicalPaths.some(
-            (owner) =>
-              owner.cwd === worktreePath && !owners.some((known) => known.thread.id === owner.id),
-          )
-        )
+        if (unresolvedHistoricalOwner)
           return keep("historical thread ownership could not be resolved");
         if (owners.length > 1 && !allArchived && familyOwner === undefined)
           return keep(`shared by ${owners.length} threads`);
@@ -3921,11 +3933,13 @@ const make = Effect.gen(function* () {
         if (!eligible && !unchangedApplies && !settings.worktreeOnMerge) return keep(notDueReason);
         const recordedBranches = owners.map((owner) => owner.thread.branch);
         // Re-read this path's threads and sessions so new activity cancels removal; full per-worktree snapshots take seconds.
-        const blockedSinceCheck = Effect.fnUntraced(function* (checkedHead?: {
-          readonly branch: string | null;
-          readonly commitSha: string;
-        }) {
-          const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+        const blockedSinceCheck = Effect.fnUntraced(function* (
+          checkedHead?: { readonly branch: string | null; readonly commitSha: string },
+          screening = false,
+        ) {
+          const savedProtection = screening
+            ? yield* screenSavedWorkspace(worktreePath)
+            : yield* savedWorkspaceProtection(worktreePath);
           if (savedProtection !== null) return savedProtection;
           if (generatedBuildReviewProtection(worktreePath))
             return "reviewed build content protects this worktree";
@@ -3948,22 +3962,17 @@ const make = Effect.gen(function* () {
           const latestPreviewLeases = yield* previewsProtectingWorktrees();
           if (guardedPaths.some((cwd) => previewUsesWorktree(cwd, latestPreviewLeases)))
             return "preview is still using the worktree";
-          const latestPaths = (yield* Effect.forEach(
-            yield* projections.getThreadWorktreePaths({ includeArchived: true }),
-            (entry) =>
-              canonicalWorkspacePath(entry.worktreePath).pipe(
-                Effect.map((cwd) => (cwd === worktreePath ? entry.threadId : null)),
-              ),
-          )).filter((id) => id !== null);
+          const latestPaths = screening
+            ? []
+            : (yield* Effect.forEach(
+                yield* projections.getThreadWorktreePaths({ includeArchived: true }),
+                (entry) =>
+                  canonicalWorkspacePath(entry.worktreePath).pipe(
+                    Effect.map((cwd) => (cwd === worktreePath ? entry.threadId : null)),
+                  ),
+              )).filter((id) => id !== null);
           const latest = (yield* Effect.forEach(
-            [
-              ...new Set([
-                ...latestPaths,
-                ...owners
-                  .filter((owner) => !("workspaceRoot" in owner.thread))
-                  .map((owner) => owner.thread.id),
-              ]),
-            ],
+            [...new Set([...latestPaths, ...liveOwners.map((owner) => owner.thread.id)])],
             (id) => projections.getThreadShell(id),
           )).filter((entry) => entry !== null);
           if (yield* hasWorktreeTerminal(guardedPaths)) return waitForStop("open terminal");
@@ -3993,7 +4002,6 @@ const make = Effect.gen(function* () {
               }),
             ),
           );
-          const liveOwners = owners.filter((owner) => !("workspaceRoot" in owner.thread));
           const latestOwner = worktreeOwner(deleted ? [thread, ...latest] : latest);
           if (
             (familyOwner !== undefined &&
@@ -4081,6 +4089,14 @@ const make = Effect.gen(function* () {
                 return "folder is a symbolic link";
             }
           }
+          if (
+            screening &&
+            (yield* WorktreeConsumers.worktreeConsumerReason(
+              consumerRoot,
+              yield* screeningProcessPaths,
+            )) === null
+          )
+            return null;
           return yield* WorktreeConsumers.worktreeConsumerReason(consumerRoot);
         });
         const settingsChangedSinceCheck = Effect.gen(function* () {
@@ -4347,7 +4363,9 @@ const make = Effect.gen(function* () {
             return keep(integrated ? notDueReason : "has commits beyond the project branch");
         }
         if (!eligible) return keep(notDueReason);
-        const blocked = yield* blockedSinceCheck(head);
+        // Inventory can screen costly inspections. Both checks under the
+        // workspace lease use current authority, owners and processes.
+        const blocked = yield* blockedSinceCheck(head, true);
         if (blocked !== null) return keep(blocked);
         // Inspect before the lease; provider startup must not wait for directory traversal.
         const inspection = yield* measureWorktree(worktreePath, true);
