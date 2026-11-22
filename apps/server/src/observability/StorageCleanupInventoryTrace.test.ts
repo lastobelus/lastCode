@@ -18,6 +18,8 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
     processCaptureMs: 12,
     uniquePaths: 90,
     pathResolutions: 100,
+    cachedPathChecks: 400,
+    cachedPathCheckMs: 582,
     directoryChecks: 16,
     directoryCheckMs: 114,
     pathResolutionMs: 1600,
@@ -62,6 +64,7 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
   assert.include(formatted, "Native capture attempts  2 in 12ms");
   assert.include(formatted, "Native capture attempts  1 in 12ms");
   assert.include(formatted, "Path resolutions         123 for 90 distinct paths in 1.6s");
+  assert.include(formatted, "Cached path checks       400 in 582ms");
   assert.include(formatted, "Directory checks         16 in 114ms");
   assert.include(formatted, "Tree walks               5 visiting 50000 objects in 3s");
 });

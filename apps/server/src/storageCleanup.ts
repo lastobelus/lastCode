@@ -4718,6 +4718,14 @@ const make = Effect.gen(function* () {
     trigger: StorageCleanupReport["trigger"],
     automaticRequest?: AutomaticSweepRequest,
   ) {
+    // One lazy observation for both resource passes; retain the original array's
+    // native identity metadata. Final removal scans remain independent and fresh.
+    const {
+      paths: observationProcessPaths,
+      targets: observationTargets,
+      annotate: annotateInventory,
+    } = yield* WorktreeConsumers.makeSweepObservation(processPaths);
+    yield* annotateInventory;
     const deletionsAtStart = deletions;
     const now = yield* Clock.currentTimeMillis;
     const serverSettings = yield* settingsService.getSettings;
@@ -4732,13 +4740,6 @@ const make = Effect.gen(function* () {
     );
     const runOutputs = scheduledGroup !== "housekeeping";
     const runHousekeeping = scheduledGroup !== "outputs";
-    // One lazy observation for both resource passes; retain the original array's
-    // native identity metadata. Final removal scans remain independent and fresh.
-    const {
-      paths: observationProcessPaths,
-      targets: observationTargets,
-      annotate: annotateInventory,
-    } = yield* WorktreeConsumers.makeSweepObservation(processPaths);
     const automaticWork: AutomaticOutputWork | undefined =
       trigger === "automatic"
         ? {

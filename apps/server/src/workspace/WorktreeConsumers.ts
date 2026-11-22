@@ -602,6 +602,19 @@ const canonicalParentToken = async (parent: string, measurement: InventoryMeasur
   }
 };
 
+const cachedPathIsDirect = async (path: string, measurement: InventoryMeasurement) => {
+  const start = performance.now();
+  measurement.cachedPathChecks++;
+  try {
+    // Parent timestamps can stay equal when a child is removed or replaced.
+    return !(await NodeFSP.lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
+  } finally {
+    measurement.cachedPathCheckMs += performance.now() - start;
+  }
+};
+
 type PathResolution = { readonly path: string } | { readonly error: unknown };
 
 const resolveProcessPath = async (
@@ -635,11 +648,16 @@ const makeProcessPathResolver = (
       const entry = capture.sharedPaths.get(path);
       if (entry === undefined) return resolveProcessPath(path, sweep);
       const { parent } = entry;
-      if (reuse && entry.token !== undefined) {
+      const cachedToken = entry.token;
+      if (
+        reuse &&
+        cachedToken !== undefined &&
+        (await cachedPathIsDirect(path, sweep.measurement))
+      ) {
         const previous = reusedParents.get(parent);
         reusedParents.set(
           parent,
-          previous === undefined || previous === entry.token ? entry.token : null,
+          previous === undefined || previous === cachedToken ? cachedToken : null,
         );
         return { path };
       }

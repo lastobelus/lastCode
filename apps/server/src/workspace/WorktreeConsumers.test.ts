@@ -508,6 +508,7 @@ const objectStat = (inode: bigint, directory = false, device = 18n, modified = 1
   ctimeNs: modified,
   isDirectory: () => directory,
   isSocket: () => false,
+  isSymbolicLink: () => false,
 });
 const targetFixture = (fileInode = 9007199254740993n) => {
   const stats = new Map([
@@ -987,10 +988,17 @@ describe("Observation-scoped target evidence", () => {
     return libraries;
   };
 
+  const sweepStats = (paths: readonly string[]) => {
+    const stats = targetFixture();
+    stats.set("/system/example", objectStat(51n, true));
+    for (const [index, path] of paths.entries()) stats.set(path, objectStat(BigInt(index + 1)));
+    return stats;
+  };
+
   it.effect("reuses stable captured file resolutions across four dependency installs", () =>
     Effect.gen(function* () {
       const libraries = sweepInventory();
-      targetFixture().set("/system/example", objectStat(51n, true));
+      sweepStats(libraries);
       const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
       yield* sweep.annotate;
       expect(
@@ -1010,7 +1018,7 @@ describe("Observation-scoped target evidence", () => {
       }
       expect(native.execFile).toHaveBeenCalledOnce();
       expect(native.realpath).toHaveBeenCalledTimes(14);
-      expect(native.lstat).toHaveBeenCalledTimes(4);
+      expect(native.lstat).toHaveBeenCalledTimes(22);
       yield* sweep.annotate;
       expect(
         (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
@@ -1019,6 +1027,8 @@ describe("Observation-scoped target evidence", () => {
         processCaptureMs: expect.any(Number),
         uniquePaths: 7,
         pathResolutions: 10,
+        cachedPathChecks: 18,
+        cachedPathCheckMs: expect.any(Number),
         directoryChecks: 4,
         pathResolutionMs: expect.any(Number),
         treeWalks: 0,
@@ -1046,9 +1056,9 @@ describe("Observation-scoped target evidence", () => {
     "still finds a consumer after a %s changes during the sweep",
     (change) =>
       Effect.gen(function* () {
-        const [library] = sweepInventory();
-        const stats = targetFixture();
-        stats.set("/system/example", objectStat(51n, true));
+        const libraries = sweepInventory();
+        const [library] = libraries;
+        const stats = sweepStats(libraries);
         if (change === "retargeted alias") {
           native.realpath.mockImplementation(async (path: string) =>
             path === library ? "/elsewhere/library" : path,
@@ -1079,9 +1089,9 @@ describe("Observation-scoped target evidence", () => {
 
   it.effect("checks cached siblings again when their directory changes during a target scan", () =>
     Effect.gen(function* () {
-      const [, alias, changed] = sweepInventory();
-      const stats = targetFixture();
-      stats.set("/system/example", objectStat(51n, true));
+      const libraries = sweepInventory();
+      const [, alias, changed] = libraries;
+      const stats = sweepStats(libraries);
       let retargeted = false;
       native.realpath.mockImplementation(async (path: string) => {
         if (path === alias) return "/elsewhere/library";
@@ -1116,8 +1126,10 @@ describe("Observation-scoped target evidence", () => {
             .join("") +
           `f9\0tREG\0n${root}/dist/output.js\0\n`,
       );
-      const stats = targetFixture();
-      stats.set("/system/example", objectStat(51n, true));
+      const stats = sweepStats([
+        firstPath,
+        ...[2, 3, 4].map((id) => `/system/example/library-${id}`),
+      ]);
       const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
       const paths = (yield* sweep.paths)!;
       expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
@@ -1132,6 +1144,28 @@ describe("Observation-scoped target evidence", () => {
         ),
       ).toBe(objectProofReason);
     }),
+  );
+
+  it.effect.each(["replaced by a symlink", "removed"] as const)(
+    "rechecks a cached pathname %s even when the parent token stays equal",
+    (change) =>
+      Effect.gen(function* () {
+        const libraries = sweepInventory();
+        const [library] = libraries;
+        const stats = sweepStats(libraries);
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = (yield* sweep.paths)!;
+        expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+        if (change === "removed") stats.delete(library!);
+        else stats.set(library!, { ...objectStat(88n), isSymbolicLink: () => true });
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path !== library) return path;
+          if (change === "removed") throw missing();
+          return `${root}/dist/output.js`;
+        });
+        expect(yield* prove(paths, sweep.targets)).toBe(true);
+        expect(native.realpath.mock.calls.filter(([path]) => path === library)).toHaveLength(2);
+      }),
   );
 
   it.effect("does not share a target walk with another native capture or observation", () =>
