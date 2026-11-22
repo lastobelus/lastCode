@@ -4405,6 +4405,73 @@ const checkoutEntries = (report: import("@t3tools/contracts").StorageCleanupRepo
     (entry) => entry.kind === "worktree" && entry.worktreeResource === undefined,
   );
 
+it.live("reports a save failure recorded for a later worktree in the same cleanup pass", () =>
+  runCleanupTest(
+    Effect.gen(function* () {
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
+        Effect.provide(SuspensionRegistry.layer),
+      );
+      const fs = yield* FileSystem.FileSystem;
+      let firstWorktree: string | undefined;
+      let failure: SuspensionRegistry.CheckoutAuthority | undefined;
+      const fixture = yield* cleanupFixture(undefined, undefined, undefined, registry).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          readDirectory: (directory, options) =>
+            Effect.gen(function* () {
+              if (directory === firstWorktree && failure !== undefined) {
+                yield* registry.put(failure, null).pipe(Effect.orDie);
+                failure = undefined;
+              }
+              return yield* fs.readDirectory(directory, options);
+            }),
+        }),
+      );
+      firstWorktree = fixture.worktree;
+      yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "local work\n");
+      const branch = "later-worktree";
+      const worktree = `${fixture.config.worktreesDir}/${branch}`;
+      yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, worktree]);
+      fixture.setThreads([
+        ...fixture.getThreads(),
+        shell({
+          id: ThreadId.make("later-owner"),
+          branch,
+          worktreePath: worktree,
+          createdAt: fixture.at(0),
+          updatedAt: fixture.at(0),
+        }),
+      ]);
+      const reason = "Workspace needs review: the save could not be verified.";
+      failure = {
+        checkoutId: "later-checkout",
+        repositoryRoot: fixture.repo,
+        path: worktree,
+        aliases: [worktree],
+        owners: [],
+        summary: {
+          checkoutId: "later-checkout",
+          generation: 0,
+          state: "active",
+          snapshotId: null,
+          lastRestoredAt: null,
+          keepWorkspace: false,
+        },
+        history: [],
+        blockedReason: reason,
+        captureFailure: { operationId: "failed-save", reason },
+      };
+      const report = yield* fixture.service.runNow;
+      expect(failure).toBeUndefined();
+      expect(checkoutEntries(report).find((entry) => entry.path === worktree)).toMatchObject({
+        outcome: "failed",
+        reason,
+      });
+      expect(yield* fixture.fs.exists(worktree)).toBe(true);
+    }),
+  ),
+);
+
 it.live("shares worktree screening reads across a cleanup pass", () => {
   const spans: Tracer.Span[] = [];
   const tracer = Tracer.make({
@@ -4499,15 +4566,23 @@ it.live("shares worktree screening reads across a cleanup pass", () => {
         statements: count("sqlite"),
         transactions: count("sql.transaction"),
       };
-      expect(counts, JSON.stringify(counts)).toMatchObject({
-        registryReads: 1,
+      const evidence = JSON.stringify(counts);
+      expect(counts, evidence).toMatchObject({
         ownerSnapshots: 1,
         ownerPathQueries: 0,
-        captures: 1,
+        captures: workspaceCount,
         measurements: workspaceCount,
-        statements: 47,
-        transactions: 5,
       });
+      expect(counts.registryReads, evidence).toBeLessThanOrEqual(1);
+      expect(counts.statements, evidence).toBeLessThanOrEqual(47);
+      expect(counts.transactions, evidence).toBeLessThanOrEqual(5);
+      const consumerCheck = "WorktreeConsumers.worktreeConsumerReason";
+      const measurement = "storageCleanup.measureWorktree";
+      expect(
+        spans
+          .filter((span) => span.name === consumerCheck || span.name === measurement)
+          .map((span) => span.name),
+      ).toEqual(Array.from({ length: workspaceCount }, () => [consumerCheck, measurement]).flat());
     }).pipe(
       Effect.provide(ProjectionStore.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
       Effect.withTracer(tracer),
@@ -8084,6 +8159,29 @@ describe("storage cleanup reports and local file policies", () => {
         });
         expect(threadBranches()).toEqual(["renamed"]);
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+      }),
+    ),
+  );
+  it.live("keeps a branch binding when saved-workspace authority changes during measurement", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* pausedMeasurementFixture();
+        const sweep = yield* fixture.service.runNow.pipe(Effect.forkChild);
+        yield* Deferred.await(fixture.measuring);
+        yield* fixture.command(fixture.worktree, ["switch", "-c", "renamed"]);
+        yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "local work\n");
+        fixture.protectSavedWorkspace(
+          fixture.worktree,
+          "The workspace is protected by a saved-workspace operation.",
+        );
+        yield* Deferred.succeed(fixture.resume, undefined);
+        const report = yield* Fiber.join(sweep);
+        expect(fixture.threadBranches()).toEqual(["feature"]);
+        expect(fixture.metadataCommands).toEqual([]);
+        expect(checkoutEntries(report)[0]).toMatchObject({
+          outcome: "kept",
+          reason: "The workspace is protected by a saved-workspace operation.",
+        });
       }),
     ),
   );

@@ -3408,9 +3408,9 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                   yield* withProjectRootLease(
                     Effect.gen(function* () {
                       record = yield* requireRecord(record.checkoutId);
-                      const currentOwners = yield* automaticOwners(record);
+                      if (!(yield* automaticallyEligible(record))) return;
+                      const currentOwners = yield* checkOwners(record);
                       if (
-                        currentOwners === null ||
                         currentOwners.length !== owners.length ||
                         currentOwners.some(
                           (owner) => !owners.some((original) => original.id === owner.id),
@@ -3433,9 +3433,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                       for (const owner of currentOwners) {
                         if (!previewOwners.has(owner.id)) continue;
                         record = yield* requireRecord(record.checkoutId);
-                        const eligibleOwners = yield* automaticOwners(record);
-                        if (eligibleOwners === null || eligibleOwners.some(ownerHasUnfinishedWork))
-                          return;
+                        if (!(yield* automaticallyEligible(record))) return;
+                        if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
                         yield* remove(owner.id, record.path);
                       }
                     }),

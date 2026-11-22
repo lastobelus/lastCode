@@ -1093,12 +1093,18 @@ const make = Effect.gen(function* () {
   const followBranch = Effect.fn("StorageCleanup.followBranch")(
     function* (worktreePath: string) {
       const cwd = yield* fs.realPath(worktreePath);
+      const protectedReason = yield* savedWorkspaceProtection(cwd);
+      if (protectedReason !== null) return protectedReason;
       yield* reconcileBranch({ cwd, refName: yield* gitWorkflow.currentBranch(cwd) });
+      return null;
     },
     (effect, worktreePath) =>
-      effect.pipe(
+      withWorkspaceLease(worktreePath, effect).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("Failed to reconcile worktree branch", { cwd: worktreePath, cause }),
+          Effect.logWarning("Failed to reconcile worktree branch", {
+            cwd: worktreePath,
+            cause,
+          }).pipe(Effect.as(null)),
         ),
       ),
   );
@@ -3391,17 +3397,11 @@ const make = Effect.gen(function* () {
     const threadsById = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
     const previewLeases = yield* previewsProtectingWorktrees();
     if (previewLeases === null) return { waiting: true, kept };
-    const savedWorkspaceInventory = yield* Effect.cached(
-      suspensionRegistry.snapshotWorktreeProtection,
-    );
-    const screeningProcessPaths = yield* Effect.cached(processPaths);
+    const worktreeProtectionInventory = yield* suspensionRegistry.snapshotWorktreeProtection;
     const screenSavedWorkspace = Effect.fn("StorageCleanup.screenSavedWorkspace")(function* (
       workspacePath: string,
     ) {
-      const observed = yield* savedWorkspaceInventory.pipe(
-        Effect.flatMap((protect) => protect(workspacePath)),
-        Effect.option,
-      );
+      const observed = yield* worktreeProtectionInventory(workspacePath).pipe(Effect.option);
       return Option.isSome(observed) && observed.value === null
         ? null
         : yield* savedWorkspaceProtection(workspacePath);
@@ -4089,14 +4089,6 @@ const make = Effect.gen(function* () {
                 return "folder is a symbolic link";
             }
           }
-          if (
-            screening &&
-            (yield* WorktreeConsumers.worktreeConsumerReason(
-              consumerRoot,
-              yield* screeningProcessPaths,
-            )) === null
-          )
-            return null;
           return yield* WorktreeConsumers.worktreeConsumerReason(consumerRoot);
         });
         const settingsChangedSinceCheck = Effect.gen(function* () {
@@ -4246,8 +4238,10 @@ const make = Effect.gen(function* () {
         if (head === null) return keep("repository or branch changed");
         // Check stale refs without status here. The file proof runs only for an eligible checkout.
         if (!(yield* staleBranchesSafe(worktreePath, recordedBranches, head, true))) {
-          if (!deleted && (yield* branchChanged(worktreePath, thread.branch)))
-            yield* followBranch(worktreePath);
+          if (!deleted && (yield* branchChanged(worktreePath, thread.branch))) {
+            const protectedReason = yield* followBranch(worktreePath);
+            if (protectedReason !== null) return keep(protectedReason);
+          }
           return keep("repository or branch changed");
         }
         if (!eligible) {
@@ -4363,8 +4357,8 @@ const make = Effect.gen(function* () {
             return keep(integrated ? notDueReason : "has commits beyond the project branch");
         }
         if (!eligible) return keep(notDueReason);
-        // Inventory can screen costly inspections. Both checks under the
-        // workspace lease use current authority, owners and processes.
+        // The file inspection needs a fresh process check even during screening.
+        // Both checks under the workspace lease also reread authority and owners.
         const blocked = yield* blockedSinceCheck(head, true);
         if (blocked !== null) return keep(blocked);
         // Inspect before the lease; provider startup must not wait for directory traversal.
@@ -4374,8 +4368,10 @@ const make = Effect.gen(function* () {
         // A full status walks the whole checkout, so only a removable worktree pays for it.
         const changes = yield* localChangesReason(worktreePath);
         if (changes !== null) {
-          if (!deleted && (yield* branchChanged(worktreePath, thread.branch)))
-            yield* followBranch(worktreePath);
+          if (!deleted && (yield* branchChanged(worktreePath, thread.branch))) {
+            const protectedReason = yield* followBranch(worktreePath);
+            if (protectedReason !== null) return keep(protectedReason);
+          }
           return keep(changes);
         }
         yield* Effect.gen(function* () {

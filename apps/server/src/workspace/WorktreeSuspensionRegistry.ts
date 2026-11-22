@@ -181,7 +181,7 @@ export class WorktreeSuspensionRegistry extends Context.Service<
       resource?: "worktree" | "dependencies",
     ) => Effect.Effect<string | null, SuspensionRegistryError>;
     /** For inventory screening. Removal must call automaticProtection again. */
-    readonly snapshotWorktreeProtection: Effect.Effect<WorktreeProtection, SuspensionRegistryError>;
+    readonly snapshotWorktreeProtection: Effect.Effect<WorktreeProtection>;
     readonly recoveryDestinationProtection: (
       workspacePath: string,
     ) => Effect.Effect<string | null, SuspensionRegistryError>;
@@ -205,6 +205,7 @@ const make = Effect.gen(function* () {
   const stateRoot = yield* fs.realPath(config.stateDir);
   const root = path.join(stateRoot, "worktree-suspension");
   const catalogPath = path.join(root, "authority.json");
+  let catalogRevision = 0;
 
   const verifyRoot = Effect.fn("WorktreeSuspensionRegistry.verifyRoot")(function* () {
     const parent = yield* fs.realPath(stateRoot);
@@ -279,7 +280,14 @@ const make = Effect.gen(function* () {
         yield* file.sync;
       }),
     );
-    yield* fs.rename(temporary, catalogPath);
+    yield* fs.rename(temporary, catalogPath).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          catalogRevision++;
+        }),
+      ),
+      Effect.uninterruptible,
+    );
     yield* Effect.scoped(
       Effect.gen(function* () {
         const directory = yield* fs.open(root, { flag: "r" });
@@ -480,18 +488,33 @@ const make = Effect.gen(function* () {
       return null;
     },
   );
-  const snapshotWorktreeProtection = list.pipe(
-    Effect.map((entries): WorktreeProtection => {
-      const protective = entries.filter(
+  const readWorktreeProtectionInventory = list.pipe(
+    Effect.map((entries) =>
+      entries.filter(
         (entry) =>
           entry.captureFailure !== undefined ||
           entry.summary.keepWorkspace ||
           operationProtectsWorktree(entry),
-      );
-      return (workspacePath) => automaticProtection(workspacePath, "worktree", protective);
-    }),
+      ),
+    ),
     Effect.withSpan("WorktreeSuspensionRegistry.snapshotWorktreeProtection"),
   );
+  const snapshotWorktreeProtection = Effect.sync((): WorktreeProtection => {
+    let current: { revision: number; entries: readonly CheckoutAuthority[] } | undefined;
+    return (workspacePath) =>
+      mutex.withPermits(1)(
+        Effect.gen(function* () {
+          // Writers use the same mutex, including through the catalog rename.
+          if (current?.revision !== catalogRevision) {
+            current = {
+              revision: catalogRevision,
+              entries: yield* readWorktreeProtectionInventory,
+            };
+          }
+          return yield* automaticProtection(workspacePath, "worktree", current.entries);
+        }),
+      );
+  });
   const dependenciesRemoved = Effect.fn("WorktreeSuspensionRegistry.dependenciesRemoved")(
     function* (workspacePath: string) {
       const candidate = path.resolve(workspacePath);

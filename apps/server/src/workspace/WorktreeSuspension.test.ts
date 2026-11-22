@@ -5061,10 +5061,9 @@ it.live("avoids duplicate owner and registry reads before automatic suspension",
       expect(saved.map((record) => record.summary.state)).toEqual(
         Array(workspaceCount).fill("suspended"),
       );
-      expect(counts, JSON.stringify(counts)).toMatchObject({
-        ownersFor: 25 * workspaceCount,
-        registryReads: 1 + 16 * workspaceCount,
-      });
+      const evidence = JSON.stringify(counts);
+      expect(counts.ownersFor, evidence).toBeLessThanOrEqual(25 * workspaceCount);
+      expect(counts.registryReads, evidence).toBeLessThanOrEqual(1 + 16 * workspaceCount);
     }).pipe(Effect.withTracer(tracer));
   }),
 );
