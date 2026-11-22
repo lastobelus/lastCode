@@ -25,9 +25,16 @@ export type PullRequestWatchChange =
   | { readonly kind: "checks-awaiting-approval"; readonly checks: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
   | { readonly kind: "no-checks"; readonly minutes: number }
+  | { readonly kind: "reactions"; readonly reactions: ReadonlyArray<PullRequestWatchReaction> }
   | { readonly kind: "conflicting" }
   | { readonly kind: "needs-rebase" }
   | { readonly kind: "merge-queue-removed"; readonly reason: string | null };
+
+/** A named reaction, or `count` more people past the names the host gave. */
+export type PullRequestWatchReaction = {
+  readonly remark: PullRequestComment;
+  readonly content: string;
+} & ({ readonly actor: string } | { readonly actor: null; readonly count: number });
 
 export interface PullRequestWatchReport {
   readonly changes: ReadonlyArray<PullRequestWatchChange>;
@@ -228,6 +235,40 @@ export function evaluatePullRequestWatch(
     ...atLatest.map((remark) => remark.id),
   ];
 
+  // Reactions have no timestamp, so scan own comments even when their text predates the watch.
+  // Keep identities across pushes and incomplete reads: neither makes an old reaction new.
+  const reactionKeys = new Set(watch.reactionKeys);
+  const reactionCounts: Record<string, number> = { ...watch.reactionCounts };
+  const reactions: Array<PullRequestWatchReaction> = [];
+  if (own !== undefined) {
+    for (const remark of remarks ?? []) {
+      if (remark.author?.login.toLowerCase() !== own) continue;
+      for (const reaction of remark.reactions ?? []) {
+        const named = reaction.actors.filter((actor) => actor.toLowerCase() !== own);
+        let newlyNamed = 0;
+        for (const actor of named) {
+          const key = JSON.stringify([remark.id, reaction.content, actor.toLowerCase()]);
+          if (reactionKeys.has(key)) continue;
+          reactionKeys.add(key);
+          newlyNamed += 1;
+          reactions.push({ remark, content: reaction.content, actor });
+        }
+        // The host names only a page of reactors, and `count` includes the own account. Past
+        // the page, only a total above the highest one reported is news, so removals and the
+        // same total again stay quiet.
+        const ownReacted = reaction.viewerHasReacted || named.length < reaction.actors.length;
+        const others = reaction.count - (ownReacted ? 1 : 0);
+        if (others <= named.length) continue;
+        const countKey = JSON.stringify([remark.id, reaction.content]);
+        const told = reactionCounts[countKey] ?? 0;
+        const count = Math.min(others - named.length, others - told - newlyNamed);
+        if (count > 0) reactions.push({ remark, content: reaction.content, actor: null, count });
+        reactionCounts[countKey] = Math.max(told, others);
+      }
+    }
+  }
+  if (reactions.length > 0) changes.push({ kind: "reactions", reactions });
+
   // Like a failed check, a conflict or rebase a push did not resolve is news for the new head.
   const toldConflict = !headMoved && watch.conflicting;
   if (watch.awaitingBaseline !== "all" && detail.mergeability === "conflicting" && !toldConflict) {
@@ -259,7 +300,9 @@ export function evaluatePullRequestWatch(
   // Null records an empty baseline; historical IDs are saved without waking the watch.
   const mergeQueueRemovalId = removal?.id ?? watch.mergeQueueRemovalId ?? null;
 
-  const commentsOnly = changes.length > 0 && changes.every((change) => change.kind === "remarks");
+  const commentsOnly =
+    changes.length > 0 &&
+    changes.every((change) => change.kind === "remarks" || change.kind === "reactions");
   const progress = headMoved || (changes.length > 0 && !commentsOnly);
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
   return {
@@ -275,6 +318,10 @@ export function evaluatePullRequestWatch(
       approvalAnnounced,
       remarksThrough,
       remarkIds,
+      reactionKeys: [...reactionKeys].toSorted(),
+      reactionCounts: Object.fromEntries(
+        Object.entries(reactionCounts).toSorted(([left], [right]) => left.localeCompare(right)),
+      ),
       conflicting,
       rebaseRequired,
       mergeQueueRemovalId,
@@ -422,6 +469,21 @@ function changeLines(
       ];
     case "needs-rebase":
       return [`- The branch requires a rebase onto ${context.baseBranch}.`];
+    case "reactions": {
+      const total = change.reactions.reduce(
+        (sum, reaction) => sum + (reaction.actor === null ? reaction.count : 1),
+        0,
+      );
+      return [
+        `- ${total} new ${total === 1 ? "reaction" : "reactions"} on your comments:`,
+        ...listed(change.reactions, (reaction) => {
+          const who =
+            reaction.actor ??
+            `${reaction.count} ${reaction.count === 1 ? "person" : "people"} the host did not name`;
+          return `  - ${who}: ${reaction.content} on "${snippet(reaction.remark.body)}"${reaction.remark.url ? ` ${reaction.remark.url}` : ""}`;
+        }),
+      ];
+    }
     case "conflicting":
       return [`- The branch now conflicts with ${context.baseBranch}.`];
     case "merge-queue-removed":
@@ -438,6 +500,7 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   "checks-awaiting-approval": "checks await approval",
   remarks: "new comments",
   "no-checks": "no checks reported",
+  reactions: "new reactions",
   conflicting: "merge conflict",
   "needs-rebase": "rebase required",
   "merge-queue-removed": "removed from merge queue",
