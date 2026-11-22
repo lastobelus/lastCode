@@ -3376,6 +3376,7 @@ const make = Effect.gen(function* () {
       ),
     );
     const scratchRoot = path.resolve(config.baseDir, "scratch");
+    const sequence = yield* readApplicationSequence();
     const deletedRows = yield* sql<{ payload_json: string; workspaceRoot: string }>`
           SELECT t.payload_json, p.workspace_root AS "workspaceRoot"
           FROM orchestration_v2_projection_threads t
@@ -3445,7 +3446,6 @@ const make = Effect.gen(function* () {
       }
       return false;
     });
-    const sequence = yield* readApplicationSequence();
     const ownedPaths = yield* Effect.forEach(
       [...snapshot.threads.filter((thread) => thread.worktreePath !== null), ...deletedThreads],
       (thread) =>
@@ -3459,6 +3459,19 @@ const make = Effect.gen(function* () {
     );
     const groups = Map.groupBy(ownedPaths, (owner) => owner.canonicalPath);
     const candidates = [...groups.values()];
+    const recordedOwnerPaths = Map.groupBy(
+      ownedPaths.filter(({ thread }) => !("workspaceRoot" in thread) && thread.deletedAt === null),
+      (owner) => owner.recordedPath,
+    );
+    // A symlink can change ownership between checks without a new thread event.
+    const screeningOwners = Effect.fnUntraced(function* (worktreePath: string) {
+      const matching: ThreadId[] = [];
+      for (const [recordedPath, owners] of recordedOwnerPaths) {
+        if ((yield* canonicalWorkspacePath(recordedPath)) === worktreePath)
+          matching.push(...owners.map(({ thread }) => thread.id));
+      }
+      return matching;
+    });
     const historicalRows = yield* sql<{ threadId: ThreadId; worktreePath: string | null }>`
       SELECT thread_id AS "threadId", json_extract(payload_json, '$.worktreePath') AS "worktreePath"
       FROM orchestration_v2_projection_threads
@@ -3963,7 +3976,7 @@ const make = Effect.gen(function* () {
           if (guardedPaths.some((cwd) => previewUsesWorktree(cwd, latestPreviewLeases)))
             return "preview is still using the worktree";
           const latestPaths = screening
-            ? []
+            ? yield* screeningOwners(worktreePath)
             : (yield* Effect.forEach(
                 yield* projections.getThreadWorktreePaths({ includeArchived: true }),
                 (entry) =>

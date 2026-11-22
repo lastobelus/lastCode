@@ -20,6 +20,8 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Inventory identity needs ctime and nanoseconds, which Effect File.Info does not expose.
+import * as NodeFSP from "node:fs/promises";
 import * as ServerConfig from "../config.ts";
 import { canonicalProjectRoot } from "./projectRootLease.ts";
 
@@ -205,7 +207,6 @@ const make = Effect.gen(function* () {
   const stateRoot = yield* fs.realPath(config.stateDir);
   const root = path.join(stateRoot, "worktree-suspension");
   const catalogPath = path.join(root, "authority.json");
-  let catalogRevision = 0;
 
   const verifyRoot = Effect.fn("WorktreeSuspensionRegistry.verifyRoot")(function* () {
     const parent = yield* fs.realPath(stateRoot);
@@ -280,14 +281,7 @@ const make = Effect.gen(function* () {
         yield* file.sync;
       }),
     );
-    yield* fs.rename(temporary, catalogPath).pipe(
-      Effect.tap(() =>
-        Effect.sync(() => {
-          catalogRevision++;
-        }),
-      ),
-      Effect.uninterruptible,
-    );
+    yield* fs.rename(temporary, catalogPath);
     yield* Effect.scoped(
       Effect.gen(function* () {
         const directory = yield* fs.open(root, { flag: "r" });
@@ -499,17 +493,43 @@ const make = Effect.gen(function* () {
     ),
     Effect.withSpan("WorktreeSuspensionRegistry.snapshotWorktreeProtection"),
   );
+  const inventoryFingerprint = Effect.fn("WorktreeSuspensionRegistry.inventoryFingerprint")(
+    function* () {
+      yield* verifyRoot();
+      const file = yield* Effect.tryPromise({
+        try: () =>
+          NodeFSP.lstat(catalogPath, { bigint: true }).catch((cause: unknown) => {
+            if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return null;
+            throw cause;
+          }),
+        catch: (cause) => new SuspensionRegistryError({ operation: "read", cause }),
+      });
+      if (file === null) {
+        if ((yield* fs.readDirectory(root)).length !== 0)
+          return yield* new SuspensionRegistryError({ operation: "read" });
+        return null;
+      }
+      if (!file.isFile() || file.size > MAX_CATALOG_BYTES || (file.mode & 0o077n) !== 0n)
+        return yield* new SuspensionRegistryError({ operation: "read" });
+      yield* fs.access(catalogPath, { readable: true });
+      return `${file.dev}:${file.ino}:${file.size}:${file.mode}:${file.mtimeNs}:${file.ctimeNs}`;
+    },
+    Effect.mapError((cause) =>
+      isRegistryError(cause) ? cause : new SuspensionRegistryError({ operation: "read", cause }),
+    ),
+  );
   const snapshotWorktreeProtection = Effect.sync((): WorktreeProtection => {
-    let current: { revision: number; entries: readonly CheckoutAuthority[] } | undefined;
+    let current: { fingerprint: string | null; entries: readonly CheckoutAuthority[] } | undefined;
     return (workspacePath) =>
       mutex.withPermits(1)(
         Effect.gen(function* () {
-          // Writers use the same mutex, including through the catalog rename.
-          if (current?.revision !== catalogRevision) {
-            current = {
-              revision: catalogRevision,
-              entries: yield* readWorktreeProtectionInventory,
-            };
+          const fingerprint = yield* inventoryFingerprint();
+          if (current?.fingerprint !== fingerprint) {
+            const entries = yield* readWorktreeProtectionInventory;
+            // A separate process can replace the catalog during our read.
+            if ((yield* inventoryFingerprint()) !== fingerprint)
+              return yield* new SuspensionRegistryError({ operation: "read" });
+            current = { fingerprint, entries };
           }
           return yield* automaticProtection(workspacePath, "worktree", current.entries);
         }),
