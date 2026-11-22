@@ -1,5 +1,8 @@
-import { BotIcon, ChevronRightIcon, SparklesIcon, TriangleAlertIcon } from "lucide-react";
+import { T, useGT, useMessages } from "gt-react";
+import { ArrowUpRightIcon, BotIcon, ChevronRightIcon, TriangleAlertIcon } from "lucide-react";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { Link } from "@tanstack/react-router";
+import { buildThreadRouteParams } from "../../threadRoutes";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { cn } from "../../lib/utils";
 import { useClientSetting } from "~/hooks/useSettings";
@@ -11,10 +14,14 @@ import {
   lastcodeSidebarFamilySummary,
   type LastCodeSidebarFamilyRow,
   type LastCodeSidebarFamilyItem,
+  type LastCodeSidebarOwnerGroup,
 } from "../lastcodeSidebarFamilies.logic";
 import type { LastCodeThreadFamilyPresentation } from "./useLastCodeThreadFamily";
 type Navigate = (ref: ScopedThreadRef) => Promise<void>;
-function useFamilyToggle(item: LastCodeSidebarFamilyItem, navigate: Navigate) {
+function useFamilyToggle(
+  item: Exclude<LastCodeSidebarFamilyItem, LastCodeSidebarOwnerGroup>,
+  navigate: Navigate,
+) {
   const setCollapsed = useLastCodeSidebarFamiliesStore((state) => state.setCollapsed);
   return () => {
     const family = item.type === "thread" ? item.row : item;
@@ -69,6 +76,8 @@ export function LastCodeThreadFamilyDisclosure({
   renameTarget: boolean;
   navigateToThread: Navigate;
 }) {
+  const gt = useGT();
+  const messages = useMessages();
   const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
   const showSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
   const toggle = useFamilyToggle({ type: "thread", row: family }, navigateToThread);
@@ -84,8 +93,10 @@ export function LastCodeThreadFamilyDisclosure({
                 data-thread-selection-safe
                 aria-label={
                   family.expanded && family.collapseNavigatesToParent
-                    ? `Collapse children and return to ${thread.title}`
-                    : `${family.expanded ? "Collapse" : "Expand"} children of ${thread.title}`
+                    ? gt("Collapse children and return to {title}", { title: thread.title })
+                    : family.expanded
+                      ? gt("Collapse children of {title}", { title: thread.title })
+                      : gt("Expand children of {title}", { title: thread.title })
                 }
                 aria-expanded={family.expanded}
                 className={cn(
@@ -114,9 +125,9 @@ export function LastCodeThreadFamilyDisclosure({
           <TooltipPopup side="top">
             {family.expanded && family.selectedDescendant
               ? family.collapseNavigatesToParent
-                ? "Collapse children and return to this thread"
-                : "Collapse children; keep the selected conversation visible"
-              : lastcodeSidebarFamilySummary(family)}
+                ? gt("Collapse children and return to this thread")
+                : gt("Collapse children; keep the selected conversation visible")
+              : lastcodeSidebarFamilySummary(family, messages)}
           </TooltipPopup>
         </Tooltip>
       ) : (
@@ -136,18 +147,24 @@ export function LastCodeSubagentGroup({
   item: Extract<LastCodeSidebarFamilyItem, { type: "subagents" }>;
   navigateToThread: Navigate;
 }) {
+  const gt = useGT();
+  const messages = useMessages();
   const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   const toggle = useFamilyToggle(item, navigateToThread);
+  const title = item.parentTitle;
+  const disclosureLabel = item.expanded
+    ? item.collapseNavigatesToParent
+      ? gt("Collapse subagents and return to {title}", { title })
+      : gt("Collapse subagents of {title}", { title })
+    : item.status
+      ? gt("Expand subagents of {title} · {status}", { title, status: messages(item.status.label) })
+      : gt("Expand subagents of {title}", { title });
   return (
     <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
       <LastCodeSidebarFamilyGuides depth={item.depth} />
       <button
         type="button"
-        aria-label={
-          item.expanded && item.collapseNavigatesToParent
-            ? `Collapse subagents and return to ${item.parentTitle}`
-            : `${item.expanded ? "Collapse" : "Expand"} subagents of ${item.parentTitle}${!item.expanded && item.status ? ` · ${item.status.label}` : ""}`
-        }
+        aria-label={disclosureLabel}
         aria-expanded={item.expanded}
         className="flex h-8 w-full items-center gap-1 rounded-md pr-2 text-3xs text-sidebar-muted-foreground uppercase hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
         style={{ paddingLeft: 12 + Math.min(item.depth, 6) * 12 }}
@@ -157,7 +174,9 @@ export function LastCodeSubagentGroup({
       >
         <ChevronRightIcon aria-hidden className={cn("size-3", item.expanded && "rotate-90")} />
         <BotIcon aria-hidden className="size-3" />
-        <span>Subagents</span>
+        <span>
+          <T>Subagents</T>
+        </span>
         <span className="text-secondary-label">{item.count}</span>
         {!item.expanded && item.status ? (
           <LastCodeThreadStatusLabel status={item.status} compact={compactStatusIndicators} />
@@ -166,10 +185,76 @@ export function LastCodeSubagentGroup({
     </SidebarMenuSubItem>
   );
 }
+export function LastCodeOwnerGroup({
+  item,
+  navigateToThread,
+}: {
+  item: LastCodeSidebarOwnerGroup;
+  navigateToThread: Navigate;
+}) {
+  const gt = useGT();
+  const setCollapsed = useLastCodeSidebarFamiliesStore((state) => state.setCollapsed);
+  const compact = useClientSetting("compactLegacySidebarStatuses");
+  const { ownerRef } = item;
+  const title = item.title ?? gt("Creator unavailable ({id})", { id: item.ownerId });
+  return (
+    <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
+      <div className="flex items-center gap-1 pr-2">
+        <button
+          type="button"
+          aria-label={
+            item.expanded
+              ? gt("Collapse children of {title}", { title })
+              : gt("Expand children of {title}", { title })
+          }
+          aria-expanded={item.expanded}
+          className="flex h-8 min-w-0 flex-1 items-center gap-1 rounded-md pl-3 pr-1 text-xs text-sidebar-muted-foreground hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          onClick={() => setCollapsed(item.key, item.expanded)}
+        >
+          <ChevronRightIcon
+            aria-hidden
+            className={cn("size-3 shrink-0", item.expanded && "rotate-90")}
+          />
+          <BotIcon aria-hidden className="size-3 shrink-0" />
+          <span className="truncate italic">{title}</span>
+          <span className="text-secondary-label">{item.count}</span>
+          {!item.expanded && item.status && (
+            <LastCodeThreadStatusLabel status={item.status} compact={compact} />
+          )}
+        </button>
+        {ownerRef && (
+          <Link
+            to="/$environmentId/$threadId"
+            params={buildThreadRouteParams(ownerRef)}
+            aria-label={gt("Open creator thread")}
+            onClick={(event) => {
+              if (
+                event.defaultPrevented ||
+                event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey
+              )
+                return;
+              event.preventDefault();
+              void navigateToThread(ownerRef);
+            }}
+            className="shrink-0 rounded-md p-1 text-sidebar-muted-foreground hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          >
+            <ArrowUpRightIcon aria-hidden className="size-3" />
+          </Link>
+        )}
+      </div>
+    </SidebarMenuSubItem>
+  );
+}
 export function LastCodeThreadRelationshipBadge({
   presentation,
+  part = "all",
 }: {
   presentation: LastCodeThreadFamilyPresentation;
+  part?: "all" | "agent" | "warning";
 }) {
   const {
     isAgentCreated,
@@ -179,33 +264,40 @@ export function LastCodeThreadRelationshipBadge({
   } = presentation;
   const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
   const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
+  const showAgent = isAgentCreated && part !== "warning";
+  const warning = part === "agent" ? null : relationshipUnavailableLabel;
   return (
     <>
-      {isAgentCreated || relationshipUnavailableLabel ? (
+      {showAgent || warning ? (
         <Tooltip>
           <TooltipTrigger
             render={
               <span
-                aria-label={relationshipDescription ?? relationshipLabel ?? undefined}
+                aria-label={
+                  (part === "warning" ? warning : (relationshipDescription ?? relationshipLabel)) ??
+                  undefined
+                }
                 className={cn(
                   "inline-flex shrink-0 items-center gap-0.5 text-3xs",
                   typedGroups ? "rounded border px-1 py-0.5" : "text-sidebar-muted-foreground",
-                  typedGroups && isAgentCreated && "border-dashed",
+                  typedGroups && showAgent && "border-dashed",
                 )}
               />
             }
           >
-            {isAgentCreated ? <SparklesIcon aria-hidden className="size-3" /> : null}
-            {isAgentCreated && !compactStatusIndicators ? (
-              <span className="hidden @sm/lastcode-sidebar:inline">Agent-created</span>
+            {showAgent ? <BotIcon aria-hidden className="size-3" /> : null}
+            {showAgent && part === "all" && !compactStatusIndicators ? (
+              <span className="hidden @sm/lastcode-sidebar:inline">
+                <T>Agent-created</T>
+              </span>
             ) : null}
-            {relationshipUnavailableLabel ? (
+            {warning ? (
               <TriangleAlertIcon aria-hidden className="size-3 text-warning-foreground" />
             ) : null}
           </TooltipTrigger>
           <TooltipPopup side="top">
-            {relationshipDescription}
-            {relationshipUnavailableLabel ? <div>{relationshipUnavailableLabel}</div> : null}
+            {part === "warning" ? null : relationshipDescription}
+            {warning ? <div>{warning}</div> : null}
           </TooltipPopup>
         </Tooltip>
       ) : null}
@@ -219,6 +311,7 @@ export function LastCodeThreadFamilySummary({
   family: LastCodeSidebarFamilyRow;
   display: "inline" | "line";
 }) {
+  const messages = useMessages();
   const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
   const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   const showSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
@@ -232,7 +325,7 @@ export function LastCodeThreadFamilySummary({
         {family.descendantsStatus ? (
           <LastCodeThreadStatusLabel status={family.descendantsStatus} compact />
         ) : null}
-        <span className="truncate">{lastcodeSidebarFamilySummary(family)}</span>
+        <span className="truncate">{lastcodeSidebarFamilySummary(family, messages)}</span>
       </span>
     );
   return (
@@ -256,7 +349,7 @@ export function LastCodeThreadFamilySummary({
         >
           +{family.descendantCount}
         </TooltipTrigger>
-        <TooltipPopup side="top">{lastcodeSidebarFamilySummary(family)}</TooltipPopup>
+        <TooltipPopup side="top">{lastcodeSidebarFamilySummary(family, messages)}</TooltipPopup>
       </Tooltip>
     </>
   );

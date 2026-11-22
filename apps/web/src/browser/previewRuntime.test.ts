@@ -32,6 +32,8 @@ import {
   rendersServerTabNatively,
 } from "./previewRuntime";
 
+import { preparedPreviewOpenTarget } from "./preparedPreviewOpenTarget";
+
 const primary = EnvironmentId.make("primary");
 const remote = EnvironmentId.make("remote");
 
@@ -101,19 +103,22 @@ describe("authoritative server page selection", () => {
     ).toBe(false);
   });
 
-  it("streams existing native popups without creating another guest", () => {
-    for (const [environment, host] of [
-      [primary, "local"],
-      [remote, "host-remote"],
-    ] as const)
-      expect(
-        rendersServerTabNatively(environment, primary, {
-          runtime: "server",
-          backingPage: "desktop-popup",
-          desktopHostId: host,
-        }),
-      ).toBe(false);
-  });
+  it.each(["desktop-popup", "desktop-root"] as const)(
+    "streams %s pages without creating another guest",
+    (backingPage) => {
+      for (const [environment, host] of [
+        [primary, "local"],
+        [remote, "host-remote"],
+      ] as const)
+        expect(
+          rendersServerTabNatively(environment, primary, {
+            runtime: "server",
+            backingPage,
+            desktopHostId: host,
+          }),
+        ).toBe(false);
+    },
+  );
 
   it("renders only the selected remote desktop, including a primary server using RPC", () => {
     state.localDesktopBrowser = false;
@@ -164,9 +169,11 @@ describe("runtime and native ownership boundaries", () => {
   });
 
   it("moves explicit desktop tabs but offers no move without a tab", () => {
-    expect(alternatePreviewRuntime(remote, primary, true, { runtime: "desktop" })).toBe("server");
-    expect(alternatePreviewRuntime(remote, primary, true, null)).toBeNull();
-    expect(alternatePreviewRuntime(remote, primary, true, undefined)).toBeNull();
+    expect(alternatePreviewRuntime(remote, primary, true, true, { runtime: "desktop" })).toBe(
+      "server",
+    );
+    expect(alternatePreviewRuntime(remote, primary, true, true, null)).toBeNull();
+    expect(alternatePreviewRuntime(remote, primary, true, true, undefined)).toBeNull();
   });
 
   it("does not borrow local ownership for a remote environment or missing primary", () => {
@@ -206,5 +213,29 @@ describe("runtime and native ownership boundaries", () => {
         desktopHostId: "host-remote",
       }),
     ).toBe(false);
+  });
+});
+
+describe("managed preview locality", () => {
+  it("uses the desktop only for a confirmed local host and honors explicit streaming", () => {
+    const url = "http://127.0.0.1:8123/app";
+    const prepared = { url, localUrl: url, managed: true, restored: true };
+    expect(preparedPreviewOpenTarget(primary, prepared, url, "default")).toEqual({
+      url,
+      runtime: "server",
+      desktopHostId: "local",
+    });
+    const streamed = { url, runtime: "server", browserHost: "environment" };
+    expect(preparedPreviewOpenTarget(primary, prepared, url, "default", "server")).toEqual(
+      streamed,
+    );
+    expect(preparedPreviewOpenTarget(remote, prepared, url, "default")).toEqual(streamed);
+    for (const localDesktopBrowser of [false, undefined]) {
+      state.localDesktopBrowser = localDesktopBrowser;
+      expect(preparedPreviewOpenTarget(primary, prepared, url, "default")).toEqual(streamed);
+    }
+    state.localDesktopBrowser = true;
+    state.electron = false;
+    expect(preparedPreviewOpenTarget(primary, prepared, url, "default")).toEqual(streamed);
   });
 });

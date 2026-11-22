@@ -344,8 +344,8 @@ export function findHighlightedCommandPaletteItem(
 }
 
 export function enumerateCommandPaletteItems(
-  items: ReadonlyArray<CommandPaletteActionItem>,
-): CommandPaletteActionItem[] {
+  items: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>,
+): Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> {
   return items.map((item, index) => {
     const shortcutCommand = THREAD_JUMP_KEYBINDING_COMMANDS[index];
     if (shortcutCommand) return { ...item, shortcutCommand };
@@ -450,6 +450,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
     environmentLabelOf?: (thread: TThread) => string | null;
     /** Tasks linked environments run for a listed thread; they open from under that thread. */
     delegatedUnderParent?: ReadonlySet<string>;
+    isThreadListed?: (thread: TThread) => boolean;
   },
   resolve: MessageResolver = m,
 ): CommandPaletteActionItem[] {
@@ -458,11 +459,12 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   const visibleThreads = input.threads.filter(
     (thread) =>
       thread.archivedAt === null &&
-      !isShownUnderParent(
-        { environmentId: thread.environmentId, threadId: thread.id },
-        thread.lineage,
-        delegatedUnderParent,
-      ),
+      (input.isThreadListed?.(thread) ??
+        !isShownUnderParent(
+          { environmentId: thread.environmentId, threadId: thread.id },
+          thread.lineage,
+          delegatedUnderParent,
+        )),
   );
 
   return visibleThreads.map((thread) => {

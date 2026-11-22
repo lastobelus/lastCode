@@ -6,7 +6,12 @@ import { useClientSetting } from "../../hooks/useSettings";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useThreadShellsForProjectRefs } from "../../state/entities";
 import { useUiStateStore } from "../../uiStateStore";
-import { lastcodeSidebarSubagentGroupKey } from "../lastcodeSidebarFamilies.logic";
+import type { indexLastCodeSidebarThreads } from "./lastcodeSidebarProjects";
+import {
+  lastcodeSidebarOwnerRef,
+  lastcodeSidebarOwnerGroupKey,
+  lastcodeSidebarSubagentGroupKey,
+} from "../lastcodeSidebarFamilies.logic";
 import { useCollapsedLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.store";
 import {
   lastCodeProjectThreadStatus,
@@ -14,10 +19,12 @@ import {
 } from "./lastcodeProjectThreads";
 
 export function useLastCodeProjectThreads(
-  project: Pick<SidebarProjectSnapshot, "memberProjectRefs">,
+  project: Pick<SidebarProjectSnapshot, "memberProjectRefs"> &
+    Partial<Pick<SidebarProjectSnapshot, "projectKey">>,
   activeThreadKey: string | null,
   projectExpanded: boolean,
   listExpanded: boolean,
+  threadIndex?: ReturnType<typeof indexLastCodeSidebarThreads>,
 ) {
   const threads = useThreadShellsForProjectRefs(project.memberProjectRefs);
   const scopes: OlderSettledScope[] = [
@@ -51,10 +58,23 @@ export function useLastCodeProjectThreads(
       thread,
     ]),
   );
-  const collapseKeys = [...threadsByKey.keys()].flatMap((key) => [
-    key,
-    lastcodeSidebarSubagentGroupKey(key),
-  ]);
+  const projectKey = project.projectKey;
+  const ownership =
+    projectKey !== undefined && threadIndex
+      ? {
+          projectKey,
+          byThreadKey: threadIndex.byThreadKey,
+          hiddenThreadKeys: threadIndex.hiddenThreadKeys,
+        }
+      : undefined;
+  const collapseKeys = new Set<string>();
+  for (const [key, thread] of threadsByKey) {
+    collapseKeys.add(key);
+    collapseKeys.add(lastcodeSidebarSubagentGroupKey(key));
+    const owner = ownership ? lastcodeSidebarOwnerRef(thread) : null;
+    if (owner && projectKey !== undefined)
+      collapseKeys.add(lastcodeSidebarOwnerGroupKey(projectKey, owner));
+  }
   const collapsedByKey = useCollapsedLastCodeSidebarFamilies(collapseKeys);
   const localVisits = useUiStateStore(
     useShallow((state) =>
@@ -68,6 +88,7 @@ export function useLastCodeProjectThreads(
   );
   const statusForThread = lastCodeProjectThreadStatus(threads, localVisits);
   const result = projectLastCodeProjectThreads(threads, sortOrder, {
+    ownership,
     collapsedByKey,
     activeThreadKey,
     projectExpanded,

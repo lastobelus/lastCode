@@ -1,10 +1,14 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
+  OptionalCapacitySnapshot,
   clampedPositiveInt,
   NonNegativeInt,
   ModelSelection,
   TrimmedNonEmptyString,
   ThreadId,
+  ThreadOwner,
+  RemoteDelegationSelector,
+  RemoteWorktreeBaseCommit,
   RunId,
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
@@ -53,9 +57,11 @@ const shared = {
 };
 const ProjectListTool = Tool.make("t3_project_list", {
   ...shared,
-  description: "List projects. Pages can shift.",
+  description:
+    "List projects. temporaryOwner filters to temporary projects owned by that thread. Pages can shift.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
+    temporaryOwner: Schema.optional(ThreadOwner),
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(clampedPositiveInt(100)),
   }),
@@ -79,18 +85,20 @@ const ProjectReadTool = Tool.make("t3_project_read", {
 const ProjectCreateTool = Tool.make("t3_project_create", {
   ...shared,
   description:
-    "Register a project folder. `createWorkspaceRootIfMissing` creates it; a registered folder is rejected. No `workspaceRoot`: makes a git repo from `title` with README, icon, first commit (`commitError` on failure; project still exists). Clone first with `t3_project_clone` if needed.",
+    "Register a project folder. `createWorkspaceRootIfMissing` creates it; a registered folder is rejected. No `workspaceRoot`: makes a git repo from `title` with README, icon, first commit (`commitError` on failure; project still exists). Clone first with `t3_project_clone` if needed. Use temporary:true for throwaway workspaces.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     ...ProjectCreatePayload.fields,
     workspaceRoot: Schema.optional(ProjectCreatePayload.fields.workspaceRoot),
+    temporary: Schema.optional(Schema.Boolean),
   }),
   success: Schema.Struct({ ...Project.fields, commitError: Schema.optional(Schema.String) }),
   dependencies: [...shared.dependencies, ManagedProjectFolders.ManagedProjectFolders],
 }).annotate(Tool.Destructive, true);
 const ProjectUpdateTool = Tool.make("t3_project_update", {
   ...shared,
-  description: "Update one project's settings. Omitted fields are unchanged.",
+  description:
+    "Update one project's settings. keepTemporary:true keeps a temporary project. Omitted fields are unchanged.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: ProjectId,
@@ -130,10 +138,12 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    "Create a top-level thread in its workspace before starting. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. On error or lost reply, reuse `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. To mention it, paste the `link` that `t3_thread_read` returns, exactly; it includes the owning environment.",
+    "Launch one child thread, bound to its workspace before the agent starts. Put the brief in `message`; omit message and attachments for an empty group thread. Your thread owns the launch across projects and environments by default. Set `topLevel:true` only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread in the same project unless it is a side chat; null clears the placement parent without changing ownership. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. To mention it, paste the `link` that `t3_thread_read` returns, exactly; it includes the owning environment.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),
+    groupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+    topLevel: Schema.optional(Schema.Boolean),
     scratch: Schema.optional(
       Schema.Boolean.annotate({
         description:
@@ -165,12 +175,24 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    remotePreparation: Schema.optional(
+      Schema.Struct({
+        parentEnvironmentId: RemoteDelegationSelector.fields.parentEnvironmentId,
+        parentThreadId: ThreadId,
+        sourceTaskId: RemoteDelegationSelector.fields.sourceTaskId,
+        existingThreadId: Schema.optional(ThreadId),
+        worktreeBaseCommit: Schema.optional(RemoteWorktreeBaseCommit),
+      }),
+    ),
   }),
   success: Schema.Struct({
+    capacity: OptionalCapacitySnapshot,
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
     projectId: ProjectId,
     modelSelection: ModelSelection,
+    delegation: Schema.optional(RemoteDelegationSelector),
+    worktreeBaseCommit: Schema.optional(RemoteWorktreeBaseCommit),
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
   }),

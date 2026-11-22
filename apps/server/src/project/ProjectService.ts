@@ -1,16 +1,23 @@
+import { getInteractiveThreadParentThreadId } from "@t3tools/contracts";
 import {
   CommandId,
   type OrchestrationProjectShell,
   PROJECT_TRACKED_FOLDERS_MAX,
+  type OrchestrationV2ThreadShell,
   ProjectId,
   type Project,
   type ProjectCreatePayload,
+  type ProjectRegistration,
   type ProjectTrackedFolder,
+  type ThreadOwner,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
   type ProjectScript,
   type ThreadId,
+  type SavedWorkspaceDisposition,
+  WorktreeSuspensionRequestError,
 } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Clock from "effect/Clock";
@@ -23,13 +30,21 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import {
+  isGroupedCreatorThread,
+  releaseCreatorGrouping,
+} from "../orchestration-v2/CreatorGrouping.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+} from "../orchestration-v2/DispatchModeLimit.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import {
@@ -40,12 +55,19 @@ import {
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import {
+  guardWrappedProjectRemoval,
+  WrappedProjectChanged,
+  type WrappedProjectDeletion,
+} from "../orchestration-v2/LastCodeArchiveTemporaryProjects.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import { deletedProjectOverridePatch } from "../provider/ProjectSettingsOverrideSweep.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as AutoPullStatus from "./AutoPullStatus.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import { makeIsWorktreeContainer } from "./worktreeContainer.ts";
+import { projectRegistrationView, temporaryProjectsOwnedBy } from "./projectRegistration.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import { isWithinRoot } from "../workspace/KnownWorkspaces.ts";
 import {
@@ -55,6 +77,12 @@ import {
   sameProjectFolders,
 } from "../workspace/WorkspaceFolders.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
+import * as ProjectRootGuard from "../vcs/ProjectRootGuard.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "../workspace/projectRootLease.ts";
+import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
+
+const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -75,6 +103,8 @@ export interface ProjectDeleteInput {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly force?: boolean;
+  readonly wrappedProject?: WrappedProjectDeletion;
+  readonly savedWorkspace?: SavedWorkspaceDisposition;
 }
 
 export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundError>()(
@@ -129,6 +159,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "delete-thread",
       "delete-project-settings",
       "dispatch-project-command",
+      "saved-workspace-lifecycle",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -136,6 +167,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
   },
 ) {
   override get message(): string {
+    if (this.operation === "saved-workspace-lifecycle")
+      return "Saved workspace data changed or is protected. Review the saved-data choice before deleting this project.";
     if (this.operation === "delete-project-settings")
       return `Project deletion committed, but settings cleanup failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}. Retry using the original command ID to finish cleanup.`;
     return `Project operation '${this.operation}' failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}.`;
@@ -143,16 +176,30 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
 }
 
 export type ProjectServiceError =
+  | WrappedProjectChanged
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
   | ProjectInvalidError
   | ProjectOperationError;
 
+interface ProjectPageBounds {
+  readonly cursor: number;
+  readonly limit: number;
+}
+
+interface ProjectPage {
+  readonly projects: ReadonlyArray<Project>;
+  readonly nextCursor: number | null;
+}
+
 export class ProjectService extends Context.Service<
   ProjectService,
   {
-    readonly create: (input: ProjectCreateInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly create: (
+      input: ProjectCreateInput,
+      registration?: ProjectRegistration,
+    ) => Effect.Effect<Project, ProjectServiceError>;
     readonly bootstrap: (
       input: ProjectBootstrapInput,
     ) => Effect.Effect<
@@ -188,13 +235,14 @@ export class ProjectService extends Context.Service<
      * A page of active projects in creation order, each with its repository
      * identity resolved, so a caller can match projects by repository.
      */
-    readonly listPage: (input: {
-      readonly cursor: number;
-      readonly limit: number;
-    }) => Effect.Effect<
-      { readonly projects: ReadonlyArray<Project>; readonly nextCursor: number | null },
-      ProjectOperationError
-    >;
+    readonly listPage: (
+      input: ProjectPageBounds,
+    ) => Effect.Effect<ProjectPage, ProjectOperationError>;
+    /** Active temporary projects registered by this exact environment and thread. */
+    readonly listTemporaryOwnedBy: (
+      owner: ThreadOwner,
+      page?: ProjectPageBounds,
+    ) => Effect.Effect<ProjectPage, ProjectOperationError>;
     readonly getShell: (
       projectId: ProjectId,
     ) => Effect.Effect<Option.Option<OrchestrationProjectShell>, ProjectOperationError>;
@@ -211,7 +259,10 @@ export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const admission = yield* UpdateDrainAdmission;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+  const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
+  const rootGuard = yield* ProjectRootGuard.ProjectRootGuard;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+  const suspensionRegistry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -224,6 +275,7 @@ export const make = Effect.gen(function* () {
     Effect.provide(ProcessRunner.layer),
   );
   const scope = yield* Effect.scope;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
   // Commands for one project run in order. Commands that claim a workspace root
   // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
@@ -246,6 +298,7 @@ export const make = Effect.gen(function* () {
     trackedFolders: row.trackedFolders,
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
+    ...projectRegistrationView(row.registration),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt,
@@ -292,7 +345,10 @@ export const make = Effect.gen(function* () {
       row.deletedAt === null
         ? yield* projectEnrichment.getAvailable(row.workspaceRoot)
         : yield* projectEnrichment.peek(row.workspaceRoot);
-    return toProject(row, enrichment);
+    return {
+      ...toProject(row, enrichment),
+      autoPullStatus: yield* autoPullStatus.get(row.workspaceRoot),
+    };
   });
 
   const readRow = (projectId: ProjectId, options?: { readonly includeDeleted?: boolean }) =>
@@ -551,29 +607,108 @@ export const make = Effect.gen(function* () {
     return Option.isNone(row) ? Option.none() : Option.some(yield* hydrate(row.value));
   });
 
+  const guardRecoveryDestination = Effect.fn("ProjectService.guardRecoveryDestination")(function* (
+    projectId: ProjectId,
+    workspaceRoot: string,
+  ) {
+    const protection = yield* suspensionRegistry.recoveryDestinationProtection(workspaceRoot).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "normalize-workspace",
+            projectId,
+            workspaceRoot,
+            cause,
+          }),
+      ),
+    );
+    if (protection !== null)
+      return yield* new ProjectInvalidError({ projectId, detail: protection });
+  });
+
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
-    function* (input) {
+    function* (input, registration) {
       yield* rejectWslSharePath(input.projectId, input.workspaceRoot);
-      const workspaceRoot = yield* normalizeWorkspaceRoot({
-        projectId: input.projectId,
-        workspaceRoot: input.workspaceRoot,
-        createIfMissing: input.createWorkspaceRootIfMissing ?? false,
-      });
-      yield* rejectWorktreeContainer(input.projectId, workspaceRoot);
-      const trackedFolders = yield* normalizeTrackedFolders(
-        input.projectId,
-        workspaceRoot,
-        input.trackedFolders ?? [],
+      const workspaceRoot = yield* withProjectRootLease(
+        Effect.gen(function* () {
+          let root: string;
+          if (input.createWorkspaceRootIfMissing) {
+            const existing = yield* workspacePaths
+              .normalizeWorkspaceRoot(input.workspaceRoot)
+              .pipe(Effect.result);
+            if (Result.isSuccess(existing)) {
+              root = existing.success;
+            } else if (existing.failure._tag === "WorkspaceRootNotExistsError") {
+              const candidate = existing.failure.normalizedWorkspaceRoot;
+              const protect = (value: string) =>
+                suspensionRegistry.automaticProtection(value).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProjectOperationError({
+                        operation: "normalize-workspace",
+                        projectId: input.projectId,
+                        workspaceRoot: input.workspaceRoot,
+                        cause,
+                      }),
+                  ),
+                );
+              const resolved = yield* canonicalProjectRoot(candidate).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProjectOperationError({
+                      operation: "normalize-workspace",
+                      projectId: input.projectId,
+                      workspaceRoot: input.workspaceRoot,
+                      cause,
+                    }),
+                ),
+              );
+              const protection = (yield* protect(candidate)) ?? (yield* protect(resolved));
+              if (protection !== null)
+                return yield* new ProjectInvalidError({
+                  projectId: input.projectId,
+                  detail: protection,
+                });
+              root = yield* normalizeWorkspaceRoot({
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+                createIfMissing: true,
+              });
+            } else {
+              return yield* new ProjectOperationError({
+                operation: "normalize-workspace",
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+                cause: existing.failure,
+              });
+            }
+          } else {
+            root = yield* normalizeWorkspaceRoot({
+              projectId: input.projectId,
+              workspaceRoot: input.workspaceRoot,
+            });
+          }
+          yield* rejectWorktreeContainer(input.projectId, root);
+          yield* guardRecoveryDestination(input.projectId, root);
+          const trackedFolders = yield* normalizeTrackedFolders(
+            input.projectId,
+            root,
+            input.trackedFolders ?? [],
+          );
+          yield* commit({
+            type: "project.create",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            title: input.title,
+            workspaceRoot: root,
+            ...(registration === undefined ? {} : { registration }),
+            ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+            trackedFolders,
+          });
+          return root;
+        }),
       );
-      yield* commit({
-        type: "project.create",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        title: input.title,
-        workspaceRoot,
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-        trackedFolders,
-      });
+      yield* rootGuard.protect(workspaceRoot);
       yield* projectEnrichment.invalidate([workspaceRoot]);
       return yield* readCommitted(input.projectId);
     },
@@ -581,86 +716,95 @@ export const make = Effect.gen(function* () {
 
   const update: ProjectService["Service"]["update"] = Effect.fn("ProjectService.update")(
     function* (input) {
-      const existing = yield* readRow(input.projectId);
-      if (Option.isNone(existing)) {
-        return yield* new ProjectNotFoundError({ projectId: input.projectId });
-      }
-      const previousRoot = existing.value.workspaceRoot;
-      if (input.workspaceRoot !== undefined && input.workspaceRoot !== previousRoot) {
-        yield* rejectWslSharePath(input.projectId, input.workspaceRoot);
-      }
-      const workspaceRoot =
-        input.workspaceRoot === undefined
-          ? previousRoot
-          : yield* normalizeWorkspaceRoot({
-              projectId: input.projectId,
-              workspaceRoot: input.workspaceRoot,
-            });
-      if (workspaceRoot !== previousRoot) {
-        yield* rejectWorktreeContainer(input.projectId, workspaceRoot);
-      }
-      const command = {
-        type: "project.meta.update",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
-        ...(input.defaultModelSelection === undefined
-          ? {}
-          : { defaultModelSelection: input.defaultModelSelection }),
-        ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
-        ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
-        ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
-        ...(input.defaultThreadEnvMode === undefined
-          ? {}
-          : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-        ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
-        ...(input.archived === undefined ? {} : { archived: input.archived }),
-      } as const;
-      // Checked against the row under the lock: an update that ran meanwhile may have moved the
-      // project's folder or changed what it tracks.
-      yield* commit(
-        command,
-        Effect.fnUntraced(function* (current) {
-          if (current === undefined || current.deletedAt !== null) return command;
-          const root = command.workspaceRoot ?? current.workspaceRoot;
-          // Moving the project's folder re-checks the folders it keeps tracking.
-          const untracked = new Set(
-            (input.untrackFolders ?? []).map((entry) => path.resolve(entry)),
-          );
-          const tracking = input.trackFolders ?? [];
-          if (
-            input.trackedFolders === undefined &&
-            untracked.size === 0 &&
-            tracking.length === 0 &&
-            root === current.workspaceRoot
-          )
-            return command;
-          const listed: ReadonlyArray<ProjectTrackedFolder> =
-            input.trackedFolders ?? current.trackedFolders;
-          const kept = listed.filter(
-            (folder) => folder.discovered !== true && !untracked.has(path.resolve(folder.path)),
-          );
-          const trackedFolders = yield* normalizeTrackedFolders(
-            input.projectId,
-            root,
-            [
-              ...kept,
-              ...tracking.filter(
-                (folder) =>
-                  !kept.some((entry) => path.resolve(entry.path) === path.resolve(folder.path)),
-              ),
-            ],
-            current.trackedFolders,
-          );
-          return { ...command, trackedFolders };
-        }),
-      );
-      if (workspaceRoot !== previousRoot || input.faviconPath !== undefined) {
-        yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
-      }
-      return yield* readCommitted(input.projectId);
+      const run = Effect.gen(function* () {
+        const existing = yield* readRow(input.projectId);
+        if (Option.isNone(existing)) {
+          return yield* new ProjectNotFoundError({ projectId: input.projectId });
+        }
+        const previousRoot = existing.value.workspaceRoot;
+        if (input.workspaceRoot !== undefined && input.workspaceRoot !== previousRoot) {
+          yield* rejectWslSharePath(input.projectId, input.workspaceRoot);
+        }
+        const workspaceRoot =
+          input.workspaceRoot === undefined
+            ? previousRoot
+            : yield* normalizeWorkspaceRoot({
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+              });
+        if (workspaceRoot !== previousRoot) {
+          yield* rejectWorktreeContainer(input.projectId, workspaceRoot);
+          yield* guardRecoveryDestination(input.projectId, workspaceRoot);
+        }
+        const command = {
+          type: "project.meta.update",
+          commandId: input.commandId,
+          projectId: input.projectId,
+          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
+          ...(input.defaultModelSelection === undefined
+            ? {}
+            : { defaultModelSelection: input.defaultModelSelection }),
+          ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
+          ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
+          ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
+          ...(input.defaultThreadEnvMode === undefined
+            ? {}
+            : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
+          ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+          ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
+          ...(input.archived === undefined ? {} : { archived: input.archived }),
+          ...(input.keepTemporary === undefined ? {} : { keepTemporary: input.keepTemporary }),
+        } as const;
+        // Checked against the row under the lock: an update that ran meanwhile may have moved the
+        // project's folder or changed what it tracks.
+        yield* commit(
+          command,
+          Effect.fnUntraced(function* (current) {
+            if (current === undefined || current.deletedAt !== null) return command;
+            const root = command.workspaceRoot ?? current.workspaceRoot;
+            // Moving the project's folder re-checks the folders it keeps tracking.
+            const untracked = new Set(
+              (input.untrackFolders ?? []).map((entry) => path.resolve(entry)),
+            );
+            const tracking = input.trackFolders ?? [];
+            if (
+              input.trackedFolders === undefined &&
+              untracked.size === 0 &&
+              tracking.length === 0 &&
+              root === current.workspaceRoot
+            )
+              return command;
+            const listed: ReadonlyArray<ProjectTrackedFolder> =
+              input.trackedFolders ?? current.trackedFolders;
+            const kept = listed.filter(
+              (folder) => folder.discovered !== true && !untracked.has(path.resolve(folder.path)),
+            );
+            const trackedFolders = yield* normalizeTrackedFolders(
+              input.projectId,
+              root,
+              [
+                ...kept,
+                ...tracking.filter(
+                  (folder) =>
+                    !kept.some((entry) => path.resolve(entry.path) === path.resolve(folder.path)),
+                ),
+              ],
+              current.trackedFolders,
+            );
+            return { ...command, trackedFolders };
+          }),
+        );
+        if (workspaceRoot !== previousRoot) {
+          yield* rootGuard.protect(workspaceRoot);
+        }
+        if (workspaceRoot !== previousRoot || input.faviconPath !== undefined) {
+          yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
+        }
+        return yield* readCommitted(input.projectId);
+      });
+      const update = input.keepTemporary === true ? threadCommands.withPersistenceLock(run) : run;
+      return yield* input.workspaceRoot === undefined ? update : withProjectRootLease(update);
     },
   );
 
@@ -683,49 +827,132 @@ export const make = Effect.gen(function* () {
     input: ProjectDeleteInput,
     threadId: ThreadId,
   ) {
-    yield* legacyImporter.ensureTranscript(threadId);
-    const projection = yield* threadProjections.getThreadRecords(threadId, [
-      "runs",
-      "attempts",
-      "nodes",
-      "runtimeRequests",
-      "subagents",
-      "providerSessions",
-    ]);
-    if (projection.thread.deletedAt !== null || projection.thread.projectId !== input.projectId) {
-      return;
-    }
-    const command = {
-      type: "thread.delete" as const,
-      commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
-      threadId,
-    };
-    const now = yield* DateTime.now;
-    const plan = yield* planThreadDeletion({
-      command,
-      projection,
-      attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
-      now,
-      idAllocator,
-    });
-    const committed = yield* eventSink.commitCommand({
-      commandId: command.commandId,
-      commandType: command.type,
-      threadId,
-      acceptedAt: now,
-      events: plan.events,
-      effects: plan.effects,
-    });
-    if (
-      committed.receipt.threadId !== command.threadId ||
-      committed.receipt.commandType !== command.type
-    ) {
-      return yield* Effect.fail("The thread deletion command ID belongs to a different command.");
-    }
-    if (committed.receipt.status === "rejected") {
-      return yield* Effect.fail(
-        committed.receipt.error ?? "Thread deletion was previously rejected.",
+    // Project deletion already holds persistence. Take the creator and every
+    // ordinary grouped conversation in the same order as thread lifecycle commands.
+    while (true) {
+      const groupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+      const paths = yield* Effect.forEach([...new Set([threadId, ...groupedIds])], (id) =>
+        Effect.gen(function* () {
+          const path: ThreadId[] = [];
+          let ancestor: ThreadId | null = id;
+          while (ancestor !== null) {
+            path.unshift(ancestor);
+            const thread: OrchestrationV2ThreadShell | null =
+              yield* threadProjections.getThreadShell(ancestor);
+            ancestor = thread?.lineage.parentThreadId ?? null;
+          }
+          return { id, path };
+        }),
       );
+      const ids = paths
+        .toSorted((left, right) => {
+          for (let index = 0; index < Math.min(left.path.length, right.path.length); index++) {
+            const a = left.path[index]!;
+            const b = right.path[index]!;
+            if (a !== b) return a < b ? -1 : 1;
+          }
+          return left.path.length - right.path.length;
+        })
+        .map(({ id }) => id);
+      const completed = yield* ids.reduceRight(
+        (effect, id) => threadCommands.withLock(id, effect),
+        Effect.gen(function* () {
+          yield* legacyImporter.ensureTranscript(threadId);
+          const projection = yield* threadProjections.getThreadRecords(threadId, [
+            "runs",
+            "attempts",
+            "nodes",
+            "runtimeRequests",
+            "subagents",
+            "providerSessions",
+            "providerThreads",
+          ]);
+          if (
+            projection.thread.deletedAt !== null ||
+            projection.thread.projectId !== input.projectId
+          )
+            return true;
+          const currentGroupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+          // A creator-linked conversation can arrive while these locks are acquired.
+          // Release the locks and collect again before planning any changes.
+          if (currentGroupedIds.some((id) => !ids.includes(id))) return false;
+          const grouped = (yield* Effect.forEach(currentGroupedIds, (id) =>
+            threadProjections.getThread(id),
+          )).filter(
+            (thread) =>
+              thread.id !== threadId &&
+              getInteractiveThreadParentThreadId(thread) === threadId &&
+              isGroupedCreatorThread(thread),
+          );
+          const limit = yield* DispatchModeLimit;
+          if (limit !== undefined) {
+            for (const thread of [projection.thread, ...grouped]) {
+              const mode = exceededDispatchModeLimit(limit, thread);
+              if (mode === undefined) continue;
+              if (limit.refused !== undefined)
+                yield* Ref.set(limit.refused, {
+                  threadId: thread.id,
+                  mode,
+                  runtimeMode: thread.runtimeMode,
+                  interactionMode: thread.interactionMode,
+                });
+              return yield* Effect.fail(
+                `Thread '${thread.id}' exceeds the permitted ${mode} mode for project deletion.`,
+              );
+            }
+          }
+          const command = {
+            type: "thread.delete" as const,
+            commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
+            threadId,
+          };
+          const now = yield* DateTime.now;
+          const plan = yield* planThreadDeletion({
+            command,
+            projection,
+            attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
+            now,
+            idAllocator,
+          });
+          const releases = yield* Effect.forEach(grouped, (thread) =>
+            Effect.gen(function* () {
+              return {
+                id: yield* idAllocator.allocate.event({
+                  threadId: thread.id,
+                  commandId: command.commandId,
+                }),
+                type: "thread.metadata-updated" as const,
+                threadId: thread.id,
+                occurredAt: now,
+                payload: releaseCreatorGrouping(thread),
+              };
+            }),
+          );
+          const committed = yield* eventSink.commitCommand({
+            commandId: command.commandId,
+            commandType: command.type,
+            threadId,
+            acceptedAt: now,
+            events: [...plan.events, ...releases],
+            effects: plan.effects,
+          });
+          if (
+            committed.receipt.threadId !== command.threadId ||
+            committed.receipt.commandType !== command.type
+          ) {
+            return yield* Effect.fail(
+              "The thread deletion command ID belongs to a different command.",
+            );
+          }
+          if (committed.receipt.status === "rejected") {
+            return yield* Effect.fail(
+              committed.receipt.error ?? "Thread deletion was previously rejected.",
+            );
+          }
+          return true;
+        }),
+      );
+      if (completed) return;
     }
   });
 
@@ -750,6 +977,19 @@ export const make = Effect.gen(function* () {
     const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads].sort(
       (a, b) => DateTime.toEpochMillis(b.createdAt) - DateTime.toEpochMillis(a.createdAt),
     );
+    if (input.wrappedProject !== undefined)
+      yield* guardWrappedProjectRemoval(
+        threadProjections,
+        projectId,
+        projectThreads,
+        input.wrappedProject,
+      ).pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "WrappedProjectChanged"
+            ? cause
+            : new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+        ),
+      );
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
@@ -759,6 +999,16 @@ export const make = Effect.gen(function* () {
         operation: "delete-thread",
         projectId,
         cause: `Persistent thread '${persistent.id}' must be released before deleting its project.`,
+      });
+    const unresolvedArchive = projectThreads.find((thread) => thread.archivePending != null);
+    if (unresolvedArchive !== undefined)
+      return yield* new ProjectOperationError({
+        operation: "delete-thread",
+        projectId,
+        cause:
+          unresolvedArchive.archivePending?.status === "failed"
+            ? "This thread is part of a failed archive, so retry or dismiss that archive before deleting the thread."
+            : "A conversation in this family is still stopping before archive. Wait for its archive to finish.",
       });
     const unfinishedCleanup = (yield* threadProjections.getWorktreeCleanupThreads.pipe(
       Effect.mapError(
@@ -775,14 +1025,11 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       projectThreads,
       (thread) =>
-        threadCommands
-          .withDeletionLock(threadCommands.withLock(thread.id, deleteChildThread(input, thread.id)))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
-            ),
+        deleteChildThread(input, thread.id).pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
           ),
+        ),
       { concurrency: 1, discard: true },
     );
   });
@@ -791,20 +1038,28 @@ export const make = Effect.gen(function* () {
     function* (input, onCommitted = Effect.void) {
       const operation = Effect.gen(function* () {
         const { projectId } = input;
-        const workspaceRoot = yield* threadCommands.withPersistenceLock(
-          Effect.gen(function* () {
-            // Read deleted rows so retries replay receipts and other command ids fail as not found.
-            const existing = yield* readRow(projectId, { includeDeleted: true });
-            if (Option.isNone(existing)) {
-              return yield* new ProjectNotFoundError({ projectId });
-            }
+        const workspaceRoot = yield* threadCommands.withDeletionLock(
+          threadCommands.withPersistenceLock(
+            Effect.gen(function* () {
+              // Read deleted rows so retries replay receipts and other command ids fail as not found.
+              const existing = yield* readRow(projectId, { includeDeleted: true });
+              if (Option.isNone(existing)) {
+                return yield* new ProjectNotFoundError({ projectId });
+              }
 
-            if (existing.value.deletedAt === null) {
-              yield* deleteChildThreads(input);
-            }
-            yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
-            return existing.value.workspaceRoot;
-          }),
+              if (existing.value.deletedAt === null) {
+                if (
+                  input.wrappedProject !== undefined &&
+                  temporaryProjectsOwnedBy([existing.value], input.wrappedProject.owner).length ===
+                    0
+                )
+                  return yield* new WrappedProjectChanged({ projectId });
+                yield* deleteChildThreads(input);
+              }
+              yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+              return existing.value.workspaceRoot;
+            }),
+          ),
         );
         // Clone creation acquires persistence while holding the tracker lock.
         // Release persistence before caller-owned cleanup takes that lock.
@@ -834,8 +1089,45 @@ export const make = Effect.gen(function* () {
       // Completed receipt replay has no child cleanup to admit. Fresh cascades
       // take admission before persistence and child locks, just like thread.delete.
       const existing = yield* readRow(input.projectId, { includeDeleted: true });
-      if (Option.isSome(existing) && existing.value.deletedAt !== null) return yield* operation;
-      return yield* admission.admit("thread-delete", operation).pipe(
+      const lifecycleOperation = Option.isSome(workspaceLifecycle)
+        ? workspaceLifecycle.value
+            .run(
+              {
+                operation: "delete",
+                target: { kind: "project", projectId: input.projectId },
+                commandId: input.commandId,
+                ...(input.savedWorkspace === undefined
+                  ? {}
+                  : { savedWorkspace: input.savedWorkspace }),
+              },
+              operation,
+            )
+            .pipe(
+              Effect.mapError((cause) =>
+                isWorktreeSuspensionRequestError(cause)
+                  ? new ProjectOperationError({
+                      operation: "saved-workspace-lifecycle",
+                      projectId: input.projectId,
+                      cause,
+                    })
+                  : cause,
+              ),
+            )
+        : input.savedWorkspace?.mode === "discard"
+          ? Effect.fail(
+              new ProjectOperationError({
+                operation: "saved-workspace-lifecycle",
+                projectId: input.projectId,
+                cause: new WorktreeSuspensionRequestError({
+                  reason: "unavailable",
+                  message: "Saved workspace disposal is unavailable.",
+                }),
+              }),
+            )
+          : operation;
+      if (Option.isSome(existing) && existing.value.deletedAt !== null)
+        return yield* lifecycleOperation;
+      return yield* admission.admit("thread-delete", lifecycleOperation).pipe(
         Effect.catchTags({
           UpdateDrainAdmissionError: Effect.fn("ProjectService.deleteThread.admissionRefused")(
             function* (cause) {
@@ -843,7 +1135,7 @@ export const make = Effect.gen(function* () {
               // behind it and the drain. Commit validates the replay under its locks.
               const recorded = yield* readRow(input.projectId, { includeDeleted: true });
               if (Option.isSome(recorded) && recorded.value.deletedAt !== null)
-                return yield* operation;
+                return yield* lifecycleOperation;
               return yield* cause;
             },
           ),
@@ -910,26 +1202,35 @@ export const make = Effect.gen(function* () {
     } satisfies ProjectSnapshot;
   });
 
-  const listPage: ProjectService["Service"]["listPage"] = Effect.fn("ProjectService.listPage")(
-    function* ({ cursor, limit }) {
-      const rows = (yield* listRows).filter((project) => project.deletedAt === null);
-      const projects = yield* Effect.forEach(
-        rows.slice(cursor, cursor + limit),
-        (row) =>
-          hydrate(row).pipe(
-            Effect.filterOrElse(
-              (project) => project.repositoryIdentity !== null,
-              (project) =>
-                projectEnrichment
-                  .readRepositoryIdentity(project.workspaceRoot)
-                  .pipe(Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity }))),
-            ),
+  const pageOfRows = Effect.fn("ProjectService.pageOfRows")(function* (
+    rows: ReadonlyArray<ProjectStore.ProjectRow>,
+    { cursor, limit }: ProjectPageBounds,
+  ) {
+    const projects = yield* Effect.forEach(
+      rows.slice(cursor, cursor + limit),
+      (row) =>
+        hydrate(row).pipe(
+          Effect.filterOrElse(
+            (project) => project.repositoryIdentity !== null,
+            (project) =>
+              projectEnrichment
+                .readRepositoryIdentity(project.workspaceRoot)
+                .pipe(Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity }))),
           ),
-        { concurrency: 8 },
-      );
-      return { projects, nextCursor: cursor + limit < rows.length ? cursor + limit : null };
-    },
-  );
+        ),
+      { concurrency: 8 },
+    );
+    return { projects, nextCursor: cursor + limit < rows.length ? cursor + limit : null };
+  });
+
+  const listPage: ProjectService["Service"]["listPage"] = (page) =>
+    listRows.pipe(Effect.flatMap((rows) => pageOfRows(rows, page)));
+
+  const listTemporaryOwnedBy: ProjectService["Service"]["listTemporaryOwnedBy"] = (owner, page) =>
+    listRows.pipe(
+      Effect.map((rows) => temporaryProjectsOwnedBy(rows, owner)),
+      Effect.flatMap((rows) => pageOfRows(rows, page ?? { cursor: 0, limit: rows.length })),
+    );
 
   return ProjectService.of({
     create,
@@ -942,6 +1243,7 @@ export const make = Effect.gen(function* () {
     workspaceScanDirectory,
     snapshot,
     listPage,
+    listTemporaryOwnedBy,
     getShell,
     listShells,
   });

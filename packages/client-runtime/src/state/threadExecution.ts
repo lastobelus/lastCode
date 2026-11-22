@@ -1,4 +1,5 @@
 import {
+  emptyWorkspacePreparationFailure,
   latestExecutedRun,
   latestRootProviderFailure,
   latestRootProviderFailureItem,
@@ -429,18 +430,30 @@ export function deriveThreadStructureRuntime(
       pullRequests: projection.thread.pullRequests,
     }),
   );
-  // A pull request watch can hold a thread that never ran.
-  if (latestRun === null && !backgroundWorkHoldsRun) return null;
+  const emptyPreparationFailure = emptyWorkspacePreparationFailure(projection.thread);
+  const preparingEmptyWorkspace =
+    projection.thread.emptyWorkspacePreparationClaim !== undefined ||
+    projection.thread.emptyWorkspacePreparation?.state === "claimed";
+  // A pull request watch or workspace preparation can hold a thread that never ran.
+  if (
+    latestRun === null &&
+    !backgroundWorkHoldsRun &&
+    emptyPreparationFailure === null &&
+    !preparingEmptyWorkspace
+  )
+    return null;
   const activeRunId =
     latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status))?.id ?? null;
   const failureItem = latestRootProviderFailureItem(latestRunProjection, projection.turnItems);
   const sessionError = providerSession?.lastError ?? null;
   return {
-    status: usageLimitedRun
-      ? "failed"
-      : backgroundWorkHoldsRun && latestRunProjection?.status !== "failed"
-        ? "idle"
-        : (activityRun?.status ?? "idle"),
+    status: preparingEmptyWorkspace
+      ? "preparing"
+      : usageLimitedRun || emptyPreparationFailure !== null
+        ? "failed"
+        : backgroundWorkHoldsRun && latestRunProjection?.status !== "failed"
+          ? "idle"
+          : (activityRun?.status ?? "idle"),
     activeRunId,
     activityStartedAt:
       liveActivityRun === null
@@ -448,7 +461,7 @@ export function deriveThreadStructureRuntime(
         : DateTime.formatIso(orchestrationV2RunWorkStartedAt(liveActivityRun)),
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
-    ...threadErrorSummary(failureItem?.failure ?? null, sessionError),
+    ...threadErrorSummary(failureItem?.failure ?? emptyPreparationFailure, sessionError),
     lastErrorSource: threadErrorSource(failureItem, sessionError, projection),
   };
 }

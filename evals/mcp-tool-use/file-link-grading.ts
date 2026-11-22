@@ -13,10 +13,8 @@ import {
   parseMarkdownFileLink,
   resolveMarkdownFileLinkTarget,
 } from "@t3tools/shared/markdownLinks";
-import {
-  needsWorkspaceBasenameLookup,
-  pickWorkspaceLinkMatch,
-} from "../../packages/client-runtime/src/workspaceBasenameLookup.ts";
+import { needsWorkspaceBasenameLookup } from "@t3tools/shared/workspaceBasenameLookup";
+import { pickWorkspaceLinkMatch } from "../../packages/client-runtime/src/workspaceBasenameLookup.ts";
 
 export const FileLinksExpect = Schema.Struct({
   /** The final answer has at least this many file pills that open a world file. */

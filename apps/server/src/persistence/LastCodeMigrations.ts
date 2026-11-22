@@ -13,6 +13,23 @@ import Migration0055 from "./Migrations/055_ProjectionThreadMessageSource.ts";
 import Migration0056 from "./Migrations/056_ProjectionThreadsPersistent.ts";
 import Migration0057 from "./Migrations/057_ProjectionThreadAttention.ts";
 import ActionRunMigration from "../actionResume/ActionRunMigration.ts";
+import ThreadCreatorEvidenceIndexMigration from "./Migrations/057_ThreadCreatorEvidenceIndex.ts";
+import OwnedThreadIndexMigration from "./Migrations/OrchestrationV2/OwnedThreadIndex.ts";
+import GroupedCreatorThreadIndexMigration from "./Migrations/OrchestrationV2/GroupedCreatorThreadIndex.ts";
+import ArchiveReadIndexMigration from "./Migrations/OrchestrationV2/ArchiveReadIndex.ts";
+import CommandHistoryIndexMigration from "./Migrations/OrchestrationV2/CommandHistoryIndex.ts";
+import ThreadReadAuthorizationIndexMigration from "./Migrations/OrchestrationV2/ThreadReadAuthorizationIndex.ts";
+import InteractiveThreadParentIndexMigration from "./Migrations/OrchestrationV2/InteractiveThreadParentIndex.ts";
+
+import PullRequestWatchIndexMigration from "./Migrations/OrchestrationV2/PullRequestWatchIndex.ts";
+
+import RetiredNativePromotionMigration from "./Migrations/OrchestrationV2/RetiredNativePromotion.ts";
+
+import ProjectRegistrationMigration from "./Migrations/ProjectRegistration.ts";
+
+import { createAuthoritySchema } from "../threadReadAuthority/Schema.ts";
+import ArchiveRecordedOwnerIndexesMigration from "./Migrations/OrchestrationV2/ArchiveRecordedOwnerIndexes.ts";
+import LastCodeArchiveJournalMigration from "./Migrations/LastCodeArchiveJournal.ts";
 
 export const lastcodeMigrationEntries = [
   [1, "ProjectionThreadAnnotation", Migration0048],
@@ -26,6 +43,19 @@ export const lastcodeMigrationEntries = [
   [9, "ProjectionThreadsPersistent", Migration0056],
   [10, "ProjectionThreadAttention", Migration0057],
   [11, "ActionResumeRuns", ActionRunMigration],
+  [12, "ThreadCreatorEvidenceIndex", ThreadCreatorEvidenceIndexMigration],
+  [13, "OrchestrationV2OwnedThreadIndex", OwnedThreadIndexMigration],
+  [14, "OrchestrationV2GroupedCreatorThreadIndex", GroupedCreatorThreadIndexMigration],
+  [15, "OrchestrationV2ArchiveReadIndex", ArchiveReadIndexMigration],
+  [16, "OrchestrationV2CommandHistoryIndex", CommandHistoryIndexMigration],
+  [17, "OrchestrationV2ThreadReadAuthorizationIndex", ThreadReadAuthorizationIndexMigration],
+  [18, "OrchestrationV2InteractiveThreadParentIndex", InteractiveThreadParentIndexMigration],
+  [19, "OrchestrationV2PullRequestWatchIndex", PullRequestWatchIndexMigration],
+  [20, "OrchestrationV2RetiredNativePromotion", RetiredNativePromotionMigration],
+  [21, "ThreadReadAuthority", createAuthoritySchema],
+  [22, "ProjectRegistration", ProjectRegistrationMigration],
+  [23, "OrchestrationV2ArchiveRecordedOwnerIndexes", ArchiveRecordedOwnerIndexesMigration],
+  [24, "LastCodeArchiveJournal", LastCodeArchiveJournalMigration],
 ] as const;
 
 export const lastcodeMigrationManifest = lastcodeMigrationEntries.map(

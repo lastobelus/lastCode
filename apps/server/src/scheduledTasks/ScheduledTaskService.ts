@@ -34,6 +34,7 @@ import * as Digest from "effect/crypto/Digest";
 import * as Mac from "effect/crypto/Mac";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Exit from "effect/Exit";
@@ -60,6 +61,7 @@ import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as DueHint from "../scheduling/DueHint.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import { latestRootProviderFailure } from "@t3tools/shared/orchestrationV2ThreadError";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 import {
   redactHeaders,
@@ -152,6 +154,7 @@ export type WebhookDeliveryOutcome =
   | "prompt_too_long"
   | "queue_full"
   | "rate_limited"
+  | "environment_paused"
   | "disabled"
   | "rejected_signature"
   | "expired"
@@ -170,6 +173,7 @@ export type WebhookTriggerResult =
   | { readonly _tag: "rejected_signature" }
   | { readonly _tag: "disabled" }
   | { readonly _tag: "blocked_by_policy" }
+  | { readonly _tag: "environment_paused" }
   | {
       readonly _tag: "rate_limited";
       readonly outcome: "rate_limited" | "queue_full";
@@ -261,6 +265,7 @@ export class ScheduledTaskService extends Context.Service<
     readonly subscribeList: () => Stream.Stream<ScheduledTaskListResult, ScheduledTaskError>;
     readonly upsert: (
       input: ScheduledTaskUpsertInput,
+      options?: { readonly resetThread: boolean },
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
     readonly setEnabled: (
       input: ScheduledTaskSetEnabledInput,
@@ -484,6 +489,25 @@ export const layer = Layer.effect(
     const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
+    const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+    const automationPaused = Option.isSome(pauseStore)
+      ? pauseStore.value.get.pipe(
+          Effect.map((session) => session !== null && session.phase !== "resuming"),
+        )
+      : Effect.succeed(false);
+    const awaitEnvironmentResume = Effect.gen(function* () {
+      while (yield* automationPaused) {
+        const resumed = yield* Deferred.make<void>();
+        yield* Effect.scoped(
+          scheduler
+            .register(
+              "webhook-environment-resume",
+              Deferred.succeed(resumed, undefined).pipe(Effect.asVoid),
+            )
+            .pipe(Effect.andThen(Deferred.await(resumed))),
+        );
+      }
+    });
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
     const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
     const webhookPolicyOrganization = ManagedPolicy.deniedBy(managedPolicy, "webhookTasks");
@@ -595,14 +619,17 @@ export const layer = Layer.effect(
       WHERE task_id = ${id}
     `.pipe(NodeSqliteClient.readOnly);
 
-    const findTask = Effect.fn("ScheduledTaskService.findTask")(function* (id: ScheduledTaskId) {
-      const rows = yield* getRows(id).pipe(
+    const findTaskRow = (id: ScheduledTaskId) =>
+      getRows(id).pipe(
+        Effect.map((rows) => rows[0] ?? null),
         Effect.mapError((cause) =>
           taskError("Could not load schedule task.", { taskId: id, cause }),
         ),
       );
-      const row = rows[0];
-      if (row === undefined) return null;
+
+    const findTask = Effect.fn("ScheduledTaskService.findTask")(function* (id: ScheduledTaskId) {
+      const row = yield* findTaskRow(id);
+      if (row === null) return null;
       return withPolicy(yield* decodeRow(row, yield* readWebhookOrigin));
     });
 
@@ -645,6 +672,7 @@ export const layer = Layer.effect(
         readonly secret: string | null;
         readonly secretChanged: boolean;
       },
+      resetThread: boolean,
     ) =>
       sql<{ task_id: string }>`
         INSERT INTO scheduled_tasks (
@@ -708,7 +736,7 @@ export const layer = Layer.effect(
           -- A first run may bind the thread while this save is in flight, so a save
           -- without a thread keeps any thread but the one it unbinds.
           thread_id = CASE
-            WHEN excluded.thread_mode = 'new_thread' THEN NULL
+            WHEN ${resetThread ? 1 : 0} = 1 OR excluded.thread_mode = 'new_thread' THEN NULL
             WHEN excluded.project_id != scheduled_tasks.project_id THEN excluded.thread_id
             ELSE COALESCE(excluded.thread_id, NULLIF(scheduled_tasks.thread_id, ${unboundThreadId}))
           END,
@@ -880,12 +908,13 @@ export const layer = Layer.effect(
     // A thread deleted before the binding landed already ran its task cleanup, so apply that
     // cleanup here; a later deletion finds the binding. An unconfirmed lookup keeps the binding.
     const bindThread = Effect.fn("ScheduledTaskService.bindThread")(
-      function* (task: ScheduledTask, threadId: ThreadId) {
+      function* (task: ScheduledTask, threadId: ThreadId, modelSelectionJson: string) {
         yield* sql`
           UPDATE scheduled_tasks SET thread_id = ${threadId}
           WHERE task_id = ${task.id} AND created_at = ${task.createdAt}
             AND project_id = ${task.projectId}
             AND thread_id IS NULL AND thread_mode != 'new_thread'
+            AND model_selection_json = ${modelSelectionJson}
         `;
         const shell = yield* threadManagement.getThreadShell(threadId);
         if (shell === null || shell.deletedAt != null) yield* deleteForThread(threadId);
@@ -969,13 +998,18 @@ export const layer = Layer.effect(
         readonly dispatched: Ref.Ref<boolean>;
       },
     ) {
+      // A previously admitted webhook owns its full payload in the existing
+      // bounded queue. Hold it before any thread/worktree preparation.
+      if (trigger === "webhook") yield* awaitEnvironmentResume;
+      if (trigger === "scheduled" && (yield* automationPaused))
+        return { task, threadId: null, dispatchFailed: false };
       // Read before reserving: nothing between the reservation and its release may fail.
       const startedAt = yield* localNow;
       const startedAtIso = iso(startedAt);
       const run = Effect.gen(function* () {
         // Re-read stale poll snapshots so deleted, paused or postponed tasks cannot fire.
-        const active = yield* findTask(task.id);
-        if (active === null) {
+        const activeRow = yield* findTaskRow(task.id);
+        if (activeRow === null) {
           if (webhook !== undefined) {
             return yield* new WebhookDeliverySkipped({
               reason: "The task was deleted before this delivery ran.",
@@ -986,6 +1020,7 @@ export const layer = Layer.effect(
           }
           return { task, threadId: null, dispatchFailed: false };
         }
+        const active = withPolicy(yield* decodeRow(activeRow, yield* readWebhookOrigin));
         if (
           webhook !== undefined &&
           (yield* sql`SELECT 1 FROM scheduled_task_webhook_pending WHERE delivery_id = ${webhook.deliveryId} AND state = 'completed'`.pipe(
@@ -1043,6 +1078,9 @@ export const layer = Layer.effect(
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
         }
 
+        if (trigger === "webhook") yield* awaitEnvironmentResume;
+        if (trigger === "scheduled" && (yield* automationPaused))
+          return { task: active, threadId: null, dispatchFailed: false };
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
         else
           yield* sql
@@ -1132,7 +1170,9 @@ export const layer = Layer.effect(
                   .pipe(
                     Effect.map((launched) => launched.threadId),
                     Effect.tap((threadId) =>
-                      threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
+                      threadMode === "new_thread"
+                        ? Effect.void
+                        : bindThread(active, threadId, activeRow.model_selection_json),
                     ),
                   ),
               )
@@ -1451,7 +1491,7 @@ export const layer = Layer.effect(
 
     const upsert: ScheduledTaskService["Service"]["upsert"] = Effect.fn(
       "ScheduledTaskService.upsert",
-    )(function* (input) {
+    )(function* (input, options) {
       // A webhook task the policy blocks can still be edited while it is off.
       if (input.enabled && input.schedule.type === "webhook" && webhookPolicyBlock !== undefined) {
         return yield* taskError(
@@ -1487,7 +1527,8 @@ export const layer = Layer.effect(
         existingTask !== null &&
         existingTask.projectId !== input.projectId &&
         keptThreadId === existingTask.threadId;
-      const threadId = threadMode === "new_thread" || movedOffThread ? null : keptThreadId;
+      const threadId =
+        threadMode === "new_thread" || movedOffThread || options?.resetThread ? null : keptThreadId;
       // An unchanged destination is not rechecked, so a task on an archived thread stays editable.
       if (threadId !== null && threadId !== existingTask?.threadId) {
         yield* requireDestinationThread(threadId, input.projectId, id);
@@ -1615,6 +1656,7 @@ export const layer = Layer.effect(
         scheduleUnchanged ? existingTask.schedule : null,
         threadId === null && input.unbindThread === true ? (existingTask?.threadId ?? null) : null,
         webhook,
+        options?.resetThread === true,
       );
       yield* notifyChanged;
       return { task: (yield* findTask(id)) ?? task };
@@ -2205,6 +2247,12 @@ export const layer = Layer.effect(
       yield* Effect.annotateCurrentSpan({ "scheduled_task.id": task.id });
       const schedule = task.schedule;
       if (schedule.type !== "webhook") return yield* notFound;
+      // Refuse before claiming the relay delivery: its next pass must retain
+      // the same payload and ID rather than treating this refusal as consumed.
+      if (yield* automationPaused) {
+        yield* observeDelivery(request, "environment_paused", undefined, undefined);
+        return { _tag: "environment_paused" as const };
+      }
 
       const now = yield* localNow;
       // Anyone can reach the tunnel directly and set the relay's header, so

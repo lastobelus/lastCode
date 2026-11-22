@@ -173,6 +173,7 @@ export function start(configuration: PreviewStreamConfiguration) {
       {
         onFrame: (jpeg) => painter.paint(jpeg),
         onPointer: showAgentCursor,
+        onThreadLink: (href) => post({ type: "threadLink", href }),
         onClipboard: (text) => post({ type: "clipboard", text }),
         onDownload: (download) => post({ type: "download", ...download }),
         onFileChooser: (chooser) => post({ type: "fileChooser", chooser }),

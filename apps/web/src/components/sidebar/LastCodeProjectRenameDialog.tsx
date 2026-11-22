@@ -1,3 +1,5 @@
+import { msg, T, useGT, Var } from "gt-react";
+import { m } from "~/i18n/messages";
 import { useState } from "react";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
@@ -49,7 +51,7 @@ async function saveProjectRename(
   if (trimmed.length === 0) {
     toastManager.add({
       type: "warning",
-      title: "Project title cannot be empty",
+      title: m(msg("Project title cannot be empty")),
     });
     return;
   }
@@ -73,13 +75,14 @@ async function saveProjectRename(
     toastManager.add(
       stackedThreadToast({
         type: "error",
-        title: "Failed to rename project",
-        description: error instanceof Error ? error.message : "An error occurred.",
+        title: m(msg("Failed to rename project")),
+        description: error instanceof Error ? error.message : m(msg("An error occurred.")),
       }),
     );
   }
 }
 function ProjectRenameForm({ target: projectRenameTarget, onClose }: DialogProps) {
+  const gt = useGT();
   const [projectRenameTitle, setProjectRenameTitle] = useState(projectRenameTarget?.title ?? "");
   const canRenameProject = useEnvironmentScope(
     projectRenameTarget?.environmentId ?? null,
@@ -94,18 +97,26 @@ function ProjectRenameForm({ target: projectRenameTarget, onClose }: DialogProps
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Rename project</DialogTitle>
+        <DialogTitle>
+          <T>Rename project</T>
+        </DialogTitle>
         <DialogDescription>
-          {projectRenameTarget
-            ? `Update the title for ${projectRenameTarget.workspaceRoot}.`
-            : "Update the project title."}
+          {projectRenameTarget ? (
+            <T>
+              Update the title for <Var>{projectRenameTarget.workspaceRoot}</Var>.
+            </T>
+          ) : (
+            <T>Update the project title.</T>
+          )}
         </DialogDescription>
       </DialogHeader>
       <DialogPanel>
         <div className="grid gap-1.5">
-          <span className="text-xs font-medium text-foreground">Project title</span>
+          <span className="text-xs font-medium text-foreground">
+            <T>Project title</T>
+          </span>
           <Input
-            aria-label="Project title"
+            aria-label={gt("Project title")}
             disabled={!canRenameProject}
             value={projectRenameTitle}
             onChange={(event) => setProjectRenameTitle(event.target.value)}
@@ -119,25 +130,35 @@ function ProjectRenameForm({ target: projectRenameTarget, onClose }: DialogProps
         </div>
         {projectRenameTarget?.environmentLabel ? (
           <p className="text-xs text-muted-foreground">
-            Environment: {projectRenameTarget.environmentLabel}
+            <T>
+              Environment: <Var>{projectRenameTarget.environmentLabel}</Var>
+            </T>
           </p>
         ) : null}
         {!canRenameProject ? (
-          <p className="text-xs text-muted-foreground">This connection cannot change projects.</p>
+          <p className="text-xs text-muted-foreground">
+            <T>This connection cannot change projects.</T>
+          </p>
         ) : null}
       </DialogPanel>
       <DialogFooter>
         <Button variant="outline" onClick={onClose}>
-          Cancel
+          <T>Cancel</T>
         </Button>
         <Button disabled={!canRenameProject} onClick={() => void submitProjectRename()}>
-          Save
+          <T>Save</T>
         </Button>
       </DialogFooter>
     </>
   );
 }
 export function LastCodeProjectRenameDialog({ target, onClose }: DialogProps) {
+  const currentTargetKey = targetKey(target);
+  const [formIdentity, setFormIdentity] = useState({ targetKey: currentTargetKey, generation: 0 });
+  // Closing popups retain their form; reopening the same target must create a fresh draft.
+  if (formIdentity.targetKey !== currentTargetKey) {
+    setFormIdentity({ targetKey: currentTargetKey, generation: formIdentity.generation + 1 });
+  }
   return (
     <Dialog
       open={target !== null}
@@ -146,7 +167,7 @@ export function LastCodeProjectRenameDialog({ target, onClose }: DialogProps) {
       }}
     >
       <DialogPopup className="max-w-lg">
-        <ProjectRenameForm key={targetKey(target)} target={target} onClose={onClose} />
+        <ProjectRenameForm key={formIdentity.generation} target={target} onClose={onClose} />
       </DialogPopup>
     </Dialog>
   );

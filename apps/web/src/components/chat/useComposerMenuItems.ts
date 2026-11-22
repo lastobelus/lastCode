@@ -19,6 +19,7 @@ import type {
   ThreadId,
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import { AuthOrchestrationReadScope } from "@t3tools/contracts";
 import {
   composerPullRequestsFromLinks,
   filterComposerPullRequestMatches,
@@ -34,8 +35,14 @@ import {
   getProviderSlashCommandsForSlashMenu,
 } from "@t3tools/client-runtime/providerSkills";
 import { searchProviderSkills } from "../../providerSkillSearch";
-import { useVisibleThreadShells } from "~/state/entities";
-import { useEnvironmentIdentities, useEnvironmentMachines } from "~/state/environments";
+import { useHiddenThreadKeys, useVisibleThreadShells } from "~/state/entities";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import {
+  useEnvironmentIdentities,
+  useEnvironmentMachines,
+  useEnvironments,
+} from "~/state/environments";
+import { useEnvironmentsWithScope } from "~/state/session";
 import { offersLinkedEnvironmentsAtom } from "~/state/peerLinks";
 import {
   pullRequestEnvironment,
@@ -75,6 +82,7 @@ export function useComposerMenuItems({
   sideChatAvailable,
   sideChatDisabledReason,
   freshSessionAvailable,
+  threadAnnotationsSupported,
   compactSlashCommandAvailable,
   selectedProvider,
   selectedProviderSkills,
@@ -95,6 +103,7 @@ export function useComposerMenuItems({
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
   readonly freshSessionAvailable: boolean;
+  readonly threadAnnotationsSupported: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
   readonly selectedProviderSkills: ServerProvider["skills"];
@@ -126,12 +135,51 @@ export function useComposerMenuItems({
     pullRequestTextQuery === debouncedPullRequestTextQuery ? pullRequestTextQuery : null;
   const isPathTrigger = composerTriggerKind === "path";
   const environmentThreadShells = useVisibleThreadShells(isPathTrigger);
-  // Mounts older settled threads matching the mention, here and on linked machines, which shells
-  // may leave out.
-  useThreadSearch(
-    isPathTrigger ? [environmentId, ...linkedEnvironments.keys()] : [],
+  const hiddenThreadKeys = useHiddenThreadKeys();
+  const { environments } = useEnvironments();
+  const canReadEnvironment = useEnvironmentsWithScope(environments, AuthOrchestrationReadScope);
+  const destinationSupportsReferences = environments.some(
+    (environment) =>
+      environment.environmentId === environmentId &&
+      environment.connection.phase === "connected" &&
+      environment.serverConfig?.environment.capabilities.universalThreadReferences === true,
+  );
+  const mentionSources = environments.filter(
+    (environment) =>
+      environment.connection.phase === "connected" &&
+      canReadEnvironment.has(environment.environmentId) &&
+      environment.serverConfig?.environment.capabilities.universalThreadReferences === true &&
+      (environment.environmentId === environmentId || destinationSupportsReferences),
+  );
+  const allowedThreadEnvironments = new Set(
+    environments
+      .filter(
+        (environment) =>
+          environment.connection.phase === "connected" &&
+          canReadEnvironment.has(environment.environmentId) &&
+          (environment.environmentId === environmentId ||
+            (destinationSupportsReferences &&
+              environment.serverConfig?.environment.capabilities.universalThreadReferences ===
+                true)),
+      )
+      .map((environment) => environment.environmentId),
+  );
+  const environmentLabels = new Map(
+    environments.map((environment) => [environment.environmentId, environment.label] as const),
+  );
+  const mentionSearch = useThreadSearch(
+    isPathTrigger ? mentionSources.map(({ environmentId: id }) => id) : [],
     pathTriggerQuery,
-    { titlesOnly: true },
+    {
+      mode: "thread-mention",
+      titlesOnly: true,
+      environmentLabels: Object.fromEntries(environmentLabels),
+    },
+  );
+  const hasUnsearchedEnvironments = environments.some(
+    (environment) =>
+      environment.entry.enabled &&
+      !mentionSources.some((source) => source.environmentId === environment.environmentId),
   );
   // The user's machines feed `@` machine matches; the catalog summary is cheap and stable.
   const environmentIdentities = useEnvironmentIdentities();
@@ -216,8 +264,16 @@ export function useComposerMenuItems({
           {
             shells: environmentThreadShells,
             environmentId,
-            linkedEnvironments,
-            excludeThreadId: activeThreadId,
+            allowedEnvironmentIds: allowedThreadEnvironments,
+            environmentLabels,
+            excludeThread:
+              activeThreadId === null ? null : { environmentId, threadId: activeThreadId },
+            candidates: (mentionSearch.mentionCandidates ?? []).filter(
+              (candidate) =>
+                !hiddenThreadKeys.has(
+                  threadKey({ environmentId: candidate.environmentId, threadId: candidate.id }),
+                ),
+            ),
             query: composerTrigger.query,
             now,
           },
@@ -262,6 +318,17 @@ export function useComposerMenuItems({
           label: "/model",
           description: gt("Switch response model for this thread"),
         },
+        ...(threadAnnotationsSupported
+          ? ([
+              {
+                id: "slash:annotate",
+                type: "slash-command",
+                command: "annotate",
+                label: "/annotate",
+                description: gt("Add or edit this thread's annotation"),
+              },
+            ] as const)
+          : []),
         ...(sideChatAvailable
           ? ([
               {
@@ -416,6 +483,7 @@ export function useComposerMenuItems({
     return [];
   })();
   const isLoading =
+    (isPathTrigger && mentionSearch.isPending) ||
     (composerTriggerKind === "path" && workspaceEntries.isPending) ||
     ((composerTriggerKind === "skill" || composerTriggerKind === "slash-command") &&
       workspaceSkillsScanning) ||
@@ -426,7 +494,18 @@ export function useComposerMenuItems({
         pullRequestTextQuery !== debouncedPullRequestTextQuery ||
         pullRequestTriggerNumber !== debouncedPullRequestNumber ||
         exactPullRequestLookup.isPending));
+  const searchStatus =
+    !isPathTrigger || pathTriggerQuery.length === 0
+      ? null
+      : pathTriggerQuery.trim().length < 2
+        ? "Type at least two characters to search more threads."
+        : hasUnsearchedEnvironments || (mentionSearch.mentionFailures?.length ?? 0) > 0
+          ? "Some environments could not be searched. Results may be incomplete."
+          : mentionSearch.mentionsTruncated
+            ? "More threads match than can be shown. Keep typing to narrow the results."
+            : null;
   const emptyState = (() => {
+    if (searchStatus !== null) return searchStatus;
     if (composerTriggerKind === "skill") {
       return gt("No skills found. Try / to browse provider commands.");
     }
@@ -449,5 +528,5 @@ export function useComposerMenuItems({
       : gt("No matching command.");
   })();
 
-  return { items, isLoading, emptyState };
+  return { items, isLoading, emptyState, searchStatus };
 }

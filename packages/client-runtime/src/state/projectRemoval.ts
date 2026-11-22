@@ -67,23 +67,14 @@ export function planProjectRemoval<
             : []),
         ]
       : [resolve(msg("This removes {count} grouped project entries.", { count: members.length }))]),
-    ...(threadCount > 0
-      ? [
-          resolve(
-            msg(
-              "Those threads and any archived threads are deleted from T3 Code. Provider sessions are kept.",
-            ),
-          ),
-        ]
-      : [
-          resolve(
-            msg("Any archived threads are deleted from T3 Code. Provider sessions are kept."),
-          ),
-        ]),
+    resolve(
+      msg(
+        "This deletes all threads in the selected project entries, including archived threads, forks, independent threads, and subagents. This cannot be undone. Provider sessions are kept.",
+      ),
+    ),
     isWholeGroup && !hasOtherMembers
       ? resolve(msg("This removes only the project entries, not the files on disk."))
       : resolve(msg("Other entries in this grouped project are unaffected.")),
-    resolve(msg("This action cannot be undone.")),
   ].join("\n");
 
   return { projectThreads, isWholeGroup, targetKind, confirmationMessage };

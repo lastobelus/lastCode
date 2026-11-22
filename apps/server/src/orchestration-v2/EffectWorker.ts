@@ -1,4 +1,11 @@
-import { CommandId, type RunId } from "@t3tools/contracts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
+import {
+  CommandId,
+  type MessageId,
+  type ThreadId,
+  type RunId,
+  UpdateDrainAdmissionError,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -9,9 +16,11 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlError from "effect/sql/SqlError";
+import { TOOL_MAINTENANCE_TARGET } from "../updateDrain/UpdateDrainAdmission.ts";
 
 import {
   increment,
@@ -29,12 +38,19 @@ import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
-import { AcceptedSteeringContinuation } from "./Orchestrator.ts";
+import * as ThreadLaunchService from "./ThreadLaunchService.ts";
+import { DispatchModeLimit } from "./DispatchModeLimit.ts";
+import {
+  PullRequestWatchDeliveryAuthorization,
+  AcceptedSteeringContinuation,
+} from "./Orchestrator.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
 const isProviderTurnControlError = Schema.is(ProviderTurnControlService.ProviderTurnControlError);
+const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -100,9 +116,11 @@ export const layerExecutor: Layer.Layer<
   | ProviderTurnStartService.ProviderTurnStartServiceV2
   | RuntimeRequestService.RuntimeRequestServiceV2
   | ThreadTitleRegenerationService.ThreadTitleRegenerationService
+  | IncomingMessageSummaryService.IncomingMessageSummaryService
   | ThreadManagementService.ThreadManagementService
   | ProjectionStore.ProjectionStoreV2
   | ServerSettings.ServerSettingsService
+  | EffectOutbox.EffectOutboxV2
 > = Layer.effect(
   OrchestrationEffectExecutorV2,
   Effect.gen(function* () {
@@ -115,50 +133,232 @@ export const layerExecutor: Layer.Layer<
     const runtimeRequests = yield* RuntimeRequestService.RuntimeRequestServiceV2;
     const threadTitleRegeneration =
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
+    const incomingMessageSummary =
+      yield* IncomingMessageSummaryService.IncomingMessageSummaryService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const environmentPauseStore = yield* Effect.serviceOption(
+      EnvironmentPauseStore.EnvironmentPauseStore,
+    );
+    // Workspace preparation runs only where the production runtime provides thread launches.
+    const threadLaunch = yield* Effect.serviceOption(ThreadLaunchService.ThreadLaunchService);
+    const recordPauseDelivery = (threadId: ThreadId, messageId: MessageId, delivered: boolean) =>
+      messageId.startsWith("environment-pause:") && Option.isSome(environmentPauseStore)
+        ? outbox
+            .enqueue([
+              {
+                id: `effect:environment-pause:receipt:${messageId}:${delivered}`,
+                commandId: CommandId.make(messageId),
+                threadId,
+                request: { type: "environment-pause.record-delivery", messageId, delivered },
+              },
+            ])
+            .pipe(
+              Effect.as(true),
+              Effect.catch((journalError) =>
+                environmentPauseStore.value.recordDelivery(messageId, delivered).pipe(
+                  Effect.as(false),
+                  Effect.mapError(() => journalError),
+                ),
+              ),
+              // Retry only journaling the known result, never the native send. If
+              // this process stops before any durable write, delivery stays unknown.
+              Effect.retry({ schedule: Schedule.spaced("1 second") }),
+              // This schedule has no terminal failure; interruption keeps its
+              // usual meaning while the native callback remains infallible.
+              Effect.orDie,
+              Effect.flatMap((journaled) =>
+                journaled
+                  ? outbox
+                      .notifyAvailable()
+                      .pipe(
+                        Effect.andThen(
+                          environmentPauseStore.value
+                            .recordDelivery(messageId, delivered)
+                            .pipe(Effect.ignore({ log: true })),
+                        ),
+                      )
+                  : Effect.void,
+              ),
+            )
+        : Effect.void;
+    const recordPauseRunDelivery = (threadId: ThreadId, runId: RunId, delivered: boolean) =>
+      Option.isNone(environmentPauseStore)
+        ? Effect.void
+        : environmentPauseStore.value.get.pipe(
+            Effect.flatMap((session) =>
+              session === null
+                ? Effect.void
+                : threads.getThreadRecords(threadId, ["runs"], { runIds: [runId] }).pipe(
+                    Effect.flatMap((projection) => {
+                      const run = projection.runs.find((run) => run.id === runId);
+                      return run === undefined
+                        ? Effect.void
+                        : recordPauseDelivery(threadId, run.userMessageId, delivered);
+                    }),
+                    Effect.ignore({ log: true }),
+                  ),
+            ),
+          );
     const startRun = (
       effect: EffectOutbox.OrchestrationEffectV2,
       runId: RunId,
       willRetry: boolean,
     ) =>
-      providerTurnStart.start({ threadId: effect.threadId, runId, willRetry }).pipe(
-        Effect.catchCauseIf(
-          (cause) => !willRetry && !Cause.hasInterruptsOnly(cause),
-          (cause) =>
-            Effect.logWarning(
-              "Last run start attempt failed",
-              { effectId: effect.id, effectType: effect.request.type, runId },
-              cause,
-            ).pipe(
-              Effect.andThen(
-                Effect.suspend(() => {
-                  const failure = Option.getOrUndefined(Cause.findErrorOption(cause));
-                  // A failed read cannot identify the attempt. Keep retry ownership
-                  // rather than settling whichever attempt happens to be current.
-                  if (
-                    !ProviderTurnStartService.isProviderTurnStartError(failure) ||
-                    failure.attemptId === undefined ||
-                    failure.rootNodeId === undefined
-                  ) {
-                    return Effect.failCause(cause);
-                  }
-                  return providerTurnStart.failStartingRun({
-                    threadId: effect.threadId,
-                    runId,
-                    attemptId: failure.attemptId,
-                    rootNodeId: failure.rootNodeId,
-                  });
-                }),
+      providerTurnStart
+        .start({
+          threadId: effect.threadId,
+          runId,
+          willRetry,
+          onMessageDelivery: (messageId, delivered) =>
+            recordPauseDelivery(effect.threadId, messageId, delivered),
+        })
+        .pipe(
+          Effect.tapError((cause) =>
+            !willRetry &&
+            cause.deliveryRejected === true &&
+            effect.request.type === "provider-turn.start"
+              ? recordPauseRunDelivery(effect.threadId, runId, false)
+              : Effect.void,
+          ),
+          Effect.catchCauseIf(
+            (cause) => !willRetry && !Cause.hasInterruptsOnly(cause),
+            (cause) =>
+              Effect.logWarning(
+                "Last run start attempt failed",
+                { effectId: effect.id, effectType: effect.request.type, runId },
+                cause,
+              ).pipe(
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    const failure = Option.getOrUndefined(Cause.findErrorOption(cause));
+                    // A failed read cannot identify the attempt. Keep retry ownership
+                    // rather than settling whichever attempt happens to be current.
+                    if (
+                      !ProviderTurnStartService.isProviderTurnStartError(failure) ||
+                      failure.attemptId === undefined ||
+                      failure.rootNodeId === undefined
+                    ) {
+                      return yield* Effect.failCause(cause);
+                    }
+                    const current = yield* projectionStore.getRun(effect.threadId, runId);
+                    // A failed terminal write leaves this attempt running and still needs recovery.
+                    if (
+                      current?.status === "running" &&
+                      current.activeAttemptId === failure.attemptId &&
+                      current.rootNodeId === failure.rootNodeId
+                    ) {
+                      return yield* Effect.failCause(cause);
+                    }
+                    return yield* providerTurnStart.failStartingRun({
+                      threadId: effect.threadId,
+                      runId,
+                      attemptId: failure.attemptId,
+                      rootNodeId: failure.rootNodeId,
+                    });
+                  }),
+                ),
               ),
-            ),
-        ),
-      );
+          ),
+        );
     return OrchestrationEffectExecutorV2.of({
       execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "pull-request-watch.deliver":
+            return threads
+              .dispatch({
+                type: "thread.pull-request-watch.deliver",
+                threadId: effect.threadId,
+                commandId: CommandId.make(`${effect.id}:attempt:${effect.attemptCount}`),
+                generation: effect.request.generation,
+                messageId: effect.request.messageId,
+              })
+              .pipe(
+                Effect.provideService(
+                  PullRequestWatchDeliveryAuthorization,
+                  effect.request.generation,
+                ),
+                Effect.asVoid,
+                // The watch obligation still owns the saved message. The reactor
+                // retries it after this row settles, without blocking thread cleanup.
+                Effect.catchIf(
+                  (error) =>
+                    error._tag === "OrchestratorDispatchError" &&
+                    isUpdateDrainAdmissionError(error.cause) &&
+                    error.cause.targetVersion === TOOL_MAINTENANCE_TARGET,
+                  () => Effect.void,
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
+          case "environment-pause.record-delivery":
+            return Option.isNone(environmentPauseStore)
+              ? Effect.fail(
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause: "The environment pause receipt store is unavailable.",
+                  }),
+                )
+              : environmentPauseStore.value
+                  .recordDelivery(effect.request.messageId, effect.request.delivered)
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationEffectExecutionError({
+                          effectId: effect.id,
+                          effectType: effect.request.type,
+                          cause,
+                        }),
+                    ),
+                  );
+          case "incoming-message.summarize":
+            return incomingMessageSummary
+              .execute({
+                threadId: effect.threadId,
+                messageId: effect.request.messageId,
+                attemptCount: effect.attemptCount,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
+          case "thread.archive":
+            return threads
+              .executeArchive({
+                threadId: effect.threadId,
+                // Preserve the confirmed project scope when replaying the effect.
+                ...effect.request,
+              })
+              .pipe(
+                Effect.provideService(
+                  ProviderSessionManager.ProviderSessionManagerV2,
+                  providerSessions,
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({
@@ -344,6 +544,7 @@ export const layerExecutor: Layer.Layer<
                 Effect.tap(() =>
                   Effect.gen(function* () {
                     if (effect.request.type !== "provider-turn.steer") return;
+                    yield* recordPauseDelivery(effect.threadId, effect.request.messageId, true);
                     const messageId = effect.request.messageId;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
@@ -368,6 +569,7 @@ export const layerExecutor: Layer.Layer<
                       effect.request.nativeOnly === true &&
                       error.deliveryRejected === true
                     ) {
+                      yield* recordPauseDelivery(effect.threadId, effect.request.messageId, false);
                       // A provider's definite rejection is final non-delivery;
                       // retrying it must not strand cleanup or start another turn.
                       return;
@@ -381,7 +583,10 @@ export const layerExecutor: Layer.Layer<
                     }
                     // The target already finished. Strict steering must neither start
                     // a follow-up nor leave an expected delivery race blocking cleanup.
-                    if (effect.request.nativeOnly === true) return;
+                    if (effect.request.nativeOnly === true) {
+                      yield* recordPauseDelivery(effect.threadId, effect.request.messageId, false);
+                      return;
+                    }
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],
@@ -720,8 +925,12 @@ export const layerExecutor: Layer.Layer<
                 threadId: effect.threadId,
                 commandId: effect.commandId,
                 reason: effect.request.reason,
+                ...(effect.request.taskIds === undefined
+                  ? {}
+                  : { taskIds: effect.request.taskIds }),
               })
               .pipe(
+                Effect.provideService(DispatchModeLimit, effect.request.modeLimit),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
@@ -731,6 +940,33 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "prepared-run.auto-retry":
+            return Option.isNone(threadLaunch)
+              ? Effect.fail(
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause: "Thread launches are unavailable.",
+                  }),
+                )
+              : threadLaunch.value
+                  .retryPreparationAutomatically({
+                    threadId: effect.threadId,
+                    runId: effect.request.runId,
+                    resetAt: effect.request.resetAt,
+                    failureCommandId: effect.commandId,
+                    finalAttempt: !willRetry,
+                  })
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationEffectExecutionError({
+                          effectId: effect.id,
+                          effectType: effect.request.type,
+                          cause,
+                        }),
+                    ),
+                  );
         }
       }),
     });
@@ -785,10 +1021,16 @@ type ClaimFilter = Omit<Parameters<EffectOutbox.EffectOutboxV2Shape["claimNext"]
 
 export interface OrchestrationEffectWorkerV2Shape {
   readonly awaitWork: Effect.Effect<void>;
+  readonly awaitIncomingSummaryWork: Effect.Effect<void>;
   readonly runOnce: (input?: {
     readonly maxRunningTitleGenerations?: number;
   }) => Effect.Effect<boolean, OrchestrationEffectWorkerError>;
   readonly runRecoveryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
+  readonly runIncomingSummaryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
+  readonly nextIncomingSummaryClaimableAt: Effect.Effect<
+    Option.Option<DateTime.Utc>,
+    OrchestrationEffectWorkerError
+  >;
   readonly nextClaimableAt: (input?: {
     readonly maxRunningTitleGenerations?: number;
   }) => Effect.Effect<Option.Option<DateTime.Utc>, OrchestrationEffectWorkerError>;
@@ -817,6 +1059,7 @@ export const layerWithOptions = (
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
+      const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
       const wasCancelled = (effectId: string) =>
@@ -954,6 +1197,16 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // Pause can commit while the SQL claim is in flight. Recheck before
+          // provider preparation, returning the untouched wake without a retry.
+          if (
+            Option.isSome(pauseStore) &&
+            (yield* outbox.deferIfEnvironmentPaused({ effectId: effect.id, workerId }))
+          ) {
+            yield* outbox.clearCancellation(effect.id);
+            return false;
+          }
+
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
             .pipe(boundExecution(effect), Effect.as("executed" as const));
@@ -992,6 +1245,7 @@ export const layerWithOptions = (
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
             : effect.attemptCount >= maxAttempts &&
+                effect.request.type !== "environment-pause.record-delivery" &&
                 (!ownsStartingRun(effect.request.type) || cannotSettleRun(exit.cause))
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
@@ -1026,8 +1280,20 @@ export const layerWithOptions = (
 
       return OrchestrationEffectWorkerV2.of({
         awaitWork: outbox.awaitAvailable,
-        runOnce,
-        runRecoveryOnce: runOnce({ excludeRestartContinuations: true }),
+        awaitIncomingSummaryWork: outbox.awaitIncomingSummaryAvailable,
+        runOnce: Effect.fn("OrchestrationEffectWorkerV2.runOnce")((input) =>
+          runOnce({ ...input, incomingSummaryLane: "exclude" }),
+        ),
+        runRecoveryOnce: runOnce({
+          excludeRestartContinuations: true,
+          incomingSummaryLane: "exclude",
+        }),
+        runIncomingSummaryOnce: runOnce({ incomingSummaryLane: "only" }),
+        nextIncomingSummaryClaimableAt: outbox.nextIncomingSummaryClaimableAt.pipe(
+          Effect.mapError(
+            (cause) => new OrchestrationEffectWorkerError({ operation: "next-claimable", cause }),
+          ),
+        ),
         // Idle workers poll this; a span per poll would bury useful traces.
         nextClaimableAt: Effect.fnUntraced(
           function* (input) {
@@ -1057,6 +1323,8 @@ export const layer = layerWithOptions();
 export interface OrchestrationEffectDaemonOptions {
   readonly concurrency?: number;
   readonly livenessPollIntervalMs?: number;
+  /** Shares the existing wake-up cadence; runs once across all worker lanes. */
+  readonly reconcileThreadHealth?: Effect.Effect<void>;
 }
 
 const DEFAULT_EFFECT_WORKER_CONCURRENCY = 4;
@@ -1081,10 +1349,32 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
         : DEFAULT_EFFECT_WORKER_LIVENESS_POLL_INTERVAL_MS;
       // Title generation can run for minutes; leave at least one worker free for turn work.
       const claimLimits = concurrency > 1 ? { maxRunningTitleGenerations: concurrency - 1 } : {};
-      // Notifications wake promptly; availableAt persists retry timing, and liveness polling recovers missed wakeups.
-      const runWorker = Effect.gen(function* () {
+      const nextHealthCheck = yield* Ref.make(0);
+      const healthCheckRunning = yield* Ref.make(false);
+      const reconcileThreadHealth = Effect.gen(function* () {
+        if (options.reconcileThreadHealth === undefined) return;
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const due = yield* Ref.modify(nextHealthCheck, (next) =>
+          now < next ? [false, next] : [true, now + livenessPollIntervalMs],
+        );
+        if (!due || (yield* Ref.getAndSet(healthCheckRunning, true))) return;
+        yield* options.reconcileThreadHealth.pipe(
+          Effect.catchCause((cause) => Effect.logWarning("Thread health check failed", cause)),
+          Effect.ensuring(Ref.set(healthCheckRunning, false)),
+          Effect.forkScoped,
+        );
+      });
+      // Post-commit notifications are the low-latency path. `availableAt` is the
+      // durable retry schedule, and the long liveness poll only recovers from a
+      // missed in-process notification or work inserted by another process.
+      const runWorker = Effect.fn("OrchestrationEffectWorker.runWorker")(function* (
+        incomingSummaryLane = false,
+      ) {
         while (true) {
-          const attempt = yield* worker.runOnce(claimLimits).pipe(
+          yield* reconcileThreadHealth;
+          const attempt = yield* (
+            incomingSummaryLane ? worker.runIncomingSummaryOnce : worker.runOnce(claimLimits)
+          ).pipe(
             Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
             Effect.catchCause((cause) =>
               Effect.logWarning("Orchestration effect worker failed", cause).pipe(
@@ -1107,16 +1397,18 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
             continue;
           }
 
-          const nextClaimableAt = yield* worker
-            .nextClaimableAt(claimLimits)
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning(
-                  "Failed to read the next orchestration effect deadline",
-                  cause,
-                ).pipe(Effect.as(Option.none<DateTime.Utc>())),
-              ),
-            );
+          const nextClaimableAt = yield* (
+            incomingSummaryLane
+              ? worker.nextIncomingSummaryClaimableAt
+              : worker.nextClaimableAt(claimLimits)
+          ).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "Failed to read the next orchestration effect deadline",
+                cause,
+              ).pipe(Effect.as(Option.none<DateTime.Utc>())),
+            ),
+          );
           const now = DateTime.toEpochMillis(yield* DateTime.now);
           const sleepMs = Option.match(nextClaimableAt, {
             onNone: () => livenessPollIntervalMs,
@@ -1126,14 +1418,16 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
             },
           });
           yield* Effect.raceFirst(
-            worker.awaitWork.pipe(Effect.as("notified" as const)),
+            (incomingSummaryLane ? worker.awaitIncomingSummaryWork : worker.awaitWork).pipe(
+              Effect.as("notified" as const),
+            ),
             Effect.sleep(Duration.millis(sleepMs)).pipe(Effect.as("scheduled" as const)),
           );
         }
       });
 
       return yield* Effect.all(
-        Array.from({ length: concurrency }, () => runWorker),
+        [...Array.from({ length: concurrency }, () => runWorker()), runWorker(true)],
         {
           concurrency: "unbounded",
           discard: true,

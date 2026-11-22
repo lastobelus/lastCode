@@ -578,6 +578,7 @@ describe("derivePendingBackgroundWork kinds", () => {
         ).toEqual([
           "child",
           "pull-request-watch:github.com/acme/app#1",
+          "pull-request-watch:github.com/acme/app#4",
           "pull-request-watch:github.com/acme/app#5",
         ]);
       },

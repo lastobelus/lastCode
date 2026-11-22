@@ -98,6 +98,10 @@ export function createPeerLinkEnvironmentAtoms<R, E>(
   return {
     list,
     names,
+    preflight: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-links:preflight",
+      tag: WS_METHODS.peerLinksPreflight,
+    }),
     link: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-links:link",
       tag: WS_METHODS.peerLinksLink,

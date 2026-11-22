@@ -35,6 +35,7 @@ import { usePromptStashStore } from "~/promptStashStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { getRouter } from "~/router";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { serverEnvironment } from "~/state/server";
 import { environmentThreadDetails } from "~/state/threads";
 import {
   ENVIRONMENT_ID,
@@ -734,6 +735,10 @@ it("a shortcut conditioned on rightPanelOpen sees the thread's open right panel"
       ]),
     ),
   });
+  // The earlier tests' config subscription outlives their mounted app.
+  appAtomRegistry.refresh(
+    serverEnvironment.configProjection({ environmentId: ENVIRONMENT_ID, input: {} }),
+  );
   __setClientSettingsForTests({
     ...DEFAULT_CLIENT_SETTINGS,
     onboardingCompletedAt: "2026-01-01T00:00:00.000Z",

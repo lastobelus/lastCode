@@ -1,3 +1,4 @@
+import { useGT, useMessages } from "gt-react";
 import { LastCodeStatusGlyph } from "./LastCodeStatusGlyph";
 import { type CSSProperties, type ReactNode } from "react";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
@@ -31,12 +32,14 @@ function ProjectDisclosure({
   expanded: boolean;
   status: ThreadStatusPill | null;
 }) {
+  const messages = useMessages();
+  const label = status ? messages(status.label) : undefined;
   return !expanded && status ? (
     <Tooltip>
       <TooltipTrigger
         render={
           <span
-            aria-label={status.label}
+            aria-label={label}
             className={`relative inline-flex size-4 shrink-0 items-center justify-center ${status.colorClass}`}
           />
         }
@@ -46,7 +49,7 @@ function ProjectDisclosure({
         </span>
         <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
       </TooltipTrigger>
-      <TooltipPopup side="top">{status.label}</TooltipPopup>
+      <TooltipPopup side="top">{label}</TooltipPopup>
     </Tooltip>
   ) : (
     <span className="inline-flex size-4 shrink-0 items-center justify-center">
@@ -61,10 +64,13 @@ function ProjectEnvironmentBadges({
 }: {
   entries: readonly LastCodeProjectEnvironmentBadge[];
 }) {
+  const gt = useGT();
   return (
     entries.length > 0 && (
       <span
-        aria-label={`Project environments: ${entries.map((entry) => entry.label).join(", ")}`}
+        aria-label={gt("Project environments: {environments}", {
+          environments: entries.map((entry) => entry.label).join(", "),
+        })}
         className="pointer-events-none absolute top-1 right-(--project-environment-inset) inline-flex h-5 items-center gap-(--thread-metadata-gap) rounded-md max-sm:right-[calc(var(--project-environment-inset)+1.5rem*var(--lastcode-sidebar-content-zoom)+var(--thread-metadata-gap))]"
         style={
           {
@@ -104,7 +110,9 @@ function ProjectEnvironmentBadges({
                 <span
                   role="img"
                   tabIndex={0}
-                  aria-label={`${entries.length - 2} more project environments`}
+                  aria-label={gt("{count, plural, other {{count} more project environments}}", {
+                    count: entries.length - 2,
+                  })}
                   className="pointer-events-auto inline-flex size-3 items-center justify-center text-3xs text-icon-muted"
                   data-lastcode-sidebar-unscaled-content
                 />

@@ -1,3 +1,4 @@
+import { capacityForTarget } from "../../capacityRead.ts";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
@@ -24,7 +25,8 @@ const handlers = {
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.delegateTask(scope, input);
+      const result = yield* service.delegateTask(scope, input);
+      return { ...result, capacity: yield* capacityForTarget(scope, input.target?.environmentId) };
     }),
   ),
   task_status: McpToolAccess.actsAsCaller(({ taskId }) =>
@@ -105,22 +107,16 @@ const handlers = {
       // A scheduled run starts long after its caller, with nothing to carry the link.
       { refused: "schedule tasks in this environment" },
     ),
-    McpToolAccess.writes(
-      ({ scheduledTaskId, prompt, title, schedule, enabled, freshSession, bindToCurrentThread }) =>
-        Effect.gen(function* () {
-          if (scheduledTaskId === undefined) return yield* Effect.die("unreachable");
-          const scope = yield* McpInvocationContext.McpInvocationContext;
-          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-          return yield* service.updateScheduledTask(scope, {
-            scheduledTaskId,
-            prompt,
-            title,
-            schedule,
-            enabled,
-            freshSession,
-            bindToCurrentThread,
-          });
-        }),
+    McpToolAccess.writes(({ scheduledTaskId, ...input }) =>
+      Effect.gen(function* () {
+        if (scheduledTaskId === undefined) return yield* Effect.die("unreachable");
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.updateScheduledTask(scope, {
+          scheduledTaskId,
+          ...input,
+        });
+      }),
     ),
   ),
   list_scheduled_tasks: McpToolAccess.reads((input) =>
@@ -146,9 +142,14 @@ const handlers = {
   ),
   create_threads: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const caller = yield* readCaller();
+      yield* McpToolAccess.assertWritableThreads(
+        caller,
+        input.threads.map((thread) => thread.groupedUnderThreadId),
+      );
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.createThreads(scope, input);
+      const result = yield* service.createThreads(caller.scope, input);
+      return { ...result, capacity: yield* capacityForTarget(caller.scope, undefined) };
     }),
   ),
   t3_thread_list: McpToolAccess.reads((input) =>

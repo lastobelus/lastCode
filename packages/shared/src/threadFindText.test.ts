@@ -117,13 +117,13 @@ it("searches displayed prose and file-chip labels without hidden paths", () => {
       String.raw`[a](C:\repo\.a\page.tsx) and [b](C:\repo\.b\page.tsx)`,
       String.raw`C:\repo`,
     ),
-  ).toEqual(["a page.tsx · repo/.a and b page.tsx · repo/.b"]);
+  ).toEqual(["a (page.tsx · repo/.a) and b (page.tsx · repo/.b)"]);
   expect(
     assistantSegments(
       String.raw`[a](C:\repo\.a\x&amp;y\page.tsx) and [b](C:\repo\.b\x&amp;y\page.tsx)`,
       String.raw`C:\repo`,
     ),
-  ).toEqual(["a page.tsx · .a/x&y and b page.tsx · .b/x&y"]);
+  ).toEqual(["a (page.tsx · .a/x&y) and b (page.tsx · .b/x&y)"]);
   expect(
     assistantSegments("[a](/repo/a&amp;b/page.tsx) and [b](/repo/c&amp;d/page.tsx)", "/repo"),
   ).toEqual(["a (page.tsx · repo/a&b) and b (page.tsx · repo/c&d)"]);

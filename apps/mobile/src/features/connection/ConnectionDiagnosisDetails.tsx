@@ -41,6 +41,7 @@ export function useConnectionDiagnosis(
   const diagnosis = presentConnectionDiagnosis(
     {
       hostLabel: presentation.entry.target.label,
+      entry: presentation.entry,
       state,
       via: relayOnly ? "relay" : "direct",
       clientVersion: Constants.expoConfig?.version,

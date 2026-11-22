@@ -18,6 +18,7 @@ export interface PendingTerminalLaunch {
   readonly env?: Record<string, string>;
   readonly initialInput?: string;
   readonly stopOnSettle?: boolean;
+  readonly terminalLinkProfileName?: string;
 }
 
 const pendingTerminalLaunches = new Map<string, PendingTerminalLaunch>();
@@ -36,6 +37,9 @@ export function stagePendingTerminalLaunch(input: {
     env: input.launch.env ? { ...input.launch.env } : undefined,
     initialInput: input.launch.initialInput,
     stopOnSettle: input.launch.stopOnSettle,
+    ...(input.launch.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: input.launch.terminalLinkProfileName }),
   });
 }
 

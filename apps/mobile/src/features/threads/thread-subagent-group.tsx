@@ -127,6 +127,7 @@ export function ThreadSubagentGroup(props: {
     return {
       ...item,
       item,
+      remoteChild: item.remoteChild ?? live?.remoteChild,
       status: live?.status ?? item.status,
       startedAt: live?.startedAt ?? item.startedAt,
       completedAt: live?.completedAt ?? item.completedAt,

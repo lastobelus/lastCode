@@ -229,37 +229,6 @@ describe("v2 thread shell lists", () => {
     }
   });
 
-  it("retains promotion progress and cancellation through live shell updates", () => {
-    const { registry, threads, snapshotAtom } = makeHarness();
-    const dispose = registry.mount(threads.threadShellsAtom);
-    let snapshot = v2ShellSnapshot;
-    const promotion = {
-      createdBy: "user" as const,
-      creationSource: "web" as const,
-      requestId: CommandId.make("promote-subagent"),
-      targetThreadId: ThreadId.make("interactive-subagent"),
-      status: "waiting" as const,
-      error: null,
-      requestedAt: v2ThreadShell.updatedAt,
-      updatedAt: v2ThreadShell.updatedAt,
-    };
-    const updates = [promotion, { ...promotion, status: "promoted" as const }, null];
-    for (const [index, subagentPromotion] of updates.entries()) {
-      snapshot = applyShellStreamEvent(snapshot, {
-        kind: "thread.updated",
-        location: "active",
-        sequence: index + 1,
-        thread: { ...v2ThreadShell, subagentPromotion },
-      });
-      registry.set(snapshotAtom(environmentId), snapshot);
-      expect(registry.get(threads.threadShellsAtom)[0]?.subagentPromotion).toEqual(
-        subagentPromotion,
-      );
-    }
-    dispose();
-    registry.dispose();
-  });
-
   it("updates creator placement from the shell stream while retaining environment and ordinary ownership", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const creator = ThreadId.make("creator:origin");
@@ -710,6 +679,21 @@ describe("v2 thread shell lists", () => {
 
     registry.set(snapshotAtom(environmentId), {
       ...v2ShellSnapshot,
+      threads: [
+        root,
+        { ...child, lineage: { ...child.lineage, independent: true } },
+        { ...grandchild, pendingRuntimeRequest: approval },
+      ],
+    });
+    expect(registry.get(parent)?.pendingSubagentRequest).toBeNull();
+    expect(registry.get(inputs)).toEqual([]);
+    const promotedRef = { environmentId, threadId: child.id };
+    expect(registry.get(threads.threadShellAtom(promotedRef))?.pendingSubagentRequest).toBe(
+      "approval",
+    );
+
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
       threads: [root, child, grandchild],
     });
     expect(registry.get(parent)?.pendingSubagentRequest).toBeNull();
@@ -800,6 +784,26 @@ describe("v2 thread shell lists", () => {
     expect(registry.get(threads.threadShellAtom(parentRef))?.pendingSubagentRequest).toBe(
       "user_input",
     );
+
+    // Promotion leaves the requester reference, but the task and its nested approvals belong here.
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [
+        { ...task, lineage: { ...task.lineage, independent: true } },
+        { ...helper, pendingRuntimeRequest: approval },
+      ],
+    });
+    expect(listed()).toEqual([
+      `${environmentId}/${parent.id}`,
+      `${remoteEnvironmentId}/${task.id}`,
+    ]);
+    expect(registry.get(threads.threadShellAtom(parentRef))?.pendingSubagentRequest).toBeNull();
+    expect(registry.get(inputs)).toEqual([]);
+
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [task, helper],
+    });
 
     // A task whose parent is gone there is listed on its own, as is one whose
     // parent's environment is switched off.

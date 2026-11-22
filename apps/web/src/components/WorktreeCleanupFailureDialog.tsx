@@ -2,7 +2,8 @@ import type { SidebarThreadSummary } from "../types";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { ensureLocalApi } from "../localApi";
-import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+import { namedClipboardTarget, useCopyToClipboard } from "../hooks/useCopyToClipboard";
+import { m } from "../i18n/messages";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -25,13 +26,14 @@ export function WorktreeCleanupFailureDialog(props: {
     reportFailure: true,
   });
   const { copyToClipboard } = useCopyToClipboard({
-    target: "worktree cleanup details",
+    target: namedClipboardTarget("worktree cleanup details"),
     onError: (error) => {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not copy worktree cleanup details",
-          description: error instanceof Error ? error.message : "An error occurred while copying.",
+          title: m(msg("Could not copy worktree cleanup details")),
+          description:
+            error instanceof Error ? error.message : m(msg("An error occurred while copying.")),
         }),
       );
     },
@@ -49,11 +51,12 @@ export function WorktreeCleanupFailureDialog(props: {
   ].join("\n");
   const keepWorktree = async () => {
     const confirmed = await ensureLocalApi().dialogs.confirm(
-      [
-        "Keep this worktree?",
-        "LastCode will stop trying to remove it and dismiss this cleanup failure.",
-        "You can still remove the worktree manually later.",
-      ].join("\n"),
+      m(
+        msg(
+          "Keep this worktree?\n{product} will stop trying to remove it and dismiss this cleanup failure.\nYou can still remove the worktree manually later.",
+          { product: "LastCode" },
+        ),
+      ),
       { variant: "destructive" },
     );
     if (!confirmed) return;
@@ -68,30 +71,38 @@ export function WorktreeCleanupFailureDialog(props: {
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Worktree cleanup failed</DialogTitle>
+          <DialogTitle>
+            <T>Worktree cleanup failed</T>
+          </DialogTitle>
           <DialogDescription>
-            The thread is deleted, but LastCode has not removed its worktree yet.
+            <T>
+              The thread is deleted, but <Var>LastCode</Var> has not removed its worktree yet.
+            </T>
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-3">
-          <div className="text-sm">
-            <div className="font-medium">{props.thread.title}</div>
-            <div className="font-mono text-xs text-muted-foreground">{props.thread.id}</div>
+        <DialogPanel>
+          <div className="space-y-3">
+            <div className="text-sm">
+              <div className="font-medium">{props.thread.title}</div>
+              <div className="font-mono text-xs text-muted-foreground">{props.thread.id}</div>
+            </div>
+            <div className="rounded-lg border border-border/70 bg-muted/40 p-3">
+              <div className="mb-1 text-xs font-medium text-muted-foreground">
+                <T>Worktree</T>
+              </div>
+              <div className="break-all font-mono text-xs">{cleanup.worktreePath}</div>
+            </div>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-error/25 bg-error/8 p-3 text-xs text-error-foreground">
+              {cleanup.error}
+            </pre>
           </div>
-          <div className="rounded-lg border border-border/70 bg-muted/40 p-3">
-            <div className="mb-1 text-xs font-medium text-muted-foreground">Worktree</div>
-            <div className="break-all font-mono text-xs">{cleanup.worktreePath}</div>
-          </div>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-error/25 bg-error/8 p-3 text-xs text-error-foreground">
-            {cleanup.error}
-          </pre>
         </DialogPanel>
         <DialogFooter className="sm:flex-wrap">
           <Button type="button" variant="destructive-outline" onClick={() => void keepWorktree()}>
-            Keep worktree
+            <T>Keep worktree</T>
           </Button>
           <Button type="button" variant="outline" onClick={() => copyToClipboard(details)}>
-            Copy details
+            <T>Copy details</T>
           </Button>
           <Button
             type="button"
@@ -104,10 +115,11 @@ export function WorktreeCleanupFailureDialog(props: {
               });
             }}
           >
-            Retry
+            <T>Retry</T>
           </Button>
         </DialogFooter>
       </DialogPopup>
     </Dialog>
   );
 }
+import { msg, T, Var } from "gt-react";

@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { toastManager } from "../ui/toast";
@@ -20,7 +22,7 @@ export async function renameLastCodeThread(
   if (trimmed.length === 0) {
     toastManager.add({
       type: "warning",
-      title: "Thread title cannot be empty",
+      title: m(msg("Thread title cannot be empty")),
     });
     finishRename();
     return;
@@ -36,6 +38,6 @@ export async function renameLastCodeThread(
       title: trimmed,
     },
   });
-  reportThreadOperationFailure(result, "Failed to rename thread");
+  reportThreadOperationFailure(result, msg("Failed to rename thread"));
   finishRename();
 }

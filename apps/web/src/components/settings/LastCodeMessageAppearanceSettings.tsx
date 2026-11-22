@@ -1,20 +1,23 @@
+import { useGT } from "gt-react";
 import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 
 export function LastCodeMessageAppearanceSettings() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
   const clientSettings = usePrimarySettings();
   return (
     <>
       <SettingsRow
         {...searchableSetting("incoming-message-style")}
-        description="Choose how agent and automation messages appear in the conversation."
+        description={gt("Choose how agent and automation messages appear in the conversation.")}
         resetAction={
           clientSettings.incomingMessageStyle !== "neutral" ? (
             <SettingResetButton
-              label="incoming message style"
+              ariaLabel={gt("Reset incoming message style to default")}
               onClick={() => updateClientSettings({ incomingMessageStyle: "neutral" })}
             />
           ) : null
@@ -28,14 +31,16 @@ export function LastCodeMessageAppearanceSettings() {
               }
             }}
           >
-            <SelectTrigger size="sm" className="w-44" aria-label="Incoming message style">
+            <SelectTrigger size="sm" className="w-44" aria-label={gt("Incoming message style")}>
               <SelectValue>
-                {clientSettings.incomingMessageStyle === "neutral" ? "Neutral fill" : "Outline"}
+                {clientSettings.incomingMessageStyle === "neutral"
+                  ? gt("Neutral fill")
+                  : gt("Outline")}
               </SelectValue>
             </SelectTrigger>
             <SelectPopup>
-              <SelectItem value="neutral">Neutral fill</SelectItem>
-              <SelectItem value="outline">Outline</SelectItem>
+              <SelectItem value="neutral">{gt("Neutral fill")}</SelectItem>
+              <SelectItem value="outline">{gt("Outline")}</SelectItem>
             </SelectPopup>
           </Select>
         }
@@ -43,11 +48,13 @@ export function LastCodeMessageAppearanceSettings() {
       {clientSettings.incomingMessageStyle === "neutral" ? (
         <SettingsRow
           {...searchableSetting("incoming-message-fill-color")}
-          description="Experiment with a fill color for agent and automation messages. Automatic follows your theme."
+          description={gt(
+            "Experiment with a fill color for agent and automation messages. Automatic follows your theme.",
+          )}
           resetAction={
             clientSettings.incomingMessageFillColor !== null ? (
               <SettingResetButton
-                label="incoming message fill color"
+                ariaLabel={gt("Reset incoming message fill color to default")}
                 onClick={() => updateClientSettings({ incomingMessageFillColor: null })}
               />
             ) : null
@@ -55,13 +62,13 @@ export function LastCodeMessageAppearanceSettings() {
           control={
             <div className="flex items-center gap-3">
               <span className="text-xs text-muted-foreground">
-                {clientSettings.incomingMessageFillColor ?? "Automatic"}
+                {clientSettings.incomingMessageFillColor ?? gt("Automatic")}
               </span>
               <ProviderAccentColorPicker
-                displayName="incoming messages"
-                label="Fill color"
+                displayName={gt("incoming messages")}
+                label={gt("Fill color")}
                 value={clientSettings.incomingMessageFillColor ?? undefined}
-                defaultOptionLabel="Automatic"
+                defaultOptionLabel={gt("Automatic")}
                 layout="inline"
                 onCommit={(value) =>
                   updateClientSettings({ incomingMessageFillColor: value || null })

@@ -10,6 +10,7 @@ import {
   LINEAR_KIND,
   parseLinearIssueUrl,
 } from "@t3tools/issue-tracker-linear/shared/issueUrl";
+import { selectLastCodeIssueRepository } from "@t3tools/source-control-core/shared/definition";
 
 import { sourceControlClients } from "./sourceControlClients.ts";
 import type { EnvironmentProject } from "./state/shell.ts";
@@ -27,8 +28,9 @@ function projectIssueBindings(project: LinkProject) {
   if (identity == null) return [];
   const cached = issueBindingsByRepository.get(identity);
   if (cached !== undefined) return cached;
+  const selected = selectLastCodeIssueRepository(identity, sourceControlClients);
   const bindings = sourceControlClients
-    .issueBindings(identity)
+    .issueBindings(selected)
     .map((binding) => ({ ...binding, scope: binding.scope.toLowerCase() }));
   issueBindingsByRepository.set(identity, bindings);
   return bindings;
@@ -52,11 +54,11 @@ function parseIssueLink(
   if (parsed !== null || authority === null) return parsed;
   const hostname = new URL(url).hostname.toLowerCase();
   for (const project of projects) {
-    const bindings = projectIssueBindings(project);
-    if (!bindings.some((binding) => binding.host === hostname || binding.host === authority))
-      continue;
-    const known = sourceControlClients.parseIssueUrl(url, project.repositoryIdentity?.provider);
-    if (known !== null) return known;
+    for (const binding of projectIssueBindings(project)) {
+      if (binding.host !== hostname && binding.host !== authority) continue;
+      const known = sourceControlClients.parseIssueUrl(url, binding.tracker);
+      if (known !== null) return known;
+    }
   }
   return null;
 }

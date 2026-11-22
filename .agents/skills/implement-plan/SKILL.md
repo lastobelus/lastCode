@@ -68,7 +68,8 @@ report the blocker.
 
 ## Review And Cleanup
 
-Use `references/review-orchestration.md` for implementation review rounds. Run at least
+Run implementation review rounds with the global `review-loop` skill, with the budget
+in `references/review-orchestration.md`. Run at least
 one review round unless the user explicitly asks for implementation only.
 
 After review rounds:

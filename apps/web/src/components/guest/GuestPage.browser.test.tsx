@@ -16,7 +16,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 
@@ -283,6 +283,12 @@ describe("GuestPage", () => {
   });
 
   it("follows the end as replies stream, and shows the guest's own message even after they scrolled up", async () => {
+    const { innerWidth, innerHeight } = window;
+    await using _viewport = {
+      [Symbol.asyncDispose]: () => page.viewport(innerWidth, innerHeight),
+    };
+    // The guest page sizes itself to the browser viewport before LegendList positions its rows.
+    await page.viewport(900, 600);
     using _page = visit(`/guest?share=${SHARE_ID}`);
     using _session = vi
       .spyOn(window, "fetch")
@@ -303,15 +309,14 @@ describe("GuestPage", () => {
       );
     const send = (event: GuestStreamEvent) =>
       sources.at(-1)!.dispatchEvent(new MessageEvent("message", { data: encodeEvent(event) }));
-    const container = document.createElement("div");
-    container.style.cssText = "height: 600px; width: 900px; display: flex; flex-direction: column;";
-    await using screen = await render(<GuestPage />, { container });
+    await using screen = await render(<GuestPage />);
     await expect.element(screen.getByText("Reply 11")).toBeInTheDocument();
     const scroller = () =>
       screen.container.querySelector<HTMLElement>(".messages-timeline-scroll")!;
     const expectAtEnd = () =>
       vi.waitFor(() => {
         const node = scroller();
+        expect(node.scrollHeight - node.clientHeight).toBeGreaterThan(400);
         expect(node.scrollHeight - node.scrollTop - node.clientHeight).toBeLessThan(2);
       });
     await expectAtEnd();

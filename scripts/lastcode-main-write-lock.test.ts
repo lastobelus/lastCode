@@ -9,7 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { githubCiRunTitle } from "./lastcode-github-ci.ts";
 import { assertSupportedNodeVersion } from "./lastcode-local-ci.ts";
 
-import { acquireMainWriteLock, MAIN_WRITE_LOCK_REF } from "./lastcode-main-write-lock.ts";
+import {
+  acquireMainWriteLock,
+  githubRepositoryFromRemoteUrl,
+  MAIN_WRITE_CANDIDATE_REF,
+  MAIN_WRITE_LOCK_REF,
+} from "./lastcode-main-write-lock.ts";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -100,6 +105,7 @@ describe("main write lock", () => {
       f.git(f.first, ["checkout", "-b", "feature"]);
       const node = fixtureNodeExecutable();
       const log = NodePath.join(f.root, "gh-commands");
+      const statusLog = NodePath.join(f.root, "guard-statuses");
       const pr = {
         number: 1,
         body: "Fixture",
@@ -121,7 +127,15 @@ const pr = ${JSON.stringify(pr)};
 const log = ${JSON.stringify(log)};
 const endpoint = args.find(arg => arg.startsWith('repos/'));
 let result;
-if (args[0] === 'pr' && args[1] === 'merge') {
+if (endpoint?.includes('/statuses/')) {
+  const state = args.find(arg => arg.startsWith('state='));
+  fs.appendFileSync(${JSON.stringify(statusLog)}, state + '\\n');
+  if (state === 'state=failure') {
+    process.stderr.write('fixture status failure\\n');
+    process.exit(3);
+  }
+  result = {};
+} else if (args[0] === 'pr' && args[1] === 'merge') {
   fs.appendFileSync(log, 'merge\\n');
   if ('${phase}' === 'merge') {
     process.stderr.write('fixture merge failure\\n');
@@ -172,6 +186,9 @@ JS`,
         phase === "merge" ? "merge\n" : "merge\nconfirmation\n",
       );
       expect(result.stdout).not.toContain("Merge complete");
+      // A merge that may not have landed must not leave the head approved for an unguarded merge.
+      expect(NodeFS.readFileSync(statusLog, "utf8")).toBe("state=success\nstate=failure\n");
+      expect(result.stderr).toContain("set it to failure by hand");
       if (phase === "confirmation") expect(result.stderr).toContain("exit code 9");
     },
   );
@@ -561,5 +578,62 @@ JS`,
     ).toThrow("Checkpoint push failed");
     expect(() => lock.release()).toThrow("Retained main write lock");
     expect(f.owner()).toBe(owner);
+  });
+
+  it.each([
+    ["https://github.com/example/repository.git", "example/repository"],
+    ["https://token@github.com/example/repository", "example/repository"],
+    ["git@github.com:example/repository.git", "example/repository"],
+    ["ssh://git@github.com/example/repository.git", "example/repository"],
+    ["https://git.example.com/example/repository.git", null],
+    ["/tmp/remote.git", null],
+  ])("finds the GitHub repository of %s", (url, repository) => {
+    expect(githubRepositoryFromRemoteUrl(url)).toBe(repository);
+  });
+
+  it("approves a promoted commit for GitHub only after GitHub has it", () => {
+    const f = fixture();
+    const statusLog = NodePath.join(f.root, "gh-commands");
+    fakeGh(f, `printf '%s\\n' "$*" >> "${statusLog}"`);
+    const local = acquireMainWriteLock(f.first, "origin", f.source, "checkpoint");
+    expect(local.approvePush(f.source)).toBeNull();
+    local.release();
+    expect(NodeFS.existsSync(statusLog)).toBe(false);
+
+    // Route the GitHub push URL to the local remote so no network is involved.
+    const ssh = NodePath.join(f.root, "bin", "ssh");
+    NodeFS.writeFileSync(
+      ssh,
+      `#!/bin/sh\nfor last; do :; done\ncase "$last" in git-receive-pack*) exec git receive-pack "${f.remote}";; git-upload-pack*) exec git upload-pack "${f.remote}";; esac\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    vi.stubEnv("GIT_SSH_COMMAND", ssh);
+    f.git(f.first, [
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "git@github.com:example/repository.git",
+    ]);
+    f.git(f.first, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "promoted",
+    ]);
+    const candidate = f.git(f.first, ["rev-parse", "HEAD"]);
+    const lock = acquireMainWriteLock(f.first, "origin", f.source, "checkpoint");
+    expect(lock.approvePush(candidate)).toBe("example/repository");
+    lock.release();
+    expect(f.git(f.root, ["--git-dir", f.remote, "rev-parse", MAIN_WRITE_CANDIDATE_REF])).toBe(
+      candidate,
+    );
+    expect(NodeFS.readFileSync(statusLog, "utf8")).toContain(
+      `api --method POST repos/example/repository/statuses/${candidate} -f state=success -f context=lastcode:merge`,
+    );
   });
 });

@@ -365,6 +365,7 @@ describe("terminal output stream", () => {
         type: "closed",
         threadId: "thread-1",
         terminalId: "default",
+        deleteHistory: false,
       };
       yield* publisher.publish(closed);
       assert.deepEqual(yield* Fiber.join(waiting), [output("last words"), closed]);

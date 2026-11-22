@@ -1,3 +1,4 @@
+import * as Capacity from "../../../capacity/Capacity.ts";
 import { ActionResumeError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -43,13 +44,17 @@ export const layer = McpToolAccess.toLayer(ActionResumeToolkit, {
           message: "Action resume is unavailable in this server runtime.",
         });
       }
-      return yield* service.value.runProjectActionAndResume(
+      const result = yield* service.value.runProjectActionAndResume(
         {
           threadId: invocation.thread.threadId,
           providerInstanceId: invocation.thread.providerInstanceId,
+          ...(invocation.thread.subagent !== true || invocation.thread.execution === undefined
+            ? {}
+            : { source: invocation.thread.execution }),
         },
         actionId,
       );
+      return { ...result, capacity: yield* (yield* Capacity.Capacity).read };
     }),
   ),
   inspect_action_run: McpToolAccess.readsAsCaller(({ runId }) =>
@@ -73,6 +78,42 @@ export const layer = McpToolAccess.toLayer(ActionResumeToolkit, {
         },
         runId,
       );
+    }),
+  ),
+  resume_interrupted_action: McpToolAccess.actsAsCaller(() =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("action-resume");
+      const invocation = yield* McpInvocationContext.requireThreadScope(
+        scope,
+        "resume_interrupted_action",
+      );
+      const service = yield* Effect.serviceOption(ActionResume);
+      if (Option.isNone(service)) {
+        return yield* new ActionResumeError({
+          reason: "internal_error",
+          message: "Action resume is unavailable in this server runtime.",
+        });
+      }
+      yield* service.value.resumeInterrupted(invocation.thread.threadId);
+      return { resumed: true as const };
+    }),
+  ),
+  discard_interrupted_action: McpToolAccess.actsAsCaller(() =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("action-resume");
+      const invocation = yield* McpInvocationContext.requireThreadScope(
+        scope,
+        "discard_interrupted_action",
+      );
+      const service = yield* Effect.serviceOption(ActionResume);
+      if (Option.isNone(service)) {
+        return yield* new ActionResumeError({
+          reason: "internal_error",
+          message: "Action resume is unavailable in this server runtime.",
+        });
+      }
+      yield* service.value.discardInterrupted(invocation.thread.threadId);
+      return { discarded: true as const };
     }),
   ),
 });

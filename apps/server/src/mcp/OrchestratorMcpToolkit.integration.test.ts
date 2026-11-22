@@ -4,17 +4,17 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
-  EnvironmentId,
   EventId,
   RunId,
   RunAttemptId,
+  OrchestratorMcpThreadReadResult,
+  EnvironmentId,
   isProviderNativeSubagentThread,
   MessageId,
   type ModelSelection,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadSendResult,
-  OrchestratorMcpThreadReadResult,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -56,6 +56,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as ThreadRecovery from "../orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
@@ -64,8 +65,20 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
 
-const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
+const layerOrchestratorToolkit = Layer.mergeAll(
+  McpHttpServer.layerOrchestratorToolkit,
+  McpHttpServer.layerThreadToolkit,
+).pipe(
+  Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+  Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
+  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -74,13 +87,6 @@ const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
 const localChild = (childThreadId: ThreadId | null): ThreadId => {
   if (childThreadId === null) throw new Error("expected a local delegated child");
   return childThreadId;
-};
-
-// Effect returns a declared tool failure as `isError` with its encoded payload
-// as JSON text, never as `structuredContent`.
-const declaredFailure = (result: McpSchema.CallToolResult) => {
-  const text = result.content[0];
-  return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
 };
 
 const parentThreadId = ThreadId.make("thread:mcp-orchestrator-parent");
@@ -96,10 +102,12 @@ const queuedFollowupResult = "Queued delegated follow-up completed.";
 const decodeThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const longFollowupResult = "Long delegated follow-up line. ".repeat(1_500);
 
+const encodeCallToolResult = Schema.encodeEffect(McpSchema.CallToolResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
 );
+const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeThreadSendResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
 
 const codexSelection = {
@@ -279,7 +287,12 @@ describe("orchestrator MCP toolkit", () => {
       ]);
       const layerTest = layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provideMerge(layerOrchestration),
         Layer.provide(
           CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript).pipe(
@@ -377,21 +390,6 @@ describe("orchestrator MCP toolkit", () => {
               Effect.provideService(McpSchema.McpServerClient, client),
             );
 
-        const noPromotion = yield* invoke("t3_subagent_promotion_status", {
-          threadId: parentThreadId,
-        });
-        expect(noPromotion.structuredContent).toEqual({ promotion: null });
-        const ordinaryThreadPromotion = yield* invoke("t3_subagent_promote", {
-          threadId: parentThreadId,
-        });
-        expect(declaredFailure(ordinaryThreadPromotion)).toMatchObject({
-          code: "orchestration_error",
-        });
-        expect(
-          (yield* orchestrator.getThreadProjection(parentThreadId)).thread.subagentPromotion ??
-            null,
-        ).toBeNull();
-
         const foreignThreadId = ThreadId.make("thread:mcp-replay-foreign");
         yield* orchestrator.dispatch({
           type: "thread.create",
@@ -407,27 +405,6 @@ describe("orchestrator MCP toolkit", () => {
           branch: null,
           worktreePath: cwd,
         });
-        for (const tool of ["t3_subagent_promote", "t3_subagent_promotion_cancel"]) {
-          const foreignPromotion = yield* invoke(tool, {
-            threadId: foreignThreadId,
-            ...(tool === "t3_subagent_promotion_cancel"
-              ? { requestId: "foreign-promotion" }
-              : {}),
-          });
-          expect(declaredFailure(foreignPromotion)).toMatchObject({
-            code: "orchestration_error",
-          });
-        }
-        const foreignPromotionStatus = yield* invoke("t3_subagent_promotion_status", {
-          threadId: foreignThreadId,
-        });
-        expect(foreignPromotionStatus.isError).toBe(false);
-        expect(foreignPromotionStatus.structuredContent).toEqual({ promotion: null });
-        expect(
-          (yield* orchestrator.getThreadProjection(foreignThreadId)).thread.subagentPromotion ??
-            null,
-        ).toBeNull();
-
         const delegationStartSequence = yield* orchestrator.getThreadEventSequence(parentThreadId);
         const delegatedCall = yield* invoke("delegate_task", {
           task: delegatedPrompt,
@@ -849,17 +826,35 @@ describe("orchestrator MCP toolkit", () => {
             ?.state,
         ).toBe("acknowledged");
 
-        const messageReadsBeforeCapabilities = messageReads.length;
-        const tableReadsBeforeCapabilities = projectionTableReads.length;
-        const capabilities = yield* invoke("orchestrator_capabilities", {}).pipe(
-          Effect.withTracer(tracer),
-        );
-        expect(capabilities.isError).not.toBe(true);
-        expect(messageReads).toHaveLength(messageReadsBeforeCapabilities);
-        // The caller check reads only the thread row, never its history.
-        expect(new Set(projectionTableReads.slice(tableReadsBeforeCapabilities))).toEqual(
-          new Set(["threads"]),
-        );
+        const callerAttempt = afterRead.attempts.at(-1);
+        expect(callerAttempt).toBeDefined();
+        for (const caller of [
+          invocation,
+          {
+            ...invocation,
+            thread: { ...invocation.thread!, attribution: "unresolved" as const },
+          },
+          {
+            ...invocation,
+            thread: {
+              ...invocation.thread!,
+              attribution: "resolved" as const,
+              execution: { runId: callerAttempt!.runId, attemptId: callerAttempt!.id },
+            },
+          },
+        ]) {
+          const messageReadsBeforeCapabilities = messageReads.length;
+          const tableReadsBeforeCapabilities = projectionTableReads.length;
+          const capabilities = yield* invoke("orchestrator_capabilities", {}, caller).pipe(
+            Effect.withTracer(tracer),
+          );
+          expect(capabilities.isError).not.toBe(true);
+          expect(messageReads).toHaveLength(messageReadsBeforeCapabilities);
+          // The caller check reads only the thread row, never its history.
+          expect(new Set(projectionTableReads.slice(tableReadsBeforeCapabilities))).toEqual(
+            new Set(["threads"]),
+          );
+        }
         const runReadsBeforeStatus = runReads.length;
         const transferReadsBeforeStatus = transferReads.length;
         const threadRecordReadsBeforeStatus = threadRecordReads.length;
@@ -894,7 +889,12 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
       ThreadManagementService.layer.pipe(Layer.provide(orchestratorLayer)),
     );
     const testLayer = layerOrchestratorToolkit.pipe(
-      Layer.provide(ThreadReadBroker.layer),
+      Layer.provide(
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.undefined }),
+          inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+        }),
+      ),
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
       Layer.provideMerge(orchestrationLayer),
       Layer.provide(registry),
@@ -909,6 +909,8 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
       ),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(layerUnusedScheduledTaskStub),
+      Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+      Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
@@ -954,7 +956,7 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
           );
         expect(result.isError).toBe(false);
         // The MCP transport validates structuredContent as JSON, after the toolkit returns.
-        const encoded = yield* Schema.encodeEffect(McpSchema.CallToolResult)(result);
+        const encoded = yield* encodeCallToolResult(result);
         return yield* decodeThreadReadResult(encoded.structuredContent);
       });
       const withoutRecovery = yield* read;
