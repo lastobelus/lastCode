@@ -4734,8 +4734,11 @@ const make = Effect.gen(function* () {
     const runHousekeeping = scheduledGroup !== "outputs";
     // One lazy observation for both resource passes; retain the original array's
     // native identity metadata. Final removal scans remain independent and fresh.
-    const observationProcessPaths = yield* Effect.cached(processPaths);
-    const observationTargets = WorktreeConsumers.createTargetObservation();
+    const {
+      paths: observationProcessPaths,
+      targets: observationTargets,
+      annotate: annotateInventory,
+    } = yield* WorktreeConsumers.makeSweepObservation(processPaths);
     const automaticWork: AutomaticOutputWork | undefined =
       trigger === "automatic"
         ? {
@@ -4821,6 +4824,7 @@ const make = Effect.gen(function* () {
       ),
       Effect.when(Effect.succeed(runOutputs)),
     );
+    yield* annotateInventory;
     const deletedWorktrees = yield* cleanWorktrees(
       serverSettings,
       now,
