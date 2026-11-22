@@ -13386,5 +13386,6 @@
   "bac896cff1757092": "Städa beroenden och byggfiler vid en körning och resten vid nästa.",
   "b11a5a9cdadd6fd9": "Vänta på Time Machine",
   "0ae8309282491222": "Vänta med automatisk städning tills Time Machine har säkerhetskopierat klart.",
-  "4b7fa11e6142029c": "Automatisk städning"
+  "4b7fa11e6142029c": "Automatisk städning",
+  "b4b98a0287c282e2": "Finns på en annan dator, så den här datorns agent kan inte läsa den. Ta bort den eller byt tillbaka till den datorn för att skicka."
 }

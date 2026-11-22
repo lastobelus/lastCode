@@ -13379,5 +13379,6 @@
   "bac896cff1757092": "Nettoie les dépendances et les fichiers de compilation lors d’un passage, puis le reste au passage suivant.",
   "b11a5a9cdadd6fd9": "Attendre Time Machine",
   "0ae8309282491222": "Le nettoyage automatique attend la fin de la sauvegarde Time Machine.",
-  "4b7fa11e6142029c": "Nettoyage automatique"
+  "4b7fa11e6142029c": "Nettoyage automatique",
+  "b4b98a0287c282e2": "Ce fil est sur une autre machine, donc l’agent de cette machine ne peut pas le lire. Retirez-le ou revenez à l’autre machine pour envoyer."
 }
