@@ -38,7 +38,6 @@ import {
   EnvironmentId,
   GitCommandError,
   OrchestrationV2AppThreadJson,
-  ServerSettingsError,
   StorageCleanupReport,
   type WorktreeKeepWhen,
   type StorageCleanupSettings,
@@ -71,10 +70,6 @@ import { vi } from "vite-plus/test";
 import * as NodeFSP from "node:fs/promises";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- The suite owns the pristine repository until its final cleanup.
 import * as NodeFS from "node:fs";
-import {
-  emptyStorageCleanupInventoryTrace,
-  STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
-} from "./observability/StorageCleanupInventoryTrace.ts";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as DependencyMounts from "./workspace/DependencyMounts.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
@@ -526,7 +521,6 @@ const cleanupFixture = (
       ...DEFAULT_SERVER_SETTINGS,
       storageCleanup,
     };
-    let settingsReadError: ServerSettingsError | undefined;
     let threads = [shell({ branch: "feature", worktreePath: worktree })];
     let deletedThreads: OrchestrationV2ThreadShell[] = [];
     let storedWorktreePaths = [worktree];
@@ -841,11 +835,7 @@ const cleanupFixture = (
           ),
       }),
       Effect.provideService(Settings.ServerSettingsService, {
-        getSettings: Effect.suspend(() =>
-          settingsReadError === undefined
-            ? Effect.succeed(settings)
-            : Effect.fail(settingsReadError),
-        ),
+        getSettings: Effect.sync(() => settings),
         subscribeChanges: Effect.succeed(
           Stream.fromQueue(settingsChanges).pipe(
             Stream.flatMap(({ settings, handled }) =>
@@ -1182,9 +1172,6 @@ const cleanupFixture = (
       publishProviderChange: () => {
         providerEventSequence++;
         ownershipRevision++;
-      },
-      failSettingsRead: (error: ServerSettingsError) => {
-        settingsReadError = error;
       },
       setRuntimeOnlySession: () => {
         runtimeOnlySession = true;
@@ -6258,32 +6245,6 @@ describe("one initial process observation per storage sweep", () => {
         expect(yield* fixture.fs.exists(output)).toBe(true);
       }),
     ),
-  );
-});
-
-it.effect("records a zero-work inventory when reading sweep settings fails", () => {
-  const sweeps: Tracer.Span[] = [];
-  const tracer = Tracer.make({
-    span(options) {
-      const span = new Tracer.NativeSpan(options);
-      if (span.name === "StorageCleanup.sweep") sweeps.push(span);
-      return span;
-    },
-  });
-  return runCleanupTest(
-    Effect.gen(function* () {
-      const fixture = yield* cleanupFixture();
-      const error = new ServerSettingsError({
-        settingsPath: "fixture-settings",
-        operation: "read-file",
-      });
-      fixture.failSettingsRead(error);
-      expect(yield* fixture.service.runNow.pipe(Effect.flip)).toEqual(error);
-      expect(sweeps).toHaveLength(1);
-      expect(sweeps[0]?.attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE)).toEqual(
-        emptyStorageCleanupInventoryTrace(),
-      );
-    }).pipe(Effect.withTracer(tracer)),
   );
 });
 

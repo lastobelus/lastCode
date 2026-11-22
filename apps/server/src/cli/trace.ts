@@ -67,20 +67,24 @@ export function makeTraceSpanSummary(sinceMs = -Infinity) {
     }
     if (endMs < sinceMs) return;
 
-    cleanupInventory.add(span.name, endMs, span.attributes?.[STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]);
+    const interrupted =
+      span.exit?._tag === "Interrupted" ||
+      span.attributes?.["effect.fiber.interrupted"] === true ||
+      span.status?.message === "Interrupted";
+    const failed = span.exit?._tag === "Failure" || span.status?.code === "2";
+    if (!interrupted && !failed)
+      cleanupInventory.add(
+        span.name,
+        endMs,
+        span.attributes?.[STORAGE_CLEANUP_INVENTORY_ATTRIBUTE],
+      );
     spanCount += 1;
     firstEndMs = Math.min(firstEndMs, endMs);
     lastEndMs = Math.max(lastEndMs, endMs);
     const stats = byName.get(span.name) ?? { durations: [], interrupted: 0, failures: 0 };
     stats.durations.push(span.durationMs);
-    if (
-      span.exit?._tag === "Interrupted" ||
-      span.attributes?.["effect.fiber.interrupted"] === true ||
-      span.status?.message === "Interrupted"
-    ) {
-      stats.interrupted += 1;
-    }
-    if (span.exit?._tag === "Failure" || span.status?.code === "2") stats.failures += 1;
+    if (interrupted) stats.interrupted += 1;
+    if (failed) stats.failures += 1;
     byName.set(span.name, stats);
   };
 

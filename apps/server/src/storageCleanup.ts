@@ -4718,15 +4718,6 @@ const make = Effect.gen(function* () {
     trigger: StorageCleanupReport["trigger"],
     automaticRequest?: AutomaticSweepRequest,
   ) {
-    // One lazy observation for both resource passes; retain the original array's
-    // native identity metadata. Final removal scans remain independent and fresh.
-    const {
-      paths: observationProcessPaths,
-      targets: observationTargets,
-      annotate: annotateInventory,
-      annotateOnExit: finalizeInventory,
-    } = yield* WorktreeConsumers.makeSweepObservation(processPaths);
-    yield* annotateInventory;
     const deletionsAtStart = deletions;
     const now = yield* Clock.currentTimeMillis;
     const serverSettings = yield* settingsService.getSettings;
@@ -4741,6 +4732,13 @@ const make = Effect.gen(function* () {
     );
     const runOutputs = scheduledGroup !== "housekeeping";
     const runHousekeeping = scheduledGroup !== "outputs";
+    // One lazy observation for both resource passes; retain the original array's
+    // native identity metadata. Final removal scans remain independent and fresh.
+    const {
+      paths: observationProcessPaths,
+      targets: observationTargets,
+      annotate: annotateInventory,
+    } = yield* WorktreeConsumers.makeSweepObservation(processPaths);
     const automaticWork: AutomaticOutputWork | undefined =
       trigger === "automatic"
         ? {
@@ -4767,7 +4765,7 @@ const make = Effect.gen(function* () {
       Effect.catch((cause) => Effect.logWarning("checkpoint ref cleanup failed", { cause })),
       Effect.when(Effect.succeed(runHousekeeping)),
     );
-    const dependencyOutputs = cleanDisposableOutputs(
+    yield* cleanDisposableOutputs(
       serverSettings,
       now,
       entries,
@@ -4798,7 +4796,7 @@ const make = Effect.gen(function* () {
       ),
       Effect.when(Effect.succeed(runOutputs)),
     );
-    const generatedOutputs = cleanDisposableOutputs(
+    yield* cleanDisposableOutputs(
       serverSettings,
       now,
       entries,
@@ -4826,9 +4824,7 @@ const make = Effect.gen(function* () {
       ),
       Effect.when(Effect.succeed(runOutputs)),
     );
-    yield* Effect.onExit(dependencyOutputs.pipe(Effect.andThen(generatedOutputs)), (exit) =>
-      finalizeInventory(exit),
-    );
+    yield* annotateInventory;
     const deletedWorktrees = yield* cleanWorktrees(
       serverSettings,
       now,

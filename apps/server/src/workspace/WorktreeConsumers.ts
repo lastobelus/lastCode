@@ -6,7 +6,6 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeBuffer from "node:buffer";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import {
@@ -551,19 +550,15 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
     }),
   );
   const targets: TargetObservation = { targets: new WeakMap(), sweep };
-  const annotate = (partial: boolean) =>
-    Effect.suspend(() =>
-      Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
-        ...measurement,
-        uniquePaths: sweep.resolvedPaths.size,
-        partial,
-      }),
-    );
   return {
     paths,
     targets,
-    annotate: annotate(false),
-    annotateOnExit: (exit: Exit.Exit<unknown, unknown>) => annotate(Exit.hasInterrupts(exit)),
+    annotate: Effect.suspend(() =>
+      Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
+        ...measurement,
+        uniquePaths: sweep.resolvedPaths.size,
+      }),
+    ),
   };
 });
 
@@ -689,8 +684,14 @@ const makeProcessPathResolver = (
   };
 };
 
-const targetUnchanged = async (root: string, evidence: TargetEvidence) => {
-  const deadline = performance.now() + 30_000;
+const targetUnchanged = async (
+  root: string,
+  evidence: TargetEvidence,
+  measurement?: InventoryMeasurement,
+) => {
+  const start = performance.now();
+  const deadline = start + 30_000;
+  if (measurement !== undefined) measurement.targetRevalidations++;
   try {
     for (const directory of evidence.directories) {
       if (performance.now() > deadline)
@@ -707,6 +708,8 @@ const targetUnchanged = async (root: string, evidence: TargetEvidence) => {
   } catch (cause) {
     if (gone(cause)) return false; // Removed directories require a new complete walk.
     throw cause;
+  } finally {
+    if (measurement !== undefined) measurement.targetRevalidationMs += performance.now() - start;
   }
 };
 
@@ -726,6 +729,7 @@ const ancestorEvidence = async (
   root: string,
   collectIdentities: boolean,
   targets: Map<string, TargetEntry>,
+  measurement?: InventoryMeasurement,
 ): Promise<TargetEvidence | null> => {
   for (const [ancestor, entry] of targets) {
     if (
@@ -737,7 +741,8 @@ const ancestorEvidence = async (
       continue;
     try {
       const evidence = scopedEvidence(root, await entry.proof);
-      if (evidence !== null && (await targetUnchanged(root, evidence))) return evidence;
+      if (evidence !== null && (await targetUnchanged(root, evidence, measurement)))
+        return evidence;
     } catch {
       // The ancestor proof failed or cannot be revalidated; walk this root itself.
     }
@@ -777,7 +782,7 @@ const targetEvidence = async (
   };
   let entry = targets.get(root);
   if (entry === undefined) {
-    const derived = await ancestorEvidence(root, collectIdentities, targets);
+    const derived = await ancestorEvidence(root, collectIdentities, targets, measurement);
     if (derived !== null) return derived;
     entry = targets.get(root);
   }
@@ -788,7 +793,8 @@ const targetEvidence = async (
     let evidence = await entry.proof;
     if (
       existing &&
-      (!(await targetUnchanged(root, evidence)) || (collectIdentities && !entry.collectIdentities))
+      (!(await targetUnchanged(root, evidence, measurement)) ||
+        (collectIdentities && !entry.collectIdentities))
     ) {
       // Another concurrent observer may already have replaced this entry.
       entry =

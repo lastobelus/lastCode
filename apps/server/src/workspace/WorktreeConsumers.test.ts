@@ -1,7 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import { it } from "@effect/vitest";
 import { beforeEach, describe, expect, vi } from "vite-plus/test";
 
@@ -924,14 +922,16 @@ describe("Observation-scoped target evidence", () => {
     Effect.gen(function* () {
       socketFixture();
       targetFixture();
-      const paths = (yield* inventory("darwin"))!;
-      const observation = WorktreeConsumers.createTargetObservation();
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      const observation = sweep.targets;
       expect(yield* prove(paths, observation)).toBe(false);
       const opens = native.opendir.mock.calls.length;
       const files = regularFileReads();
       native.lstat.mockClear();
       expect(yield* prove(paths, observation)).toBe(false);
       expect(yield* prove(paths, observation)).toBe(false);
+      expect(yield* prove(paths, observation, `${root}/dist`)).toBe(false);
       expect(opens).toBe(2);
       expect(files).toBe(2);
       expect(native.opendir).toHaveBeenCalledTimes(opens);
@@ -942,7 +942,15 @@ describe("Observation-scoped target evidence", () => {
         ).toBeGreaterThanOrEqual(2);
       }
       expect(native.execFile).toHaveBeenCalledOnce();
-    }),
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        treeWalks: 1,
+        targetRevalidations: 3,
+        targetRevalidationMs: expect.any(Number),
+      });
+    }).pipe(Effect.withSpan("sweep fixture")),
   );
 
   it.effect("answers a nested root from an ancestor walk of the same inventory", () =>
@@ -1168,45 +1176,6 @@ describe("Observation-scoped target evidence", () => {
         expect(yield* prove(paths, sweep.targets)).toBe(true);
         expect(native.realpath.mock.calls.filter(([path]) => path === library)).toHaveLength(2);
       }),
-  );
-
-  it.effect("marks a sweep partial while an interrupted file check is still pending", () =>
-    Effect.gen(function* () {
-      const libraries = sweepInventory();
-      const [first] = libraries;
-      sweepStats(libraries);
-      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
-      const paths = (yield* sweep.paths)!;
-      expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
-
-      const entered = yield* Deferred.make<void>();
-      const finished = yield* Deferred.make<void>();
-      const release = Promise.withResolvers<void>();
-      const lstat = native.lstat.getMockImplementation()!;
-      native.lstat.mockImplementation(async (path: string, options: unknown) => {
-        if (path === first) {
-          Deferred.doneUnsafe(entered, Effect.void);
-          await release.promise;
-        }
-        return lstat(path, options);
-      });
-      yield* Effect.gen(function* () {
-        const worker = yield* Effect.promise(() =>
-          WorktreeConsumers.processPathsUseRoot(root, paths, sweep.targets).finally(() => {
-            Deferred.doneUnsafe(finished, Effect.void);
-          }),
-        ).pipe(Effect.onExit(sweep.annotateOnExit), Effect.forkChild({ startImmediately: true }));
-        yield* Deferred.await(entered);
-        yield* Fiber.interrupt(worker);
-        expect(
-          (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
-        ).toMatchObject({ partial: true, cachedPathChecks: 1, cachedPathCheckMs: 0 });
-      }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => release.resolve()).pipe(Effect.andThen(Deferred.await(finished))),
-        ),
-      );
-    }).pipe(Effect.withSpan("sweep fixture")),
   );
 
   it.effect("does not share a target walk with another native capture or observation", () =>

@@ -6,7 +6,7 @@ import {
   STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
 } from "./StorageCleanupInventoryTrace.ts";
 
-it("summarizes measured cleanup inventory without dropping older sweep spans", () => {
+it("shows inventory for completed sweeps and retains all sweep spans", () => {
   const summarizer = makeTraceSpanSummary();
   const span = {
     name: "StorageCleanup.sweep",
@@ -14,7 +14,6 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
     endTimeUnixNano: "1000000",
   };
   const metrics = {
-    partial: false,
     processCaptures: 1,
     processCaptureMs: 12,
     uniquePaths: 90,
@@ -27,25 +26,32 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
     treeWalks: 5,
     treeWalkMs: 3000,
     objectsVisited: 50_000,
+    targetRevalidations: 3,
+    targetRevalidationMs: 225,
   };
   summarizer.addLine(JSON.stringify(span));
   const measurements = [
-    metrics,
-    { ...metrics, processCaptures: 2, pathResolutions: 123, partial: true },
-    emptyStorageCleanupInventoryTrace(),
-    "malformed",
+    { value: metrics },
+    { value: { ...metrics, processCaptures: 2, pathResolutions: 123 } },
+    { value: emptyStorageCleanupInventoryTrace() },
+    { value: "malformed" },
+    { value: metrics, exit: { _tag: "Interrupted" } },
+    { value: metrics, exit: { _tag: "Failure" } },
   ];
-  for (const [index, value] of measurements.entries()) {
+  for (const [index, { value, exit }] of measurements.entries()) {
     summarizer.addLine(
       JSON.stringify({
         ...span,
         endTimeUnixNano: String(BigInt(index + 1) * 1000000000n),
         attributes: { [STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]: value },
+        exit,
       }),
     );
   }
   const summary = summarizer.finish();
-  assert.strictEqual(summary.spanCount, 5);
+  assert.strictEqual(summary.spanCount, 7);
+  assert.strictEqual(summary.spans[0]?.interrupted, 1);
+  assert.strictEqual(summary.spans[0]?.failures, 1);
   assert.strictEqual(summary.skippedLineCount, 0);
   assert.deepStrictEqual(
     summary.cleanupInventory.map(({ endMs, inventory }) => [
@@ -60,9 +66,7 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
     ],
   );
   const formatted = formatTraceSummary(summary, 25);
-  assert.include(formatted, "Storage cleanup usage inventory by sweep");
-  assert.include(formatted, "1970-01-01T00:00:02.000Z (partial)");
-  assert.notInclude(formatted, "1970-01-01T00:00:03.000Z (partial)");
+  assert.include(formatted, "Storage cleanup usage inventory by completed sweep");
   assert.include(formatted, "Native capture attempts  0 in 0ms");
   assert.include(formatted, "Native capture attempts  2 in 12ms");
   assert.include(formatted, "Native capture attempts  1 in 12ms");
@@ -70,4 +74,5 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
   assert.include(formatted, "Cached path checks       400 in 582ms");
   assert.include(formatted, "Directory checks         16 in 114ms");
   assert.include(formatted, "Tree walks               5 visiting 50000 objects in 3s");
+  assert.include(formatted, "Target revalidations     3 in 225ms");
 });
