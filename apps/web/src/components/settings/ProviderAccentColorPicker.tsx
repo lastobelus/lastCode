@@ -13,12 +13,14 @@ const FALLBACK_ACCENT_COLOR = "#2563eb";
 
 function ProviderCustomColorPanel(props: {
   readonly value: string;
+  readonly label: string | undefined;
   readonly onPreview: (value: string) => void;
   readonly onCommit: (value: string) => void;
   readonly showAddButton: boolean;
 }) {
   const gt = useGT();
   const { onCommit, onPreview } = props;
+  const colorLabel = props.label?.toLowerCase();
   const [hsv, setHsv] = useState(() => hexToHsv(props.value));
   const currentColor = hsvToHex(hsv.h, hsv.s, hsv.v);
   const [hexDraft, setHexDraft] = useState<string | null>(null);
@@ -59,7 +61,7 @@ function ProviderCustomColorPanel(props: {
     <div className="w-56 bg-popover">
       <div onPointerDownCapture={startDrag}>
         <ColorSaturationValuePlane
-          label={gt("Accent color")}
+          label={props.label ?? gt("Accent color")}
           value={hsv}
           onChange={changeHsv}
           onInteractionEnd={endDrag}
@@ -69,7 +71,11 @@ function ProviderCustomColorPanel(props: {
       <div className="grid gap-3 p-3">
         <div onPointerDownCapture={startDrag}>
           <ColorHueSlider
-            label={gt("Accent color hue")}
+            label={
+              props.label === undefined
+                ? gt("Accent color hue")
+                : gt("{label} hue", { label: props.label })
+            }
             value={hsv.h}
             onChange={(h) => changeHsv({ ...hsv, h })}
             onInteractionEnd={endDrag}
@@ -88,7 +94,11 @@ function ProviderCustomColorPanel(props: {
           }}
           onBlur={() => setHexDraft(null)}
           font="mono"
-          aria-label={gt("Custom hex accent color")}
+          aria-label={
+            colorLabel === undefined
+              ? gt("Custom hex accent color")
+              : gt("Custom hex {label}", { label: colorLabel })
+          }
           spellCheck={false}
         />
         {props.showAddButton ? (
@@ -107,14 +117,25 @@ function ProviderCustomColorPanel(props: {
 
 function ProviderCustomColorPicker(props: {
   readonly displayName: string;
+  readonly label: string | undefined;
   readonly value: string | undefined;
   readonly onPreview: (value: string) => void;
   readonly onCommit: (value: string) => void;
   readonly onClear: () => void;
   readonly onClose: () => void;
+  readonly clearLabel?: string;
 }) {
   const gt = useGT();
   const normalized = normalizeProviderAccentColor(props.value);
+  const colorLabel = props.label?.toLowerCase();
+  const triggerLabel =
+    colorLabel === undefined
+      ? normalized
+        ? gt("Change accent color for {provider}", { provider: props.displayName })
+        : gt("Add accent color for {provider}", { provider: props.displayName })
+      : normalized
+        ? gt("Change {label} for {provider}", { label: colorLabel, provider: props.displayName })
+        : gt("Add {label} for {provider}", { label: colorLabel, provider: props.displayName });
   return (
     <Popover
       onOpenChange={(open) => {
@@ -128,15 +149,15 @@ function ProviderCustomColorPicker(props: {
             size="icon-sm"
             variant="ghost-muted"
             style={normalized ? { backgroundColor: normalized } : undefined}
-            aria-label={
-              normalized
-                ? gt("Change accent color for {provider}", { provider: props.displayName })
-                : gt("Add accent color for {provider}", { provider: props.displayName })
-            }
+            aria-label={triggerLabel}
           >
             {normalized ? (
               <span className="sr-only">
-                <T>Change accent color</T>
+                {colorLabel === undefined ? (
+                  <T>Change accent color</T>
+                ) : (
+                  gt("Change {label}", { label: colorLabel })
+                )}
               </span>
             ) : (
               <PlusIcon aria-hidden />
@@ -147,6 +168,7 @@ function ProviderCustomColorPicker(props: {
       <PopoverPopup side="bottom" align="start" sideOffset={6} padding="none">
         <ProviderCustomColorPanel
           value={normalized ?? FALLBACK_ACCENT_COLOR}
+          label={props.label}
           onPreview={props.onPreview}
           onCommit={props.onCommit}
           showAddButton={!normalized}
@@ -163,7 +185,7 @@ function ProviderCustomColorPicker(props: {
                   onClick={props.onClear}
                 >
                   <XIcon className="size-3.5" aria-hidden />
-                  <T>Clear color</T>
+                  {props.clearLabel ?? <T>Clear color</T>}
                 </Button>
               }
             />
@@ -178,10 +200,19 @@ export function ProviderAccentColorPicker(props: {
   readonly displayName: string;
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
+  readonly label?: string;
+  readonly defaultOptionLabel?: string;
   readonly description?: string;
   readonly layout?: "stacked" | "inline";
 }) {
-  const { description, displayName, layout = "stacked", onCommit } = props;
+  const {
+    defaultOptionLabel,
+    description,
+    displayName,
+    label,
+    layout = "stacked",
+    onCommit,
+  } = props;
   const value = props.value ?? "";
   // The draft shows a dragged or just-committed color only while `value` is
   // still the one it was picked against, so the persisted value (or any outside
@@ -205,6 +236,7 @@ export function ProviderAccentColorPicker(props: {
   const picker = (
     <ProviderCustomColorPicker
       displayName={displayName}
+      label={label}
       value={normalizeProviderAccentColor(shownValue)}
       onPreview={(color) =>
         setDraft({
@@ -215,6 +247,7 @@ export function ProviderAccentColorPicker(props: {
       }
       onCommit={commit}
       onClear={() => commit("")}
+      {...(defaultOptionLabel ? { clearLabel: defaultOptionLabel } : {})}
       onClose={() => {
         if (draft?.previewing && draft.base === value) commit(draft.color);
       }}
@@ -227,9 +260,7 @@ export function ProviderAccentColorPicker(props: {
 
   return (
     <div className="grid gap-2">
-      <span className="text-xs font-medium text-foreground">
-        <T>Accent color</T>
-      </span>
+      <span className="text-xs font-medium text-foreground">{label ?? <T>Accent color</T>}</span>
       {picker}
       {description ? <span className="text-xs text-muted-foreground">{description}</span> : null}
     </div>

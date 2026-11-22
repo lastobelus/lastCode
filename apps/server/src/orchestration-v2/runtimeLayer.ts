@@ -447,6 +447,7 @@ const layerMcpSignInProvided = McpSignIn.layer.pipe(
 
 export const layer = Layer.mergeAll(
   layerCommandOutputHubProvided,
+  layerEventSinkProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,
   layerMcpSignInProvided,
