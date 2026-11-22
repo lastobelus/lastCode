@@ -4765,7 +4765,7 @@ const make = Effect.gen(function* () {
       Effect.catch((cause) => Effect.logWarning("checkpoint ref cleanup failed", { cause })),
       Effect.when(Effect.succeed(runHousekeeping)),
     );
-    yield* cleanDisposableOutputs(
+    const dependencyOutputs = cleanDisposableOutputs(
       serverSettings,
       now,
       entries,
@@ -4796,7 +4796,7 @@ const make = Effect.gen(function* () {
       ),
       Effect.when(Effect.succeed(runOutputs)),
     );
-    yield* cleanDisposableOutputs(
+    const generatedOutputs = cleanDisposableOutputs(
       serverSettings,
       now,
       entries,
@@ -4824,7 +4824,10 @@ const make = Effect.gen(function* () {
       ),
       Effect.when(Effect.succeed(runOutputs)),
     );
-    yield* annotateInventory;
+    yield* dependencyOutputs.pipe(
+      Effect.andThen(generatedOutputs),
+      Effect.ensuring(annotateInventory),
+    );
     const deletedWorktrees = yield* cleanWorktrees(
       serverSettings,
       now,

@@ -16,16 +16,23 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
     uniquePaths: 90,
     pathResolutions: 100,
     directoryChecks: 16,
+    directoryCheckMs: 114,
     pathResolutionMs: 1600,
     treeWalks: 5,
     treeWalkMs: 3000,
     objectsVisited: 50_000,
   };
   summarizer.addLine(JSON.stringify(span));
-  for (const value of [metrics, metrics, "malformed"]) {
+  const measurements = [
+    metrics,
+    { ...metrics, processCaptures: 2, pathResolutions: 123 },
+    "malformed",
+  ];
+  for (const [index, value] of measurements.entries()) {
     summarizer.addLine(
       JSON.stringify({
         ...span,
+        endTimeUnixNano: String(BigInt(index + 1) * 1000000000n),
         attributes: { [STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]: value },
       }),
     );
@@ -33,12 +40,22 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
   const summary = summarizer.finish();
   assert.strictEqual(summary.spanCount, 4);
   assert.strictEqual(summary.skippedLineCount, 0);
-  const formatted = formatTraceSummary(summary, 25);
-  assert.include(formatted, "Storage cleanup inventory (2 measured)");
-  assert.include(formatted, "Process captures  2 in 24ms");
-  assert.include(
-    formatted,
-    "Path resolutions  200 for 180 distinct paths counted per sweep with 32 directory checks in 3.2s",
+  assert.deepStrictEqual(
+    summary.cleanupInventory.map(({ endMs, inventory }) => [
+      endMs,
+      inventory.processCaptures,
+      inventory.pathResolutions,
+    ]),
+    [
+      [2000, 2, 123],
+      [1000, 1, 100],
+    ],
   );
-  assert.include(formatted, "Tree walks        10 visiting 100000 objects in 6s");
+  const formatted = formatTraceSummary(summary, 25);
+  assert.include(formatted, "Storage cleanup usage inventory by sweep");
+  assert.include(formatted, "Native capture attempts  2 in 12ms");
+  assert.include(formatted, "Native capture attempts  1 in 12ms");
+  assert.include(formatted, "Path resolutions         123 for 90 distinct paths in 1.6s");
+  assert.include(formatted, "Directory checks         16 in 114ms");
+  assert.include(formatted, "Tree walks               5 visiting 50000 objects in 3s");
 });

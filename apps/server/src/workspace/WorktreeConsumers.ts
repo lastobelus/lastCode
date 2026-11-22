@@ -367,9 +367,11 @@ const processPaths = async (
   platform: NodeJS.Platform,
   uid: number | undefined,
   binary: string | null,
+  onAttempt: (() => void) | undefined,
 ) => {
   if (uid === undefined || (platform !== "linux" && platform !== "darwin")) return null;
   const capture = async () => {
+    onAttempt?.();
     try {
       return await captureProcessPaths(platform, uid, binary);
     } catch {
@@ -382,6 +384,11 @@ const processPaths = async (
   return first === null ? capture() : first;
 };
 
+class ProcessCaptureCounter extends Context.Reference<(() => void) | undefined>(
+  "t3/workspace/ProcessCaptureCounter",
+  { defaultValue: () => undefined },
+) {}
+
 /** Actual file consumers, observed afresh; generic startup does not renew usage clocks. */
 export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<string> | null>>(
   "t3/workspace/WorktreeProcessPaths",
@@ -389,12 +396,13 @@ export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<
     defaultValue: Effect.fn("defaultValue")(function* () {
       const platform = yield* HostProcess.Platform;
       const uid = yield* HostProcess.UserId;
+      const onAttempt = yield* ProcessCaptureCounter;
       const binary =
         platform === "darwin" && uid !== undefined
           ? yield* yield* ResourceMonitorBinary.ProcessCaptureBinary
           : null;
       return yield* Effect.tryPromise({
-        try: () => processPaths(platform, uid, binary),
+        try: () => processPaths(platform, uid, binary, onAttempt),
         catch: () => null,
       }).pipe(Effect.orElseSucceed(() => null));
     }),
@@ -526,11 +534,15 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
     resolvedPaths: new Set(),
     measurement,
   };
+  let inventoryStarted = false;
   const paths = yield* Effect.cached(
     Effect.suspend(() => {
       const start = performance.now();
-      measurement.processCaptures++;
+      inventoryStarted = true;
       return capture.pipe(
+        Effect.provideService(ProcessCaptureCounter, () => {
+          measurement.processCaptures++;
+        }),
         Effect.ensuring(
           Effect.sync(() => {
             measurement.processCaptureMs += performance.now() - start;
@@ -544,7 +556,7 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
     paths,
     targets,
     annotate: Effect.suspend(() =>
-      measurement.processCaptures === 0
+      !inventoryStarted
         ? Effect.void
         : Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
             ...measurement,
@@ -590,7 +602,7 @@ const canonicalParentToken = async (parent: string, measurement: InventoryMeasur
   } catch {
     return null;
   } finally {
-    measurement.pathResolutionMs += performance.now() - start;
+    measurement.directoryCheckMs += performance.now() - start;
   }
 };
 
@@ -614,26 +626,47 @@ const resolveProcessPath = async (
   }
 };
 
-const makeProcessPathResolver = (paths: readonly string[], sweep?: SweepObservation) => {
-  if (sweep === undefined) return resolveProcessPath;
+const makeProcessPathResolver = (
+  paths: readonly string[],
+  sweep: SweepObservation,
+  reuse = true,
+) => {
   const capture = sweepResolutions(sweep, paths);
+  const reusedParents = new Map<string, string | null>();
   const checkedParents = new Map<string, string | null>();
-  return async (path: string): Promise<PathResolution> => {
-    const entry = capture.sharedPaths.get(path);
-    if (entry === undefined) return resolveProcessPath(path, sweep);
-    const { parent } = entry;
-    let token = checkedParents.get(parent);
-    if (token === undefined) {
-      token = await canonicalParentToken(parent, sweep.measurement);
-      checkedParents.set(parent, token);
-    }
-    if (token !== null && entry.token === token) return { path };
-    const resolution = await resolveProcessPath(path, sweep);
-    // Alias chains and failed lookups need fresh resolution. Descriptor identities
-    // stay indexed by the original array, even when names repeat.
-    if (token !== null && "path" in resolution && resolution.path === path) entry.token = token;
-    else delete entry.token;
-    return resolution;
+  return {
+    resolve: async (path: string): Promise<PathResolution> => {
+      const entry = capture.sharedPaths.get(path);
+      if (entry === undefined) return resolveProcessPath(path, sweep);
+      const { parent } = entry;
+      if (reuse && entry.token !== undefined) {
+        const previous = reusedParents.get(parent);
+        reusedParents.set(
+          parent,
+          previous === undefined || previous === entry.token ? entry.token : null,
+        );
+        return { path };
+      }
+      let token = checkedParents.get(parent);
+      if (token === undefined) {
+        token = await canonicalParentToken(parent, sweep.measurement);
+        checkedParents.set(parent, token);
+      }
+      const resolution = await resolveProcessPath(path, sweep);
+      // Alias chains and failed lookups need fresh resolution. Descriptor identities
+      // stay indexed by the original array, even when names repeat.
+      if (token !== null && "path" in resolution && resolution.path === path) entry.token = token;
+      else delete entry.token;
+      return resolution;
+    },
+    isStillValid: async () => {
+      // A later lookup in the same scan can overlap a change to an earlier directory.
+      for (const [parent, token] of reusedParents) {
+        if (token === null || (await canonicalParentToken(parent, sweep.measurement)) !== token)
+          return false;
+      }
+      return true;
+    },
   };
 };
 
@@ -757,29 +790,22 @@ const targetEvidence = async (
   }
 };
 
-/**
- * Darwin D/i identify vnodes; only unresolved objects may use complete unchanged no-follow inventories.
- * Socket paths come from sockaddr_un; vanished paths prove absence only for socket-free targets.
- * Callers retain fresh mount protection under the canonical workspace lease.
- */
-export const processPathsUseRoot = async (
+const scanProcessPaths = async (
   canonicalRoot: string,
   paths: ReadonlyArray<string>,
-  observation?: TargetObservation,
-  completeProof = false,
-): Promise<boolean> => {
-  if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
+  completeProof: boolean,
+  resolvePath: (path: string) => Promise<PathResolution>,
+) => {
   const captured = (paths as CapturedPaths)[nativeIdentities];
   const unresolved: ObjectIdentity[] = [];
   // Inventories repeat paths (shared libraries, one entry per descriptor).
   const resolutions = new Map<string, PathResolution>();
-  const resolvePath = makeProcessPathResolver(paths, observation?.sweep);
   let vanishedSocket = false;
   let matched = false;
   for (const [index, path] of paths.entries()) {
     if (!NodePath.isAbsolute(path)) throw new Error("Process consumer path is not absolute");
     if (within(canonicalRoot, path)) {
-      if (!completeProof) return true;
+      if (!completeProof) return { matched: true, unresolved, vanishedSocket };
       matched = true;
       continue;
     }
@@ -791,7 +817,7 @@ export const processPathsUseRoot = async (
     try {
       if ("error" in resolution) throw resolution.error;
       if (within(canonicalRoot, resolution.path)) {
-        if (!completeProof) return true;
+        if (!completeProof) return { matched: true, unresolved, vanishedSocket };
         matched = true;
       }
     } catch (error) {
@@ -827,6 +853,43 @@ export const processPathsUseRoot = async (
       unresolved.push(identity);
     }
   }
+  return { matched, unresolved, vanishedSocket };
+};
+
+/**
+ * Darwin D/i identify vnodes; only unresolved objects may use complete unchanged no-follow inventories.
+ * Socket paths come from sockaddr_un; vanished paths prove absence only for socket-free targets.
+ * Callers retain fresh mount protection under the canonical workspace lease.
+ */
+export const processPathsUseRoot = async (
+  canonicalRoot: string,
+  paths: ReadonlyArray<string>,
+  observation?: TargetObservation,
+  completeProof = false,
+): Promise<boolean> => {
+  if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
+  const scan = (resolvePath: (path: string) => Promise<PathResolution>) =>
+    scanProcessPaths(canonicalRoot, paths, completeProof, resolvePath);
+  const sweep = observation?.sweep;
+  let evidence;
+  if (sweep === undefined) {
+    evidence = await scan(resolveProcessPath);
+  } else {
+    const resolver = makeProcessPathResolver(paths, sweep);
+    const first = await scan(resolver.resolve).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    if ("value" in first && first.value.matched && !completeProof) return true;
+    if (!(await resolver.isStillValid())) {
+      evidence = await scan(makeProcessPathResolver(paths, sweep, false).resolve);
+    } else {
+      if ("error" in first) throw first.error;
+      evidence = first.value;
+    }
+  }
+  const { matched, unresolved, vanishedSocket } = evidence;
+  if (matched && !completeProof) return true;
   if (unresolved.length === 0 && !vanishedSocket) return matched;
   const { found } = await targetEvidence(
     canonicalRoot,

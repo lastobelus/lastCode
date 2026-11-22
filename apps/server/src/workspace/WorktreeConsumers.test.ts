@@ -1067,6 +1067,34 @@ describe("Observation-scoped target evidence", () => {
       }).pipe(Effect.withSpan("sweep fixture")),
   );
 
+  it.effect("checks cached siblings again when their directory changes during a target scan", () =>
+    Effect.gen(function* () {
+      const [, alias, changed] = sweepInventory();
+      const stats = targetFixture();
+      stats.set("/system/example", objectStat(51n, true));
+      let retargeted = false;
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === alias) return "/elsewhere/library";
+        if (path === changed && retargeted) return `${root}/dist/output.js`;
+        return path;
+      });
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === alias) {
+          retargeted = true;
+          stats.set("/system/example", objectStat(51n, true, 18n, 2n));
+          return "/elsewhere/library";
+        }
+        if (path === changed && retargeted) return `${root}/dist/output.js`;
+        return path;
+      });
+      expect(yield* prove(paths, sweep.targets)).toBe(true);
+      expect(native.realpath.mock.calls.filter(([path]) => path === changed)).toHaveLength(2);
+    }),
+  );
+
   it.effect("does not share a target walk with another native capture or observation", () =>
     Effect.gen(function* () {
       socketFixture();
@@ -1391,11 +1419,16 @@ describe("Fresh native observation retry", () => {
       native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
         callback(null, incomplete, ""),
       );
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      expect(yield* guard(yield* sweep.paths)).toBe(
         "A process is using a file or directory in the worktree.",
       );
       expect(native.execFile).toHaveBeenCalledTimes(2);
-    }),
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({ processCaptures: 2 });
+    }).pipe(Effect.withSpan("sweep fixture")),
   );
   it.effect("does not retry a complete first capture", () =>
     Effect.gen(function* () {

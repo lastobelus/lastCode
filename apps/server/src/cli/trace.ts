@@ -67,7 +67,7 @@ export function makeTraceSpanSummary(sinceMs = -Infinity) {
     }
     if (endMs < sinceMs) return;
 
-    cleanupInventory.add(span.name, span.attributes?.[STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]);
+    cleanupInventory.add(span.name, endMs, span.attributes?.[STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]);
     spanCount += 1;
     firstEndMs = Math.min(firstEndMs, endMs);
     lastEndMs = Math.max(lastEndMs, endMs);
@@ -160,7 +160,7 @@ export function formatTraceSummary(
     ...(summary.spans.length > limit
       ? ["", `${summary.spans.length - limit} more span names. Use --limit to show more.`]
       : []),
-    ...formatStorageCleanupInventory(summary.cleanupInventory, formatMs),
+    ...formatStorageCleanupInventory(summary.cleanupInventory, formatIso, formatMs),
   ].join("\n");
 }
 
