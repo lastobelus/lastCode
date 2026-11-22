@@ -1,7 +1,10 @@
 import { assert, it } from "@effect/vitest";
 
 import { formatTraceSummary, makeTraceSpanSummary } from "../cli/trace.ts";
-import { STORAGE_CLEANUP_INVENTORY_ATTRIBUTE } from "./StorageCleanupInventoryTrace.ts";
+import {
+  emptyStorageCleanupInventoryTrace,
+  STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+} from "./StorageCleanupInventoryTrace.ts";
 
 it("summarizes measured cleanup inventory without dropping older sweep spans", () => {
   const summarizer = makeTraceSpanSummary();
@@ -26,6 +29,7 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
   const measurements = [
     metrics,
     { ...metrics, processCaptures: 2, pathResolutions: 123 },
+    emptyStorageCleanupInventoryTrace(),
     "malformed",
   ];
   for (const [index, value] of measurements.entries()) {
@@ -38,7 +42,7 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
     );
   }
   const summary = summarizer.finish();
-  assert.strictEqual(summary.spanCount, 4);
+  assert.strictEqual(summary.spanCount, 5);
   assert.strictEqual(summary.skippedLineCount, 0);
   assert.deepStrictEqual(
     summary.cleanupInventory.map(({ endMs, inventory }) => [
@@ -47,12 +51,14 @@ it("summarizes measured cleanup inventory without dropping older sweep spans", (
       inventory.pathResolutions,
     ]),
     [
+      [3000, 0, 0],
       [2000, 2, 123],
       [1000, 1, 100],
     ],
   );
   const formatted = formatTraceSummary(summary, 25);
   assert.include(formatted, "Storage cleanup usage inventory by sweep");
+  assert.include(formatted, "Native capture attempts  0 in 0ms");
   assert.include(formatted, "Native capture attempts  2 in 12ms");
   assert.include(formatted, "Native capture attempts  1 in 12ms");
   assert.include(formatted, "Path resolutions         123 for 90 distinct paths in 1.6s");

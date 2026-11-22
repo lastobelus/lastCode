@@ -992,6 +992,16 @@ describe("Observation-scoped target evidence", () => {
       const libraries = sweepInventory();
       targetFixture().set("/system/example", objectStat(51n, true));
       const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        processCaptures: 0,
+        processCaptureMs: 0,
+        pathResolutions: 0,
+        treeWalks: 0,
+      });
+      expect(native.execFile).not.toHaveBeenCalled();
       const installs = ["one", "two", "three", "four"].map(
         (name) => `/workspace/${name}/node_modules`,
       );
@@ -1092,6 +1102,35 @@ describe("Observation-scoped target evidence", () => {
       });
       expect(yield* prove(paths, sweep.targets)).toBe(true);
       expect(native.realpath.mock.calls.filter(([path]) => path === changed)).toHaveLength(2);
+    }),
+  );
+
+  it.effect("rechecks earlier cached paths before accepting a later direct match", () =>
+    Effect.gen(function* () {
+      const firstPath = "/system/example/unproven";
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          `f1\0tREG\0n${firstPath}\0\n` +
+          [2, 3, 4]
+            .map((id) => `f${id}\0tREG\0D0x12\0i${id}\0n/system/example/library-${id}\0\n`)
+            .join("") +
+          `f9\0tREG\0n${root}/dist/output.js\0\n`,
+      );
+      const stats = targetFixture();
+      stats.set("/system/example", objectStat(51n, true));
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+      stats.set("/system/example", objectStat(51n, true, 18n, 2n));
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === firstPath) throw missing();
+        return path;
+      });
+      expect(
+        yield* WorktreeConsumers.worktreeConsumerReason(root, paths, sweep.targets).pipe(
+          Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+        ),
+      ).toBe(objectProofReason);
     }),
   );
 

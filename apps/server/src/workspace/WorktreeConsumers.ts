@@ -534,11 +534,9 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
     resolvedPaths: new Set(),
     measurement,
   };
-  let inventoryStarted = false;
   const paths = yield* Effect.cached(
     Effect.suspend(() => {
       const start = performance.now();
-      inventoryStarted = true;
       return capture.pipe(
         Effect.provideService(ProcessCaptureCounter, () => {
           measurement.processCaptures++;
@@ -556,12 +554,10 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
     paths,
     targets,
     annotate: Effect.suspend(() =>
-      !inventoryStarted
-        ? Effect.void
-        : Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
-            ...measurement,
-            uniquePaths: sweep.resolvedPaths.size,
-          }),
+      Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
+        ...measurement,
+        uniquePaths: sweep.resolvedPaths.size,
+      }),
     ),
   };
 });
@@ -880,7 +876,6 @@ export const processPathsUseRoot = async (
       (value) => ({ value }),
       (error: unknown) => ({ error }),
     );
-    if ("value" in first && first.value.matched && !completeProof) return true;
     if (!(await resolver.isStillValid())) {
       evidence = await scan(makeProcessPathResolver(paths, sweep, false).resolve);
     } else {
