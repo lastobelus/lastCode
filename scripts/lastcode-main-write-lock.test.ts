@@ -363,6 +363,7 @@ JS`,
       vi.stubEnv("FIXTURE_REAL_GIT", realGit);
       vi.stubEnv("PATH", `${bin}${NodePath.delimiter}${process.env.PATH ?? ""}`);
       const hooks = NodePath.join(f.first, ".git", "hooks");
+      f.git(f.first, ["config", "core.hooksPath", hooks]);
       NodeFS.copyFileSync(
         NodePath.join(import.meta.dirname, "..", ".vite-hooks", "pre-push"),
         NodePath.join(hooks, "lastcode-pre-push"),
