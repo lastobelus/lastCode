@@ -697,6 +697,7 @@ export function filterSidebarV2VisibleThreads<
   threads: readonly T[],
   scopedProjectKeys: ReadonlySet<string> | null,
   delegatedUnderParent: ReadonlySet<string>,
+  annotationPendingChildThreadKeys?: ReadonlySet<string>,
 ): T[] {
   const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   return threads.filter(
@@ -705,6 +706,9 @@ export function filterSidebarV2VisibleThreads<
       (threadShellIsCleanupRecovery(thread) ||
         archiveRecoveryRows.has(thread) ||
         (thread.lineage.independent === true && thread.lineage.sideChat !== true) ||
+        annotationPendingChildThreadKeys?.has(
+          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+        ) ||
         !isShownUnderParent(
           { environmentId: thread.environmentId, threadId: thread.id },
           thread.lineage,

@@ -6,6 +6,10 @@ import { scopeThreadRef, scopedThreadKey } from "../environment/scoped.ts";
 import type { EnvironmentThreadShell } from "./models.ts";
 
 const NO_ANNOTATION_HIDDEN_THREADS: ReadonlySet<string> = new Set();
+const EMPTY_VISIBILITY = {
+  hiddenThreadKeys: NO_ANNOTATION_HIDDEN_THREADS,
+  pendingChildThreadKeys: NO_ANNOTATION_HIDDEN_THREADS,
+};
 
 type AnnotationVisibilityThread = Pick<
   EnvironmentThreadShell,
@@ -19,11 +23,13 @@ type AnnotationVisibilityThread = Pick<
   | "hasPendingUserInput"
 >;
 
-export function getLastCodeAnnotationHiddenThreadKeys(
-  threads: readonly AnnotationVisibilityThread[],
-): ReadonlySet<string> {
+function needsAnswer(thread: AnnotationVisibilityThread) {
+  return thread.hasPendingApprovals || thread.hasPendingUserInput;
+}
+
+export function getLastCodeAnnotationVisibility(threads: readonly AnnotationVisibilityThread[]) {
   const remaining = threads.filter((thread) => isThreadAnnotationHidden(thread.annotation));
-  if (remaining.length === 0) return NO_ANNOTATION_HIDDEN_THREADS;
+  if (remaining.length === 0) return EMPTY_VISIBILITY;
 
   const childrenByOwner = new Map<string, AnnotationVisibilityThread[]>();
   for (const thread of threads) {
@@ -37,25 +43,48 @@ export function getLastCodeAnnotationHiddenThreadKeys(
 
   const seen = new Set<string>();
   const hidden = new Set<string>();
+  const pendingChildren = new Set<string>();
   for (const thread of remaining) {
     const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
     if (seen.has(key)) continue;
     seen.add(key);
-    if (!thread.hasPendingApprovals && !thread.hasPendingUserInput) hidden.add(key);
+    const hiddenByAnnotation = !needsAnswer(thread);
+    if (hiddenByAnnotation) hidden.add(key);
     const children = childrenByOwner.get(key);
-    if (children) remaining.push(...children);
+    if (!children) continue;
+    for (const child of children) {
+      remaining.push(child);
+      // Some children normally appear inside their parent's row.
+      if (hiddenByAnnotation && needsAnswer(child)) {
+        pendingChildren.add(scopedThreadKey(scopeThreadRef(child.environmentId, child.id)));
+      }
+    }
   }
-  return hidden;
+  return { hiddenThreadKeys: hidden, pendingChildThreadKeys: pendingChildren };
 }
 
-export function createLastCodeAnnotationHiddenThreadKeysAtom(
+function reuseThreadKeys(previous: ReadonlySet<string>, next: ReadonlySet<string>) {
+  return previous.size === next.size && [...next].every((key) => previous.has(key))
+    ? previous
+    : next;
+}
+
+export function createLastCodeAnnotationVisibilityAtom(
   threads: Atom.Atom<readonly EnvironmentThreadShell[]>,
 ) {
-  let previous = NO_ANNOTATION_HIDDEN_THREADS;
+  let previous = EMPTY_VISIBILITY;
   return Atom.make((get) => {
-    const next = getLastCodeAnnotationHiddenThreadKeys(get(threads));
-    if (next.size !== previous.size || ![...next].every((key) => previous.has(key)))
-      previous = next;
+    const next = getLastCodeAnnotationVisibility(get(threads));
+    const hiddenThreadKeys = reuseThreadKeys(previous.hiddenThreadKeys, next.hiddenThreadKeys);
+    const pendingChildThreadKeys = reuseThreadKeys(
+      previous.pendingChildThreadKeys,
+      next.pendingChildThreadKeys,
+    );
+    if (
+      hiddenThreadKeys !== previous.hiddenThreadKeys ||
+      pendingChildThreadKeys !== previous.pendingChildThreadKeys
+    )
+      previous = { hiddenThreadKeys, pendingChildThreadKeys };
     return previous;
-  }).pipe(Atom.withLabel("lastcode-annotation-hidden-thread-keys"));
+  }).pipe(Atom.withLabel("lastcode-annotation-visibility"));
 }
