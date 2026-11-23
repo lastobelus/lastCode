@@ -60,6 +60,8 @@ function shellTokens(command: string): ShellToken[] | undefined {
 
 const basename = (command: string | undefined) => command?.split("/").at(-1);
 const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+const isScriptPath = (value: string | undefined, path: string) =>
+  value === path || value?.endsWith(`/${path}`) === true;
 
 function skipEnvironment(words: string[]): void {
   if (basename(words[0]) === "env") {
@@ -87,11 +89,6 @@ export function isLastCodeWrappedCommand(command: string): boolean {
         return false;
     }
     skipEnvironment(words);
-    if (["sh", "bash", "zsh"].includes(basename(words[0]) ?? "")) {
-      if (words.length !== 3 || !/^-(?:c|lc|cl)$/u.test(words[1] ?? "")) return false;
-      command = words[2]!;
-      continue;
-    }
     if (basename(words[0]) === "mise") {
       if (
         words[1] !== "exec" ||
@@ -106,8 +103,14 @@ export function isLastCodeWrappedCommand(command: string): boolean {
       words.splice(0, words[2] === "--" ? 3 : 2);
     }
     const [node, script, ...args] = words;
-    const isScriptPath = (value: string | undefined, path: string) =>
-      value === path || value?.endsWith(`/${path}`) === true;
+    if (["sh", "bash", "zsh"].includes(basename(node) ?? "")) {
+      if (isScriptPath(script, "scripts/lc-run")) {
+        return parseLastCodeWrappedAction(args) !== undefined;
+      }
+      if (args.length !== 1 || !/^-(?:c|lc|cl)$/u.test(script ?? "")) return false;
+      command = args[0]!;
+      continue;
+    }
     if (isScriptPath(node, "scripts/lc-run")) {
       return parseLastCodeWrappedAction(words.slice(1)) !== undefined;
     }
@@ -131,6 +134,7 @@ export function lastCodeWrappedCommandEnvironment(enabled: boolean): Record<stri
 export function withLastCodeClaudeBackgroundLimit(
   settings: ClaudeSdkSettings | undefined,
   enabled: boolean,
+  configuredTimeout: string | undefined,
 ): ClaudeSdkSettings | undefined {
   if (!enabled) return settings;
   return {
@@ -139,7 +143,7 @@ export function withLastCodeClaudeBackgroundLimit(
       ...settings?.env,
       ...lastCodeWrappedCommandEnvironment(true),
       // Claude uses its foreground default as the background default when it exceeds 30 minutes.
-      BASH_DEFAULT_TIMEOUT_MS: "7200000",
+      ...(configuredTimeout === undefined ? { BASH_DEFAULT_TIMEOUT_MS: "7200000" } : {}),
     },
   };
 }

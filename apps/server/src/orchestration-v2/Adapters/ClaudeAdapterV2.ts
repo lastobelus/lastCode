@@ -14110,6 +14110,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ? undefined
               : claudeSdkLaunchArgSettings(launchArgSettings),
             backgroundWaitEnabled,
+            backgroundWaitEnabled
+              ? yield* resolveClaudeEnv(
+                  turnInput.runtimePolicy.cwd,
+                  launchArgSettings,
+                  "BASH_DEFAULT_TIMEOUT_MS",
+                )
+              : undefined,
           );
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,

@@ -18554,11 +18554,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     { enabled: false, promoted: true },
     { enabled: true, promoted: false },
     { enabled: true, promoted: true },
+    { enabled: true, promoted: false, configuredTimeout: "10800000" },
   ])(
-    "automatically awaits a wrapped Claude command (enabled=$enabled promoted=$promoted)",
-    ({ enabled, promoted }) =>
+    "automatically awaits a wrapped Claude command (enabled=$enabled promoted=$promoted configuredTimeout=$configuredTimeout)",
+    ({ enabled, promoted, configuredTimeout }) =>
       Effect.gen(function* () {
-        const harness = yield* makeWakeHarness;
+        const harness = yield* makeWakeHarnessWithOptions(
+          configuredTimeout === undefined
+            ? undefined
+            : { environment: { BASH_DEFAULT_TIMEOUT_MS: configuredTimeout } },
+        );
         const command = "CI=1 ./scripts/lc-run ci --quick";
         const launch = makeClaudeTestTurnInput({
           threadId: harness.threadId,
@@ -18571,7 +18576,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* harness.runtime.startTurn(launch);
         const settings = harness.getOpenedOptions()?.settings;
         const env = typeof settings === "object" ? settings.env : undefined;
-        assert.equal(env?.BASH_DEFAULT_TIMEOUT_MS, enabled ? "7200000" : undefined);
+        assert.equal(
+          env?.BASH_DEFAULT_TIMEOUT_MS,
+          enabled && configuredTimeout === undefined ? "7200000" : undefined,
+        );
+        assert.equal(harness.getOpenedOptions()?.env?.BASH_DEFAULT_TIMEOUT_MS, configuredTimeout);
         assert.equal(env?.LASTCODE_BACKGROUND_WAIT, enabled ? "1" : undefined);
         yield* harness.offerAndWait(
           claudeSdkFrame({

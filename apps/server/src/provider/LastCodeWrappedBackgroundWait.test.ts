@@ -8,6 +8,9 @@ const tag = "lastcode/checkpoint/v0.1.0-nightly.20261122.1";
 describe("wrapped LastCode commands", () => {
   it.each([
     "./scripts/lc-run prepare",
+    "sh ./scripts/lc-run prepare",
+    "pnpm exec sh ./scripts/lc-run prepare",
+    "/bin/zsh -lc 'cd /worktree && /bin/sh ./scripts/lc-run ci --quick'",
     "node scripts/lastcode-run.ts ci --quick",
     "node ./scripts/lastcode-run.ts ci --full",
     "pnpm exec ./scripts/lc-run wait-checkpoint",
@@ -23,6 +26,7 @@ describe("wrapped LastCode commands", () => {
 
   it.each([
     "vp run dev",
+    "sh ./scripts/unrelated.sh ./scripts/lc-run prepare",
     "node scripts/service.ts --watch",
     "./scripts/lc-run watch",
     "./scripts/lc-run package",
