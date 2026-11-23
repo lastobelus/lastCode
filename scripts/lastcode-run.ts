@@ -12,7 +12,7 @@ import {
 } from "../packages/shared/src/lastcodeWrappedCommands.ts";
 
 const WAIT_INSTRUCTION =
-  "[lc-run] If you are the main agent in this LastCode thread and the shell reports this command is running in the background, end your turn. LastCode will wake this thread with the result. Do not poll. If you are running as a native subagent inside another agent's turn, collect the result before you return.";
+  "[lc-run] If you are this LastCode thread's main agent, launched ./scripts/lc-run by itself (optionally after one cd ... &&), and the shell reports it running in the background, end your turn. LastCode will wake the thread with the result. Do not poll. For other shell constructs and native subagent runs, collect the result before returning.";
 const USAGE =
   "Usage: ./scripts/lc-run prepare | prepare-checkpoint --upstream <commit> | ci --quick | ci --full | wait-checkpoint | package --tag <tag>";
 const REPORT_PREFIX = "[lastcode-action] Result: ";
