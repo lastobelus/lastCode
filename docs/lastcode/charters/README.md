@@ -22,11 +22,11 @@ A charter's `paths` are the main code paths behind the feature. They are hints a
 
 A tier of `—` means the area has no charter yet and follows lean upstream.
 
-| Area | Tier | Sub-features |
-| --- | --- | --- |
-| `agent-orchestration`: Agents directing agents | — | Delegated tasks and child threads · Thread tools for agents · Waiting without polling · Scheduled tasks · PR and issue follow-through |
-| `thread-organization`: Keeping many threads manageable | — | Sidebar families and conveniences · Pin, snooze and settle · Thread annotations · Archiving thread families |
-| `seeing-the-work`: Seeing what agents build | — | Background browser for agent QA · Preview hosting and handoff links · Browser profiles, import and annotations · Simulator and emulator devices |
-| `machines-and-checkouts`: Machines and worktrees | — | Linked environments · Pausing and resuming an environment · Worktree lifecycle (suspend, hand off, restore) · Storage cleanup and usage limits |
-| `in-a-thread`: Working inside a thread | — | Composer and prompt snippets · Keyboard scrolling and focus · Terminal · Provider adjustments |
-| `running-lastcode`: Running my own LastCode | — | Local nightly updates and install · Checkpoints and carry replay · Local CI and PR gates · Setup and settings import · Appearance and branding |
+| Area                                                   | Tier | Sub-features                                                                                                                                    |
+| ------------------------------------------------------ | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent-orchestration`: Agents directing agents         | —    | Delegated tasks and child threads · Thread tools for agents · Waiting without polling · Scheduled tasks · PR and issue follow-through           |
+| `thread-organization`: Keeping many threads manageable | —    | Sidebar families and conveniences · Pin, snooze and settle · Thread annotations · Archiving thread families                                     |
+| `seeing-the-work`: Seeing what agents build            | —    | Background browser for agent QA · Preview hosting and handoff links · Browser profiles, import and annotations · Simulator and emulator devices |
+| `machines-and-checkouts`: Machines and worktrees       | —    | Linked environments · Pausing and resuming an environment · Worktree lifecycle (suspend, hand off, restore) · Storage cleanup and usage limits  |
+| `in-a-thread`: Working inside a thread                 | —    | Composer and prompt snippets · Keyboard scrolling and focus · Terminal · Provider adjustments                                                   |
+| `running-lastcode`: Running my own LastCode            | —    | Local nightly updates and install · Checkpoints and carry replay · Local CI and PR gates · Setup and settings import · Appearance and branding  |
