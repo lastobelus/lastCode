@@ -128,6 +128,7 @@ export interface ThreadLaunchInput {
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
   /** The workflow run this thread is an agent step of. */
   readonly workflowRun?: OrchestrationV2WorkflowOrigin;
+  readonly creatorThreadId?: ThreadId;
 }
 
 type PreparationInput = Pick<
@@ -1539,6 +1540,9 @@ const make = Effect.gen(function* () {
                 ...(initialMessage === undefined
                   ? {}
                   : { initialMessage: { ...initialMessage, workspaceStrategy } }),
+                ...(input.creatorThreadId === undefined
+                  ? {}
+                  : { creatorThreadId: input.creatorThreadId }),
               };
         const claimOperation =
           input.reuseExistingThread === true ? "update-thread" : "create-thread";

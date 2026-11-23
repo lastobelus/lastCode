@@ -86,6 +86,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Button } from "../ui/button";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { ConnectedEnvironmentIcon } from "../../environmentIcons";
 import { type ServerClientSessionRecord } from "~/environments/primary";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { useUiStateStore } from "~/uiStateStore";
@@ -1301,13 +1302,24 @@ function ConnectionsSettingsContent({
               (desktopBridge ? gt("This machine") : gt("Primary environment"))
             }
             icon={
-              <EnvironmentMachineIcon
-                aria-hidden
-                kind={
-                  accessServerConfig ? resolveEnvironmentMachineKind(accessServerConfig) : "desktop"
-                }
-                className="size-4"
-              />
+              accessEnvironmentId !== null ? (
+                <ConnectedEnvironmentIcon
+                  environmentId={accessEnvironmentId}
+                  context="settings"
+                  aria-hidden
+                  className="size-4"
+                />
+              ) : (
+                <EnvironmentMachineIcon
+                  aria-hidden
+                  kind={
+                    accessServerConfig
+                      ? resolveEnvironmentMachineKind(accessServerConfig)
+                      : "desktop"
+                  }
+                  className="size-4"
+                />
+              )
             }
             headerAction={
               accessEnvironmentId !== null ? (
