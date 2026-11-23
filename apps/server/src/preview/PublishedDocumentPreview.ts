@@ -1,4 +1,7 @@
 import {
+  type AssetAccessError,
+  type AssetCreateUrlInput,
+  type AssetCreateUrlResult,
   PreviewAutomationPublishedDocumentError,
   type PreviewAutomationError,
   type PreviewAutomationMcpOpenInput,
@@ -40,7 +43,7 @@ export class PublishedDocumentPreview extends Context.Service<
   }
 >()("t3/preview/PublishedDocumentPreview") {}
 
-const make = Effect.gen(function* () {
+const assetIssuer = Effect.gen(function* () {
   // Asset access is the existing publication resolver and signer. Capture only
   // application services here; the calling thread is read afresh on every open.
   const assets = Context.make(FileSystem.FileSystem, yield* FileSystem.FileSystem).pipe(
@@ -70,6 +73,16 @@ const make = Effect.gen(function* () {
       yield* NativeAppIconResolver.NativeAppIconResolver,
     ),
   );
+  return (input: AssetCreateUrlInput) =>
+    AssetAccess.issueAssetUrl(input).pipe(Effect.provide(assets));
+});
+
+// Keep preview routing independent of asset resolution's application-service graph.
+export const make = Effect.fn("PublishedDocumentPreview.make")(function* (
+  issueAssetUrl: (
+    input: AssetCreateUrlInput,
+  ) => Effect.Effect<AssetCreateUrlResult, AssetAccessError>,
+) {
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const server = yield* HttpServer.HttpServer;
 
@@ -95,7 +108,7 @@ const make = Effect.gen(function* () {
     const boundHost = address.address.toString();
     const hostname = boundHost === "0.0.0.0" ? "127.0.0.1" : boundHost === "::" ? "::1" : boundHost;
     const host = hostname.includes(":") ? `[${hostname}]` : hostname;
-    const asset = yield* AssetAccess.issueAssetUrl({
+    const asset = yield* issueAssetUrl({
       resource: {
         _tag: "media-file",
         threadId: scope.thread.threadId,
@@ -103,7 +116,6 @@ const make = Effect.gen(function* () {
         linkedThreadFile: true,
       },
     }).pipe(
-      Effect.provide(assets),
       Effect.mapError(
         (cause) =>
           new PreviewAutomationPublishedDocumentError({
@@ -130,4 +142,4 @@ const make = Effect.gen(function* () {
   return PublishedDocumentPreview.of({ open });
 });
 
-export const layer = Layer.effect(PublishedDocumentPreview, make);
+export const layer = Layer.effect(PublishedDocumentPreview, assetIssuer.pipe(Effect.flatMap(make)));
