@@ -49,7 +49,7 @@ it("prints background guidance before the first step only in opted-in sessions",
   expect(fast.stdout).toBe("Installing\n[lc-run] prepare: success (exit 0)\nInstalled\n");
   expect(hinted.status).toBe(0);
   expect(hinted.stdout).toBe(
-    "[lc-run] If you are this LastCode thread's main agent, ran ./scripts/lc-run as a simple command, and the shell reports it running in the background, end your turn. LastCode will wake the thread with the result. Do not poll. You may prefix the command with cd <literal path> &&, with no cd options or shell expansion. For other shell constructs and native subagent runs, collect the result before returning.\n" +
+    "[lc-run] If you're this thread's main agent and the shell backgrounds a simple ./scripts/lc-run command, LastCode already registered the wake. End your turn without calling a tool. A literal cd <path> && prefix is fine without options or expansion. For other shell constructs or native subagents, collect the result.\n" +
       fast.stdout,
   );
 });
