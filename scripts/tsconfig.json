@@ -14,6 +14,7 @@
     "../packages/contracts/src/lastcodePullRequestWatchSettings.ts",
     "../packages/shared/src/dependencyActivity.ts",
     "../packages/shared/src/generatedBuildOwnership.ts",
+    "../packages/shared/src/lastcodeWrappedCommands.ts",
     "../packages/shared/src/nativeFileSystem.ts"
   ]
 }

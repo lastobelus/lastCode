@@ -299,6 +299,10 @@
       "types": "./src/paletteSearch.ts",
       "import": "./src/paletteSearch.ts"
     },
+    "./lastcodeWrappedCommands": {
+      "types": "./src/lastcodeWrappedCommands.ts",
+      "import": "./src/lastcodeWrappedCommands.ts"
+    },
     "./lastcodeThreadMentionSearch": {
       "types": "./src/lastcodeThreadMentionSearch.ts",
       "import": "./src/lastcodeThreadMentionSearch.ts"
