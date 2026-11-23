@@ -6,18 +6,15 @@ import {
   parseLastCodeWrappedAction,
 } from "@t3tools/shared/lastcodeWrappedCommands";
 
-type ShellToken = string | { readonly operator: "&&" };
-
-const shellAnd = { operator: "&&" } as const;
-
 // Only accept simple literal commands. Quoted operators are arguments, and shell expansions,
-// substitutions, redirects, pipes and extra commands are outside the wrapper's launch syntax.
-function shellTokens(command: string): ShellToken[] | undefined {
-  const tokens: ShellToken[] = [];
+// substitutions, redirects and pipes are outside the wrapper's launch syntax.
+function shellSteps(command: string): string[][] | undefined {
+  const steps: string[][] = [];
+  let words: string[] = [];
   let word: string | undefined;
   let quote: "'" | '"' | undefined;
   const flush = () => {
-    if (word !== undefined) tokens.push(word);
+    if (word !== undefined) words.push(word);
     word = undefined;
   };
   for (let index = 0; index < command.length; index++) {
@@ -40,12 +37,14 @@ function shellTokens(command: string): ShellToken[] | undefined {
       word ??= "";
     } else if (character === " " || character === "\t") {
       flush();
-    } else if (character === "&" && command[index + 1] === "&") {
+    } else if (character === ";" || (character === "&" && command[index + 1] === "&")) {
       flush();
-      tokens.push(shellAnd);
-      index++;
+      if (words.length === 0) return undefined;
+      steps.push(words);
+      words = [];
+      if (character === "&") index++;
     } else if (
-      ";|&<>\n\r(){}*?[]".includes(character) ||
+      "|&<>\n\r(){}*?[]".includes(character) ||
       (word === undefined && character === "#")
     ) {
       return undefined;
@@ -55,7 +54,7 @@ function shellTokens(command: string): ShellToken[] | undefined {
   }
   if (quote !== undefined) return undefined;
   flush();
-  return tokens;
+  return words.length === 0 ? undefined : [...steps, words];
 }
 
 const basename = (command: string | undefined) => command?.split("/").at(-1);
@@ -71,23 +70,60 @@ function skipEnvironment(words: string[]): void {
   while (words[0] !== undefined && assignment.test(words[0])) words.shift();
 }
 
+const wrapperLauncher = "scripts/lc-run";
+const shellLaunchers = new Set(["sh", "bash", "zsh"]);
+const opaquePrefixCommands = new Set([
+  "!",
+  ".",
+  "alias",
+  "case",
+  "coproc",
+  "do",
+  "done",
+  "elif",
+  "else",
+  "esac",
+  "eval",
+  "exec",
+  "fi",
+  "for",
+  "function",
+  "if",
+  "select",
+  "source",
+  "then",
+  "time",
+  "trap",
+  "until",
+  "while",
+  "ash",
+  "csh",
+  "dash",
+  "fish",
+  "ksh",
+  "tcsh",
+]);
+const wrapperInspectionCommands = new Set(["ls", "stat", "test", "echo", "printf", "file", "cat"]);
+
+function isSimplePrefix(words: string[]): boolean {
+  const invocation = [...words];
+  skipEnvironment(invocation);
+  const program = basename(invocation[0]);
+  if (!program || shellLaunchers.has(program) || opaquePrefixCommands.has(program)) return false;
+  // A file inspection can name the launcher without executing it. Otherwise reject prefix steps
+  // that name the wrapper, including invocations through an intermediary such as xargs or node.
+  return (
+    wrapperInspectionCommands.has(program) ||
+    !words.some((word) => word.includes(wrapperLauncher) || word.includes(LASTCODE_WRAPPED_COMMAND))
+  );
+}
+
 export function isLastCodeWrappedCommand(command: string): boolean {
   // Codex may report up to a couple of nested shell invocations.
   for (let depth = 0; depth < 4; depth++) {
-    const tokens = shellTokens(command.trim());
-    if (tokens === undefined) return false;
-    const parts = tokens.indexOf(shellAnd);
-    const words = (parts === -1 ? tokens : tokens.slice(parts + 1)).flatMap((token) =>
-      typeof token === "string" ? [token] : [],
-    );
-    if (parts !== -1) {
-      const prefix = tokens.slice(0, parts);
-      if (
-        !(prefix[0] === "cd" && (parts === 2 || (parts === 3 && prefix[1] === "--"))) ||
-        tokens.lastIndexOf(shellAnd) !== parts
-      )
-        return false;
-    }
+    const steps = shellSteps(command.trim());
+    if (steps === undefined || !steps.slice(0, -1).every(isSimplePrefix)) return false;
+    const words = steps.at(-1)!;
     skipEnvironment(words);
     if (basename(words[0]) === "mise") {
       if (
@@ -103,15 +139,15 @@ export function isLastCodeWrappedCommand(command: string): boolean {
       words.splice(0, words[2] === "--" ? 3 : 2);
     }
     const [node, script, ...args] = words;
-    if (["sh", "bash", "zsh"].includes(basename(node) ?? "")) {
-      if (isScriptPath(script, "scripts/lc-run")) {
+    if (shellLaunchers.has(basename(node) ?? "")) {
+      if (isScriptPath(script, wrapperLauncher)) {
         return parseLastCodeWrappedAction(args) !== undefined;
       }
       if (args.length !== 1 || !/^-(?:c|lc|cl)$/u.test(script ?? "")) return false;
       command = args[0]!;
       continue;
     }
-    if (isScriptPath(node, "scripts/lc-run")) {
+    if (isScriptPath(node, wrapperLauncher)) {
       return parseLastCodeWrappedAction(words.slice(1)) !== undefined;
     }
     return (
