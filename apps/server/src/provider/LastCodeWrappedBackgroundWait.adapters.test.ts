@@ -151,6 +151,8 @@ const startTurn = Effect.fnUntraced(function* (
 });
 
 const codexCommand = "/bin/zsh -lc 'cd /workspace && ./scripts/lc-run prepare'";
+const failingChain = "ls missing-file && ./scripts/lc-run prepare";
+const failingPrefixOutput = "ls: missing-file: No such file or directory";
 const codexTaskId = "call-wrapped-codex";
 const codexProcessId = "4242";
 
@@ -174,6 +176,8 @@ const codexTranscript = Effect.fnUntraced(function* (completion: CodexCommandCom
   }
   const nativeThreadId = terminal.frame.params.threadId;
   const nativeTurnId = terminal.frame.params.turn.id;
+  const command = completion === "yielded" ? failingChain : codexCommand;
+  const output = completion === "yielded" ? failingPrefixOutput : "Wrapped command finished";
   const commandFrame = (completed: boolean): CodexReplay.CodexAppServerReplayEntry => ({
     type: "emit_inbound",
     label: completed ? "wrapped command completed" : "wrapped command started",
@@ -185,14 +189,14 @@ const codexTranscript = Effect.fnUntraced(function* (completion: CodexCommandCom
         item: {
           type: "commandExecution",
           id: codexTaskId,
-          command: codexCommand,
+          command,
           cwd: "/workspace",
           processId: codexProcessId,
           source: "unifiedExecStartup",
           status: completed ? "completed" : "inProgress",
-          commandActions: [{ type: "unknown", command: codexCommand }],
-          aggregatedOutput: completed ? "Wrapped command finished" : null,
-          exitCode: completed ? 3 : null,
+          commandActions: [{ type: "unknown", command }],
+          aggregatedOutput: completed ? output : null,
+          exitCode: completed ? (completion === "yielded" ? 1 : 3) : null,
           durationMs: null,
         },
       },
@@ -314,7 +318,7 @@ it.effect.each([
               {
                 taskId: codexTaskId,
                 kind: "command",
-                description: codexCommand,
+                description: completion === "yielded" ? failingChain : codexCommand,
                 awaited: true,
                 runId: turn.runId,
               },
@@ -369,7 +373,14 @@ it.effect.each([
       assert.deepEqual(seen.roster()?.providerThread.pendingBackgroundTasks ?? [], []);
       if (!enabled) return;
 
-      assert.include(wake.detail, "Wrapped command finished");
+      assert.include(
+        wake.detail,
+        completion === "yielded" ? failingPrefixOutput : "Wrapped command finished",
+      );
+      assert.include(
+        wake.detail,
+        `Background command completed (exit ${completion === "yielded" ? 1 : 3})`,
+      );
       assert.equal(wake.notification?.outcome, "failed");
       assert.isTrue(seen.roster()?.backgroundRosterOnly);
       assert.deepEqual(seen.roster()?.providerThread.owedBackgroundResults, [owed]);
