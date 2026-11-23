@@ -20,10 +20,9 @@ vi.mock(import("../../state/entities"), async (original) => ({
   ...(await original()),
   readEnvironmentSupportsThreadAnnotations: () => mocks.supported,
 }));
-vi.mock("../../state/threads", () => ({
-  environmentThreadDetails: {},
-  environmentThreadShells: {},
-  threadEnvironment: { upsertAnnotation: "upsert", resolveAnnotation: "resolve" },
+vi.mock(import("../../state/threads"), async (original) => ({
+  ...(await original()),
+  threadEnvironment: { upsertAnnotation: "upsert", resolveAnnotation: "resolve" } as never,
 }));
 vi.mock("../../state/use-orchestration-command", () => ({
   useOrchestrationCommand: (command: string) =>

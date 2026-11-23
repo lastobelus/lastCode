@@ -37,12 +37,8 @@ import {
   getPendingThreadOrder,
   threadDropBusyAtom,
 } from "../../state/thread-order";
-import {
-  createPendingThreadOrder,
-  createThreadMovePlanner,
-  threadDropLifecycle,
-} from "../threads/threadOrder";
-import { getThreadListV2OrderedSection } from "../threads/threadListV2";
+import { createPendingThreadOrder, threadDropLifecycle } from "../threads/threadOrder";
+import { planLastCodeAnnotationThreadMove } from "../threads/lastCodeAnnotationThreadLists";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
 function environmentConfigLoaded(environmentId: EnvironmentThreadShell["environmentId"]) {
@@ -257,7 +253,7 @@ function confirmThreadDeletion(
   });
 }
 
-export function useThreadListActions(): {
+export function useThreadListActions(retainedThreadKey?: string | null): {
   readonly archiveThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly confirmDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly settleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
@@ -741,27 +737,24 @@ export function useThreadListActions(): {
       );
       return false;
     }
-    const ordered = getThreadListV2OrderedSection({
+    const movedId = scopedThreadKey(thread.environmentId, thread.id);
+    const plan = planLastCodeAnnotationThreadMove({
       threads: shells,
       section,
       now: new Date().toISOString(),
       queuedThreadKeys: appAtomRegistry.get(queuedThreadKeysAtom),
       settlementEnvironmentIds: new Set(configs.keys()),
       snoozeEnvironmentIds: new Set(configs.keys()),
-    });
-    const assignments = createThreadMovePlanner({
-      allThreads: shells,
-      ordered,
-      section,
+      retainedThreadKey,
       reorderableEnvironmentIds: new Set(
         [...configs.keys()].filter((environmentId) => connectedEnvironmentIds.has(environmentId)),
       ),
-    })(scopedThreadKey(thread.environmentId, thread.id), direction);
-    if (assignments === null) return false;
+      movedId,
+      direction,
+    });
+    if (plan === null) return false;
+    const { ordered, assignments, crossSection } = plan;
     const lifecycle = threadDropLifecycle(thread, section, new Date().toISOString());
-    const crossSection = !ordered.some(
-      (row) => row.id === thread.id && row.environmentId === thread.environmentId,
-    );
     const shellByKey = new Map(
       shells.map((shell) => [scopedThreadKey(shell.environmentId, shell.id), shell]),
     );
@@ -778,10 +771,11 @@ export function useThreadListActions(): {
           createPendingThreadOrder({
             section,
             ordered,
-            movedId: scopedThreadKey(thread.environmentId, thread.id),
+            movedId,
             direction,
             assignments,
           }),
+          retainedThreadKey,
         );
     const reorder = section === "pinned" ? reorderPinnedMutation : reorderActiveMutation;
     const moved = await (async () => {

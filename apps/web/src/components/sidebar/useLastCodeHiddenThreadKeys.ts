@@ -1,3 +1,4 @@
+import { isThreadAnnotationHidden } from "@t3tools/shared/threadAnnotation";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useServerConfigs } from "../../state/entities";
 import type { SidebarThreadSummary } from "../../types";
@@ -5,8 +6,7 @@ import { lastcodeSidebarThreadKey } from "../lastcodeSidebarFamilies.logic";
 
 const NO_HIDDEN_THREADS: ReadonlySet<string> = new Set();
 
-/** LastCode has a fallback group for visible children of a hidden owner. */
-export function useLastCodeHiddenThreadKeys(threads: readonly SidebarThreadSummary[]) {
+export function useLastCodeTagHiddenThreadKeys(threads: readonly SidebarThreadSummary[]) {
   const configs = useServerConfigs();
   const tagsByEnvironment = new Map<EnvironmentId, ReadonlySet<string>>();
   for (const [environmentId, config] of configs) {
@@ -23,4 +23,13 @@ export function useLastCodeHiddenThreadKeys(threads: readonly SidebarThreadSumma
       hidden.add(lastcodeSidebarThreadKey(thread));
   }
   return hidden;
+}
+
+/** LastCode has a fallback group for visible children of a hidden owner. */
+export function useLastCodeHiddenThreadKeys(threads: readonly SidebarThreadSummary[]) {
+  const tagHidden = useLastCodeTagHiddenThreadKeys(threads);
+  const annotated = threads.filter((thread) => isThreadAnnotationHidden(thread.annotation));
+  return annotated.length === 0
+    ? tagHidden
+    : new Set([...tagHidden, ...annotated.map(lastcodeSidebarThreadKey)]);
 }

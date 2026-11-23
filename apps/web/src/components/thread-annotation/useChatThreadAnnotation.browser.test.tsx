@@ -1,6 +1,7 @@
 import { act, render as renderUi, fakeTimers } from "../../../test/render";
 import {
   AuthOrchestrationOperateScope,
+  CommandId,
   EnvironmentId,
   ThreadId,
   MessageId,
@@ -22,6 +23,17 @@ const state = vi.hoisted(() => ({
   reopen: vi.fn<(value: unknown) => Promise<AtomCommandResult<void, Error>>>(),
   toast: vi.fn(),
   expandThreadAnnotations: true,
+  hideUntilEnvironments: new Map<string, string>(),
+}));
+vi.mock(import("../../state/entities"), async (original) => ({
+  ...(await original()),
+  useServerConfigs: () =>
+    new Map(
+      [...state.hideUntilEnvironments].map(([id, serverVersion]) => [
+        id,
+        { environment: { serverVersion, capabilities: { threadAnnotationHideUntil: true } } },
+      ]),
+    ) as never,
 }));
 vi.mock(import("../../state/session"), async (original) => ({
   ...(await original()),
@@ -115,6 +127,7 @@ async function setup() {
     command.mockReset().mockResolvedValue(success());
   state.toast.mockReset();
   state.expandThreadAnnotations = true;
+  state.hideUntilEnvironments.clear();
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
   useUiStateStore.setState({ threadAnnotationExpansionById: {} });
   const screen = stack.use(await renderUi(null));
@@ -187,6 +200,52 @@ async function setup() {
 }
 
 describe("chat annotation ownership", () => {
+  it("shows a hidden banner and reveals without submitting its body", async () => {
+    await using fixture = await setup();
+    const serverVersion = "0.1.11-nightly.20261120.4979.1";
+    state.hideUntilEnvironments.set(a.environmentId, serverVersion);
+    state.expandThreadAnnotations = false;
+    const trigger = {
+      id: CommandId.make("armed-trigger"),
+      kind: "checkpoints",
+      count: 1,
+      baselineVersion: serverVersion,
+      seenBuilds: [],
+      hiddenAt: note.updatedAt,
+    } as const;
+    const hidden = {
+      ...note,
+      body: "Generated fallback",
+      bodyGenerated: true as const,
+      hideUntil: trigger,
+    };
+    await fixture.render({ annotation: hidden });
+    expect(fixture.controls.banner?.title).toBe("HIDDEN:");
+    expect(fixture.container.textContent).toContain("until the next checkpoint is installed");
+    expect(fixture.container.textContent).not.toContain("Generated fallback");
+
+    await fixture.click("Show now");
+    expect(state.save).toHaveBeenCalledExactlyOnceWith({
+      environmentId: a.environmentId,
+      input: {
+        threadId: a.threadId,
+        annotationId: note.id,
+        hideUntil: null,
+        expectedHideTriggerId: trigger.id,
+      },
+    });
+
+    const { hideUntil: _hidden, ...visible } = hidden;
+    await fixture.render({
+      annotation: {
+        ...visible,
+        reveal: { by: "manual", at: note.updatedAt, trigger },
+      },
+    });
+    expect(fixture.container.textContent).toContain("Shown manually");
+    expect(fixture.container.textContent).not.toContain("Generated fallback");
+  });
+
   it.each([true, false])(
     "uses expansion setting %s until manually toggled or edited",
     async (enabled) => {

@@ -25,7 +25,14 @@ import {
   WorktreeSuspensionTransitionInput,
 } from "./worktreeSuspension.ts";
 import { SavedWorkspaceDisposition } from "./workspaceLifecycle.ts";
-import { ThreadAnnotation, ThreadWorktreeCleanup } from "./threadMetadata.ts";
+import {
+  AnnotationHideTriggerInput,
+  ThreadAnnotation,
+  ThreadAnnotationBodyInput,
+  ThreadAnnotationHideProgressCommand,
+  ThreadAnnotationRevealCommand,
+  ThreadWorktreeCleanup,
+} from "./threadMetadata.ts";
 export * from "./threadMetadata.ts";
 import {
   COMPOSER_CONTEXT_MAX_RECORDS,
@@ -3648,7 +3655,10 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.annotation.upsert"),
     commandId: CommandId,
     threadId: ThreadId,
-    body: ThreadAnnotation.fields.body,
+    body: Schema.optionalKey(ThreadAnnotationBodyInput),
+    bodyEdited: Schema.optionalKey(Schema.Literal(true)),
+    hideUntil: Schema.optionalKey(Schema.NullOr(AnnotationHideTriggerInput)),
+    expectedHideTriggerId: Schema.optionalKey(CommandId),
     createNew: Schema.optional(Schema.Boolean),
     annotationId: Schema.optional(TrimmedNonEmptyString),
   }),
@@ -4206,6 +4216,8 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  ThreadAnnotationRevealCommand,
+  ThreadAnnotationHideProgressCommand,
   // The server issues this after checking the value against the run's declared schema.
   Schema.Struct({
     type: Schema.Literal("run.output.submit"),

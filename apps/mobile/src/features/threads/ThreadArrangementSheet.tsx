@@ -40,6 +40,7 @@ import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
   threadListInboxReturns,
 } from "./threadListV2";
+import { filterLastCodeAnnotationThreadRows } from "./lastCodeAnnotationThreadLists";
 import { useThreadListNow } from "./use-thread-list-now";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -183,7 +184,11 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
     baseFontSize: appearance.baseFontSize,
     fontScale,
   });
-  const threads = useAtomValue(steadyNavigationThreadShellsAtom);
+  const orderCandidates = useAtomValue(steadyNavigationThreadShellsAtom);
+  const threads = useMemo(
+    () => filterLastCodeAnnotationThreadRows(orderCandidates),
+    [orderCandidates],
+  );
   const configs = useAtomValue(environmentServerConfigsAtom);
   const listEnvironments = useAtomValue(threadListEnvironmentsAtom);
   const queuedThreadKeys = useAtomValue(queuedThreadKeysAtom);
@@ -230,12 +235,12 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
   const listedSettled = sections.settled.filter(olderSettledShelf.isListed);
   useOlderSettledShelfGrowth(olderSettledShelf, listedSettled);
   const visibleSettled = listedSettled.slice(0, settledVisibleCount);
-  const settledCount = sections.settled.length + olderSettledShelf.unloadedCount(threads);
+  const settledCount = sections.settled.length + olderSettledShelf.unloadedCount(orderCandidates);
   const planners = useMemo(() => {
     const planner = (section: "pinned" | "active") =>
       createThreadMovePlanner({
         ordered: sections[section],
-        allThreads: threads,
+        allThreads: orderCandidates,
         section,
         reorderableEnvironmentIds:
           section === "pinned"
@@ -245,7 +250,7 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
               : listEnvironments.activeReorderEnvironmentIds,
       });
     return { pinned: planner("pinned"), active: planner("active") };
-  }, [sections, threads, listEnvironments, workingShelfEnabled]);
+  }, [sections, orderCandidates, listEnvironments, workingShelfEnabled]);
   const rows = useMemo(() => {
     const result: Row[] = [];
     let offset = 0;

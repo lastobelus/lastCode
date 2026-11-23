@@ -1,3 +1,4 @@
+import { isThreadAnnotationRevealUnseen } from "@t3tools/shared/threadAnnotation";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
@@ -187,6 +188,12 @@ const DONE_STATUS_LABEL: StatusLabel = {
   className: "text-adaptive-emerald-700-300",
   iconTintClassName: "accent-adaptive-emerald-700-300",
 };
+
+const UNREAD_STATUS_LABEL = {
+  ...DONE_STATUS_LABEL,
+  label: msg("Unread"),
+  icon: "circle.fill",
+} satisfies StatusLabel;
 
 // DM Sans has no tabular figures, so a ticking timer in it reflows the row every second.
 const TABULAR_DURATION_STYLE = {
@@ -977,6 +984,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   // label as the web sidebar, sourced from the server-side visited watermark
   // so checking a thread on any device clears it everywhere.
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
+  const isRevealUnread =
+    status === "ready" && isThreadAnnotationRevealUnseen(thread.annotation, thread.lastVisitedAt);
   const workingLabel =
     status === "waiting" && actionPresentation?.state === "waiting"
       ? {
@@ -998,7 +1007,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const statusEntry: StatusLabel | undefined =
     (cleanupStatus
       ? { label: cleanupStatus.label, className: cleanupStatus.textClassName }
-      : activeStatusLabel) ?? (isUnread ? DONE_STATUS_LABEL : undefined);
+      : activeStatusLabel) ??
+    (isRevealUnread ? UNREAD_STATUS_LABEL : isUnread ? DONE_STATUS_LABEL : undefined);
   const statusLabel = statusEntry && {
     ...statusEntry,
     label: statusEntry.label === null ? null : m(statusEntry.label),
@@ -2202,6 +2212,18 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             ) : null}
           </View>
           {props.hasQueuedMessages ? <QueuedMessageIcon selected={selected} /> : null}
+          {isRevealUnread ? (
+            <SymbolView
+              name={UNREAD_STATUS_LABEL.icon}
+              size={8}
+              tintColorClassName={
+                selected
+                  ? selectedThreadRowColors.iconTintClassName
+                  : UNREAD_STATUS_LABEL.iconTintClassName
+              }
+              type="monochrome"
+            />
+          ) : null}
           <Text
             className={cn(
               "text-sm tabular-nums",

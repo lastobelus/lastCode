@@ -1,3 +1,4 @@
+import { isThreadAnnotationRevealUnseen } from "@t3tools/shared/threadAnnotation";
 import { msg } from "gt-react-native";
 import type { MenuAction } from "@react-native-menu/menu";
 import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
@@ -676,7 +677,8 @@ function resolveThreadListV2ItemTimeLabel(
     variant === "card" &&
     (resolveThreadListV2RowStatus(thread) !== "ready" ||
       item.wokeAt !== null ||
-      threadHasUnseenCompletion(thread))
+      threadHasUnseenCompletion(thread) ||
+      isThreadAnnotationRevealUnseen(thread.annotation, thread.lastVisitedAt))
   )
     return "";
   const settledTimestamp =

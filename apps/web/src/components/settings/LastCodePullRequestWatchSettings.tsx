@@ -1,5 +1,8 @@
 import { useGT } from "gt-react";
-import { DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES } from "@t3tools/contracts";
+import {
+  DEFAULT_LASTCODE_ANNOTATION_PR_CHECK_MINUTES,
+  DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES,
+} from "@t3tools/contracts";
 import { useState } from "react";
 
 import {
@@ -27,6 +30,12 @@ export function LastCodePullRequestWatchSettings() {
   const updateSettings = useUpdateScopedSettings();
   const { scope, connectedEnvironments } = useSettingsScope();
   const canWrite = useScopedSettingsWriteAllowed();
+  const showAnnotationInterval =
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every(
+      (environment) =>
+        environment.serverConfig?.environment.capabilities.threadAnnotationHideUntil === true,
+    );
   const supported =
     connectedEnvironments.length > 0 &&
     connectedEnvironments.every(
@@ -101,6 +110,75 @@ export function LastCodePullRequestWatchSettings() {
           </div>
         }
       />
+      {showAnnotationInterval && <AnnotationPullRequestCheckSetting />}
     </SettingsSection>
+  );
+}
+
+function AnnotationPullRequestCheckSetting() {
+  const gt = useGT();
+  const searchableSetting = useSearchableSetting();
+  const { scope } = useSettingsScope();
+  const minutes = useScopedSettings((settings) => settings.lastcodeAnnotationPrCheckMinutes);
+  const mixed = useScopedSettingsMixed(["lastcodeAnnotationPrCheckMinutes"]);
+  const updateSettings = useUpdateScopedSettings();
+  const canWrite = useScopedSettingsWriteAllowed();
+  const environmentScoped = scope.kind !== "project" && scope.kind !== "checkout";
+  const disabled = !canWrite || !environmentScoped;
+  const defaultMinutes = DEFAULT_LASTCODE_ANNOTATION_PR_CHECK_MINUTES;
+  const save = (value: number) => {
+    if (!disabled) updateSettings({ lastcodeAnnotationPrCheckMinutes: value });
+  };
+
+  return (
+    <SettingsRow
+      {...searchableSetting("annotation-pr-check-interval")}
+      serverScoped
+      settingKeys={["lastcodeAnnotationPrCheckMinutes"]}
+      mixed={mixed}
+      description={gt(
+        "How often to check whether the PRs that hidden threads are waiting on have merged. Checks pause while this environment is paused.",
+      )}
+      status={
+        environmentScoped
+          ? undefined
+          : gt("Choose an environment to set how often it checks PRs for hidden threads.")
+      }
+      resetAction={
+        mixed || minutes !== defaultMinutes ? (
+          <SettingResetButton
+            ariaLabel={gt("Reset hidden thread PR checks to default")}
+            disabled={disabled}
+            onClick={() => save(defaultMinutes)}
+          />
+        ) : null
+      }
+      control={
+        <div className="w-36">
+          <NumberField
+            key={mixed ? "mixed" : minutes}
+            size="sm"
+            min={1}
+            max={1440}
+            step={1}
+            disabled={disabled}
+            defaultValue={mixed ? undefined : minutes}
+            onValueCommitted={(value) => {
+              if (value !== null && Number.isInteger(value) && value >= 1 && value <= 1440)
+                save(value);
+            }}
+          >
+            <NumberFieldGroup>
+              <NumberFieldDecrement aria-label={gt("Decrease annotation PR check minutes")} />
+              <NumberFieldInput
+                aria-label={gt("Annotation PR check minutes")}
+                placeholder={gt("Mixed", { $context: "values differ across targets" })}
+              />
+              <NumberFieldIncrement aria-label={gt("Increase annotation PR check minutes")} />
+            </NumberFieldGroup>
+          </NumberField>
+        </div>
+      }
+    />
   );
 }

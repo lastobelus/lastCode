@@ -16,6 +16,8 @@ export interface LastCodeThreadAnnotationActions {
   onEditAnnotation: (thread: SidebarThreadSummary) => void;
   onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
   onResolveAnnotation: (thread: SidebarThreadSummary) => void;
+  onShowAnnotationNow?: (thread: SidebarThreadSummary) => void;
+  canShowAnnotationNow?: (thread: SidebarThreadSummary) => boolean;
 }
 
 export function LastCodeThreadCleanupOverlay({
@@ -84,6 +86,14 @@ export function LastCodeThreadDetails({
             if (checkTaskPermission(thread.environmentId)) annotations.onEditAnnotation(thread);
           }}
           onResolve={() => annotations.onResolveAnnotation(thread)}
+          onShowNow={
+            annotation.hideUntil && annotations.canShowAnnotationNow?.(thread)
+              ? () => {
+                  if (checkTaskPermission(thread.environmentId))
+                    annotations.onShowAnnotationNow?.(thread);
+                }
+              : undefined
+          }
           threadDetails={content}
           trailingContent={trailingContent}
           threadRef={scopeThreadRef(thread.environmentId, thread.id)}

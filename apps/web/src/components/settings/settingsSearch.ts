@@ -980,6 +980,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("pull request review timeout stalled waiting minutes wake")],
   },
   {
+    id: "annotation-pr-check-interval",
+    title: msg("PR checks for hidden threads"),
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: [msg("annotation hide thread until pull request merged interval minutes")],
+  },
+  {
     id: "continue-threads-after-server-update",
     title: msg("Continue threads after restarts"),
     to: "/settings/maintenance",

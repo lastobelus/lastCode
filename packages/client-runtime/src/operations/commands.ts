@@ -1,5 +1,6 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
+  type AnnotationHideTriggerInput,
   type ThreadLinkedPullRequest,
   CommandId,
   CheckpointId,
@@ -128,7 +129,10 @@ export interface SetThreadPersistenceInput extends ThreadCommandInput {
 }
 
 export interface UpsertThreadAnnotationInput extends ThreadCommandInput {
-  readonly body: string;
+  readonly body?: string;
+  readonly bodyEdited?: true;
+  readonly hideUntil?: AnnotationHideTriggerInput | null;
+  readonly expectedHideTriggerId?: CommandId;
   readonly createNew?: boolean;
   readonly annotationId?: string;
 }
@@ -682,7 +686,12 @@ export const upsertThreadAnnotation = Effect.fn("EnvironmentCommands.upsertThrea
       type: "thread.annotation.upsert",
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
-      body: input.body,
+      ...(input.body === undefined ? {} : { body: input.body }),
+      ...(input.bodyEdited === undefined ? {} : { bodyEdited: input.bodyEdited }),
+      ...(input.hideUntil === undefined ? {} : { hideUntil: input.hideUntil }),
+      ...(input.expectedHideTriggerId === undefined
+        ? {}
+        : { expectedHideTriggerId: input.expectedHideTriggerId }),
       ...(input.createNew === undefined ? {} : { createNew: input.createNew }),
       ...(input.annotationId === undefined ? {} : { annotationId: input.annotationId }),
     });

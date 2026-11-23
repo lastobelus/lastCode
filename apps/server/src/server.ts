@@ -14,6 +14,7 @@ import * as WorkspaceLifecycle from "./workspace/WorkspaceLifecycle.ts";
 import * as CommandReceiptStore from "./orchestration-v2/CommandReceiptStore.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
+import * as LastCodeAnnotationHideTriggers from "./orchestration-v2/LastCodeAnnotationHideTriggers.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
 // Effect wraps this raw Node HTTP server after its startup and write-error guards attach.
 // @effect-diagnostics nodeBuiltinImport:off
@@ -782,6 +783,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     Layer.provide(layerServerRestart),
   ),
   layerThreadPullRequestWorker,
+  LastCodeAnnotationHideTriggers.layer.pipe(Layer.provide(layerPullRequestService)),
   KeepAwake.layer,
   DelegatedTaskAnalytics.layer,
   Layer.effectDiscard(

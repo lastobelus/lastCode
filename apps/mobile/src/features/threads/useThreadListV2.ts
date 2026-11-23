@@ -47,6 +47,7 @@ function observeInbox(
  */
 export function useThreadListV2(input: {
   readonly threads: LayoutInput["threads"];
+  readonly orderCandidates?: LayoutInput["threads"] | undefined;
   readonly pendingTasks: ReadonlyArray<PendingNewTask>;
   readonly environmentId: EnvironmentId | null;
   readonly projectRefs: LayoutInput["projectRefs"];
@@ -69,6 +70,7 @@ export function useThreadListV2(input: {
   readonly selectedThreadKey: string | null;
 }) {
   const { threads, workingShelfEnabled } = input;
+  const orderCandidates = input.orderCandidates ?? threads;
   const layoutTime = useMemo(
     () => threadListV2LayoutTime({ threads, now: input.now, searchQuery: input.searchQuery }),
     [threads, input.now, input.searchQuery],
@@ -86,7 +88,7 @@ export function useThreadListV2(input: {
   const moveAvailability = useMemo(() => {
     const sectionAvailability = (section: "pinned" | "active") =>
       computeThreadMoveAvailability({
-        allThreads: threads,
+        allThreads: orderCandidates,
         section,
         pendingOrder: input.pendingOrder,
         reorderableEnvironmentIds:
@@ -107,6 +109,7 @@ export function useThreadListV2(input: {
     ]);
   }, [
     threads,
+    orderCandidates,
     input.pendingOrder,
     input.pinReorderEnvironmentIds,
     input.activeReorderEnvironmentIds,
@@ -156,7 +159,7 @@ export function useThreadListV2(input: {
         selectedThreadKey: input.selectedThreadKey,
         isListedSettled: isListed,
         unloadedSettledCount: unloadedCount(
-          threads.filter(
+          orderCandidates.filter(
             (thread) =>
               thread.archivedAt === null &&
               scopes.some(
@@ -170,6 +173,7 @@ export function useThreadListV2(input: {
     [
       input.pendingOrder,
       threads,
+      orderCandidates,
       input.environmentId,
       input.projectRefs,
       input.searchQuery,

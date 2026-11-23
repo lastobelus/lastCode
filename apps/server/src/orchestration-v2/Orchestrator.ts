@@ -213,6 +213,14 @@ import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts"
 import { pauseActivity } from "../environment/EnvironmentPauseActivity.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import {
+  allowsUnchangedAnnotation,
+  applyAnnotationEdit,
+  applyAnnotationTriggerCommand,
+  isStaleStandaloneAnnotationReveal,
+  updateAnnotationHistory,
+  type AnnotationTriggerCommand,
+} from "./LastCodeAnnotationHide.ts";
+import {
   decideGuestMessageSend,
   guestShareAfterCancelledSend,
   releasedGuestAttachmentIds,
@@ -872,6 +880,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.annotation.upsert":
     case "thread.annotation.resolve":
     case "thread.annotation.reopen":
+    case "thread.annotation.reveal":
+    case "thread.annotation.hide-progress":
     case "thread.create":
     case "thread.archive.complete":
     case "thread.archive.fail":
@@ -4984,6 +4994,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     )[0];
     const notes = threadAnnotationsOf(thread);
     const previousAnnotation = threadAnnotationById(thread, command.annotationId);
+    if (isStaleStandaloneAnnotationReveal(command, previousAnnotation)) return;
     const createNew = command.type === "thread.annotation.upsert" && command.createNew === true;
     if (
       !createNew &&
@@ -5022,9 +5033,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} has no user message to anchor a note.`,
       });
     }
-    const note = {
+    const noteBase = {
       id: creating ? String(command.commandId) : previousAnnotation.id,
-      body: command.type === "thread.annotation.upsert" ? command.body : previousAnnotation!.body,
       anchorMessageId,
       createdAt: creating ? nowIso : previousAnnotation.createdAt,
       updatedAt: nowIso,
@@ -5035,13 +5045,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? null
             : previousAnnotation.resolvedAt,
     };
-    const updated = [note, ...notes.filter((entry) => entry.id !== note.id)].toSorted(
-      (a, b) =>
-        Number(a.resolvedAt !== null) - Number(b.resolvedAt !== null) ||
-        Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
-    );
-    const [head, ...others] = updated;
-    const annotation = { ...head!, ...(others.length === 0 ? {} : { otherAnnotations: others }) };
+    const note = yield* applyAnnotationEdit(
+      command,
+      noteBase,
+      creating ? null : previousAnnotation,
+      {
+        latestSequence: eventSink.latestSequence,
+        findThread: projectionStore.findThread,
+      },
+    ).pipe(mapDispatchError(command));
+    const annotation = updateAnnotationHistory(notes, note, noteBase.id);
     yield* emitThread(
       command.type === "thread.annotation.upsert"
         ? "thread.annotation-upserted"
@@ -5055,6 +5068,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       },
     );
   });
+
+  const dispatchAnnotationTrigger = Effect.fn("orchestrationV2.dispatch.annotationTrigger")(
+    function* (
+      command: AnnotationTriggerCommand,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const thread = yield* projectionStore
+        .findThread(command.threadId)
+        .pipe(mapDispatchError(command));
+      const now = yield* DateTime.now;
+      const payload = applyAnnotationTriggerCommand(thread, command, now);
+      if (payload === null) return;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.annotation-upserted",
+        threadId: payload.id,
+        providerInstanceId: payload.providerInstanceId,
+        occurredAt: now,
+        payload,
+      });
+    },
+  );
 
   const dispatchThreadVisit = Effect.fn("orchestrationV2.dispatch.threadVisit")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.visit" }>,
@@ -18812,6 +18849,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.annotation.reopen":
         yield* dispatchThreadMetadata(command, events);
         break;
+      case "thread.annotation.reveal":
+      case "thread.annotation.hide-progress":
+        yield* dispatchAnnotationTrigger(command, events);
+        break;
       case "thread.create": {
         yield* dispatchThreadCreate(command, events);
         const initialMessage = threadCreateInitialMessage(command);
@@ -20406,6 +20447,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             planned.events.length > 0 ||
             // A stale visit changes no read state.
             command.type === "thread.visit" ||
+            allowsUnchangedAnnotation(command) ||
             isUnobservedAcknowledgement(command) ||
             command.type === "thread.pull-request-watch.checks-reopen" ||
             command.type === "thread.pull-request-watch.deliver" ||

@@ -40,6 +40,7 @@ import {
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
+import { filterLastCodeAnnotationThreadRows } from "./lastCodeAnnotationThreadLists";
 import { useThreadListV2 } from "./useThreadListV2";
 import { useSidebarRowThreadKey } from "./useSidebarRowThreadKey";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
@@ -130,8 +131,12 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   const insets = useSafeAreaInsets();
   const { fabClearance, fabSize } = useAndroidControlSizing();
   const projects = useProjects();
-  const threads = useAtomValue(steadyNavigationThreadShellsAtom);
+  const orderCandidates = useLaunchingThreads(useAtomValue(steadyNavigationThreadShellsAtom));
   const selectedThreadKey = useSidebarRowThreadKey(props.selectedThreadKey);
+  const threads = useMemo(
+    () => filterLastCodeAnnotationThreadRows(orderCandidates, selectedThreadKey),
+    [orderCandidates, selectedThreadKey],
+  );
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
@@ -149,9 +154,8 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     moveThread,
     renameThread,
     regenerateThreadTitle,
-  } = useThreadListActions();
+  } = useThreadListActions(selectedThreadKey);
   const pendingTasks = usePendingNewTasks();
-  const launchingThreads = useLaunchingThreads(threads);
   const activeNewTask = useActiveNewTask();
   const queuedThreadKeys = useQueuedThreadKeys();
   const selectDetail = useSelectWorkspaceDetail();
@@ -278,7 +282,8 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     contentOnlyThreadKeys,
     olderSettledShelf,
   } = useThreadListV2({
-    threads: launchingThreads,
+    threads,
+    orderCandidates,
     pendingTasks,
     environmentId: options.selectedEnvironmentId,
     projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,

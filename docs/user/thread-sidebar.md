@@ -343,13 +343,28 @@ remembered for that thread across navigation and reloads. Choose **Edit** to ope
 Markdown in the editor. You can dismiss the note for the current visit without deleting or resolving it.
 
 The conversation minimap has a yellow marker for each annotation: solid for the current note, faded
-for resolved notes. A new note's marker sits on the newest message. It moves only when you resolve
-the note, to the message that is newest at that moment; editing or reopening leaves it in place.
+for resolved notes. An annotation needs a user message to anchor it. A new note starts at the newest
+user message, and resolving it moves the marker to the latest user message. Editing or reopening
+keeps the anchor in place.
 
 Resolved annotations disappear from the sidebar and composer but keep their minimap markers. Choose
 **Annotate thread…** to start a new note; your resolved notes stay as they are. Hover a resolved
 note's marker to edit it or reopen it. Only one note can be current, so to reopen an older note,
 resolve the current one first or copy what you need into it.
+
+Use **Hide thread until** in the annotation editor to put a thread aside until newer LastCode
+checkpoints are installed, another thread is archived, a pull request is merged, or a date and time
+in Pacific Time arrives. You can leave the note empty when you add a trigger. The open thread stays
+visible while you view it. After you leave, use a direct link or search for its title in the command
+palette to find it again.
+
+Choose **Show now** on the annotation to bring the thread back early, or resolve the annotation to
+clear the trigger. A revealed thread comes back unread and the annotation records why it returned.
+Deleting the target thread or closing the target PR also brings the thread back with an explanation.
+
+**Settings → LastCode → PR checks for hidden threads** controls how often the environment checks PR
+triggers. The default is 15 minutes. Pausing the environment pauses PR checks. Date, archive, and
+checkpoint triggers keep running.
 
 ## Resumable Project Actions in LastCode
 
