@@ -1815,6 +1815,7 @@ const make = Effect.gen(function* () {
       time: number,
       used = false,
       persist = true,
+      skipRecentWithinRetentionDays?: number,
     ) {
       if (yield* savedWorkspaceProtection(input.worktreePath, protectionResource)) return null;
       if (generatedBuilds)
@@ -1833,6 +1834,7 @@ const make = Effect.gen(function* () {
         persist,
         processObservation,
         persist ? observationTargets : undefined,
+        skipRecentWithinRetentionDays,
       );
     });
     const unrecognizedReason = () =>
@@ -1984,13 +1986,16 @@ const make = Effect.gen(function* () {
         (owner) => owner.cleanupPath,
       )) {
         const owner = owners[0]!;
+        const days = resolveWorktreeCleanup(
+          serverSettings,
+          owner.projectId,
+        ).worktreeDependenciesAfterDays;
         if (
           (automaticWork?.paths != null && !automaticWork.paths.has(cwd)) ||
           owners.length !== 1 ||
           owner.archivedAt !== null ||
           owner.worktreePath === null ||
-          resolveWorktreeCleanup(serverSettings, owner.projectId).worktreeDependenciesAfterDays ===
-            null ||
+          days === null ||
           !(yield* outputExists(cwd))
         )
           continue;
@@ -2024,6 +2029,8 @@ const make = Effect.gen(function* () {
               processCwd === path.join(cwd, "node_modules") ||
               inside(path.join(cwd, "node_modules"), processCwd),
           ) ?? false,
+          true,
+          automaticWork !== undefined ? days : undefined,
         ).pipe(Effect.orElseSucceed(() => null));
         dependencyActivityByPath.set(
           cwd,
@@ -2519,6 +2526,8 @@ const make = Effect.gen(function* () {
               processCwd === path.join(cwd, "node_modules") ||
               inside(path.join(cwd, "node_modules"), processCwd),
           ) ?? false,
+          true,
+          automaticWork !== undefined ? days : undefined,
         );
         if (protectedReason !== null) return keep(protectedReason);
         if (observation === null) return keep(unrecognizedReason());

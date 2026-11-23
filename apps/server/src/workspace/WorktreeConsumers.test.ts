@@ -172,7 +172,7 @@ const emptyFdCapture =
 const helperOutput = (
   output = emptyFdCapture,
   header: unknown = {
-    version: 1,
+    version: 2,
     type: "lsofCapture",
     uid: 1000,
     emptyFdPids: [123],
@@ -194,11 +194,51 @@ describe("Native Darwin capture", () => {
       expect(yield* guard(paths)).toBeNull();
       expect(native.execFile).toHaveBeenCalledWith(
         "/native/resource-monitor",
-        ["capture-lsof-v1", "1000"],
+        ["capture-lsof-v2", "1000"],
         { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 + 100_000 * 12 + 128 },
         expect.any(Function),
       );
       expect(native.execFile).toHaveBeenCalledOnce();
+    }),
+  );
+  it.effect("falls back to capture-lsof-v1 when an older helper rejects capture-lsof-v2", () =>
+    Effect.gen(function* () {
+      native.execFile.mockImplementation((_file, args, _options, callback) => {
+        if (args[0] === "capture-lsof-v2") {
+          callback(
+            new Error("Command failed"),
+            "",
+            'Error: Custom { kind: Other, error: "Unsupported resource monitor command" }\n',
+          );
+          return;
+        }
+        callback(
+          null,
+          helperOutput(emptyFdCapture, {
+            version: 1,
+            type: "lsofCapture",
+            uid: 1000,
+            emptyFdPids: [123],
+          }),
+          "",
+        );
+      });
+      const paths = yield* helperInventory();
+      expect(paths).toEqual(["/workspace/elsewhere", "/system/example/tool"]);
+      expect(native.execFile).toHaveBeenNthCalledWith(
+        1,
+        "/native/resource-monitor",
+        ["capture-lsof-v2", "1000"],
+        expect.any(Object),
+        expect.any(Function),
+      );
+      expect(native.execFile).toHaveBeenNthCalledWith(
+        2,
+        "/native/resource-monitor",
+        ["capture-lsof-v1", "1000"],
+        expect.any(Object),
+        expect.any(Function),
+      );
     }),
   );
   it.effect("retains text and numeric-FD consumers from other processes", () =>
@@ -216,15 +256,16 @@ describe("Native Darwin capture", () => {
     }),
   );
   it.effect.each([
-    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123] },
-    { version: 1, type: "hello", uid: 1000, emptyFdPids: [123] },
-    { version: 1, type: "lsofCapture", uid: 501, emptyFdPids: [123] },
-    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [] },
-    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [456] },
-    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 123] },
-    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 456] },
-    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123.5] },
-    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: ["123"] },
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123] },
+    { version: 3, type: "lsofCapture", uid: 1000, emptyFdPids: [123] },
+    { version: 2, type: "hello", uid: 1000, emptyFdPids: [123] },
+    { version: 2, type: "lsofCapture", uid: 501, emptyFdPids: [123] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [456] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 123] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 456] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123.5] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: ["123"] },
     null,
   ])("rejects mismatched or malformed proof metadata (%j)", (header) =>
     Effect.gen(function* () {
@@ -267,7 +308,7 @@ describe("Native Darwin capture", () => {
     Effect.gen(function* () {
       darwinFixture(
         helperOutput("p456\0\nfcwd\0tDIR\0n/workspace/example\0\n", {
-          version: 1,
+          version: 2,
           type: "lsofCapture",
           uid: 1000,
           emptyFdPids: [],
@@ -277,7 +318,7 @@ describe("Native Darwin capture", () => {
         callback(
           null,
           helperOutput(emptyFdCapture, {
-            version: 1,
+            version: 2,
             type: "lsofCapture",
             uid: 1000,
             emptyFdPids: [],
@@ -316,8 +357,12 @@ describe("Darwin worktree consumers", () => {
       ]);
       expect(native.execFile).toHaveBeenCalledWith(
         "lsof",
-        ["-a", "-u", "1000", "-F0pftnDi", "-n", "-P"],
-        { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
+        ["-a", "-u", "1000", "-F0pcftnDi", "-n", "-P"],
+        {
+          timeout: 10_000,
+          maxBuffer: 16 * 1024 * 1024,
+          env: expect.objectContaining({ LC_ALL: "C" }),
+        },
         expect.any(Function),
       );
     }),
@@ -1468,6 +1513,108 @@ describe("Observation-scoped target evidence", () => {
         expect(native.opendir).toHaveBeenCalledTimes(2);
         expect(native.execFile).toHaveBeenCalledTimes(2);
       }),
+  );
+
+  it.effect(
+    "records sanitized walk trigger kinds and process names once per walk on the sweep span",
+    () =>
+      Effect.gen(function* () {
+        darwinFixture(
+          "p101\0cGoogle\\x20Chrome\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i99\0n/system/example/file1\0\n" +
+            "f5\0tREG\0D0x12\0i100\0n/system/example/file2\0\n" +
+            "p102\0c/private/secret/bin/worker\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f6\0tunix\0n/system/example/socket\0\n" +
+            "f7\0tREG\0D0x12\0i101\0n/system/example/other\0\n",
+        );
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path === "/system/example/socket") throw missing();
+          if (path.startsWith("/system/example/"))
+            throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return path;
+        });
+        const stats = targetFixture();
+        stats.set("/workspace/other", objectStat(20n, true));
+        stats.set("/workspace/other/dist", objectStat(21n, true));
+        stats.set("/workspace/other/dist/output.js", objectStat(22n));
+        native.opendir.mockImplementation(async (path: string) =>
+          (async function* () {
+            const names =
+              path === root
+                ? ["dist", "link"]
+                : path === "/workspace/other"
+                  ? ["dist"]
+                  : path.endsWith("/dist")
+                    ? ["output.js"]
+                    : [];
+            for (const name of names) yield { name };
+          })(),
+        );
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = yield* sweep.paths;
+        expect(paths).not.toBeNull();
+        expect(yield* prove(paths!, sweep.targets, root)).toBe(false);
+        expect(yield* prove(paths!, sweep.targets, root)).toBe(false);
+        expect(yield* prove(paths!, sweep.targets, "/workspace/other")).toBe(false);
+        WorktreeConsumers.recordSkippedUsageCheck(sweep.targets);
+        yield* sweep.annotate;
+        const inventoryAttr = (yield* Effect.currentSpan).attributes.get(
+          STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+        ) as Record<string, unknown>;
+        expect(inventoryAttr).toMatchObject({
+          treeWalks: 2,
+          skippedRecentUsageChecks: 1,
+          walkTriggers: [
+            { kind: "socket", process: "worker", walks: 2 },
+            { kind: "vnode", process: "Google Chrome", walks: 2 },
+            { kind: "vnode", process: "worker", walks: 2 },
+          ],
+        });
+        expect(JSON.stringify(inventoryAttr)).not.toContain("/private/secret");
+      }).pipe(Effect.withSpan("sweep fixture")),
+  );
+
+  it.effect(
+    "sanitizes control characters in process names, defaults missing or undecodable c fields to unknown, and rejects misplaced c fields",
+    () =>
+      Effect.gen(function* () {
+        darwinFixture(
+          "p101\0cbad\\n\\xc2\\x9b\u0085\u202Ename\\x07\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i99\0n/system/example/file1\0\n" +
+            "p102\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f5\0tunix\0n/system/example/socket\0\n" +
+            "p103\0cC\\xc3\\xb3digo\\xc3\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f6\0tunix\0n/system/example/socket2\0\n" +
+            "p104\0cbad\uFFFDname\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f7\0tunix\0n/system/example/socket3\0\n",
+        );
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path.startsWith("/system/example/socket")) throw missing();
+          if (path.startsWith("/system/example/"))
+            throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return path;
+        });
+        targetFixture();
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = yield* sweep.paths;
+        expect(paths).not.toBeNull();
+        expect(yield* prove(paths!, sweep.targets, root)).toBe(false);
+        yield* sweep.annotate;
+        expect(
+          (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+        ).toMatchObject({
+          walkTriggers: [
+            { kind: "socket", process: "unknown", walks: 1 },
+            { kind: "vnode", process: "badname", walks: 1 },
+          ],
+        });
+        darwinFixture("p101\0cfirst\0csecond\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n");
+        expect(yield* inventory("darwin")).toBeNull();
+        darwinFixture("p101\0\nfcwd\0tDIR\0cfirst\0n/workspace/elsewhere\0\n");
+        expect(yield* inventory("darwin")).toBeNull();
+        darwinFixture("p101\0cgood\0\nfcwd\0tDIR\0n/workspace/bad\uFFFDdir\0\n");
+        expect(yield* inventory("darwin")).toBeNull();
+      }).pipe(Effect.withSpan("sweep fixture")),
   );
 });
 

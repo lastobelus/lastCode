@@ -32,7 +32,18 @@ it("shows inventory for completed sweeps and retains all sweep spans", () => {
   summarizer.addLine(JSON.stringify(span));
   const measurements = [
     { value: metrics },
-    { value: { ...metrics, processCaptures: 2, pathResolutions: 123 } },
+    {
+      value: {
+        ...metrics,
+        processCaptures: 2,
+        pathResolutions: 123,
+        skippedRecentUsageChecks: 4,
+        walkTriggers: [
+          { kind: "socket", process: "worker", walks: 2 },
+          { kind: "vnode", process: "node", walks: 3 },
+        ],
+      },
+    },
     { value: emptyStorageCleanupInventoryTrace() },
     { value: "malformed" },
     { value: metrics, exit: { _tag: "Interrupted" } },
@@ -58,11 +69,12 @@ it("shows inventory for completed sweeps and retains all sweep spans", () => {
       endMs,
       inventory.processCaptures,
       inventory.pathResolutions,
+      inventory.skippedRecentUsageChecks,
     ]),
     [
-      [3000, 0, 0],
-      [2000, 2, 123],
-      [1000, 1, 100],
+      [3000, 0, 0, 0],
+      [2000, 2, 123, 4],
+      [1000, 1, 100, undefined],
     ],
   );
   const formatted = formatTraceSummary(summary, 25);
@@ -74,5 +86,7 @@ it("shows inventory for completed sweeps and retains all sweep spans", () => {
   assert.include(formatted, "Cached path checks       400 in 582ms");
   assert.include(formatted, "Directory checks         16 in 114ms");
   assert.include(formatted, "Tree walks               5 visiting 50000 objects in 3s");
+  assert.include(formatted, "Walk triggers            socket worker (2), vnode node (3)");
+  assert.include(formatted, "Recent-use skips         4");
   assert.include(formatted, "Target revalidations     3 in 225ms");
 });

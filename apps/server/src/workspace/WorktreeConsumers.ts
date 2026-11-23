@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import {
   STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
   emptyStorageCleanupInventoryTrace,
+  type StorageCleanupWalkTrigger,
 } from "../observability/StorageCleanupInventoryTrace.ts";
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
 import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
@@ -19,11 +20,16 @@ import * as DependencyMounts from "./DependencyMounts.ts";
 const MAX_INVENTORY_BYTES = 16 * 1024 * 1024;
 const MAX_PROCESS_PATHS = 100_000;
 const MAX_TARGET_OBJECTS = 1_000_000;
+const MAX_DIAGNOSTIC_PROCESS_NAME_LENGTH = 64;
+const MAX_TRACE_WALK_TRIGGERS = 32;
 const nativeIdentities = Symbol("captured vnode identities");
+const nativeProcesses = Symbol("captured process names");
 type ObjectIdentity = { readonly device: bigint | null; readonly inode: bigint };
 type CapturedObject = ObjectIdentity | "unix-socket" | null;
+type WalkTrigger = Omit<StorageCleanupWalkTrigger, "walks">;
 type CapturedPaths = ReadonlyArray<string> & {
   readonly [nativeIdentities]?: ReadonlyArray<CapturedObject>;
+  readonly [nativeProcesses]?: ReadonlyArray<string>;
 };
 // @effect-diagnostics-next-line extendsNativeError:off -- Native Promise inventory throws this sentinel; worktreeConsumerReason maps it into the Effect failure channel.
 class ObjectProofUnavailable extends Error {}
@@ -171,15 +177,31 @@ const decodeLsofPath = (printed: string): string | null => {
   return decoded.toString("utf8");
 };
 
+const sanitizeProcessName = (printed: string): string => {
+  if (printed.includes("\uFFFD")) return "unknown";
+  const decoded = decodeLsofPath(printed);
+  if (decoded === null || decoded.includes("\uFFFD")) return "unknown";
+  const base = decoded.replaceAll("\\", "/").split("/").filter(Boolean).at(-1) ?? "";
+  const cleaned = base.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, "").trim();
+  const sanitized = Array.from(cleaned)
+    .slice(0, MAX_DIAGNOSTIC_PROCESS_NAME_LENGTH)
+    .join("")
+    .trim();
+  return sanitized === "" ? "unknown" : sanitized;
+};
+
 const lsofPaths = (
   output: string,
   emptyFdPids: ReadonlySet<number> = new Set(),
 ): ReadonlyArray<string> | null => {
-  if (!output.endsWith("\0\n") || output.includes("\uFFFD")) return null;
+  if (!output.endsWith("\0\n")) return null;
   const paths: string[] = [];
   const identities: CapturedObject[] = [];
+  const processesByPath: string[] = [];
   let processes = 0;
   let pid = 0;
+  let processName = "unknown";
+  let commandSeen = false;
   const recovered = new Set<number>();
   const numericPids = new Set<number>();
   let cwdSeen = false;
@@ -220,6 +242,7 @@ const lsofPaths = (
       const name = decodeLsofPath(file.name);
       if (name === null) return false;
       paths.push(stripDeleted(name));
+      processesByPath.push(processName);
       const inode = file.inode === undefined ? null : BigInt(file.inode);
       // Darwin omits the device field for FIFO vnodes. A positive inode can
       // still prove absence only by treating every same-inode target as a match.
@@ -259,13 +282,21 @@ const lsofPaths = (
     const field = raw.replace(/^\n/, "");
     if (field === "") continue;
     const value = field.slice(1);
+    if (field[0] !== "c" && field.includes("\uFFFD")) return null;
     switch (field[0]) {
       case "p":
         if (!/^\d+$/.test(value) || !finishFile() || (processes > 0 && !cwdSeen)) return null;
         if (++processes > MAX_PROCESS_PATHS) return null;
         pid = Number(value);
+        processName = "unknown";
+        commandSeen = false;
         cwdSeen = false;
         file = undefined;
+        break;
+      case "c":
+        if (processes === 0 || file !== undefined || commandSeen) return null;
+        commandSeen = true;
+        processName = sanitizeProcessName(value);
         break;
       case "f":
         if (processes === 0 || value === "" || !finishFile()) return null;
@@ -296,10 +327,15 @@ const lsofPaths = (
   if (recovered.size !== emptyFdPids.size || [...recovered].some((pid) => numericPids.has(pid)))
     return null;
   Object.defineProperty(paths, nativeIdentities, { value: Object.freeze(identities) });
+  Object.defineProperty(paths, nativeProcesses, { value: Object.freeze(processesByPath) });
   return Object.freeze(paths);
 };
 
-const helperPaths = (output: string, uid: number): ReadonlyArray<string> | null => {
+const helperPaths = (
+  output: string,
+  uid: number,
+  expectedVersion: 1 | 2,
+): ReadonlyArray<string> | null => {
   const boundary = output.indexOf("\n");
   if (boundary < 0 || boundary > MAX_PROCESS_PATHS * 12 + 128) return null;
   try {
@@ -311,7 +347,7 @@ const helperPaths = (output: string, uid: number): ReadonlyArray<string> | null 
     } | null;
     if (
       header === null ||
-      header.version !== 1 ||
+      header.version !== expectedVersion ||
       header.type !== "lsofCapture" ||
       header.uid !== uid ||
       !Array.isArray(header.emptyFdPids) ||
@@ -331,6 +367,38 @@ const helperPaths = (output: string, uid: number): ReadonlyArray<string> | null 
   }
 };
 
+const runHelperCapture = (
+  binary: string,
+  command: "capture-lsof-v1" | "capture-lsof-v2",
+  uid: number,
+) =>
+  new Promise<{
+    readonly paths: ReadonlyArray<string> | null;
+    readonly unsupportedCommand: boolean;
+  }>((resolve) => {
+    NodeChildProcess.execFile(
+      binary,
+      [command, String(uid)],
+      {
+        timeout: 10_000,
+        maxBuffer: MAX_INVENTORY_BYTES + MAX_PROCESS_PATHS * 12 + 128,
+      },
+      (error, stdout, stderr) =>
+        resolve(
+          error || stderr.trim() !== ""
+            ? {
+                paths: null,
+                unsupportedCommand:
+                  Boolean(error) && stderr.includes("Unsupported resource monitor command"),
+              }
+            : {
+                paths: helperPaths(stdout, uid, command === "capture-lsof-v2" ? 2 : 1),
+                unsupportedCommand: false,
+              },
+        ),
+    );
+  });
+
 const captureProcessPaths = async (
   platform: NodeJS.Platform,
   uid: number,
@@ -338,27 +406,21 @@ const captureProcessPaths = async (
 ) => {
   if (platform === "linux") return linuxPaths(uid);
   if (platform !== "darwin") return null;
+  if (binary !== null) {
+    const v2 = await runHelperCapture(binary, "capture-lsof-v2", uid);
+    if (v2.paths !== null || !v2.unsupportedCommand) return v2.paths;
+    return (await runHelperCapture(binary, "capture-lsof-v1", uid)).paths;
+  }
   return await new Promise<ReadonlyArray<string> | null>((resolve) => {
     NodeChildProcess.execFile(
-      binary ?? "lsof",
-      binary === null
-        ? ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"]
-        : ["capture-lsof-v1", String(uid)],
+      "lsof",
+      ["-a", "-u", String(uid), "-F0pcftnDi", "-n", "-P"],
       {
         timeout: 10_000,
-        maxBuffer:
-          binary === null
-            ? MAX_INVENTORY_BYTES
-            : MAX_INVENTORY_BYTES + MAX_PROCESS_PATHS * 12 + 128,
+        maxBuffer: MAX_INVENTORY_BYTES,
+        env: { ...process.env, LC_ALL: "C" },
       },
-      (error, stdout, stderr) =>
-        resolve(
-          error || stderr.trim() !== ""
-            ? null
-            : binary === null
-              ? lsofPaths(stdout)
-              : helperPaths(stdout, uid),
-        ),
+      (error, stdout, stderr) => resolve(error || stderr.trim() !== "" ? null : lsofPaths(stdout)),
     );
   });
 };
@@ -515,6 +577,7 @@ type SweepObservation = {
   readonly captures: WeakMap<ReadonlyArray<string>, CaptureResolutions>;
   readonly resolvedPaths: Set<string>;
   readonly measurement: InventoryMeasurement;
+  readonly walkTriggerCounts: Map<string, StorageCleanupWalkTrigger>;
 };
 
 export type TargetObservation = {
@@ -525,6 +588,12 @@ export type TargetObservation = {
 /** Native tree evidence is scoped to the capture that supplied its object identities. */
 export const createTargetObservation = (): TargetObservation => ({ targets: new WeakMap() });
 
+export const recordSkippedUsageCheck = (observation?: TargetObservation): void => {
+  if (observation?.sweep !== undefined) {
+    observation.sweep.measurement.skippedRecentUsageChecks++;
+  }
+};
+
 export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObservation")(function* (
   capture: Effect.Effect<ReadonlyArray<string> | null>,
 ) {
@@ -533,6 +602,7 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
     captures: new WeakMap(),
     resolvedPaths: new Set(),
     measurement,
+    walkTriggerCounts: new Map(),
   };
   const paths = yield* Effect.cached(
     Effect.suspend(() => {
@@ -553,12 +623,21 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
   return {
     paths,
     targets,
-    annotate: Effect.suspend(() =>
-      Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
+    annotate: Effect.suspend(() => {
+      const walkTriggers = [...sweep.walkTriggerCounts.values()]
+        .toSorted(
+          (left, right) =>
+            right.walks - left.walks ||
+            left.kind.localeCompare(right.kind) ||
+            left.process.localeCompare(right.process),
+        )
+        .slice(0, MAX_TRACE_WALK_TRIGGERS);
+      return Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
         ...measurement,
         uniquePaths: sweep.resolvedPaths.size,
-      }),
-    ),
+        walkTriggers,
+      });
+    }),
   };
 });
 
@@ -755,12 +834,22 @@ const targetEvidence = async (
   paths: ReadonlyArray<string>,
   collectIdentities: boolean,
   observation?: TargetObservation,
+  walkTriggers: ReadonlyArray<WalkTrigger> = [],
 ): Promise<TargetEvidence> => {
-  const measurement = observation?.sweep?.measurement;
+  const sweep = observation?.sweep;
+  const measurement = sweep?.measurement;
   const walk = (identities: boolean) => {
     if (measurement === undefined) return targetIdentities(root, identities, paths);
     const start = performance.now();
     measurement.treeWalks++;
+    for (const trigger of walkTriggers) {
+      const key = `${trigger.kind}\0${trigger.process}`;
+      const previous = sweep!.walkTriggerCounts.get(key);
+      sweep!.walkTriggerCounts.set(key, {
+        ...trigger,
+        walks: (previous?.walks ?? 0) + 1,
+      });
+    }
     return targetIdentities(root, identities, paths, measurement).finally(() => {
       measurement.treeWalkMs += performance.now() - start;
     });
@@ -804,7 +893,7 @@ const targetEvidence = async (
       if (entry.unavailable) throw entry.cause;
       evidence = await entry.proof;
       if (collectIdentities && !entry.collectIdentities)
-        return targetEvidence(root, paths, true, observation);
+        return targetEvidence(root, paths, true, observation, walkTriggers);
     }
     return evidence;
   } catch (cause) {
@@ -820,9 +909,18 @@ const scanProcessPaths = async (
   paths: ReadonlyArray<string>,
   completeProof: boolean,
   resolvePath: (path: string) => Promise<PathResolution>,
+  collectWalkTriggers: boolean,
 ) => {
   const captured = (paths as CapturedPaths)[nativeIdentities];
+  const capturedProcesses = (paths as CapturedPaths)[nativeProcesses];
   const unresolved: ObjectIdentity[] = [];
+  const walkTriggers = collectWalkTriggers ? new Map<string, WalkTrigger>() : null;
+  const noteWalkTrigger = (kind: WalkTrigger["kind"], index: number) => {
+    if (walkTriggers === null) return;
+    const process = capturedProcesses?.[index] ?? "unknown";
+    const key = `${kind}\0${process}`;
+    if (!walkTriggers.has(key)) walkTriggers.set(key, { kind, process });
+  };
   // Inventories repeat paths (shared libraries, one entry per descriptor).
   const resolutions = new Map<string, PathResolution>();
   let vanishedSocket = false;
@@ -830,7 +928,13 @@ const scanProcessPaths = async (
   for (const [index, path] of paths.entries()) {
     if (!NodePath.isAbsolute(path)) throw new Error("Process consumer path is not absolute");
     if (within(canonicalRoot, path)) {
-      if (!completeProof) return { matched: true, unresolved, vanishedSocket };
+      if (!completeProof)
+        return {
+          matched: true,
+          unresolved,
+          vanishedSocket,
+          walkTriggers: walkTriggers === null ? [] : [...walkTriggers.values()],
+        };
       matched = true;
       continue;
     }
@@ -842,7 +946,13 @@ const scanProcessPaths = async (
     try {
       if ("error" in resolution) throw resolution.error;
       if (within(canonicalRoot, resolution.path)) {
-        if (!completeProof) return { matched: true, unresolved, vanishedSocket };
+        if (!completeProof)
+          return {
+            matched: true,
+            unresolved,
+            vanishedSocket,
+            walkTriggers: walkTriggers === null ? [] : [...walkTriggers.values()],
+          };
         matched = true;
       }
     } catch (error) {
@@ -866,6 +976,7 @@ const scanProcessPaths = async (
             cause: error,
           });
         vanishedSocket = true;
+        noteWalkTrigger("socket", index);
         continue;
       }
       if (identity.device === null && (error as NodeJS.ErrnoException).code !== "ENOENT")
@@ -876,9 +987,15 @@ const scanProcessPaths = async (
           },
         );
       unresolved.push(identity);
+      noteWalkTrigger("vnode", index);
     }
   }
-  return { matched, unresolved, vanishedSocket };
+  return {
+    matched,
+    unresolved,
+    vanishedSocket,
+    walkTriggers: walkTriggers === null ? [] : [...walkTriggers.values()],
+  };
 };
 
 /**
@@ -893,9 +1010,9 @@ export const processPathsUseRoot = async (
   completeProof = false,
 ): Promise<boolean> => {
   if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
-  const scan = (resolvePath: (path: string) => Promise<PathResolution>) =>
-    scanProcessPaths(canonicalRoot, paths, completeProof, resolvePath);
   const sweep = observation?.sweep;
+  const scan = (resolvePath: (path: string) => Promise<PathResolution>) =>
+    scanProcessPaths(canonicalRoot, paths, completeProof, resolvePath, sweep !== undefined);
   let evidence;
   if (sweep === undefined) {
     evidence = await scan(resolveProcessPath);
@@ -912,7 +1029,7 @@ export const processPathsUseRoot = async (
       evidence = first.value;
     }
   }
-  const { matched, unresolved, vanishedSocket } = evidence;
+  const { matched, unresolved, vanishedSocket, walkTriggers } = evidence;
   if (matched && !completeProof) return true;
   if (unresolved.length === 0 && !vanishedSocket) return matched;
   const { found } = await targetEvidence(
@@ -920,6 +1037,7 @@ export const processPathsUseRoot = async (
     paths,
     unresolved.length > 0,
     observation,
+    walkTriggers,
   ).catch((cause: unknown) => {
     throw new ObjectProofUnavailable("Consumer target inventory could not be verified", { cause });
   });

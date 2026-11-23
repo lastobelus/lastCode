@@ -1011,16 +1011,35 @@ mod lsof_capture {
         }
         Ok(output)
     }
-    fn lsof(uid: u32, deadline: Instant) -> io::Result<String> {
+    fn lsof_fields(include_commands: bool) -> &'static str {
+        if include_commands {
+            "-F0pcftnDi"
+        } else {
+            "-F0pftnDi"
+        }
+    }
+    fn lsof_command(uid: u32, include_commands: bool) -> Command {
+        let mut command = Command::new("/usr/sbin/lsof");
+        command
+            .args([
+                "-a",
+                "-u",
+                &uid.to_string(),
+                lsof_fields(include_commands),
+                "-n",
+                "-P",
+            ])
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+    fn lsof(uid: u32, include_commands: bool, deadline: Instant) -> io::Result<String> {
         if Instant::now() >= deadline {
             return Err(unavailable());
         }
-        let mut child = Command::new("/usr/sbin/lsof")
-            .args(["-a", "-u", &uid.to_string(), "-F0pftnDi", "-n", "-P"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut child = lsof_command(uid, include_commands).spawn()?;
         let stdout = child.stdout.take().ok_or_else(unavailable)?;
         let stderr = child.stderr.take().ok_or_else(unavailable)?;
         let out = thread::spawn(move || bounded_read(stdout, MAX_BYTES));
@@ -1052,12 +1071,12 @@ mod lsof_capture {
         uid: u32,
         empty_fd_pids: Vec<i32>,
     }
-    pub(super) fn run(uid: u32) -> io::Result<()> {
+    pub(super) fn run(uid: u32, include_commands: bool) -> io::Result<()> {
         // Share one budget so the server's outer timeout cannot strand lsof
         // after an unusually expensive census.
         let deadline = Instant::now() + TIMEOUT;
         let before = census(uid, deadline)?;
-        let output = lsof(uid, deadline)?;
+        let output = lsof(uid, include_commands, deadline)?;
         let pids = error_pids(&output)?;
         for pid in &pids {
             if Instant::now() >= deadline {
@@ -1075,7 +1094,7 @@ mod lsof_capture {
         serde_json::to_writer(
             &mut writer,
             &Header {
-                version: 1,
+                version: if include_commands { 2 } else { 1 },
                 kind: "lsofCapture",
                 uid,
                 empty_fd_pids: pids,
@@ -1097,7 +1116,16 @@ mod lsof_capture {
         }
         #[test]
         fn exact_error_record_only_without_numeric_fds() {
-            let fixture = "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nferr\0nFD info error: Invalid argument\0\n";
+            assert_eq!(lsof_fields(false), "-F0pftnDi");
+            assert_eq!(lsof_fields(true), "-F0pcftnDi");
+            assert!(
+                lsof_command(501, true)
+                    .get_envs()
+                    .any(|(key, value)| key == "LC_ALL" && value == Some(std::ffi::OsStr::new("C")))
+            );
+            let truncated_command = "p123\0caaaaaaaaaaaaaaaaaaaaaaaaaaaa\\xc3\\xa9\\xc3\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nferr\0nFD info error: Invalid argument\0\n";
+            assert_eq!(error_pids(truncated_command).unwrap(), [123]);
+            let fixture = "p123\0cnode\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nferr\0nFD info error: Invalid argument\0\n";
             assert_eq!(error_pids(fixture).unwrap(), [123]);
             for output in [
                 fixture.replace("Invalid argument", "Permission denied"),
@@ -1220,7 +1248,7 @@ mod lsof_capture {
             assert!(matching_empty(before.uid, &before, &before, true, &after));
             // The actual OS lsof seam emits ferr for this successful empty table.
             let capture = Command::new("/usr/sbin/lsof")
-                .args(["-a", "-p", &pid.to_string(), "-F0pftnDi", "-n", "-P"])
+                .args(["-a", "-p", &pid.to_string(), "-F0pcftnDi", "-n", "-P"])
                 .output()
                 .unwrap();
             assert!(capture.status.success());
@@ -1264,11 +1292,11 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
         #[cfg(target_os = "macos")]
-        if args.len() == 2 && args[0] == "capture-lsof-v1" {
+        if args.len() == 2 && (args[0] == "capture-lsof-v1" || args[0] == "capture-lsof-v2") {
             let uid = args[1]
                 .parse::<u32>()
                 .map_err(|_| io::Error::other("Invalid UID"))?;
-            return lsof_capture::run(uid);
+            return lsof_capture::run(uid, args[0] == "capture-lsof-v2");
         }
         return Err(io::Error::other("Unsupported resource monitor command"));
     }
