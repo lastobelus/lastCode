@@ -1,4 +1,4 @@
-import type { OrchestrationV2DomainEvent } from "@t3tools/contracts";
+import type { EventId, OrchestrationV2DomainEvent } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import type { ProjectionStoreV2 } from "./ProjectionStore.ts";
 
@@ -6,10 +6,15 @@ import type { ProjectionStoreV2 } from "./ProjectionStore.ts";
 export const mergeProviderBackgroundRoster = Effect.fnUntraced(function* (
   events: ReadonlyArray<OrchestrationV2DomainEvent>,
   projectionStore: Pick<ProjectionStoreV2["Service"], "getThreadRecords">,
+  preserveFor?: EventId,
 ) {
   const merged = yield* Effect.forEach(events, (event) =>
     Effect.gen(function* () {
-      if (event.type !== "provider-thread.updated") return [event];
+      if (
+        event.type !== "provider-thread.updated" ||
+        (preserveFor !== undefined && event.id !== preserveFor)
+      )
+        return [event];
       const projection = yield* projectionStore
         .getThreadRecords(event.threadId, ["providerThreads"], {
           providerThreadIds: [event.payload.id],
@@ -25,14 +30,16 @@ export const mergeProviderBackgroundRoster = Effect.fnUntraced(function* (
         current.providerSessionId === null ||
         current.providerSessionId !== event.payload.providerSessionId
       )
-        return [];
+        return preserveFor === undefined ? [] : [event];
+      const [thread, roster] =
+        preserveFor === undefined ? [current, event.payload] : [event.payload, current];
       return [
         {
           ...event,
           payload: {
-            ...current,
-            pendingBackgroundTasks: event.payload.pendingBackgroundTasks,
-            owedBackgroundResults: event.payload.owedBackgroundResults,
+            ...thread,
+            pendingBackgroundTasks: roster.pendingBackgroundTasks,
+            owedBackgroundResults: roster.owedBackgroundResults,
             updatedAt: event.occurredAt,
           },
         },

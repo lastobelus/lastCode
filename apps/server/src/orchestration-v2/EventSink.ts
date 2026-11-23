@@ -149,6 +149,8 @@ export interface EventSinkV2Shape {
     readonly updateDelegatedCompletionOnly?: boolean;
     /** Rebuilds provider-thread.updated events against the current session's stored row. */
     readonly backgroundRosterOnly?: boolean;
+    /** Keep the stored roster when writing the identified provider-thread event. */
+    readonly preserveProviderBackgroundRosterFor?: EventId;
     readonly unlessNativeThreadOwned?: Pick<
       OrchestrationV2ProviderThread,
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
@@ -159,6 +161,7 @@ export interface EventSinkV2Shape {
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
+    readonly preserveProviderBackgroundRosterFor?: EventId;
     readonly guardRecoveredBackground?: RecoveredBackgroundGuard;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -748,8 +751,15 @@ const layerBase: Layer.Layer<
           let events = input.updateDelegatedCompletionOnly
             ? yield* updateDelegatedCompletionOnly(input.events, () => true)
             : input.events;
-          if (input.backgroundRosterOnly === true) {
-            events = yield* mergeProviderBackgroundRoster(events, projectionStore);
+          if (
+            input.backgroundRosterOnly === true ||
+            input.preserveProviderBackgroundRosterFor !== undefined
+          ) {
+            events = yield* mergeProviderBackgroundRoster(
+              events,
+              projectionStore,
+              input.preserveProviderBackgroundRosterFor,
+            );
           }
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
@@ -833,10 +843,18 @@ const layerBase: Layer.Layer<
               input.events,
               input.guardRecoveredBackground,
             );
+            const events =
+              input.preserveProviderBackgroundRosterFor === undefined
+                ? guarded
+                : yield* mergeProviderBackgroundRoster(
+                    guarded,
+                    projectionStore,
+                    input.preserveProviderBackgroundRosterFor,
+                  );
             const normalized = yield* normalizeEvents(
               input.guardPendingUserInputCancellations === true
-                ? yield* guardUserInputCancellations(guarded)
-                : guarded,
+                ? yield* guardUserInputCancellations(events)
+                : events,
             );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),

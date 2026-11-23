@@ -892,6 +892,10 @@ export const layer: Layer.Layer<
         );
         // Stopped runs capture rollback points for the next message; enqueue before later starts on this effect lane.
         const finalization = {
+          // Codex updates its roster on the session stream, independently of this run's snapshot.
+          ...(input.providerThread.driver === "codex" && !input.clearPendingBackgroundTasks
+            ? { preserveProviderBackgroundRosterFor: providerThreadEventId }
+            : {}),
           effects:
             input.terminal.status === "completed" ||
             input.terminal.status === "interrupted" ||
@@ -1077,8 +1081,7 @@ export const layer: Layer.Layer<
                   },
                 }
               : {}),
-            events: finalization.events,
-            effects: finalization.effects,
+            ...finalization,
             guardPendingUserInputCancellations: true,
             ...(input.backgroundSettlement === undefined ||
             input.backgroundProviderSessionId === undefined
