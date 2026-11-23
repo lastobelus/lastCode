@@ -55,7 +55,7 @@ import {
 import { useThreadSearch } from "../../state/queries";
 import { requestThreadMessageJump } from "../threads/threadMessageJump";
 import { useCanShareWithGuest } from "../threads/useCanShareWithGuest";
-import { threadEnvironment } from "../../state/threads";
+import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
 import { useWorkspaceEnvironments } from "../../state/workspace";
@@ -242,9 +242,10 @@ export function CommandPalette(props: {
   const environments = useWorkspaceEnvironments();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const [query, setQuery] = useState("");
+  const annotationHidden = useAtomValue(environmentThreadShells.annotationHiddenThreadKeysAtom);
   const paletteThreads = useMemo(
-    () => filterLastCodeMobilePaletteThreads(threads, query),
-    [threads, query],
+    () => filterLastCodeMobilePaletteThreads(threads, query, annotationHidden),
+    [threads, query, annotationHidden],
   );
   // Ranking is relative to when the palette opened, so rows do not reorder as time passes.
   const [now] = useState(() => Date.now());

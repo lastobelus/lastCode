@@ -5,11 +5,14 @@ import { resolveListedAncestorThreadRef } from "@t3tools/client-runtime/state/th
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { environmentThreadShells } from "../../state/threads";
 
-/** An open subagent, side chat or delegated task has no row; its listed ancestor's row is selected. */
+/** Select the open thread's own row when it is listed, or its listed ancestor. */
 export function useSidebarRowThreadKey(openThreadKey: string | null): string | null {
   const threads = useAtomValue(environmentThreadShells.quietThreadShellsAtom);
+  const pendingChildThreadKeys = useAtomValue(
+    environmentThreadShells.annotationPendingChildThreadKeysAtom,
+  );
   const openThreadRef = openThreadKey === null ? null : parseScopedThreadKey(openThreadKey);
   if (openThreadRef === null) return openThreadKey;
-  const rowRef = resolveListedAncestorThreadRef(openThreadRef, threads);
+  const rowRef = resolveListedAncestorThreadRef(openThreadRef, threads, pendingChildThreadKeys);
   return scopedThreadKey(rowRef.environmentId, rowRef.threadId);
 }

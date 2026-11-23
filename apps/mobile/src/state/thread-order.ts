@@ -10,7 +10,7 @@ import { getLastCodeAnnotationOrderedSection } from "../features/threads/lastCod
 import { nextSnoozeWakeAfter } from "../features/threads/threadListV2";
 import { appAtomRegistry } from "./atom-registry";
 import { environmentServerConfigsAtom } from "./server";
-import { steadyNavigationThreadShellsAtom } from "./threads";
+import { steadyAnnotationHiddenThreadKeysAtom, steadyNavigationThreadShellsAtom } from "./threads";
 import { queuedThreadKeysAtom } from "./use-thread-outbox";
 
 export const threadArrangementOpenAtom = Atom.make(false).pipe(Atom.keepAlive);
@@ -76,6 +76,7 @@ export function beginPendingThreadOrder(
         settlementEnvironmentIds: new Set(configs.keys()),
         snoozeEnvironmentIds: new Set(configs.keys()),
       },
+      appAtomRegistry.get(steadyAnnotationHiddenThreadKeysAtom),
       retainedThreadKey,
     );
     const next = reconcilePendingThreadOrder(current, ordered);
@@ -92,6 +93,7 @@ export function beginPendingThreadOrder(
   appAtomRegistry.set(pendingThreadOrderAtom, pending);
   unsubscribers.push(
     appAtomRegistry.subscribe(steadyNavigationThreadShellsAtom, refresh),
+    appAtomRegistry.subscribe(steadyAnnotationHiddenThreadKeysAtom, refresh),
     appAtomRegistry.subscribe(environmentServerConfigsAtom, refresh),
     appAtomRegistry.subscribe(queuedThreadKeysAtom, refresh),
     minuteTick.subscribe(refresh),

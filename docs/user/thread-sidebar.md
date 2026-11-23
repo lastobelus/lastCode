@@ -354,9 +354,10 @@ resolve the current one first or copy what you need into it.
 
 Use **Hide thread until** in the annotation editor to put a thread aside until newer LastCode
 checkpoints are installed, another thread is archived, a pull request is merged, or a date and time
-in Pacific Time arrives. You can leave the note empty when you add a trigger. The open thread stays
-visible while you view it. After you leave, use a direct link or search for its title in the command
-palette to find it again.
+in your local time zone arrives. Threads it owns hide with it. You can leave the note empty when
+you add a trigger. An open thread stays visible while you view it, and a thread that needs your
+answer or approval stays visible until you respond. You can also find hidden threads through a
+direct link or by searching for their titles in the command palette.
 
 Choose **Show now** on the annotation to bring the thread back early, or resolve the annotation to
 clear the trigger. A revealed thread comes back unread and the annotation records why it returned.

@@ -1,6 +1,7 @@
-import { isThreadAnnotationHidden } from "@t3tools/shared/threadAnnotation";
+import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useServerConfigs } from "../../state/entities";
+import { environmentThreadShells } from "../../state/threads";
 import type { SidebarThreadSummary } from "../../types";
 import { lastcodeSidebarThreadKey } from "../lastcodeSidebarFamilies.logic";
 
@@ -28,8 +29,7 @@ export function useLastCodeTagHiddenThreadKeys(threads: readonly SidebarThreadSu
 /** LastCode has a fallback group for visible children of a hidden owner. */
 export function useLastCodeHiddenThreadKeys(threads: readonly SidebarThreadSummary[]) {
   const tagHidden = useLastCodeTagHiddenThreadKeys(threads);
-  const annotated = threads.filter((thread) => isThreadAnnotationHidden(thread.annotation));
-  return annotated.length === 0
-    ? tagHidden
-    : new Set([...tagHidden, ...annotated.map(lastcodeSidebarThreadKey)]);
+  const annotationHidden = useAtomValue(environmentThreadShells.annotationHiddenThreadKeysAtom);
+  if (tagHidden.size === 0) return annotationHidden;
+  return annotationHidden.size === 0 ? tagHidden : new Set([...tagHidden, ...annotationHidden]);
 }

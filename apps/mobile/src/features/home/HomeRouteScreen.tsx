@@ -11,7 +11,10 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
 
 import { useProjects } from "../../state/entities";
-import { steadyNavigationThreadShellsAtom } from "../../state/threads";
+import {
+  steadyAnnotationHiddenThreadKeysAtom,
+  steadyNavigationThreadShellsAtom,
+} from "../../state/threads";
 import { useLaunchingThreads, usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
@@ -56,9 +59,10 @@ export function HomeRouteScreen() {
   const orderCandidates = useLaunchingThreads(
     useAtomValueWhileVisible(steadyNavigationThreadShellsAtom, visible),
   );
+  const annotationHidden = useAtomValueWhileVisible(steadyAnnotationHiddenThreadKeysAtom, visible);
   const threads = useMemo(
-    () => filterLastCodeAnnotationThreadRows(orderCandidates),
-    [orderCandidates],
+    () => filterLastCodeAnnotationThreadRows(orderCandidates, annotationHidden),
+    [orderCandidates, annotationHidden],
   );
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();

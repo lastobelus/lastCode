@@ -1,10 +1,11 @@
 import { CommandId, MessageId, ThreadId, type ThreadAnnotation } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   annotationDatePreset,
   annotationEditorEdit,
   annotationRevealReason,
   annotationTriggerInput,
+  formatAnnotationDateTime,
   storedHideUntilDraft,
 } from "./threadAnnotationHideUntil.logic";
 
@@ -58,15 +59,64 @@ describe("annotation trigger input", () => {
     });
   });
 
-  it("uses the Pacific calendar day and offset for presets and keeps a single absolute instant", () => {
-    const tomorrow = annotationDatePreset(now, "tomorrow");
-    expect(tomorrow).toEqual({ kind: "date", date: "2026-11-22", time: "09:00" });
-    expect(annotationTriggerInput(tomorrow, serverVersion, now)).toEqual({
-      kind: "date",
-      at: "2026-11-22T16:00:00.000Z",
-    });
-    expect(annotationDatePreset(now, "monday").date).toBe("2026-11-23");
-    expect(annotationDatePreset(now, "week").date).toBe("2026-11-28");
+  it("uses the viewer’s calendar for presets and keeps a single instant when viewed in another zone", () => {
+    vi.stubEnv("TZ", "Asia/Tokyo");
+    try {
+      const tomorrow = annotationDatePreset(now, "tomorrow");
+      expect(tomorrow).toEqual({ kind: "date", date: "2026-11-23", time: "09:00" });
+      const input = tomorrow && annotationTriggerInput(tomorrow, serverVersion, now);
+      expect(input).toEqual({ kind: "date", at: "2026-11-23T00:00:00.000Z" });
+      expect(annotationDatePreset(now, "monday")?.date).toBe("2026-11-23");
+      expect(annotationDatePreset(now, "week")?.date).toBe("2026-11-29");
+
+      vi.stubEnv("TZ", "America/New_York");
+      expect(
+        storedHideUntilDraft({ ...trigger, kind: "date", at: "2026-11-23T00:00:00.000Z" }),
+      ).toEqual({ kind: "date", date: "2026-11-22", time: "19:00" });
+      expect(formatAnnotationDateTime("2026-11-23T00:05:00.000Z", "en-US")).toMatch(
+        /Nov 22, 2026.*19:05/u,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("offers today’s afternoon and evening times only before they arrive", () => {
+    vi.stubEnv("TZ", "Asia/Tokyo");
+    try {
+      const afternoon = { kind: "date", date: "2026-11-22", time: "13:00" };
+      const tonight = { kind: "date", date: "2026-11-22", time: "19:00" };
+      expect(annotationDatePreset(now, "afternoon")).toEqual(afternoon);
+      expect(annotationDatePreset(now, "tonight")).toEqual(tonight);
+      const atAfternoon = Date.parse("2026-11-22T04:00:00.000Z");
+      expect(annotationDatePreset(atAfternoon, "afternoon")).toBeNull();
+      expect(annotationDatePreset(atAfternoon, "tonight")).toEqual(tonight);
+      expect(annotationDatePreset(Date.parse("2026-11-22T10:01:00.000Z"), "tonight")).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("schedules an elapsed hour even through a repeated local hour", () => {
+    vi.stubEnv("TZ", "America/New_York");
+    try {
+      const beforeFallback = Date.parse("2026-11-01T05:30:37.000Z");
+      const draft = annotationDatePreset(beforeFallback, "hour");
+      expect(draft).toMatchObject({ kind: "date", date: "2026-11-01", time: "01:30" });
+      expect(draft && annotationTriggerInput(draft, serverVersion, beforeFallback)).toEqual({
+        kind: "date",
+        at: "2026-11-01T06:30:37.000Z",
+      });
+      const beforeMidnight = Date.parse("2026-11-22T04:40:00.000Z");
+      expect(annotationDatePreset(beforeMidnight, "hour")).toMatchObject({
+        kind: "date",
+        date: "2026-11-22",
+        time: "00:40",
+      });
+      expect(formatAnnotationDateTime("2026-11-22T05:05:00.000Z", "en-US")).toMatch(/00:05/u);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it.each(["2026-11-20", "2026-11-31", ""])("rejects past and invalid dates (%j)", (date) => {

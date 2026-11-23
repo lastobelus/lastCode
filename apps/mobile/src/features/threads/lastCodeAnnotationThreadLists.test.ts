@@ -39,19 +39,24 @@ const annotated = makeThreadShellFixture({
 describe("mobile annotation navigation", () => {
   it("uses a trimmed title match at the command palette seam", () => {
     const visible = makeThreadShellFixture({ environmentId, id: ThreadId.make("visible") });
-    const threads = [annotated, visible];
-    expect(filterLastCodeMobilePaletteThreads(threads, "")).toEqual([visible]);
-    expect(filterLastCodeMobilePaletteThreads(threads, "  ")).toEqual([visible]);
-    expect(filterLastCodeMobilePaletteThreads(threads, "next-release")).toEqual([visible]);
-    expect(filterLastCodeMobilePaletteThreads(threads, "  PAIRING  ")).toEqual(threads);
+    const inherited = { ...annotated, id: ThreadId.make("inherited"), annotation: null };
+    const hidden = new Set([scopedThreadKey(environmentId, inherited.id)]);
+    const threads = [annotated, inherited, visible];
+    expect(filterLastCodeMobilePaletteThreads(threads, "", hidden)).toEqual([visible]);
+    expect(filterLastCodeMobilePaletteThreads(threads, "  ", hidden)).toEqual([visible]);
+    expect(filterLastCodeMobilePaletteThreads(threads, "next-release", hidden)).toEqual([visible]);
+    expect(filterLastCodeMobilePaletteThreads(threads, "  PAIRING  ", hidden)).toEqual(threads);
   });
 
   it("retains the open drawer row only when it belongs to that environment's input", () => {
     const key = `${annotated.environmentId}:${annotated.id}`;
     const remote = { ...annotated, environmentId: EnvironmentId.make("remote") };
-    expect(filterLastCodeAnnotationThreadRows([annotated, remote])).toEqual([]);
-    expect(filterLastCodeAnnotationThreadRows([annotated, remote], key)).toEqual([annotated]);
-    expect(filterLastCodeAnnotationThreadRows([remote], key)).toEqual([]);
+    const hidden = new Set([key, scopedThreadKey(remote.environmentId, remote.id)]);
+    expect(filterLastCodeAnnotationThreadRows([annotated, remote], hidden)).toEqual([]);
+    expect(filterLastCodeAnnotationThreadRows([annotated, remote], hidden, key)).toEqual([
+      annotated,
+    ]);
+    expect(filterLastCodeAnnotationThreadRows([remote], hidden, key)).toEqual([]);
   });
 
   it("moves among visible rows while reserving the order key of a hidden neighbor", () => {
@@ -68,6 +73,7 @@ describe("mobile annotation navigation", () => {
     const moved = { ...first, id: ThreadId.make("moved"), pinOrderKey: "z" };
     const plan = planLastCodeAnnotationThreadMove({
       threads: [first, hidden, second, moved],
+      annotationHiddenThreadKeys: new Set([scopedThreadKey(hidden.environmentId, hidden.id)]),
       section: "pinned",
       now,
       movedId: "local:moved",
@@ -104,15 +110,21 @@ describe("mobile annotation navigation", () => {
       child,
     ]);
     const retainedThreadKey = scopedThreadKey(row.environmentId, row.threadId);
-    expect(filterLastCodeAnnotationThreadRows(drawerThreads, retainedThreadKey)).toEqual(
-      drawerThreads,
-    );
+    const annotationHiddenThreadKeys = new Set([retainedThreadKey]);
+    expect(
+      filterLastCodeAnnotationThreadRows(
+        drawerThreads,
+        annotationHiddenThreadKeys,
+        retainedThreadKey,
+      ),
+    ).toEqual(drawerThreads);
     const input = {
       threads: drawerThreads,
       section: "pinned" as const,
       now,
       movedId: "local:annotated",
       retainedThreadKey,
+      annotationHiddenThreadKeys,
       direction: "up" as const,
       reorderableEnvironmentIds: new Set([environmentId]),
     };
@@ -123,10 +135,17 @@ describe("mobile annotation navigation", () => {
     expect(plan.ordered).toEqual([first, open]);
 
     const pending = createPendingThreadOrder({ ...input, ...plan });
-    const current = getLastCodeAnnotationOrderedSection(input, input.retainedThreadKey);
+    const current = getLastCodeAnnotationOrderedSection(
+      input,
+      annotationHiddenThreadKeys,
+      retainedThreadKey,
+    );
     expect(reconcilePendingThreadOrder(pending, current)).toBe(pending);
     expect(
-      reconcilePendingThreadOrder(pending, getLastCodeAnnotationOrderedSection(input)),
+      reconcilePendingThreadOrder(
+        pending,
+        getLastCodeAnnotationOrderedSection(input, annotationHiddenThreadKeys),
+      ),
     ).toBeNull();
   });
 });

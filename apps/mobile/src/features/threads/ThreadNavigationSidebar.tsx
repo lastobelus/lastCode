@@ -26,7 +26,10 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { useProjects } from "../../state/entities";
-import { steadyNavigationThreadShellsAtom } from "../../state/threads";
+import {
+  steadyAnnotationHiddenThreadKeysAtom,
+  steadyNavigationThreadShellsAtom,
+} from "../../state/threads";
 import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 import { useThreadListNow } from "./use-thread-list-now";
@@ -132,10 +135,11 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   const { fabClearance, fabSize } = useAndroidControlSizing();
   const projects = useProjects();
   const orderCandidates = useLaunchingThreads(useAtomValue(steadyNavigationThreadShellsAtom));
+  const annotationHidden = useAtomValue(steadyAnnotationHiddenThreadKeysAtom);
   const selectedThreadKey = useSidebarRowThreadKey(props.selectedThreadKey);
   const threads = useMemo(
-    () => filterLastCodeAnnotationThreadRows(orderCandidates, selectedThreadKey),
-    [orderCandidates, selectedThreadKey],
+    () => filterLastCodeAnnotationThreadRows(orderCandidates, annotationHidden, selectedThreadKey),
+    [orderCandidates, selectedThreadKey, annotationHidden],
   );
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();

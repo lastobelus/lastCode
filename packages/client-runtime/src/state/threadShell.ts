@@ -17,6 +17,8 @@ import {
 import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
+import { scopedThreadKey } from "../environment/scoped.ts";
+import { createLastCodeAnnotationVisibilityAtom } from "./lastCodeAnnotationVisibility.ts";
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
 import { getArchiveRecoveryRows } from "./threadArchive.ts";
 import {
@@ -91,6 +93,7 @@ export function resolveListedAncestorThreadRef(
     EnvironmentThreadShell,
     "id" | "environmentId" | "lineage" | "delegatedFrom" | "archivedAt"
   >[],
+  pendingChildThreadKeys?: ReadonlySet<string>,
 ): ScopedThreadRef {
   const findThread = (target: ScopedThreadRef) =>
     threads.find(
@@ -100,6 +103,7 @@ export function resolveListedAncestorThreadRef(
   let current = ref;
   let thread = findThread(current);
   while (thread !== undefined) {
+    if (pendingChildThreadKeys?.has(scopedThreadKey(current))) return current;
     let parent: ScopedThreadRef;
     if (!isListedThreadLineage(thread.lineage)) {
       if (thread.lineage.parentThreadId === null) return ref;
@@ -773,26 +777,34 @@ export function createEnvironmentThreadShellAtoms(input: {
     return next;
   }).pipe(Atom.withLabel("environment-delegated-under-parent"));
 
+  const annotationVisibilityAtom = createLastCodeAnnotationVisibilityAtom(threadShellsAtom);
+  const annotationHiddenThreadKeysAtom = Atom.map(
+    annotationVisibilityAtom,
+    (visibility) => visibility.hiddenThreadKeys,
+  );
+  const annotationPendingChildThreadKeysAtom = Atom.map(
+    annotationVisibilityAtom,
+    (visibility) => visibility.pendingChildThreadKeys,
+  );
   let previousNavigationShells: ReadonlyArray<EnvironmentThreadShell> = [];
   const navigationThreadShellsAtom = Atom.make((get) => {
     const next: EnvironmentThreadShell[] = [];
     const underParent = get(delegatedUnderParentAtom);
     const hidden = get(hiddenThreadKeysAtom);
+    const pendingChildRows = get(annotationPendingChildThreadKeysAtom);
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const subagentRequests = get(pendingSubagentRequestsAtom(environmentId));
       const environmentThreads = get(environmentThreadsAtom(environmentId));
       const archiveRecoveryRows = getArchiveRecoveryRows(environmentThreads);
       for (const thread of environmentThreads) {
+        const ref = { environmentId, threadId: thread.id };
         if (
           !threadShellIsVisible(thread) ||
           (!threadShellIsCleanupRecovery(thread) &&
             !archiveRecoveryRows.has(thread) &&
-            isShownUnderParent(
-              { environmentId, threadId: thread.id },
-              thread.lineage,
-              underParent,
-            )) ||
-          hidden.has(threadKey({ environmentId, threadId: thread.id }))
+            !pendingChildRows.has(scopedThreadKey(ref)) &&
+            isShownUnderParent(ref, thread.lineage, underParent)) ||
+          hidden.has(threadKey(ref))
         ) {
           continue;
         }
@@ -813,6 +825,8 @@ export function createEnvironmentThreadShellAtoms(input: {
     threadShellsAtom,
     visibleThreadShellsAtom,
     hiddenThreadKeysAtom,
+    annotationHiddenThreadKeysAtom,
+    annotationPendingChildThreadKeysAtom,
     anyEnvironmentHidingAtom,
     quietThreadShellsAtom,
     navigationThreadShellsAtom,

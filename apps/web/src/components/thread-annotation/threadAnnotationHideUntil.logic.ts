@@ -13,9 +13,6 @@ import { msg } from "gt-react";
 
 import { m, type MessageResolver } from "~/i18n/messages";
 
-const PACIFIC_TIME = "America/Vancouver";
-const pacificOptions = { timeZone: PACIFIC_TIME } as const;
-
 export interface AnnotationEdit {
   readonly body?: string;
   readonly bodyEdited?: true;
@@ -24,30 +21,50 @@ export interface AnnotationEdit {
 }
 
 type PullRequestTrigger = Extract<AnnotationHideTriggerInput, { kind: "pull-request-merged" }>;
+type DateDraft = { kind: "date"; date: string; time: string; presetAt?: number };
 export type HideUntilDraft =
   | { kind: "none" }
   | { kind: "checkpoints"; count: string }
   | { kind: "thread-archived"; threadId: ThreadId | null }
   | { kind: "pull-request-merged"; pullRequest: PullRequestTrigger | null }
-  | { kind: "date"; date: string; time: string };
+  | DateDraft;
 
-function pacificDateFields(value: string | number) {
-  const zoned = DateTime.makeZonedUnsafe(value, pacificOptions);
-  const { year, month, day, hour, minute } = DateTime.toParts(zoned);
+function localDateFields(value: string | number) {
+  const local = new Date(value);
   const pad = (number: number) => String(number).padStart(2, "0");
-  return { date: `${year}-${pad(month)}-${pad(day)}`, time: `${pad(hour)}:${pad(minute)}` };
+  return {
+    date: `${String(local.getFullYear()).padStart(4, "0")}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}`,
+    time: `${pad(local.getHours())}:${pad(local.getMinutes())}`,
+  };
 }
 
-export function annotationDatePreset(now: number, preset: "tomorrow" | "monday" | "week") {
-  const { date } = pacificDateFields(now);
+type CalendarPreset = "tomorrow" | "monday" | "week";
+function calendarDatePreset(date: string, preset: CalendarPreset): DateDraft {
   const day = DateTime.makeUnsafe(`${date}T00:00:00Z`);
   const days =
     preset === "week" ? 7 : preset === "monday" ? (8 - DateTime.toParts(day).weekDay) % 7 || 7 : 1;
   return {
-    kind: "date" as const,
+    kind: "date",
     date: DateTime.formatIsoDateUtc(DateTime.add(day, { days })),
     time: "09:00",
   };
+}
+
+export function annotationDatePreset(
+  now: number,
+  preset: CalendarPreset | "hour" | "afternoon" | "tonight",
+): DateDraft | null {
+  if (preset === "hour") {
+    const presetAt = now + 60 * 60 * 1000;
+    // The displayed minute cannot distinguish the two occurrences of a repeated local hour.
+    return { kind: "date", ...localDateFields(presetAt), presetAt };
+  }
+  const { date } = localDateFields(now);
+  if (preset === "afternoon" || preset === "tonight") {
+    const time = preset === "afternoon" ? "13:00" : "19:00";
+    return futureLocalInstant(date, time, now) === null ? null : { kind: "date", date, time };
+  }
+  return calendarDatePreset(date, preset);
 }
 
 export function makeHideUntilDraft(kind: HideUntilDraft["kind"], now: number): HideUntilDraft {
@@ -61,7 +78,7 @@ export function makeHideUntilDraft(kind: HideUntilDraft["kind"], now: number): H
     case "pull-request-merged":
       return { kind, pullRequest: null };
     case "date":
-      return annotationDatePreset(now, "tomorrow");
+      return calendarDatePreset(localDateFields(now).date, "tomorrow");
   }
 }
 
@@ -77,20 +94,20 @@ export function storedHideUntilDraft(trigger: AnnotationHideTrigger | undefined)
       return { kind, pullRequest: { kind, repository, host, number } };
     }
     case "date":
-      return { kind: trigger.kind, ...pacificDateFields(trigger.at) };
+      return { kind: trigger.kind, ...localDateFields(trigger.at) };
   }
 }
 
-function futurePacificInstant(date: string, time: string, now: number) {
+function futureLocalInstant(date: string, time: string, now: number) {
   if (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || !/^\d{2}:\d{2}$/u.test(time)) return null;
   const input = `${date}T${time}:00.000Z`;
   const instant = DateTime.makeZoned(input, {
-    ...pacificOptions,
+    timeZone: DateTime.zoneMakeLocal(),
     adjustForTimeZone: true,
     disambiguation: "reject",
   });
   if (Option.isNone(instant) || DateTime.toEpochMillis(instant.value) <= now) return null;
-  const fields = pacificDateFields(DateTime.toEpochMillis(instant.value));
+  const fields = localDateFields(DateTime.toEpochMillis(instant.value));
   return fields.date === date && fields.time === time ? DateTime.formatIso(instant.value) : null;
 }
 
@@ -117,7 +134,12 @@ export function annotationTriggerInput(
     case "pull-request-merged":
       return draft.pullRequest;
     case "date": {
-      const at = futurePacificInstant(draft.date, draft.time, now);
+      const at =
+        draft.presetAt === undefined
+          ? futureLocalInstant(draft.date, draft.time, now)
+          : draft.presetAt > now
+            ? new Date(draft.presetAt).toISOString()
+            : null;
       return at === null ? null : { kind: draft.kind, at };
     }
   }
@@ -139,7 +161,12 @@ function sameHideUntilDraft(left: HideUntilDraft, right: HideUntilDraft): boolea
         right.pullRequest?.number === left.pullRequest?.number
       );
     case "date":
-      return right.kind === left.kind && right.date === left.date && right.time === left.time;
+      return (
+        right.kind === left.kind &&
+        right.date === left.date &&
+        right.time === left.time &&
+        right.presetAt === left.presetAt
+      );
   }
 }
 
@@ -195,18 +222,11 @@ export function annotationEditorEdit(input: {
   return { ...triggerEdit, ...bodyEdit };
 }
 
-export function formatAnnotationPacificTime(at: string, locale: string) {
+export function formatAnnotationDateTime(at: string, locale: string) {
   return new Intl.DateTimeFormat(locale, {
-    ...pacificOptions,
     dateStyle: "medium",
     timeStyle: "short",
-  }).format(new Date(at));
-}
-
-export function formatAnnotationPacificDate(at: string, locale: string) {
-  return new Intl.DateTimeFormat(locale, {
-    ...pacificOptions,
-    dateStyle: "medium",
+    hourCycle: "h23",
   }).format(new Date(at));
 }
 
@@ -234,7 +254,7 @@ export function annotationTriggerSummary(
       return resolve(msg("until PR #{number} is merged", { number: trigger.number }));
     case "date":
       return resolve(
-        msg("until {dateTime} PT", { dateTime: formatAnnotationPacificTime(trigger.at, locale) }),
+        msg("until {dateTime}", { dateTime: formatAnnotationDateTime(trigger.at, locale) }),
       );
   }
 }
@@ -265,8 +285,8 @@ export function annotationRevealReason(
         return resolve(msg("Was hidden until PR #{number} merged", { number: trigger.number }));
       case "date":
         return resolve(
-          msg("Was hidden until {dateTime} PT", {
-            dateTime: formatAnnotationPacificTime(trigger.at, locale),
+          msg("Was hidden until {dateTime}", {
+            dateTime: formatAnnotationDateTime(trigger.at, locale),
           }),
         );
     }

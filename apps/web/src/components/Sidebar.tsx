@@ -172,7 +172,7 @@ import {
 import { environmentPresentations } from "../state/presentation";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
-import { threadEnvironment } from "../state/threads";
+import { environmentThreadShells, threadEnvironment } from "../state/threads";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../state/olderSettledShelf";
 import { terminalEnvironment } from "../state/terminal";
 import { useThreadSearch } from "../state/queries";
@@ -381,6 +381,8 @@ type SidebarOptimisticDrop = {
 
 interface SidebarThreadPartitionInput {
   readonly threads: readonly EnvironmentThreadShell[];
+  readonly annotationHiddenThreadKeys: ReadonlySet<string>;
+  readonly annotationPendingChildThreadKeys: ReadonlySet<string>;
   readonly routeRowThreadKey: string | null;
   readonly scopedProjectKeys: ReadonlySet<string> | null;
   /** Tasks linked environments run for a listed thread; they show under it. */
@@ -455,6 +457,7 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly annotationPendingChildThreadKeys: ReadonlySet<string>;
   readonly routeRowThreadKey: string | null;
   readonly departingThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
@@ -516,6 +519,10 @@ function useSidebarThreads(input: {
 
   const partition = partitionSidebarThreads({
     threads,
+    annotationHiddenThreadKeys: useAtomValue(
+      environmentThreadShells.annotationHiddenThreadKeysAtom,
+    ),
+    annotationPendingChildThreadKeys: input.annotationPendingChildThreadKeys,
     routeRowThreadKey,
     scopedProjectKeys,
     delegatedUnderParent,
@@ -667,8 +674,13 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     threads,
     scopedProjectKeys,
     delegatedUnderParent,
+    input.annotationPendingChildThreadKeys,
   );
-  const visible = filterLastCodeAnnotationInboxRows(candidates, input.routeRowThreadKey);
+  const visible = filterLastCodeAnnotationInboxRows(
+    candidates,
+    input.routeRowThreadKey,
+    input.annotationHiddenThreadKeys,
+  );
   const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
@@ -1164,6 +1176,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ),
         );
   const threads = useQuietThreadShells();
+  const annotationPendingChildThreadKeys = useAtomValue(
+    environmentThreadShells.annotationPendingChildThreadKeysAtom,
+  );
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const listedThreads =
     promotingDraftThreadKeys.length === 0
@@ -1176,7 +1191,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
-      : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
+      : scopedThreadKey(
+          resolveListedAncestorThreadRef(routeThreadRef, threads, annotationPendingChildThreadKeys),
+        );
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
@@ -1193,6 +1210,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     isSearching: isSearchingThreads,
     scopedProjectKeys: chosenScopeProjectKeys,
     delegatedUnderParent,
+    annotationPendingChildThreadKeys,
     findThread: (key) => threads.find((candidate) => threadShellKey(candidate) === key),
   });
   const projectScopeKeys = revealWidensScope ? [] : chosenProjectScopeKeys;
@@ -1406,6 +1424,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
+    annotationPendingChildThreadKeys,
     routeRowThreadKey,
     departingThreadKey,
     folderGroups: boringSidebarEnabled
