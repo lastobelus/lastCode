@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { useId, useState } from "react";
 
+import { useNowMinute } from "../../hooks/useNowMinute";
 import {
   useProject,
   useQuietThreadShell,
@@ -104,7 +105,7 @@ export function ThreadAnnotationHideUntilField({
       icon: PullRequestGlyph.merged,
       hint: gt("This thread's PRs first, then open PRs"),
     },
-    { kind: "date", label: gt("A date"), icon: CalendarIcon, hint: gt("Pacific Time") },
+    { kind: "date", label: gt("A date/time"), icon: CalendarIcon },
   ] as const;
   const selected = triggerOptions.find((option) => option.kind === draft.kind);
   const SelectedIcon = selected?.icon;
@@ -218,59 +219,89 @@ export function ThreadAnnotationHideUntilField({
         <>
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <Input
-              aria-label={gt("Date (PT)")}
+              aria-label={gt("Date")}
               className="w-auto"
               disabled={disabled}
               nativeInput
               size="sm"
               type="date"
               value={draft.date}
-              onChange={(event) => onChange({ ...draft, date: event.target.value })}
+              onChange={(event) =>
+                onChange({ kind: "date", date: event.target.value, time: draft.time })
+              }
             />
             <Input
-              aria-label={gt("Time (PT)")}
+              aria-label={gt("Time")}
               className="w-auto"
               disabled={disabled}
               nativeInput
               size="sm"
               type="time"
               value={draft.time}
-              onChange={(event) => onChange({ ...draft, time: event.target.value })}
+              onChange={(event) =>
+                onChange({ kind: "date", date: draft.date, time: event.target.value })
+              }
             />
-            <T>PT</T>
           </div>
           {invalid && draft.date && draft.time ? (
             <p className="text-xs text-destructive">
-              <T>Choose a future date and time in PT.</T>
+              <T>Choose a future date and time.</T>
             </p>
           ) : null}
-          <div className="flex flex-wrap gap-1.5">
-            {(
-              [
-                ["tomorrow", gt("Tomorrow 9 AM")],
-                ["monday", gt("Monday 9 AM")],
-                ["week", gt("In a week")],
-              ] as const
-            ).map(([preset, label]) => {
-              const value = annotationDatePreset(now, preset);
-              const selected = value.date === draft.date && value.time === draft.time;
-              return (
-                <Button
-                  key={preset}
-                  aria-pressed={selected}
-                  disabled={disabled}
-                  size="xs"
-                  type="button"
-                  variant={selected ? "secondary" : "outline"}
-                  onClick={() => onChange(value)}
-                >
-                  {label}
-                </Button>
-              );
-            })}
-          </div>
+          <DatePresetButtons draft={draft} disabled={disabled} onChange={onChange} />
         </>
       ) : null}
+    </div>
+  );
+}
+
+function DatePresetButtons({
+  draft,
+  disabled,
+  onChange,
+}: {
+  draft: Extract<HideUntilDraft, { kind: "date" }>;
+  disabled: boolean;
+  onChange: (draft: HideUntilDraft) => void;
+}) {
+  const gt = useGT();
+  const now = Date.parse(`${useNowMinute()}:00.000Z`);
+  const options = [
+    ["hour", gt("An hour")],
+    ["afternoon", gt("This afternoon")],
+    ["tonight", gt("Tonight")],
+    ["tomorrow", gt("Tomorrow 9 AM")],
+    ["monday", gt("Monday 9 AM")],
+    ["week", gt("In a week")],
+  ] as const;
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map(([preset, label]) => {
+        const value = annotationDatePreset(now, preset);
+        const selected =
+          preset === "hour"
+            ? draft.presetAt !== undefined
+            : draft.presetAt === undefined &&
+              value?.date === draft.date &&
+              value.time === draft.time;
+        return (
+          <Button
+            key={preset}
+            aria-pressed={selected}
+            disabled={disabled || value === null}
+            size="xs"
+            type="button"
+            variant={selected ? "secondary" : "outline"}
+            onClick={() => {
+              const picked = annotationDatePreset(Date.now(), preset);
+              if (picked !== null) onChange(picked);
+            }}
+          >
+            {label}
+          </Button>
+        );
+      })}
     </div>
   );
 }

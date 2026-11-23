@@ -12,8 +12,7 @@ import {
   annotationRevealFailed,
   annotationRevealReason,
   annotationTriggerSummary,
-  formatAnnotationPacificDate,
-  formatAnnotationPacificTime,
+  formatAnnotationDateTime,
 } from "./threadAnnotationHideUntil.logic";
 
 function useArchiveTarget(threadRef: ScopedThreadRef, trigger: AnnotationHideTrigger) {
@@ -47,12 +46,12 @@ export function ThreadAnnotationRevealSummary({
   const resolve = useMessages();
   const locale = useLocale();
   const target = useArchiveTarget(threadRef, reveal.trigger);
-  const dateTime = formatAnnotationPacificTime(reveal.at, locale);
+  const dateTime = formatAnnotationDateTime(reveal.at, locale);
   const reason = annotationRevealReason(reveal, target?.title, locale, resolve);
   const summary =
     reveal.by === "manual"
-      ? resolve(msg("Shown manually {dateTime} PT. {reason}", { dateTime, reason }))
-      : resolve(msg("Reappeared {dateTime} PT. {reason}", { dateTime, reason }));
+      ? resolve(msg("Shown manually {dateTime}. {reason}", { dateTime, reason }))
+      : resolve(msg("Reappeared {dateTime}. {reason}", { dateTime, reason }));
   return (
     <span className={annotationRevealFailed(reveal) ? "text-destructive" : undefined}>
       {summary}
@@ -64,7 +63,7 @@ export function ThreadAnnotationHiddenSince({ at }: { at: string }) {
   const resolve = useMessages();
   const locale = useLocale();
   return resolve(
-    msg("Hidden since {dateTime} PT", { dateTime: formatAnnotationPacificTime(at, locale) }),
+    msg("Hidden since {dateTime}", { dateTime: formatAnnotationDateTime(at, locale) }),
   );
 }
 
@@ -221,25 +220,24 @@ export function ThreadAnnotationRevealLine({
   const resolve = useMessages();
   const locale = useLocale();
   const target = useArchiveTarget(threadRef, reveal.trigger);
-  const dateTime = formatAnnotationPacificTime(reveal.at, locale);
+  const dateTime = formatAnnotationDateTime(reveal.at, locale);
   const reason = annotationRevealReason(reveal, target?.title, locale, resolve);
-  const from = formatAnnotationPacificDate(reveal.trigger.hiddenAt, locale);
-  const to = formatAnnotationPacificDate(reveal.at, locale);
+  const from = formatAnnotationDateTime(reveal.trigger.hiddenAt, locale);
   return (
     <div className="flex items-start gap-1.5 text-xs text-warning-foreground">
       <EyeIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
       <div className="min-w-0 [overflow-wrap:anywhere]">
         <span className="font-medium">
           {reveal.by === "manual"
-            ? resolve(msg("Shown manually {dateTime} PT", { dateTime }))
-            : resolve(msg("Reappeared {dateTime} PT", { dateTime }))}
+            ? resolve(msg("Shown manually {dateTime}", { dateTime }))
+            : resolve(msg("Reappeared {dateTime}", { dateTime }))}
         </span>
         <div className="mt-0.5 text-2xs text-warning-foreground/80">
           <span className={annotationRevealFailed(reveal) ? "block text-destructive" : undefined}>
             {reason}
           </span>
           {!annotationRevealFailed(reveal) ? " · " : null}
-          {resolve(msg("hidden {from} – {to} PT", { from, to }))}
+          {resolve(msg("hidden {from} – {to}", { from, to: dateTime }))}
         </div>
       </div>
     </div>
