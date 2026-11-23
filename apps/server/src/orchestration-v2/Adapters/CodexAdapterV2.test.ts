@@ -6994,7 +6994,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ],
   });
 
-  const waitEndings = ["dispatch", "4242", BG_COMMAND_ITEM];
+  const waitEndings = ["dispatch", "4242", BG_COMMAND_ITEM, "clear-running"];
   it.effect.each(waitEndings)("awaits only marked commands (%s)", (resolution) =>
     Effect.gen(function* () {
       const settled = yield* Deferred.make<void>();
@@ -7148,8 +7148,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ?.backgroundRosterOnly,
       );
       assert.isTrue(yield* harness.hasPendingBackgroundWork);
-      yield* wait!({ providerThread: harness.providerThread, taskIds: ["4242"], awaited: true });
-      yield* harness.until(() => tasks().length === 1);
+      if (resolution !== "clear-running") {
+        yield* wait!({ providerThread: harness.providerThread, taskIds: ["4242"], awaited: true });
+        yield* harness.until(() => tasks().length === 1);
+      }
       const nextStart = yield* harness.runtime
         .startTurn(
           makeCodexTestTurnInput({
@@ -7179,6 +7181,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       // command, and the wake must claim it for the originating delegated run.
       const latestRoster = () =>
         harness.events.findLast((event) => event.type === "provider_thread.updated");
+      if (resolution === "clear-running") {
+        assert.isUndefined(wake?.backgroundResultContinuation);
+        assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, []);
+        yield* Fiber.join(nextStart);
+        yield* Deferred.succeed(registered, undefined);
+        return;
+      }
       const owedResult = { taskId: BG_COMMAND_ITEM, originRunId: firstTurn.runId };
       assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
       assert.isTrue(latestRoster()?.sessionScoped);
