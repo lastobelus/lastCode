@@ -826,8 +826,12 @@ export const layer: Layer.Layer<
             // arrives. Later turns need fresh cleanup even after an earlier unload.
             const effects: Array<PendingOrchestrationEffectV2> = [...summaries.effects];
             const incoming = input.event;
+            const backgroundRosterOnly =
+              incoming.type === "provider_thread.updated" &&
+              incoming.sessionScoped === true &&
+              incoming.backgroundRosterOnly === true;
             if (
-              incoming.type === "provider_thread.updated" ||
+              (incoming.type === "provider_thread.updated" && !backgroundRosterOnly) ||
               (incoming.type === "provider_turn.updated" &&
                 (incoming.providerTurn.status === "pending" ||
                   incoming.providerTurn.status === "running"))
@@ -918,9 +922,9 @@ export const layer: Layer.Layer<
                 events,
               };
               return yield* (
-                effects.length === 0
+                effects.length === 0 && !backgroundRosterOnly
                   ? eventSink.write(writeInput)
-                  : eventSink.writeWithEffects({ ...writeInput, effects })
+                  : eventSink.writeWithEffects({ ...writeInput, effects, backgroundRosterOnly })
               ).pipe(retryLockTimeout, Effect.mapError(mapWriteError));
             }
             const result = yield* eventSink

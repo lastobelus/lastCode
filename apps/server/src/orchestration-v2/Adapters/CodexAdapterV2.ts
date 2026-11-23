@@ -2851,7 +2851,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             driver: CODEX_PROVIDER,
             providerThread: updated,
             // These writes must persist even without a subscribed turn.
-            ...(updateOwedResults === undefined ? {} : { sessionScoped: true }),
+            ...(updateOwedResults === undefined
+              ? {}
+              : { sessionScoped: true, backgroundRosterOnly: true }),
           });
         });
 

@@ -7171,6 +7171,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const owedResult = { taskId: BG_COMMAND_ITEM, originRunId: firstTurn.runId };
       assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
       assert.isTrue(latestRoster()?.sessionScoped);
+      assert.isTrue(latestRoster()?.backgroundRosterOnly);
       assert.deepEqual(wake?.backgroundResultContinuation, {
         providerThreadId: harness.providerThread.id,
         originRunId: firstTurn.runId,
