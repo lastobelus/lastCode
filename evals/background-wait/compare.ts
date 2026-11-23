@@ -11,15 +11,18 @@ function load(path: string): Results {
   return data;
 }
 
-function paired(a: Results, b: Results) {
+function paired(a: Results, b: Results, baselineHead?: string) {
   const { provider, model, effort, head, scale } = a.config;
+  if (baselineHead !== undefined && baselineHead !== head) {
+    throw new Error(`--baseline-head does not match arm A's recorded head ${head}.`);
+  }
   if (
     a.config.arm !== "a" ||
     b.config.arm !== "b" ||
     b.config.provider !== provider ||
     b.config.model !== model ||
     b.config.effort !== effort ||
-    b.config.head !== head ||
+    (b.config.head !== head && baselineHead === undefined) ||
     b.config.scale !== scale
   ) {
     throw new Error(
@@ -57,8 +60,8 @@ const total = (rows: (SampleResult | undefined)[], get: (row: SampleResult) => n
   return available.length === rows.length ? available.reduce((sum, value) => sum + value, 0) : null;
 };
 
-export function compare(a: Results, b: Results, subsequentTurns: number) {
-  const cases = paired(a, b);
+export function compare(a: Results, b: Results, subsequentTurns: number, baselineHead?: string) {
+  const cases = paired(a, b, baselineHead);
   const aResults = cases.flatMap((row) => row.a);
   const bResults = cases.flatMap((row) => row.b);
   const firstInputs = values(aResults, (row) => row.firstInput);
@@ -128,6 +131,7 @@ export function compare(a: Results, b: Results, subsequentTurns: number) {
   const cheaper = aRaw !== null && bRaw !== null && bRaw < aRaw;
   return {
     outcome: !sufficient ? "incomplete" : reliable && zeroPolls && cheaper ? "pass" : "fail",
+    heads: { a: a.config.head, b: b.config.head },
     wrapperLine: b.config.wrapperLine ?? null,
     formulaInputs: { typicalContext, subsequentTurns },
     summaries,
@@ -139,7 +143,10 @@ export function compare(a: Results, b: Results, subsequentTurns: number) {
 if (import.meta.main) {
   const { positionals, values: flags } = NodeUtil.parseArgs({
     allowPositionals: true,
-    options: { "subsequent-turns": { type: "string", default: "5" } },
+    options: {
+      "subsequent-turns": { type: "string", default: "5" },
+      "baseline-head": { type: "string" },
+    },
   });
   const [left, right] = positionals;
   const subsequentTurns = Number(flags["subsequent-turns"]);
@@ -151,10 +158,10 @@ if (import.meta.main) {
     subsequentTurns < 0
   ) {
     throw new Error(
-      "Usage: node evals/background-wait/compare.ts <arm-a/results.json> <arm-b/results.json> [--subsequent-turns 5]",
+      "Usage: node evals/background-wait/compare.ts <arm-a/results.json> <arm-b/results.json> [--subsequent-turns 5] [--baseline-head <exact-arm-a-head>]",
     );
   }
-  const comparison = compare(load(left), load(right), subsequentTurns);
+  const comparison = compare(load(left), load(right), subsequentTurns, flags["baseline-head"]);
   console.log(JSON.stringify(comparison, null, 2));
   if (comparison.outcome !== "pass") process.exitCode = 1;
 }

@@ -4,7 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { parseLastCodeWrappedAction } from "../../packages/shared/src/lastcodeWrappedCommands.ts";
 import { cases } from "./cases.ts";
-import { gradeSample } from "./metrics.ts";
+import { compare } from "./compare.ts";
+import { gradeSample, type Results } from "./metrics.ts";
 import {
   awaitedWrapperIds,
   gradeTrace,
@@ -26,6 +27,31 @@ const wait =
   "[lc-run] If you are this LastCode thread's main agent, ran ./scripts/lc-run as a simple command, and the shell reports it running in the background, end your turn. LastCode will wake the thread with the result. Do not poll. You may prefix the command with cd <literal path> &&, with no cd options or shell expansion. For other shell constructs and native subagent runs, collect the result before returning.";
 
 describe("real-session evidence", () => {
+  it("requires an exact opt-in to reuse a baseline recorded at another head", () => {
+    const a: Results = {
+      version: 1,
+      config: {
+        arm: "a",
+        head: "earlier",
+        provider: "codex",
+        model: "fixture",
+        scale: 1,
+        base: "/home/user/a",
+      },
+      samples: [],
+    };
+    const b: Results = {
+      ...a,
+      config: { ...a.config, arm: "b", head: "later", base: "/home/user/b" },
+    };
+    expect(() => compare(a, b, 5)).toThrow("same source revision");
+    expect(() => compare(a, b, 5, "wrong")).toThrow("does not match arm A");
+    expect(compare(a, b, 5, "earlier")).toMatchObject({
+      outcome: "incomplete",
+      heads: { a: "earlier", b: "later" },
+    });
+  });
+
   it("passes real wrapper syntax for every fixture", () => {
     for (const scenario of cases)
       expect(parseLastCodeWrappedAction(scenario.wrapper)).toBeDefined();
@@ -136,6 +162,40 @@ describe("real-session evidence", () => {
       polls: 1,
       redundantMarks: 1,
       extraCallsWhileWaiting: 1,
+    });
+  });
+
+  it("links a yielded wrapper cell to the wait result that first shows the instruction", () => {
+    const instruction = wrapperWaitInstruction();
+    const trace = [
+      {
+        kind: "call",
+        id: "exec",
+        name: "exec",
+        args: 'await tools.exec_command({cmd:"./scripts/lc-run wait-checkpoint"})',
+      },
+      {
+        kind: "output",
+        id: "exec",
+        body: "Script running with cell ID g1:2\nWall time: 1.0 seconds\nOutput:\n",
+      },
+      { kind: "call", id: "other", name: "wait", args: '{"cell_id":"g1:3"}' },
+      { kind: "output", id: "other", body: instruction },
+      { kind: "call", id: "wait", name: "wait", args: '{"cell_id":"g1:2"}' },
+      { kind: "output", id: "wait", body: "Script running with cell ID g1:2\nOutput:\n" },
+      { kind: "call", id: "resume", name: "wait", args: '{"cell_id":"g1:2"}' },
+      {
+        kind: "output",
+        id: "resume",
+        body: `Script completed\nOutput:\n${JSON.stringify({ session_id: 123, output: instruction })}`,
+      },
+      { kind: "turn-end" },
+    ] as const;
+    expect(gradeTrace([...trace], instruction, true)).toMatchObject({
+      wrapperCalls: 1,
+      markers: 1,
+      polls: 0,
+      extraCallsWhileWaiting: 0,
     });
   });
 

@@ -102,7 +102,7 @@ export function gradeSample(input: GradeInput): SampleResult {
     problems.push("Final response omitted the artifact path.");
   }
 
-  const observed = traces?.map((trace) => gradeTrace(trace, input.waitInstruction));
+  const observed = traces?.map((trace) => gradeTrace(trace, input.waitInstruction, arm === "b"));
   const worker = observed?.at(-1);
   const polls = observed?.reduce((sum, trace) => sum + trace.polls, 0) ?? null;
   const redundantMarks = observed?.reduce((sum, trace) => sum + trace.redundantMarks, 0) ?? null;

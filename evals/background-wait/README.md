@@ -52,6 +52,13 @@ done
 
 The comparison reports one model and effort at a time. The codified pass bar is 20 complete samples per arm in each of the six cases, a majority of correct wrapper samples and at least as many correct samples as Actions **in each case**, zero post-instruction wrapper polls, and lower mean raw tokens per task across the six cases. The report includes per-case raw costs to expose any regressions hidden by the aggregate. A missing trace or missing usage makes the decision incomplete. A valid failure counts, including its measured tokens. The live break tests and soak in #824 remain separate gates.
 
+To reuse the arm A Luna run from before the wrapper trace-grading fix, keep its results file and run arm B from this checkout with `--wrapper-line registered`. Both revisions use the same server and arm A fixtures and scoring. Pin the saved arm A head explicitly so the comparison records both revisions:
+
+```sh
+node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna --wrapper-line registered
+node evals/background-wait/compare.ts "$a/background-wait-eval/luna/results.json" "$b/background-wait-eval/luna/results.json" --baseline-head 7203dc52fc8f208dbebcafc21737241ac9dbfd73
+```
+
 ### Pilot the wrapper wording
 
 Reuse the same two running dev servers. Use a fresh `--out` name for each run so the original pilot remains available. Arm B defaults to `registered`. Selecting `original` substitutes the landed wait line in each synthetic checkout. The same server, wrapper logic, fixture, and guidance run in both variants.

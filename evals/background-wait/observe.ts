@@ -281,8 +281,13 @@ function callsTool(call: Extract<TraceEvent, { kind: "call" }>, name: string) {
   );
 }
 
-export function gradeTrace(trace: TraceEvent[], waitInstruction = waitLine) {
+export function gradeTrace(
+  trace: TraceEvent[],
+  waitInstruction = waitLine,
+  followWrapperCells = false,
+) {
   const calls = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
+  const wrapperCells = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
   let waiting: "action" | "wrapper" | undefined;
   let wrapperCalls = 0;
   let terminalWrapperOutputs = 0;
@@ -300,7 +305,13 @@ export function gradeTrace(trace: TraceEvent[], waitInstruction = waitLine) {
       continue;
     }
     if (event.kind === "call") {
-      calls.set(event.id, event);
+      const cellId =
+        followWrapperCells && event.name === "wait"
+          ? /"cell_id"\s*:\s*"([^"]+)"/u.exec(event.args)?.[1]
+          : undefined;
+      const launch = cellId === undefined ? undefined : wrapperCells.get(cellId);
+      if (cellId !== undefined) wrapperCells.delete(cellId);
+      calls.set(event.id, launch ?? event);
       if (waiting) {
         const poll =
           /write_stdin|TaskOutput|inspect_action_run|thread[ /_-]+(?:show|read|wait)|\b(?:tail|sleep|ps|jobs|pgrep)\b|terminal.*(?:log|read|status)/iu.test(
@@ -341,6 +352,10 @@ export function gradeTrace(trace: TraceEvent[], waitInstruction = waitLine) {
     else if (event.body.includes(waitInstruction)) {
       waiting = "wrapper";
       markers++;
+    } else if (followWrapperCells) {
+      // A yielded exec cell can deliver the wrapper's first output via functions.wait.
+      const cellId = /^Script running with cell ID (\S+)/u.exec(event.body)?.[1];
+      if (cellId !== undefined) wrapperCells.set(cellId, call);
     }
   }
   return {
