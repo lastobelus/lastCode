@@ -51,4 +51,5 @@ export const layer = Layer.unwrap(
   Layer.provide(ProjectionStore.layer),
   Layer.provide(EffectOutbox.layer),
   Layer.provide(EnvironmentPauseStore.layer),
+  Capacity.orUnwired,
 );
