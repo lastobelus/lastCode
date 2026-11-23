@@ -2,6 +2,7 @@ import { generatedBuildReviewProtection } from "@t3tools/shared/generatedBuildOw
 import { isGeneratedDependencyPath } from "@t3tools/shared/regenerableIgnoredPath";
 import {
   observeDependencyActivity,
+  recentVerifiedDependencyActivity,
   recordDependencyUse,
   dependencyActivitySnapshot,
 } from "@t3tools/shared/dependencyActivity";
@@ -134,6 +135,7 @@ export class GeneratedDependencies extends Context.Service<
       persist?: boolean,
       observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
       observationTargets?: WorktreeConsumers.TargetObservation,
+      skipRecentWithinRetentionDays?: number,
     ) => Effect.Effect<
       { readonly lastUsedAt: number; readonly renewed: boolean } | null,
       GeneratedDependenciesError
@@ -372,15 +374,18 @@ const make = Effect.gen(function* () {
     });
     return identity === null
       ? null
-      : ({
-          managedWorktreesRoot,
-          repositoryRoot,
-          repositoryCommonGitDir,
-          worktreePath,
-          dependencyPath,
-          packageManager: candidate.packageManager,
-          ...identity,
-        } satisfies Omit<DependencyInspection, "estimatedReclaimedBytes">);
+      : {
+          worktreeGitDir: NodePath.resolve(worktreePath, gitDir),
+          inspection: {
+            managedWorktreesRoot,
+            repositoryRoot,
+            repositoryCommonGitDir,
+            worktreePath,
+            dependencyPath,
+            packageManager: candidate.packageManager,
+            ...identity,
+          } satisfies Omit<DependencyInspection, "estimatedReclaimedBytes">,
+        };
   });
 
   const observe = Effect.fn("GeneratedDependencies.observe")(function* (
@@ -390,9 +395,28 @@ const make = Effect.gen(function* () {
     persist = true,
     observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
     observationTargets?: WorktreeConsumers.TargetObservation,
+    skipRecentWithinRetentionDays?: number,
   ) {
-    const current = yield* validate(input, "GeneratedDependencies.observe");
-    if (current === null) return null;
+    const validated = yield* validate(input, "GeneratedDependencies.observe");
+    if (validated === null) return null;
+    const { inspection: current, worktreeGitDir } = validated;
+    if (persist && !used && skipRecentWithinRetentionDays !== undefined) {
+      const currentTime = yield* Clock.currentTimeMillis;
+      const recent = yield* Effect.try({
+        try: () =>
+          recentVerifiedDependencyActivity(
+            worktreeGitDir,
+            current.worktreePath,
+            Math.max(now, currentTime),
+            skipRecentWithinRetentionDays,
+          ),
+        catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+      });
+      if (recent !== null && recent.lastUsedAt <= currentTime) {
+        WorktreeConsumers.recordSkippedUsageCheck(observationTargets);
+        return recent;
+      }
+    }
     let consumed = false;
     // Read-only eligibility compares durable metadata only. Unsaved OS evidence
     // must be captured by a writing observer or the native removal guards.
@@ -405,23 +429,10 @@ const make = Effect.gen(function* () {
         catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
       });
     }
-    const location = yield* git
-      .execute({
-        operation: "GeneratedDependencies.observe",
-        cwd: current.worktreePath,
-        args: ["rev-parse", "--absolute-git-dir"],
-        maxOutputBytes: 64 * 1024,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
-        ),
-      );
-    if (location.stdoutTruncated || location.stderrTruncated) return null;
     return yield* Effect.try({
       try: () =>
         observeDependencyActivity(
-          location.stdout.trim(),
+          worktreeGitDir,
           current.worktreePath,
           now,
           used || consumed,
@@ -432,8 +443,9 @@ const make = Effect.gen(function* () {
   });
 
   const inspect = Effect.fn("GeneratedDependencies.inspect")(function* (input: DependencyInput) {
-    const current = yield* validate(input);
-    if (current === null) return null;
+    const validated = yield* validate(input);
+    if (validated === null) return null;
+    const current = validated.inspection;
     const mounts = yield* mountPoints;
     if (mounts === null || DependencyMounts.containsMount(current.dependencyPath, mounts))
       return null;
@@ -504,7 +516,8 @@ const make = Effect.gen(function* () {
       entries,
       ({ inspection, canRemove, isStillEligible }) =>
         Effect.gen(function* () {
-          const current = yield* validate(inspection);
+          const validatedEntry = yield* validate(inspection);
+          const current = validatedEntry?.inspection ?? null;
           if (
             current === null ||
             current.dependencyPath !== inspection.dependencyPath ||

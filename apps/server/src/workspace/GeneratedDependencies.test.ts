@@ -3,6 +3,7 @@ import {
   saveLegacyBuildSelection,
 } from "@t3tools/shared/generatedBuildOwnership";
 import {
+  observeDependencyActivity,
   recordDependencyUse,
   dependencyActivitySnapshot,
 } from "@t3tools/shared/dependencyActivity";
@@ -17,11 +18,13 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as DateTime from "effect/DateTime";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
+import * as Tracer from "effect/Tracer";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as TestClock from "effect/testing/TestClock";
 import {
@@ -32,11 +35,12 @@ import {
   OrchestrationV2ProviderSessionJson,
   OrchestrationV2DomainEvent,
   ProjectId,
+  StorageCleanupReport,
   ThreadId,
   type ServerSettings,
   type TerminalSummary,
 } from "@t3tools/contracts";
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 // @effect-diagnostics nodeBuiltinImport:off - Observe native reads and lsof captures without a test-only service API.
 import * as NodeFSP from "node:fs/promises";
@@ -52,6 +56,8 @@ import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
+import { TimeMachineBackupStatus } from "../storageCleanupSchedule.ts";
+import { STORAGE_CLEANUP_INVENTORY_ATTRIBUTE } from "../observability/StorageCleanupInventoryTrace.ts";
 import * as SuspensionTestkit from "./WorktreeSuspension.testkit.ts";
 import * as TaskFolders from "./TaskFolders.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -2942,4 +2948,322 @@ it.effect(
       assert.deepEqual(removed, []);
       assert.isTrue(yield* fs.exists(dependencyPath));
     }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect(
+  "automatic sweeps skip recent verified-use walks without advancing lastUsedAt while keeping manual and aged checks fresh",
+  () => {
+    const HOUR_MS = 3_600_000;
+    const sweepSpans: Tracer.Span[] = [];
+    const tracer = Tracer.make({
+      span(options) {
+        const span = new Tracer.NativeSpan(options);
+        if (span.name === "StorageCleanup.sweep") sweepSpans.push(span);
+        return span;
+      },
+    });
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      const sql = yield* SqlClient.SqlClient;
+      const config = yield* ServerConfig.ServerConfig;
+      const logsDir = f.path.join(f.root, "logs");
+      yield* f.fs.makeDirectory(logsDir, { recursive: true });
+      for (const query of [
+        "CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY, aggregate_kind TEXT, stream_id TEXT, event_type TEXT, occurred_at TEXT, application_event_version INTEGER NOT NULL DEFAULT 1, payload_json TEXT NOT NULL)",
+        "CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT)",
+        "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT, payload_json TEXT, deleted_at TEXT)",
+        "CREATE TABLE orchestration_v2_events (thread_id TEXT, occurred_at TEXT)",
+        "CREATE TABLE orchestration_v2_projection_runs (thread_id TEXT, status TEXT)",
+        "CREATE TABLE orchestration_v2_projection_subagents (thread_id TEXT, child_thread_id TEXT, status TEXT)",
+        "CREATE TABLE orchestration_v2_projection_runtime_requests (thread_id TEXT, status TEXT)",
+        "CREATE TABLE orchestration_v2_projection_provider_threads (thread_id TEXT, status TEXT, payload_json TEXT)",
+        "CREATE TABLE orchestration_v2_projection_provider_sessions (provider_session_id TEXT, status TEXT, payload_json TEXT)",
+        "CREATE TABLE orchestration_v2_projection_provider_session_bindings (provider_session_id TEXT, thread_id TEXT)",
+        "CREATE TABLE orchestration_v2_effect_outbox (thread_id TEXT, status TEXT)",
+      ])
+        yield* sql.unsafe(query);
+      const addWorktree = Effect.fn("test.addWorktree")(function* (branch: string) {
+        const worktreePath = f.path.join(f.input.managedWorktreesRoot, branch);
+        yield* f.runGit(f.repository, ["worktree", "add", "-b", branch, worktreePath]);
+        const dependencyPath = f.path.join(worktreePath, "node_modules");
+        yield* f.fs.makeDirectory(f.path.join(dependencyPath, "package"), { recursive: true });
+        yield* f.fs.writeFileString(f.path.join(dependencyPath, f.marker), "layoutVersion: 5\n");
+        yield* f.fs.writeFileString(
+          f.path.join(dependencyPath, "package/index.js"),
+          "module.exports = 1;\n",
+        );
+        const location = yield* f.runGit(worktreePath, ["rev-parse", "--absolute-git-dir"]);
+        return {
+          worktreePath,
+          dependencyPath,
+          gitDir: location.stdout.trim(),
+          input: { ...f.input, worktreePath },
+        };
+      });
+      const recentLocation = yield* f.runGit(f.input.worktreePath, [
+        "rev-parse",
+        "--absolute-git-dir",
+      ]);
+      const recent = {
+        worktreePath: f.input.worktreePath,
+        dependencyPath: f.dependencyPath,
+        gitDir: recentLocation.stdout.trim(),
+        input: f.input,
+      };
+      const agedActive = yield* addWorktree("aged-active");
+      const agedIdle = yield* addWorktree("aged-idle");
+      observeDependencyActivity(recent.gitDir, recent.worktreePath, NOW - 23 * HOUR_MS, true);
+      observeDependencyActivity(agedActive.gitDir, agedActive.worktreePath, NOW - 30 * day, true);
+      observeDependencyActivity(agedIdle.gitDir, agedIdle.worktreePath, NOW - 30 * day, true);
+      const agedStat = yield* Effect.promise(() =>
+        NodeFSP.stat(f.path.join(agedActive.dependencyPath, "package/index.js"), { bigint: true }),
+      );
+      yield* fakeLsof(
+        "p101\0cnode\0\nfcwd\0tDIR\0n/\0\n" +
+          "f4\0tREG\0D0xdead\0i9007199254740993\0n/t3-absent/unresolved.js\0\n" +
+          `f5\0tREG\0D0x${agedStat.dev.toString(16)}\0i${agedStat.ino}\0n/t3-absent/active.js\0\n` +
+          "p102\0cpython\0\nfcwd\0tDIR\0n/\0\n" +
+          "f6\0tunix\0n/t3-absent/vanished.sock\0\n",
+      );
+      const threads = [recent, agedActive, agedIdle].map((entry, index) => ({
+        ...makeShell(entry.worktreePath),
+        id: ThreadId.make(`skip-thread-${index}`),
+        branch: index === 0 ? "feature" : f.path.basename(entry.worktreePath),
+      }));
+      const project = {
+        id: projectId,
+        workspaceRoot: f.repository,
+        title: "Fixture",
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: "2026-05-01T00:00:00.000Z",
+        updatedAt: "2026-05-01T00:00:00.000Z",
+      };
+      const settings: ServerSettings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        storageCleanup: {
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeDependenciesAfterDays: 7,
+          worktreeAfterDays: null,
+          worktreeOnDelete: false,
+          worktreeOnMerge: false,
+          worktreeUnchanged: false,
+        },
+        storageCleanupSchedule: {
+          ...DEFAULT_SERVER_SETTINGS.storageCleanupSchedule,
+          intervalMinutes: 30,
+          deferDuringTimeMachine: false,
+        },
+      };
+      const activation = yield* Deferred.make<void>();
+      const dependencies = Layer.mergeAll(
+        Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
+          historicalWorktreeOwners: Effect.succeed([]),
+        }),
+        Layer.succeed(ServerConfig.ServerConfig, {
+          ...config,
+          logsDir,
+          worktreesDir: f.input.managedWorktreesRoot,
+        }),
+        Layer.mock(TaskFolders.TaskFolders)({ find: () => Effect.succeed(null) }),
+        Layer.mock(ProjectStore.ProjectStoreV2)({
+          listShells: () => Effect.succeed([project]),
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadWorktreePaths: () =>
+            Effect.succeed(
+              threads.map((thread) => ({
+                threadId: thread.id,
+                worktreePath: thread.worktreePath!,
+              })),
+            ),
+          getShellSnapshot: () =>
+            Effect.succeed({
+              schemaVersion: 1 as const,
+              snapshotSequence: 0,
+              projects: [project],
+              threads,
+              archivedThreads: [],
+            }),
+          getThreadShell: (requestedId) =>
+            Effect.succeed(threads.find((thread) => thread.id === requestedId) ?? null),
+        }),
+        Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: Stream.empty }),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getShellSnapshot: () =>
+            Effect.succeed({
+              schemaVersion: 1 as const,
+              snapshotSequence: 0,
+              projects: [project],
+              threads,
+              archivedThreads: [],
+            }),
+          dispatch: () => Effect.succeed({ sequence: 0, storedEvents: [] }),
+        }),
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          currentBranch: (cwd) =>
+            f
+              .runGit(cwd, ["branch", "--show-current"])
+              .pipe(Effect.map((result) => result.stdout.trim() || null)),
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          ownershipRevision: Effect.succeed(0),
+          workspaceOwnership: Effect.succeed([]),
+          isLive: () => Effect.succeed(false),
+        }),
+        Layer.mock(Settings.ServerSettingsService)({
+          getSettings: Effect.succeed(settings),
+          subscribeChanges: Effect.succeed(Stream.empty),
+        }),
+        Layer.mock(GitManager.GitManager)({ invalidateStatus: () => Effect.void }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          subscribeMetadata: (listener) =>
+            listener({ type: "snapshot", terminals: [] }).pipe(Effect.as(() => undefined)),
+        }),
+        Layer.mock(PreviewHosting.PreviewHosting)({
+          protectedWorkspacePaths: () => Effect.succeed([]),
+        }),
+        Layer.succeed(TimeMachineBackupStatus, Effect.succeed("idle" as const)),
+      );
+      const cleanupContext = yield* Layer.build(StorageCleanup.layer).pipe(
+        Effect.provide(Layer.merge(SuspensionTestkit.layer, dependencies)),
+        Effect.provideService(ServerActivation.ServerActivation, Deferred.await(activation)),
+        Effect.provideService(StorageCleanup.FirstAutomaticSweepDelay, Duration.zero),
+      );
+      const worker = Context.get(cleanupContext, StorageCleanup.StorageCleanup);
+      const reports = yield* Queue.unbounded<StorageCleanupReport>();
+      yield* worker.reports.pipe(
+        Stream.filter((report): report is StorageCleanupReport => report?.trigger === "automatic"),
+        Stream.runForEach((report) => Queue.offer(reports, report)),
+        Effect.forkScoped,
+      );
+      const opendir = vi.mocked(NodeFSP.opendir);
+      const dependencyWalksFor = (dependencyPath: string) =>
+        opendir.mock.calls.filter(([target]) => target === dependencyPath).length;
+      opendir.mockClear();
+      yield* Deferred.succeed(activation, undefined);
+      yield* Queue.take(reports);
+      yield* worker.drain;
+      assert.equal(dependencyWalksFor(recent.dependencyPath), 0);
+      assert.isTrue(yield* f.fs.exists(agedActive.dependencyPath));
+      assert.isFalse(yield* f.fs.exists(agedIdle.dependencyPath));
+      assert.equal(
+        observeDependencyActivity(recent.gitDir, recent.worktreePath, NOW, false, false).lastUsedAt,
+        NOW - 23 * HOUR_MS,
+      );
+      assert.equal(
+        observeDependencyActivity(agedActive.gitDir, agedActive.worktreePath, NOW, false, false)
+          .lastUsedAt,
+        NOW,
+      );
+      const sweepOneAttr = sweepSpans[0]?.attributes.get(
+        STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+      ) as Record<string, unknown>;
+      assert.isDefined(sweepOneAttr);
+      expect(sweepOneAttr).toMatchObject({
+        skippedRecentUsageChecks: 1,
+        walkTriggers: [
+          { kind: "socket", process: "python", walks: expect.any(Number) },
+          { kind: "vnode", process: "node", walks: expect.any(Number) },
+        ],
+      });
+      expect(JSON.stringify(sweepOneAttr)).not.toContain("/t3-absent/");
+      opendir.mockClear();
+      yield* worker.runNow;
+      yield* worker.drain;
+      assert.isAbove(dependencyWalksFor(recent.dependencyPath), 0);
+      assert.equal(
+        observeDependencyActivity(recent.gitDir, recent.worktreePath, NOW, false, false).lastUsedAt,
+        NOW - 23 * HOUR_MS,
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.merge(
+          testLayer(undefined, undefined, undefined, false, undefined, darwinCapture),
+          NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
+        ),
+      ),
+      Effect.withTracer(tracer),
+    );
+  },
+);
+
+it.effect(
+  "GeneratedDependencies.observe skips capture only within 24h of verified use when skipRecentWithinRetentionDays is set",
+  () => {
+    const HOUR_MS = 3_600_000;
+    let captures = 0;
+    const freshCapture = () =>
+      Effect.sync(() => {
+        captures++;
+        return [] as readonly string[];
+      });
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      const location = yield* f.runGit(f.input.worktreePath, ["rev-parse", "--absolute-git-dir"]);
+      const gitDir = location.stdout.trim();
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(freshCapture());
+      const usedAt = NOW - 2 * HOUR_MS;
+      yield* f.cleanup.observe(f.input, usedAt, true, true, sweep.paths, sweep.targets, 7);
+      assert.equal(captures, 1);
+
+      // Independent effect proves capture is skipped rather than merely cached by sweep.paths.
+      const skipped = yield* f.cleanup.observe(
+        f.input,
+        NOW,
+        false,
+        true,
+        freshCapture(),
+        sweep.targets,
+        7,
+      );
+      assert.deepStrictEqual(skipped, { lastUsedAt: usedAt, renewed: false });
+      assert.equal(captures, 1);
+
+      // Manual sweeps (no skipRecentWithinRetentionDays) always capture fresh.
+      yield* f.cleanup.observe(f.input, NOW, false, true, freshCapture(), sweep.targets);
+      assert.equal(captures, 2);
+
+      // Explicit verified execution bypasses the skip even with the window enabled.
+      yield* f.cleanup.observe(f.input, NOW, true, true, freshCapture(), sweep.targets, 7);
+      assert.equal(captures, 3);
+
+      // Clock crossing the 24h boundary mid-sweep forces a fresh capture even with an older sweep `now`.
+      yield* f.fs.writeFileString(
+        f.path.join(f.dependencyPath, f.marker),
+        "layoutVersion: 5\ncase: clock\n",
+      );
+      observeDependencyActivity(gitDir, f.input.worktreePath, NOW - (24 * HOUR_MS - 60_000), true);
+      yield* TestClock.adjust("3 minutes");
+      yield* f.cleanup.observe(f.input, NOW, false, true, freshCapture(), sweep.targets, 7);
+      assert.equal(captures, 4);
+
+      // Use recorded after sweep start `now` still skips without exceeding decision clock.
+      const midSweepBase = NOW + 180_000;
+      yield* TestClock.adjust("10 seconds");
+      const midSweepUseAt = midSweepBase + 10_000;
+      recordDependencyUse(f.input.worktreePath, midSweepUseAt);
+      yield* TestClock.adjust("20 seconds");
+      const midSweepSkipped = yield* f.cleanup.observe(
+        f.input,
+        midSweepBase,
+        false,
+        true,
+        freshCapture(),
+        sweep.targets,
+        7,
+      );
+      assert.deepStrictEqual(midSweepSkipped, { lastUsedAt: midSweepUseAt, renewed: false });
+      assert.equal(captures, 4);
+
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({ skippedRecentUsageChecks: 2 });
+    }).pipe(Effect.withSpan("sweep fixture"), Effect.scoped, Effect.provide(testLayer()));
+  },
 );

@@ -3,6 +3,14 @@ import * as Schema from "effect/Schema";
 
 export const STORAGE_CLEANUP_INVENTORY_ATTRIBUTE = "storage_cleanup.inventory";
 
+const StorageCleanupWalkTrigger = Schema.Struct({
+  kind: Schema.Literals(["vnode", "socket"]),
+  process: Schema.String,
+  walks: Schema.Finite,
+});
+
+export type StorageCleanupWalkTrigger = typeof StorageCleanupWalkTrigger.Type;
+
 const StorageCleanupInventoryTrace = Schema.Struct({
   processCaptures: Schema.Finite,
   processCaptureMs: Schema.Finite,
@@ -18,6 +26,8 @@ const StorageCleanupInventoryTrace = Schema.Struct({
   objectsVisited: Schema.Finite,
   targetRevalidations: Schema.Finite,
   targetRevalidationMs: Schema.Finite,
+  skippedRecentUsageChecks: Schema.optional(Schema.Finite),
+  walkTriggers: Schema.optional(Schema.Array(StorageCleanupWalkTrigger)),
 });
 
 export const emptyStorageCleanupInventoryTrace = () => ({
@@ -35,6 +45,7 @@ export const emptyStorageCleanupInventoryTrace = () => ({
   objectsVisited: 0,
   targetRevalidations: 0,
   targetRevalidationMs: 0,
+  skippedRecentUsageChecks: 0,
 });
 
 const decodeInventory = Schema.decodeUnknownOption(StorageCleanupInventoryTrace);
@@ -73,6 +84,16 @@ export const formatStorageCleanupInventory = (
           `    Cached path checks       ${inventory.cachedPathChecks} in ${formatMs(inventory.cachedPathCheckMs)}`,
           `    Directory checks         ${inventory.directoryChecks} in ${formatMs(inventory.directoryCheckMs)}`,
           `    Tree walks               ${inventory.treeWalks} visiting ${inventory.objectsVisited} objects in ${formatMs(inventory.treeWalkMs)}`,
+          ...(inventory.walkTriggers && inventory.walkTriggers.length > 0
+            ? [
+                `    Walk triggers            ${inventory.walkTriggers
+                  .map((trigger) => `${trigger.kind} ${trigger.process} (${trigger.walks})`)
+                  .join(", ")}`,
+              ]
+            : []),
+          ...(inventory.skippedRecentUsageChecks !== undefined
+            ? [`    Recent-use skips         ${inventory.skippedRecentUsageChecks}`]
+            : []),
           `    Target revalidations     ${inventory.targetRevalidations} in ${formatMs(inventory.targetRevalidationMs)}`,
         ]),
       ];
