@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off -- Starts before the checkout's dependencies are installed.
-import * as ChildProcess from "node:child_process";
-import * as OS from "node:os";
-import * as Path from "node:path";
-import * as Readline from "node:readline";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
 import type { ActionReport } from "@t3tools/contracts";
 import {
   LASTCODE_BACKGROUND_WAIT_ENV,
@@ -91,11 +91,15 @@ async function runStep(
   environment: NodeJS.ProcessEnv,
 ): Promise<StepResult> {
   const [script, ...args] = step;
-  const child = ChildProcess.spawn(process.execPath, [Path.join(directory, script), ...args], {
-    env: environment,
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  const output = Readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const child = NodeChildProcess.spawn(
+    process.execPath,
+    [NodePath.join(directory, script), ...args],
+    {
+      env: environment,
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  );
+  const output = NodeReadline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   let report: ActionReport | undefined;
   output.on("line", (line) => {
     const parsed = readReport(line);
@@ -114,7 +118,7 @@ async function runStep(
       });
       child.once("close", (code, signal) =>
         resolve({
-          exitCode: code ?? (signal === null ? 1 : 128 + OS.constants.signals[signal]),
+          exitCode: code ?? (signal === null ? 1 : 128 + NodeOS.constants.signals[signal]),
           ...(report === undefined ? {} : { report }),
           ...(error === undefined ? {} : { error }),
         }),

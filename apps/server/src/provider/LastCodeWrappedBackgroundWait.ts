@@ -1,3 +1,4 @@
+import type { Settings as ClaudeSdkSettings } from "@anthropic-ai/claude-agent-sdk";
 import type { OrchestrationV2PendingBackgroundTask, RunId, ThreadId } from "@t3tools/contracts";
 import {
   LASTCODE_BACKGROUND_WAIT_ENV,
@@ -127,9 +128,10 @@ export function lastCodeWrappedCommandEnvironment(enabled: boolean): Record<stri
   return enabled ? { [LASTCODE_BACKGROUND_WAIT_ENV]: "1" } : {};
 }
 
-export function withLastCodeClaudeBackgroundLimit<
-  Settings extends { readonly env?: Record<string, string> | undefined },
->(settings: Settings | undefined, enabled: boolean): Settings | undefined {
+export function withLastCodeClaudeBackgroundLimit(
+  settings: ClaudeSdkSettings | undefined,
+  enabled: boolean,
+): ClaudeSdkSettings | undefined {
   if (!enabled) return settings;
   return {
     ...settings,
@@ -139,7 +141,7 @@ export function withLastCodeClaudeBackgroundLimit<
       // Claude uses its foreground default as the background default when it exceeds 30 minutes.
       BASH_DEFAULT_TIMEOUT_MS: "7200000",
     },
-  } as Settings;
+  };
 }
 
 export type ClaudeWrappedTaskGeneration = {

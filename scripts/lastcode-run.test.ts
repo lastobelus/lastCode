@@ -1,25 +1,25 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Exercise the standalone launcher without dependencies.
-import * as ChildProcess from "node:child_process";
-import * as FS from "node:fs";
-import * as OS from "node:os";
-import * as Path from "node:path";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { expect, it, onTestFinished } from "vite-plus/test";
 
 function fixture() {
-  const root = FS.mkdtempSync(Path.join(OS.tmpdir(), "lastcode-run-"));
-  onTestFinished(() => FS.rmSync(root, { recursive: true }));
-  const repo = Path.join(import.meta.dirname, "..");
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-run-"));
+  onTestFinished(() => NodeFS.rmSync(root, { recursive: true }));
+  const repo = NodePath.join(import.meta.dirname, "..");
   const script = "scripts/lastcode-run.ts";
   for (const file of [script, "packages/shared/src/lastcodeWrappedCommands.ts"]) {
-    FS.mkdirSync(Path.dirname(Path.join(root, file)), { recursive: true });
-    FS.copyFileSync(Path.join(repo, file), Path.join(root, file));
+    NodeFS.mkdirSync(NodePath.dirname(NodePath.join(root, file)), { recursive: true });
+    NodeFS.copyFileSync(NodePath.join(repo, file), NodePath.join(root, file));
   }
 
   function writeStep(name: string, body: string) {
-    FS.writeFileSync(Path.join(root, "scripts", name), body);
+    NodeFS.writeFileSync(NodePath.join(root, "scripts", name), body);
   }
   function run(args: string[], backgroundWait: boolean) {
-    return ChildProcess.spawnSync(process.execPath, [script, ...args], {
+    return NodeChildProcess.spawnSync(process.execPath, [script, ...args], {
       cwd: root,
       encoding: "utf8",
       env: {
