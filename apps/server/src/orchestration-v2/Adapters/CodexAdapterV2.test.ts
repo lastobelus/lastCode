@@ -1658,17 +1658,19 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const firstTerminal = yield* Deferred.make<void>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) =>
-          Effect.sync(() => {
-            events.push(event);
-          }).pipe(
-            Effect.andThen(
-              event.type === "turn.terminal"
-                ? Deferred.succeed(firstTerminal, undefined)
-                : Effect.void,
-            ),
-            Effect.andThen(changes.notify),
-            Effect.andThen(onEvent(event)),
-          ),
+          event.type === "events.barrier"
+            ? event.after
+            : Effect.sync(() => {
+                events.push(event);
+              }).pipe(
+                Effect.andThen(
+                  event.type === "turn.terminal"
+                    ? Deferred.succeed(firstTerminal, undefined)
+                    : Effect.void,
+                ),
+                Effect.andThen(changes.notify),
+                Effect.andThen(onEvent(event)),
+              ),
         ),
         Effect.forkScoped,
       );
@@ -7072,15 +7074,14 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   ? Deferred.await(commandFinished)
                   : Effect.void,
       );
-      yield* harness.runtime.startTurn(
-        makeCodexTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make("attempt-command-completion-wake"),
-          text: BG_PROMPT,
-        }),
-      );
+      const firstTurn = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("attempt-command-completion-wake"),
+        text: BG_PROMPT,
+      });
+      yield* harness.runtime.startTurn(firstTurn);
       const commands = () =>
         harness.events.flatMap((event) =>
           event.type === "turn_item.updated" && event.turnItem.type === "command_execution"
@@ -7161,7 +7162,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ["running", "always"],
         ["completed", "always"],
       ]);
-      assert.include(harness.continuationRequests[0]?.detail, "CODEX_BG_WAKE_DONE");
+      const [wake] = harness.continuationRequests;
+      assert.include(wake?.detail, "CODEX_BG_WAKE_DONE");
+      // An app-owned child must still owe the result after removing the live
+      // command, and the wake must claim it for the originating delegated run.
+      const latestRoster = () =>
+        harness.events.findLast((event) => event.type === "provider_thread.updated");
+      const owedResult = { taskId: BG_COMMAND_ITEM, originRunId: firstTurn.runId };
+      assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
+      assert.isTrue(latestRoster()?.sessionScoped);
+      assert.deepEqual(wake?.backgroundResultContinuation, {
+        providerThreadId: harness.providerThread.id,
+        originRunId: firstTurn.runId,
+        taskIds: [BG_COMMAND_ITEM],
+      });
       assert.isBelow(
         harness.events.findLastIndex((event) => event.type === "provider_thread.updated"),
         harness.events.findLastIndex(
@@ -7189,6 +7203,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       );
       assert.deepEqual(tasks(), []);
+      assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
+
+      yield* wake!.dispatchIfCurrent!(
+        Effect.sync(() => {
+          assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
+        }),
+      );
+      yield* harness.until(
+        () => latestRoster()?.providerThread.owedBackgroundResults?.length === 0,
+      );
     }).pipe(
       Effect.scoped,
       Effect.provide(

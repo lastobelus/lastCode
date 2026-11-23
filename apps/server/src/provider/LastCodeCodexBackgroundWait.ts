@@ -1,6 +1,7 @@
-import type { OrchestrationV2ProviderSession } from "@t3tools/contracts";
+import type { OrchestrationV2ProviderSession, RunId } from "@t3tools/contracts";
 import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderAdapterV2SessionRuntime } from "@t3tools/provider-core/server/ProviderAdapter";
+import type { ProviderContinuationRequest } from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -53,4 +54,22 @@ export function codexBackgroundWaitInstructions(enabled: boolean): string {
   return enabled
     ? "\n\nFor a background result you need, call `t3_background_wait` with its exec session ID string in `taskIds`. End your turn without polling. Completion wakes you. Leave dev servers and watchers unmarked."
     : "";
+}
+
+export function codexBackgroundResultRequest(
+  request: ProviderContinuationRequest,
+  owed: { readonly taskId: string; readonly originRunId: RunId },
+  clear: () => Effect.Effect<void>,
+): ProviderContinuationRequest {
+  return {
+    ...request,
+    backgroundResultContinuation: {
+      providerThreadId: request.providerThreadId,
+      originRunId: owed.originRunId,
+      taskIds: [owed.taskId],
+    },
+    // Transfer the hold only after the continuation run has been recorded.
+    dispatchIfCurrent: (dispatch) => dispatch.pipe(Effect.tap(clear), Effect.asSome),
+    clearIfCurrent: clear,
+  };
 }

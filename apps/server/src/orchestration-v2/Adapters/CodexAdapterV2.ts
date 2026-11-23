@@ -117,6 +117,7 @@ import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { buildCodexAdditionalContext } from "../../provider/CodexDeveloperInstructions.ts";
 import {
+  codexBackgroundResultRequest,
   codexBackgroundWaitForNewSession,
   codexBackgroundWaitHook,
   loadCodexBackgroundWaitReader,
@@ -2540,16 +2541,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           });
         });
 
-        // The awaited roster is adapter-owned; a caller's snapshot can predate a completion.
+        // The roster and results are adapter-owned; a caller's snapshot can predate a completion.
         const withCurrentAwaitedTasks = (
           nativeThreadId: string,
           providerThread: OrchestrationV2ProviderThread,
         ): OrchestrationV2ProviderThread => {
           if (!backgroundWaitEnabled) return providerThread;
-          const current = rootProviderThreads.get(nativeThreadId)?.pendingBackgroundTasks;
+          const current = rootProviderThreads.get(nativeThreadId);
           return current === undefined
             ? providerThread
-            : { ...providerThread, pendingBackgroundTasks: current };
+            : {
+                ...providerThread,
+                pendingBackgroundTasks: current.pendingBackgroundTasks,
+                owedBackgroundResults: current.owedBackgroundResults,
+              };
         };
 
         const rememberRootProviderThread = Effect.fnUntraced(function* (
@@ -2807,6 +2812,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         const emitAwaitedCommands = Effect.fn("CodexAdapterV2.emitAwaitedCommands")(function* (
           providerThread: OrchestrationV2ProviderThread,
+          updateOwedResults?: (
+            current: NonNullable<OrchestrationV2ProviderThread["owedBackgroundResults"]>,
+          ) => OrchestrationV2ProviderThread["owedBackgroundResults"],
         ) {
           const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
           if (nativeThreadId == null) return;
@@ -2825,9 +2833,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               description: item.command,
               awaited: true as const,
             }));
+          const current = rootProviderThreads.get(nativeThreadId) ?? providerThread;
           const updated = {
-            ...(rootProviderThreads.get(nativeThreadId) ?? providerThread),
+            ...current,
             pendingBackgroundTasks,
+            ...(updateOwedResults === undefined
+              ? {}
+              : { owedBackgroundResults: updateOwedResults(current.owedBackgroundResults ?? []) }),
             updatedAt: yield* DateTime.now,
           };
           rootProviderThreads.set(nativeThreadId, updated);
@@ -2836,6 +2848,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             type: "provider_thread.updated",
             driver: CODEX_PROVIDER,
             providerThread: updated,
+            // These writes must persist even without a subscribed turn.
+            ...(updateOwedResults === undefined ? {} : { sessionScoped: true }),
           });
         });
 
@@ -5862,12 +5876,29 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   .get(payload.turnId)
                   ?.get(payload.item.id)?.awaited === true;
               const turnDrained = yield* clearRunningCommandItem(payload.turnId, payload.item.id);
-              // Ingestion can close on the last terminal command item, so clear its roster first.
-              if (awaited) yield* emitAwaitedCommands(context.providerThread);
               const userStopped = yield* Ref.modify(userStoppedCommandItemIds, (current) => {
                 const updated = new Set(current);
                 return [updated.delete(payload.item.id), updated] as const;
               });
+              const shouldWake =
+                settled &&
+                context.subagent === null &&
+                continuationRequests !== undefined &&
+                !userStopped &&
+                !(yield* Ref.get(interruptingNativeTurns)).has(payload.turnId) &&
+                !(yield* Ref.get(offeredContinuationItemsByTurn))
+                  .get(payload.turnId)
+                  ?.has(payload.item.id);
+              const owedResult =
+                awaited && shouldWake && context.projectionRunId !== null
+                  ? { taskId: payload.item.id, originRunId: context.projectionRunId }
+                  : undefined;
+              // Replace the live command with its owed result in the same roster write.
+              if (awaited)
+                yield* emitAwaitedCommands(
+                  context.providerThread,
+                  owedResult === undefined ? undefined : (current) => [...current, owedResult],
+                );
               const artifacts = yield* buildCommandExecutionArtifacts(context, payload.item);
               yield* emitProviderEvent({
                 type: "node.updated",
@@ -5880,50 +5911,57 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 turnItem: artifacts.turnItem,
               });
               if (settled) {
-                if (
-                  context.subagent === null &&
-                  continuationRequests !== undefined &&
-                  !userStopped &&
-                  !(yield* Ref.get(interruptingNativeTurns)).has(payload.turnId)
-                ) {
-                  const alreadyOffered = yield* Ref.modify(
-                    offeredContinuationItemsByTurn,
-                    (current) => {
-                      const items = current.get(payload.turnId);
-                      if (items !== undefined && items.has(payload.item.id)) {
-                        return [true, current] as const;
-                      }
-                      const updated = new Map(current);
-                      const updatedItems = new Set(items ?? []);
-                      updatedItems.add(payload.item.id);
-                      updated.set(payload.turnId, updatedItems);
-                      return [false, updated] as const;
-                    },
+                if (shouldWake) {
+                  yield* Ref.update(offeredContinuationItemsByTurn, (current) =>
+                    new Map(current).set(
+                      payload.turnId,
+                      new Set([...(current.get(payload.turnId) ?? []), payload.item.id]),
+                    ),
                   );
-                  if (!alreadyOffered) {
-                    yield* continuationRequests.offer({
-                      threadId: context.projectionThreadId,
-                      providerThreadId: context.providerThread.id,
+                  const request: ProviderContinuationRequests.ProviderContinuationRequest = {
+                    threadId: context.projectionThreadId,
+                    providerThreadId: context.providerThread.id,
+                    driver: CODEX_PROVIDER,
+                    // Codex starts a new turn from this text, so nothing is buffered.
+                    delivery: "message_text",
+                    detail: codexBackgroundCommandDetail(payload.item),
+                    notification: {
+                      ...backgroundWorkNotification([
+                        {
+                          kind: "command",
+                          label: payload.item.command,
+                          outcome:
+                            payload.item.exitCode === 0
+                              ? "completed"
+                              : payload.item.exitCode == null
+                                ? "unknown"
+                                : "failed",
+                          exitCode: payload.item.exitCode ?? undefined,
+                        },
+                      ]),
+                      detail: payload.item.command,
+                    },
+                  };
+                  if (owedResult === undefined) {
+                    yield* continuationRequests.offer(request);
+                  } else {
+                    const clear = () =>
+                      turnTerminalizationPermit.withPermits(1)(
+                        emitAwaitedCommands(context.providerThread, (current) =>
+                          current.filter(
+                            (owed) =>
+                              owed.taskId !== owedResult.taskId ||
+                              owed.originRunId !== owedResult.originRunId,
+                          ),
+                        ),
+                      );
+                    // Admission validates the owed result against the persisted roster.
+                    yield* emitProviderEvent({
+                      type: "events.barrier",
                       driver: CODEX_PROVIDER,
-                      // Codex starts a new turn from this text, so nothing is buffered.
-                      delivery: "message_text",
-                      detail: codexBackgroundCommandDetail(payload.item),
-                      notification: {
-                        ...backgroundWorkNotification([
-                          {
-                            kind: "command",
-                            label: payload.item.command,
-                            outcome:
-                              payload.item.exitCode === 0
-                                ? "completed"
-                                : payload.item.exitCode == null
-                                  ? "unknown"
-                                  : "failed",
-                            exitCode: payload.item.exitCode ?? undefined,
-                          },
-                        ]),
-                        detail: payload.item.command,
-                      },
+                      after: continuationRequests.offer(
+                        codexBackgroundResultRequest(request, owedResult, clear),
+                      ),
                     });
                   }
                 }
