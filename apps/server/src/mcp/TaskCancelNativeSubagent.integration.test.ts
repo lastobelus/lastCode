@@ -48,9 +48,18 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -227,6 +236,12 @@ const cancelBackgroundOnlyTask = (
         ),
       );
       const layerTest = layerOrchestratorService.pipe(
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provideMerge(layerOrchestration),
         Layer.provide(
           Layer.mergeAll(
@@ -521,7 +536,8 @@ const cancelBackgroundOnlyTask = (
         if (cancelAt === "monitor") {
           // A monitor notification then ran and completed while the shell kept running.
           const { runs, messages } = yield* orchestrator.getThreadProjection(task.childThreadId!);
-          const run = { ...runs[0]!, id: RunId.make("run:monitor"), ordinal: 2 };
+          const { delegatedTaskId: _delegatedTaskId, ...completedRun } = runs[0]!;
+          const run = { ...completedRun, id: RunId.make("run:monitor"), ordinal: 2 };
           const source = { kind: "monitor" } as const;
           const notification = { source, outcome: "updated", summary: "Ran" } as const;
           const user = { ...messages[0]!, id: MessageId.make("message:monitor"), runId: run.id };
@@ -605,7 +621,15 @@ const cancelBackgroundOnlyTask = (
           assert.isUndefined(after?.cancelledRunId);
           return undefined;
         }
-        // Settling the task ends the async question it left, after its own row.
+        // Await the stored task itself: derived status and question cleanup can finish
+        // before the provider-event reactor commits the parent's terminal task row.
+        const taskSettled = yield* watch(
+          (event) =>
+            event.type === "subagent.updated" &&
+            event.threadId === parentThreadId &&
+            event.payload.id === task.id &&
+            event.payload.status === "interrupted",
+        );
         const settled = yield* watch(
           (event) =>
             event.type === "runtime-request.updated" &&
@@ -626,6 +650,7 @@ const cancelBackgroundOnlyTask = (
         );
         // task_cancel settles a finished turn itself; a running one settles when it ends.
         if ((yield* owned)?.status !== "resolved") yield* Fiber.join(settled);
+        yield* Fiber.join(taskSettled);
 
         const childAfter = yield* orchestrator.getThreadProjection(task.childThreadId!);
         const nativeStatus = background === "subagent" ? "interrupted" : undefined;

@@ -44,13 +44,22 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFixtures.ts";
 import {
+  setThreadPersistence,
+  upsertThreadAnnotation,
+  resolveThreadAnnotation,
+  reopenThreadAnnotation,
+  deleteThread,
+  retryThreadWorktreeCleanup,
+  abandonThreadWorktreeCleanup,
   archiveThread,
+  unarchiveThread,
   updateThreadMetadata,
   interruptThreadTurn,
   promoteQueuedRun,
   revertThreadCheckpoint,
   resumeThreadQueue,
   startThreadTurn,
+  updateProject,
 } from "./commands.ts";
 
 const layerTestRandom = Layer.succeed(
@@ -149,6 +158,21 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("V2 environment commands", () => {
+  it.effect("keeps a temporary project through the existing project mutation RPC", () =>
+    Effect.gen(function* () {
+      const projects: ProjectMutation[] = [];
+      const supervisor = yield* makeSupervisor({ commands: [], projects });
+      const commandId = CommandId.make("keep-project");
+      const projectId = ProjectId.make("temporary-project");
+      yield* updateProject({ commandId, projectId, keepTemporary: true }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+      expect(projects).toEqual([
+        { type: "project.update", commandId, projectId, keepTemporary: true },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
   it.effect("distinguishes sending a selected queued message from resuming queue order", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
@@ -171,6 +195,71 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
+  it.effect("dispatches durable LastCode controls through V2 without fetching history", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projectionRequests: ThreadId[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
+      yield* Effect.all([
+        setThreadPersistence({ threadId: v2ThreadId, persistent: true }),
+        upsertThreadAnnotation({
+          threadId: v2ThreadId,
+          body: "Keep this review open",
+          createNew: true,
+        }),
+        upsertThreadAnnotation({
+          threadId: v2ThreadId,
+          body: "Edit old note",
+          annotationId: "note-1",
+        }),
+        upsertThreadAnnotation({
+          threadId: v2ThreadId,
+          annotationId: "note-1",
+          hideUntil: null,
+          expectedHideTriggerId: CommandId.make("active-trigger"),
+        }),
+        resolveThreadAnnotation({ threadId: v2ThreadId, annotationId: "note-1" }),
+        reopenThreadAnnotation({ threadId: v2ThreadId, annotationId: "note-1" }),
+        deleteThread({ threadId: v2ThreadId, deleteWorktree: true, repositoryKey: "repository-1" }),
+        retryThreadWorktreeCleanup({ threadId: v2ThreadId }),
+        abandonThreadWorktreeCleanup({ threadId: v2ThreadId }),
+      ]).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(commands.map(({ commandId: _id, ...command }) => command)).toEqual([
+        { type: "thread.persistence.set", threadId: v2ThreadId, persistent: true },
+        {
+          type: "thread.annotation.upsert",
+          threadId: v2ThreadId,
+          body: "Keep this review open",
+          createNew: true,
+        },
+        {
+          type: "thread.annotation.upsert",
+          threadId: v2ThreadId,
+          body: "Edit old note",
+          annotationId: "note-1",
+        },
+        {
+          type: "thread.annotation.upsert",
+          threadId: v2ThreadId,
+          annotationId: "note-1",
+          hideUntil: null,
+          expectedHideTriggerId: "active-trigger",
+        },
+        { type: "thread.annotation.resolve", threadId: v2ThreadId, annotationId: "note-1" },
+        { type: "thread.annotation.reopen", threadId: v2ThreadId, annotationId: "note-1" },
+        {
+          type: "thread.delete",
+          threadId: v2ThreadId,
+          deleteWorktree: true,
+          repositoryKey: "repository-1",
+        },
+        { type: "thread.worktree-cleanup.retry", threadId: v2ThreadId },
+        { type: "thread.worktree-cleanup.abandon", threadId: v2ThreadId },
+      ]);
+      expect(projectionRequests).toEqual([]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
   it.effect("preserves caller command ids for idempotent V2 commands", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
@@ -183,6 +272,74 @@ describe("V2 environment commands", () => {
 
       expect(commands).toEqual([
         { type: "thread.archive", commandId: "queued-command", threadId: "thread-1" },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect("forwards the reviewed archive inputs and failed attempt", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const linkedArchiveSelection = [
+        {
+          environmentId: EnvironmentId.make("peer"),
+          label: "Build machine",
+          status: "ready" as const,
+          cohorts: [
+            {
+              anchorThreadId: ThreadId.make("remote-child"),
+              selectedThreadIds: [ThreadId.make("remote-child")],
+              typedIn: [],
+              childDisposition: "archive_after_review" as const,
+            },
+          ],
+        },
+      ];
+      yield* archiveThread({
+        commandId: CommandId.make("archive-family"),
+        threadId: ThreadId.make("parent"),
+        childDisposition: "archive_after_review",
+        expectedChildThreadIds: [ThreadId.make("child")],
+        expectedTemporaryProjects: [
+          { projectId: ProjectId.make("scratch"), threadIds: [ThreadId.make("child")] },
+        ],
+        expectedArchiveCommandId: CommandId.make("failed-attempt"),
+        linkedArchiveSelection,
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(commands).toEqual([
+        {
+          type: "thread.archive",
+          commandId: "archive-family",
+          threadId: "parent",
+          childDisposition: "archive_after_review",
+          expectedChildThreadIds: ["child"],
+          expectedTemporaryProjects: [{ projectId: "scratch", threadIds: ["child"] }],
+          expectedArchiveCommandId: "failed-attempt",
+          linkedArchiveSelection,
+        },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect("preserves the observed failed archive attempt without changing ordinary Restore", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      for (const expectedArchiveCommandId of [undefined, CommandId.make("failed-attempt")]) {
+        yield* unarchiveThread({
+          commandId: CommandId.make(expectedArchiveCommandId ?? "restore"),
+          threadId: ThreadId.make("owner"),
+          ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      }
+      expect(commands).toEqual([
+        { type: "thread.unarchive", commandId: "restore", threadId: "owner" },
+        {
+          type: "thread.unarchive",
+          commandId: "failed-attempt",
+          threadId: "owner",
+          expectedArchiveCommandId: "failed-attempt",
+        },
       ]);
     }).pipe(Effect.provide(layerTestRandom)),
   );
@@ -1036,15 +1193,29 @@ describe("V2 environment commands", () => {
             creatorGrouping,
           }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
         }
-        expect(commands).toEqual(
-          ["independent", "grouped"].map((creatorGrouping) => ({
+        const placements = [ThreadId.make("organization:parent"), null];
+        for (const [index, groupedUnderThreadId] of placements.entries()) {
+          yield* updateThreadMetadata({
+            commandId: CommandId.make(`explicit-placement:${index}`),
+            threadId: v2ThreadId,
+            groupedUnderThreadId,
+          }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        }
+        expect(commands).toEqual([
+          ...["independent", "grouped"].map((creatorGrouping) => ({
             type: "thread.metadata.update",
             commandId: `creator-placement:${creatorGrouping}`,
             threadId: v2ThreadId,
             creatorGrouping,
           })),
-        );
+          ...placements.map((groupedUnderThreadId, index) => ({
+            type: "thread.metadata.update",
+            commandId: `explicit-placement:${index}`,
+            threadId: v2ThreadId,
+            groupedUnderThreadId,
+          })),
+        ]);
         expect(projectionRequests).toEqual([]);
-      }).pipe(Effect.provide(layerTestCrypto)),
+      }).pipe(Effect.provide(layerTestRandom)),
   );
 });

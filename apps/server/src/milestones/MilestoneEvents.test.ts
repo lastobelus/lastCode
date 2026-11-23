@@ -45,7 +45,8 @@ const scopes: Record<string, McpInvocationContext.McpInvocationScope> = {
       providerInstanceId: ProviderInstanceId.make("codex"),
     },
     client: undefined,
-    capabilities: new Set(["orchestration"]),
+    // Use a thread credential that can reach the full MCP endpoint's event listing.
+    capabilities: new Set(["orchestration", "preview"]),
     issuedAt: 1,
   },
 };

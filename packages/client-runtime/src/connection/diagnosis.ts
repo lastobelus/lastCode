@@ -4,15 +4,19 @@ import {
 } from "@t3tools/contracts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
+import { errorDisplayMessage } from "../errors/translatable.ts";
+import type { ConnectionCatalogEntry } from "./catalog.ts";
 import type {
   ConnectionAttemptError,
   ConnectionFailureCause,
   ConnectionHop,
   SupervisorConnectionState,
 } from "./model.ts";
-import { mFallback, msg } from "gt-i18n";
-import type { MFunctionType } from "gt-i18n/types";
+import { connectionRoutes } from "./routes.ts";
 
 export type ConnectionHopResult = "ok" | "failed" | "unchecked";
 
@@ -34,6 +38,7 @@ export interface ConnectionDiagnosis {
 
 export interface ConnectionDiagnosisInput {
   readonly hostLabel: string;
+  readonly entry: ConnectionCatalogEntry;
   readonly state: SupervisorConnectionState;
   /** The environment's usual route, used when the failure does not name one. */
   readonly via: "relay" | "direct";
@@ -101,6 +106,8 @@ function headline(
   host: string,
   located: Located,
   failure: ConnectionAttemptError | null,
+  relayPath: boolean,
+  savedPairing: boolean,
   resolve: MFunctionType,
 ): string {
   switch (located.cause) {
@@ -156,9 +163,32 @@ function headline(
         ? resolve(msg("This device can't reach {host}'s tunnel", { host }))
         : resolve(msg("T3 Connect could not reach {host}'s tunnel", { host }));
     case "server":
-      return failure?.reason === "authentication" || failure?.reason === "permission"
-        ? resolve(msg("T3 Code on {host} did not accept this device", { host }))
-        : resolve(msg("T3 Code on {host} did not answer", { host }));
+      if (
+        located.guessed &&
+        (failure?.reason === "authentication" || failure?.reason === "permission")
+      ) {
+        return errorDisplayMessage(failure, resolve) ?? failure.detail;
+      }
+      if (failure?.reason === "authentication") {
+        if (relayPath) {
+          return resolve(
+            msg("{host} is reachable, but didn't accept this device's sign-in", { host }),
+          );
+        }
+        return savedPairing
+          ? resolve(
+              msg("{host} is reachable, but didn't accept this device's saved pairing", { host }),
+            )
+          : resolve(
+              msg("{host} is reachable, but didn't accept this device's saved access", { host }),
+            );
+      }
+      if (failure?.reason === "permission") {
+        return resolve(
+          msg("{host} is reachable, but this device's access doesn't allow this", { host }),
+        );
+      }
+      return resolve(msg("T3 Code on {host} did not answer", { host }));
   }
 }
 
@@ -166,6 +196,8 @@ function steps(
   host: string,
   located: Located,
   failure: ConnectionAttemptError | null,
+  relayPath: boolean,
+  savedPairing: boolean,
   resolve: MFunctionType,
 ): string[] {
   const checkHost = resolve(
@@ -286,19 +318,44 @@ function steps(
           ]
         : [resolve(msg("Make sure {host} is awake and online.", { host })), checkHost];
     case "server":
-      return failure?.reason === "authentication"
-        ? [
-            resolve(
-              msg(
-                "This device's sign-in to {host} expired or was revoked. Pair it again with a new pairing link from {host}.",
-                { host },
+      if (located.guessed) {
+        return [resolve(msg("Retry. If it keeps failing, copy the diagnostics."))];
+      }
+      if (failure?.reason === "authentication") {
+        if (relayPath) return [resolve(msg("Sign out of T3 Connect and sign in again."))];
+        return savedPairing
+          ? [
+              resolve(msg("Pair this device with {host} again.", { host })),
+              resolve(
+                msg(
+                  "Get a new pairing code from Settings > Sharing & access on {host}, then choose Add environment here and enter the same address.",
+                  { host },
+                ),
               ),
-            ),
-          ]
-        : [
-            resolve(msg("Make sure T3 Code is running on {host}.", { host })),
-            resolve(msg("Retry. If it keeps failing, copy the diagnostics.")),
-          ];
+              resolve(msg("Your projects and threads on {host} are unaffected.", { host })),
+            ]
+          : [resolve(msg("Retry. If it keeps failing, copy the diagnostics."))];
+      }
+      if (failure?.reason === "permission") {
+        return [
+          savedPairing
+            ? resolve(
+                msg(
+                  "On {host}, open Settings > Sharing & access and check this device's access. If it needs more, pair again with a new pairing code.",
+                  { host },
+                ),
+              )
+            : resolve(
+                msg("On {host}, open Settings > Sharing & access and check this device's access.", {
+                  host,
+                }),
+              ),
+        ];
+      }
+      return [
+        resolve(msg("Make sure T3 Code is running on {host}.", { host })),
+        resolve(msg("Retry. If it keeps failing, copy the diagnostics.")),
+      ];
   }
 }
 
@@ -393,6 +450,15 @@ export function presentConnectionDiagnosis(
     located.hop === "tunnel" ||
     (failure === null && input.relayStatus?.status === "offline") ||
     (failure?.via ?? input.via) === "relay";
+  const profile = Option.getOrNull(input.entry.profile);
+  // Failures identify direct vs relay, not which saved route supplied the credential.
+  const savedPairing =
+    !relayPath &&
+    connectionRoutes(input.entry).length === 1 &&
+    input.entry.target._tag === "BearerConnectionTarget" &&
+    profile?._tag === "BearerConnectionProfile" &&
+    profile.authorization !== "t3-connect" &&
+    profile.learned !== true;
   const order: ReadonlyArray<ConnectionHop> = HOP_ORDER[relayPath ? "relay" : "direct"];
   const failedIndex = order.indexOf(located.hop);
   const hops = order.map((hop, index): ConnectionDiagnosisHop => ({
@@ -437,9 +503,9 @@ export function presentConnectionDiagnosis(
   add(resolve(msg("Trace ID")), failure?.traceId);
 
   return {
-    headline: headline(host, located, failure, resolve),
+    headline: headline(host, located, failure, relayPath, savedPairing, resolve),
     hops,
-    steps: steps(host, located, failure, resolve),
+    steps: steps(host, located, failure, relayPath, savedPairing, resolve),
     facts,
     moreInfoUrl:
       relayPath || located.cause === "session_pending"

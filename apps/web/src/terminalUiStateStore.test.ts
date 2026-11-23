@@ -178,12 +178,13 @@ describe("terminalUiStateStore actions", () => {
   it("keeps unconfirmed allocations through partial metadata reconciliation", () => {
     const store = useTerminalUiStateStore.getState();
     store.newTerminal(THREAD_REF, "named-terminal", "Work account");
+    store.reconcileTerminalIds(THREAD_REF, ["named-terminal"]);
     store.reconcileTerminalIds(THREAD_REF, ["other-terminal"]);
     const ui = selectThreadTerminalUiState(
       useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
       THREAD_REF,
     );
-    expect(ui.terminalIds).toEqual(["other-terminal", "named-terminal"]);
+    expect(ui.terminalIds).toEqual(["named-terminal", "other-terminal"]);
     expect(selectOrdinaryActionTerminal().createNewTerminal).toBe(true);
   });
 

@@ -1,3 +1,5 @@
+import { msg, T, useGT } from "gt-react";
+import { m } from "~/i18n/messages";
 import { useEffect, useRef } from "react";
 import { ArchiveIcon } from "lucide-react";
 import type { SidebarThreadSummary } from "../../types";
@@ -10,7 +12,7 @@ import type { LastCodeThreadActions } from "./LastCodeThreadActions";
 import { readThreadShell } from "../../state/entities";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { reportThreadOperationFailure } from "./lastcodeThreadOperationResult";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { CommandId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import type { LastCodeThreadEditingCapabilities } from "./useLastCodeThreadEditing";
 
 const ARCHIVE_BUTTON_CLASS =
@@ -24,8 +26,10 @@ export function LastCodeThreadArchiveControl({
   confirming: boolean;
   editing: LastCodeThreadEditingCapabilities;
 }) {
+  const gt = useGT();
   const confirmRequired = useClientSettings((settings) => settings.confirmThreadArchive);
   const confirmButton = useRef<HTMLButtonElement | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the mounted archive confirmation button after its DOM is available and cancels pending focus on cleanup
   useEffect(() => {
     if (!confirming) return;
     const frame = requestAnimationFrame(() => confirmButton.current?.focus());
@@ -40,12 +44,12 @@ export function LastCodeThreadArchiveControl({
         type="button"
         data-thread-selection-safe
         data-testid={`thread-archive-confirm-${thread.id}`}
-        aria-label={`Confirm archive ${thread.title}`}
+        aria-label={gt("Confirm archive {title}", { title: thread.title })}
         className="absolute top-1/2 right-1 inline-flex h-5 -translate-y-1/2 cursor-pointer items-center rounded-md bg-destructive/12 px-2 text-3xs font-medium text-destructive transition-colors hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-destructive/40"
         onPointerDown={stopPointer}
         onClick={archive}
       >
-        Confirm
+        <T>Confirm</T>
       </button>
     );
   const control = (
@@ -54,7 +58,7 @@ export function LastCodeThreadArchiveControl({
         type="button"
         data-thread-selection-safe
         data-testid={`thread-archive-${thread.id}`}
-        aria-label={`Archive ${thread.title}`}
+        aria-label={gt("Archive {title}", { title: thread.title })}
         className={ARCHIVE_BUTTON_CLASS}
         onPointerDown={stopPointer}
         onClick={archive}
@@ -68,7 +72,9 @@ export function LastCodeThreadArchiveControl({
   ) : (
     <Tooltip>
       <TooltipTrigger render={control} />
-      <TooltipPopup side="top">Archive</TooltipPopup>
+      <TooltipPopup side="top">
+        <T>Archive</T>
+      </TooltipPopup>
     </Tooltip>
   );
 }
@@ -77,20 +83,27 @@ export async function archiveLastCodeThread(
   ref: ScopedThreadRef,
   inlineConfirmed: boolean,
   archive: LastCodeThreadActions["archiveThread"],
+  attempt?: { readonly threadId: ThreadId; readonly commandId: CommandId },
 ) {
   if (!checkTaskPermission(ref.environmentId)) return;
   if (readThreadShell(ref)?.persistent === true) {
     toastManager.add(
       stackedThreadToast({
         type: "warning",
-        title: "Persistent thread not archived",
-        description: "Disable persistence or move it to another thread first.",
+        title: m(msg("Persistent thread not archived")),
+        description: m(msg("Disable persistence or move it to another thread first.")),
       }),
     );
     return;
   }
-  const result = inlineConfirmed ? await archive(ref, { confirmed: true }) : await archive(ref);
-  reportThreadOperationFailure(result, "Failed to archive thread");
+  const target = attempt ? scopeThreadRef(ref.environmentId, attempt.threadId) : ref;
+  const options = {
+    ...(inlineConfirmed ? { confirmed: true } : {}),
+    ...(attempt ? { expectedArchiveCommandId: attempt.commandId } : {}),
+  };
+  const result =
+    inlineConfirmed || attempt ? await archive(target, options) : await archive(target);
+  reportThreadOperationFailure(result, msg("Failed to archive thread"));
 }
 
 /** Inline confirmation is independent from the shared family archive confirmation. */
@@ -102,15 +115,19 @@ function useArchiveClick(
 ) {
   const { archiveThread } = useLastCodeThreadActions();
   const ref = scopeThreadRef(thread.environmentId, thread.id);
+  const displayedAttempt =
+    thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
+  const confirmationAttempt = useRef(displayedAttempt);
   return (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     event.stopPropagation();
     if (confirming) editing.cancelArchiveConfirmation(ref);
     if (thread.persistent) return;
+    if (!confirming) confirmationAttempt.current = displayedAttempt;
     if (!confirming && confirmRequired) {
       if (checkTaskPermission(thread.environmentId)) editing.requestArchiveConfirmation(ref);
       return;
     }
-    void archiveLastCodeThread(ref, confirming, archiveThread);
+    void archiveLastCodeThread(ref, confirming, archiveThread, confirmationAttempt.current);
   };
 }

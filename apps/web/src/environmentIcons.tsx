@@ -5,8 +5,10 @@ import {
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
+import { msg } from "gt-react";
 import type { ComponentProps, CSSProperties } from "react";
 
+import { m, type MessageResolver } from "./i18n/messages";
 import { cn } from "./lib/utils";
 import { EnvironmentMachineIcon } from "./components/EnvironmentMachineIcon";
 import { useEnvironment } from "./state/environments";
@@ -55,19 +57,25 @@ export function resolveEnvironmentIconColor(
   return isKnownEnvironment ? color : undefined;
 }
 
-export function legacyThreadEnvironmentPresentation(input: {
-  readonly isPrimary: boolean;
-  readonly isDesktopLocal: boolean;
-  readonly showLocalEnvironmentIcon: boolean;
-  readonly environmentLabel: string | null | undefined;
-}) {
+export function legacyThreadEnvironmentPresentation(
+  input: {
+    readonly isPrimary: boolean;
+    readonly isDesktopLocal: boolean;
+    readonly showLocalEnvironmentIcon: boolean;
+    readonly environmentLabel: string | null | undefined;
+  },
+  resolve: MessageResolver = m,
+) {
   return {
     showRowIcon: input.isPrimary ? input.showLocalEnvironmentIcon : !input.isDesktopLocal,
     hoverLabel: input.isPrimary
       ? input.showLocalEnvironmentIcon
         ? formatLocalEnvironmentLabel(input.environmentLabel)
         : null
-      : (input.environmentLabel ?? (input.isDesktopLocal ? "Local" : "Remote")),
+      : (input.environmentLabel ??
+        (input.isDesktopLocal
+          ? resolve(msg("Local", { $context: "environment location" }))
+          : resolve(msg("Remote", { $context: "environment location" })))),
   };
 }
 
@@ -83,15 +91,21 @@ export interface ProjectEnvironmentIconEntry {
   readonly label: string;
 }
 
-export function projectEnvironmentIconEntries(input: {
-  readonly members: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly environmentLabel: string | null;
-  }>;
-  readonly primaryEnvironmentId: EnvironmentId | null;
-  readonly desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
-  readonly showLocalEnvironmentIcon: boolean;
-}): ProjectEnvironmentIconEntry[] {
+export function projectEnvironmentIconEntries(
+  input: {
+    readonly members: ReadonlyArray<{
+      readonly environmentId: EnvironmentId;
+      readonly environmentLabel: string | null;
+    }>;
+    readonly primaryEnvironmentId: EnvironmentId | null;
+    readonly desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
+    readonly showLocalEnvironmentIcon: boolean;
+  },
+  labels: { readonly localSandbox: string; readonly remote: string } = {
+    localSandbox: m(msg("Local sandbox")),
+    remote: m(msg("Remote", { $context: "environment location" })),
+  },
+): ProjectEnvironmentIconEntry[] {
   const uniqueMembers = input.members.filter(
     (member, index, members) =>
       members.findIndex((candidate) => candidate.environmentId === member.environmentId) === index,
@@ -116,14 +130,14 @@ export function projectEnvironmentIconEntries(input: {
       return [
         {
           environmentId: member.environmentId,
-          label: member.environmentLabel ?? "Local sandbox",
+          label: member.environmentLabel ?? labels.localSandbox,
         },
       ];
     }
     return [
       {
         environmentId: member.environmentId,
-        label: member.environmentLabel ?? "Remote",
+        label: member.environmentLabel ?? labels.remote,
       },
     ];
   });

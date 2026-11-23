@@ -1,3 +1,4 @@
+import { useGT } from "gt-react";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { useSettingsScope } from "./SettingsScopeContext";
@@ -8,9 +9,11 @@ import {
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 
 export function LastCodeEnvironmentPauseSettings() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
   const enabled = useScopedSettings((settings) => settings.environmentPauseEnabled);
   const mixed = useScopedSettingsMixed(["environmentPauseEnabled"]);
   const updateSettings = useUpdateScopedSettings();
@@ -24,17 +27,19 @@ export function LastCodeEnvironmentPauseSettings() {
   const disabled = !supported || !canWrite || scope.kind === "project" || scope.kind === "checkout";
 
   return (
-    <SettingsSection title="Environment controls">
+    <SettingsSection title={gt("Environment controls")}>
       <SettingsRow
         serverScoped
         settingKeys={["environmentPauseEnabled"]}
         {...searchableSetting("environment-pause")}
-        description="Enable pause and resume controls for this environment in Connections. The sidebar control pauses only the environment running on this computer."
-        status={supported ? undefined : "Update the environment to enable this feature."}
+        description={gt(
+          "Enable pause and resume controls for this environment in Connections. The sidebar control pauses only the environment running on this computer.",
+        )}
+        status={supported ? undefined : gt("Update the environment to enable this feature.")}
         resetAction={
           mixed || enabled !== DEFAULT_SERVER_SETTINGS.environmentPauseEnabled ? (
             <SettingResetButton
-              label="environment pause button"
+              ariaLabel={gt("Reset environment pause button to default")}
               disabled={disabled}
               onClick={() =>
                 updateSettings({
@@ -52,7 +57,7 @@ export function LastCodeEnvironmentPauseSettings() {
             onCheckedChange={(checked) =>
               updateSettings({ environmentPauseEnabled: Boolean(checked) })
             }
-            aria-label="Environment pause button"
+            aria-label={gt("Environment pause button")}
           />
         }
       />

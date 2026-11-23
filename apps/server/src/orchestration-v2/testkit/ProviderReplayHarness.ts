@@ -1,4 +1,5 @@
 import * as UpdateDrainAdmission from "../../updateDrain/UpdateDrainAdmission.ts";
+import * as UpdateDrainAdmissionTestkit from "../../updateDrain/UpdateDrainAdmission.testkit.ts";
 import type { MigrationHistoryError } from "../../persistence/DatabaseMigrations.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
@@ -40,7 +41,6 @@ import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as IncomingMessageSummaryService from "../IncomingMessageSummaryService.ts";
-import * as SubagentPromotionService from "../SubagentPromotionService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as ThreadViewers from "../ThreadViewers.ts";
 import * as EventStore from "../EventStore.ts";
@@ -287,6 +287,7 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   | Orchestrator.OrchestratorV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
+  | ProjectionStore.ProjectionStoreV2
   | CommandOutputRecorder.CommandOutputRecorder
   | ProviderSessionManager.ProviderSessionManagerV2
   | CommandReceiptStore.CommandReceiptStoreV2
@@ -344,8 +345,10 @@ export function layerWithRegistry<Error, SettingsError = never>(
   | EffectOutbox.EffectOutboxV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
+  | ProjectionStore.ProjectionStoreV2
   | CommandOutputRecorder.CommandOutputRecorder
   | ProviderSessionManager.ProviderSessionManagerV2
+  | ThreadManagementService.ThreadManagementService
   | ThreadCommandExecutor.ThreadCommandExecutor
   | CommandReceiptStore.CommandReceiptStoreV2
   | ServerSettings.ServerSettingsService,
@@ -593,11 +596,7 @@ export function layerWithRegistry<Error, SettingsError = never>(
   const layerOrchestratorProvided = Orchestrator.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        options.admissionLayer ??
-          Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
-            admit: (_kind, effect) => effect,
-            admitOrElse: (_kind, effect) => effect,
-          }),
+        options.admissionLayer ?? UpdateDrainAdmissionTestkit.layerOpen,
         layerCheckpointServiceProvided,
         CommandPolicy.layer,
         layerContextHandoffServiceProvided,
@@ -636,11 +635,6 @@ export function layerWithRegistry<Error, SettingsError = never>(
           ),
         )
       : Layer.empty;
-  const subagentPromotionProvided = SubagentPromotionService.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(layerStores, layerProvidedRegistry, layerRuntime, layerOrchestratorProvided),
-    ),
-  );
   const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -658,7 +652,6 @@ export function layerWithRegistry<Error, SettingsError = never>(
         layerServerSettings,
         layerThreadManagementProvided,
         layerStores,
-        subagentPromotionProvided,
       ),
     ),
   );
@@ -667,8 +660,10 @@ export function layerWithRegistry<Error, SettingsError = never>(
   );
   const layerReplayRuntime = Layer.mergeAll(
     layerEffectOutboxProvided,
+    layerProjectionStore.pipe(Layer.provide(layerDatabase)),
     layerOrchestratorProvided,
     layerProviderSessionManagerProvided,
+    layerThreadManagementProvided,
     layerEffectWorkerProvided,
     layerEventSinkProvided,
     layerContinuationWorkerProvided,

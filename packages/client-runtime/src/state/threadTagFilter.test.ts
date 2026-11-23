@@ -70,6 +70,26 @@ describe("hiddenThreadKeys", () => {
     );
   });
 
+  it("uses a promoted delegate's own tags while keeping its requester reference", () => {
+    const original = linkedThreads[0]!;
+    const promoted = {
+      ...original,
+      tags: ["client"],
+      lineage: { ...original.lineage, independent: true },
+    };
+    const environments = [
+      { environmentId: local, threads: localThreads, hiddenTags: ["private"] },
+      { environmentId: linked, threads: [promoted], hiddenTags: null },
+    ];
+    const taskKey = key(linked, "delegated-from-private");
+    expect(hiddenThreadKeys(environments).has(taskKey)).toBe(false);
+    expect(
+      hiddenThreadKeys([environments[0]!, { ...environments[1]!, hiddenTags: ["client"] }]).has(
+        taskKey,
+      ),
+    ).toBe(true);
+  });
+
   it("judges an archive page against live hidden parents", () => {
     const archived = hiddenThreadKeys(
       [{ environmentId: linked, threads: [linkedThreads[0]!], hiddenTags: null }],

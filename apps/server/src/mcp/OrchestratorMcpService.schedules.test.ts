@@ -5,9 +5,12 @@ import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ProviderAdapters from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as Launch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
@@ -21,6 +24,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as Git from "../vcs/GitVcsDriver.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as Mcp from "./OrchestratorMcpService.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 
 const dependencies = Layer.mergeAll(
   NodeCrypto.layer,
@@ -40,6 +44,12 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Git.GitVcsDriver)({}),
   Layer.mock(Secrets.SecretRequests)({}),
   Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+  Layer.mock(ActionResume.ActionResume)({}),
+  Layer.mock(PeerForwarding.PeerForwarding)({}),
+  Layer.mock(PeerLinks.PeerLinks)({}),
+  Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+    forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+  }),
   Layer.mock(Scheduler.Scheduler)({ register: () => Effect.void }),
 );
 

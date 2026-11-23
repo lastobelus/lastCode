@@ -1,3 +1,4 @@
+import { T } from "gt-react";
 import { memo } from "react";
 import { SearchIcon } from "lucide-react";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
@@ -24,7 +25,9 @@ export const LastCodeSidebarSearch = memo(function LastCodeSidebarSearch({
                 render={<SidebarMenuButton data-testid="command-palette-trigger" />}
               >
                 <SearchIcon />
-                <span className="flex-1 truncate">Search</span>
+                <span className="flex-1 truncate">
+                  <T>Search</T>
+                </span>
                 {shortcutLabel ? <Kbd>{shortcutLabel}</Kbd> : null}
               </CommandDialogTrigger>
             </div>

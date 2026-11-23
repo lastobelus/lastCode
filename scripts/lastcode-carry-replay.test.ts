@@ -293,7 +293,7 @@ assert.throws(() => replayCarrySetOnto(${JSON.stringify(input)}), /could not app
 `,
       );
       // The outer guard proves that an ignored SIGTERM cannot hold the eight-second failure path.
-      assert.equal(result.error, undefined);
+      assert.equal(result.error, undefined, result.stderr);
       assert.equal(result.status, 0, result.stderr);
       assert.equal(
         git(repo, ["rev-parse", "REBASE_HEAD"]),

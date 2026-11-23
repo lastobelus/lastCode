@@ -1,3 +1,5 @@
+import { LASTCODE_GUARDED_MERGE_CONTEXT } from "./lastcode-main-write-lock.ts";
+
 export const LASTCODE_CI_WORKFLOW = "ci.yml";
 export const LASTCODE_CI_GATE = "CI Gate";
 
@@ -135,11 +137,29 @@ export function githubCiJobsArgs(repository: string, runId: number): ReadonlyArr
   return ["api", `repos/${repository}/actions/runs/${runId}/jobs?filter=latest&per_page=100`];
 }
 
-export function requiredGithubCiGate(branchRules: ReadonlyArray<GithubBranchRule>): boolean {
+function requiresStatusContext(
+  branchRules: ReadonlyArray<GithubBranchRule>,
+  requiredContext: string,
+): boolean {
   return branchRules.some(
     (rule) =>
       rule.type === "required_status_checks" &&
-      rule.parameters?.required_status_checks?.some(({ context }) => context === LASTCODE_CI_GATE),
+      rule.parameters?.required_status_checks?.some(({ context }) => context === requiredContext),
+  );
+}
+
+export function requiredGithubCiGate(branchRules: ReadonlyArray<GithubBranchRule>): boolean {
+  return requiresStatusContext(branchRules, LASTCODE_CI_GATE);
+}
+
+export function readGuardedMergeRequired(
+  repository: string,
+  baseBranch: string,
+  runGithubJson: RunGithubJson,
+): boolean {
+  return requiresStatusContext(
+    runGithubJson<ReadonlyArray<GithubBranchRule>>(githubBranchRulesArgs(repository, baseBranch)),
+    LASTCODE_GUARDED_MERGE_CONTEXT,
   );
 }
 

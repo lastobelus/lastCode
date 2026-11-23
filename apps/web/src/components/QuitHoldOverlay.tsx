@@ -68,8 +68,18 @@ export function QuitHoldOverlay() {
   const shortcut = isMacPlatform(navigator.platform) ? "⌘Q" : "Ctrl+Q";
   const message =
     visibleMode === "hold"
-      ? gt("Hold {shortcut} or press twice to quit", { shortcut })
-      : gt("Press {shortcut} again to quit", { shortcut });
+      ? runningActionCount > 0
+        ? gt(
+            "Hold {shortcut} or press twice to quit and cancel {count, plural, one {{count} running Action} other {{count} running Actions}}",
+            { shortcut, count: runningActionCount },
+          )
+        : gt("Hold {shortcut} or press twice to quit", { shortcut })
+      : runningActionCount > 0
+        ? gt(
+            "Press {shortcut} again to quit and cancel {count, plural, one {{count} running Action} other {{count} running Actions}}",
+            { shortcut, count: runningActionCount },
+          )
+        : gt("Press {shortcut} again to quit", { shortcut });
   return (
     <div
       role="status"
@@ -77,9 +87,6 @@ export function QuitHoldOverlay() {
     >
       <div className="rounded-full bg-foreground/95 px-8 py-4 text-2xl font-bold text-background shadow-xl">
         {message}
-        {runningActionCount > 0
-          ? ` and cancel ${runningActionCount} running ${runningActionCount === 1 ? "Action" : "Actions"}`
-          : ""}
       </div>
     </div>
   );

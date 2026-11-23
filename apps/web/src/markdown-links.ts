@@ -18,6 +18,8 @@ export interface MarkdownFileLinkMeta {
   displayPath: string;
   workspaceRelativePath: string | null;
   basename: string;
+  /** Whether the authored destination omitted every directory segment. */
+  isBareFilename: boolean;
   line?: number;
   column?: number;
   endLine?: number;
@@ -127,6 +129,11 @@ function resolveMarkdownFileLinkMetaUncached(
     displayPath: formatWorkspaceRelativePath(targetPath, cwd),
     workspaceRelativePath: workspaceRelativeFilePath(path, cwd),
     basename: fileBasename(path),
+    isBareFilename:
+      !isAbsolutePath(sourcePath) &&
+      !/[\\/]/.test(sourcePath) &&
+      sourcePath !== "." &&
+      sourcePath !== "..",
     ...lines,
     workspaceLookupPath:
       !isAbsolutePath(sourcePath) &&

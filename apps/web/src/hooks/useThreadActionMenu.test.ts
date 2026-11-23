@@ -44,6 +44,14 @@ function recordEffect(action: string) {
 }
 
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
+vi.mock("./useWorktreeSuspensionActions", () => ({
+  useWorktreeSuspensionActions: () => ({ menuItems: () => [], run: async () => false }),
+}));
+vi.mock("./useLastCodeLinkedArchiveRecovery", () => ({
+  LINKED_ARCHIVE_STATUS_ACTION: "linked-archive-status",
+  linkedArchiveStatusMenuItem: () => [],
+  useLastCodeLinkedArchiveRecovery: () => async () => {},
+}));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
@@ -180,6 +188,7 @@ vi.mock("./useThreadActions", () => ({
         "confirmAndUnpinThread",
         "archiveThread",
         "deleteThread",
+        "confirmAndDeleteThread",
       ].map((action) => [
         action,
         async (...args: unknown[]) => {
@@ -189,7 +198,9 @@ vi.mock("./useThreadActions", () => ({
               ? "mark-unread"
               : action === "markThreadRead"
                 ? "mark-read"
-                : action,
+                : action === "confirmAndDeleteThread"
+                  ? "deleteThread"
+                  : action,
           );
           return AsyncResult.success(undefined);
         },

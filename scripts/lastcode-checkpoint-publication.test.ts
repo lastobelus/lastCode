@@ -482,10 +482,31 @@ exec "$FIXTURE_REAL_GIT" "$@"
         "Concurrent remote main update\n",
       );
       assert.notEqual(gitResult(fixture.repo, ["cat-file", "-e", descendant]).status, 0);
+      // Route a GitHub push URL to the local origin so promotion approves the candidate.
+      const statusLog = NodePath.join(fixture.root, "guard-statuses");
+      const ssh = NodePath.join(fixture.root, "bin", "ssh");
+      NodeFS.writeFileSync(
+        ssh,
+        `#!/bin/sh\nfor last; do :; done\ncase "$last" in git-receive-pack*) exec git receive-pack "${fixture.origin}";; esac\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      NodeFS.writeFileSync(
+        NodePath.join(fixture.root, "bin", "gh"),
+        `#!/bin/sh\ncase "$*" in *statuses/*) printf '%s\\n' "$*" >> "${statusLog}"; exit 0;; esac\ntouch "$FIXTURE_PR_QUERY"\necho '[{"number":209}]'\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      git(fixture.repo, [
+        "remote",
+        "set-url",
+        "--push",
+        "origin",
+        "git@github.com:example/repository.git",
+      ]);
       const result = checkpoint(fixture, ["--push-tags", "--promote"], {
         ...raceEnvironment,
         FIXTURE_MERGE_PHASE: "push",
         FIXTURE_MERGE_COMMIT: descendant,
+        GIT_SSH_COMMAND: ssh,
       });
       assert.equal(NodeFS.existsSync(raceEnvironment.FIXTURE_MERGE_MARKER), true);
       assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -496,6 +517,14 @@ exec "$FIXTURE_REAL_GIT" "$@"
       );
       assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), descendant);
       assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+      const candidate = remoteCommit(fixture.origin, "refs/lastcode/main-write-candidate");
+      assert.deepEqual(
+        NodeFS.readFileSync(statusLog, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => /statuses\/(\w+) -f (state=\w+)/u.exec(line)?.slice(1).join(" ")),
+        [`${candidate} state=success`, `${candidate} state=failure`],
+      );
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }

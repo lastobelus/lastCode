@@ -259,9 +259,14 @@ export const layer: Layer.Layer<
           if (currentRun.status !== "waiting" && !stoppedNow) {
             return;
           }
-          // Omit delegatedCompletion to preserve cohort writes made after capture loaded the run.
-          const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } =
-            currentRun;
+          // These fields can change while Git captures the checkpoint; keep the committed ownership.
+          const {
+            delegatedCompletion: _delegatedCompletion,
+            actionObligations: _actionObligations,
+            pullRequestWatchObligations: _watchObligations,
+            pullRequestWatchContinuation: _watchContinuation,
+            ...runWithoutConcurrentObligations
+          } = currentRun;
           yield* eventSink.commitCommand({
             commandId,
             threadId: input.threadId,
@@ -337,9 +342,9 @@ export const layer: Layer.Layer<
                 providerInstanceId: run.providerInstanceId,
                 occurredAt: capturedAt,
                 payload: stoppedNow
-                  ? { ...runWithoutDelegatedCompletion, checkpointId: checkpoint.id }
+                  ? { ...runWithoutConcurrentObligations, checkpointId: checkpoint.id }
                   : {
-                      ...runWithoutDelegatedCompletion,
+                      ...runWithoutConcurrentObligations,
                       status: "completed",
                       completedAt: capturedAt,
                       checkpointId: checkpoint.id,

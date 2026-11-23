@@ -1,3 +1,7 @@
+import * as ProjectionStore from "./ProjectionStore.ts";
+import { threadWorkspaceLifecycleTarget } from "./LastCodeArchivePlanner.ts";
+import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
+import type { DeleteThreadsInput, DeleteThreadsResult, NodeId } from "@t3tools/contracts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -32,6 +36,7 @@ import {
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadTranscript,
+  type OrchestrationV2ThreadPlacementResult,
   type OrchestrationV2TurnItem,
   ProjectId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -41,6 +46,7 @@ import {
   RunId,
   type ScheduledTaskId,
   ThreadId,
+  WorktreeSuspensionRequestError,
   type TurnItemId,
 } from "@t3tools/contracts";
 import { delegatedTaskProgress } from "@t3tools/provider-core/server/subagentProjection";
@@ -69,6 +75,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
+import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import { cancelledBeforeStart } from "./RestartBackgroundNote.ts";
 import { contextBoundaryOrdinal } from "./contextBoundary.ts";
@@ -76,12 +83,27 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { ThreadWorktreeRestore } from "../workspace/restoreMissingWorktree.ts";
 import { checkOutput, outputRequestProblem } from "./runOutput.ts";
+import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as LastCodeArchiveRunner from "./LastCodeArchiveRunner.ts";
+import { withVerifiedArchiveActivity } from "./ThreadArchiveActivity.ts";
+import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
 
-export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
+const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
+
+export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart" | "cooperative";
 
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+}
+
+export interface ThreadPlacementInput {
+  readonly projectId: ProjectId;
+  readonly items: ReadonlyArray<{
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly groupedUnderThreadId: ThreadId | null;
+  }>;
 }
 
 export function withCreationProvenance(
@@ -90,12 +112,14 @@ export function withCreationProvenance(
 ): OrchestrationV2Command {
   switch (command.type) {
     case "thread.create": {
-      // Only the server stamps a link's origin or folds in a first message, so a client cannot.
+      // The server supplies link and creator provenance and folds in the first message.
       const {
         linkOrigin: _linkOrigin,
         delegatedFrom: _delegatedFrom,
+        creatorOrigin: _creatorOrigin,
         initialMessage: _initialMessage,
         workflowRun: _workflowRun,
+        groupThread: _groupThread,
         ...rest
       } = command;
       return { ...rest, ...provenance };
@@ -134,6 +158,9 @@ function existingThreadIdsForCommand(
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
     case "delegated_task.remote.request":
+    case "delegated_task.remote.begin":
+    case "delegated_task.remote.interaction":
+    case "delegated_task.remote.stage":
     case "delegated_task.remote.complete":
     case "delegated_task.remote.stop":
       return [command.parentThreadId];
@@ -167,6 +194,8 @@ export interface ThreadManagementSendInput {
   readonly freshContext?: boolean;
   /** Ask the run for a result as data matching this JSON Schema; it is queued, never steered. */
   readonly outputSchema?: Readonly<Record<string, Schema.Json>>;
+  /** Environment Pause must not start a new turn after the recipient finishes. */
+  readonly pauseOnlyIfActive?: true;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }
@@ -415,12 +444,19 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
 export interface ThreadManagementServiceShape {
+  readonly withActionObligation: Orchestrator.OrchestratorV2Shape["withActionObligation"];
+  readonly reserveActionObligation: Orchestrator.OrchestratorV2Shape["reserveActionObligation"];
+  readonly disposeActionObligation: Orchestrator.OrchestratorV2Shape["disposeActionObligation"];
+  readonly deleteMany: (
+    input: DeleteThreadsInput,
+  ) => Effect.Effect<DeleteThreadsResult, WorktreeSuspensionRequestError>;
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
   readonly searchThread: (
     input: OrchestrationV2SearchThreadInput,
   ) => Effect.Effect<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
+  readonly executeArchive: LastCodeArchiveRunner.LastCodeArchiveRunner["Service"]["execute"];
   readonly ensureLegacyTranscript: (
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
@@ -432,6 +468,7 @@ export interface ThreadManagementServiceShape {
    */
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
+    options?: Orchestrator.OrchestratorV2DispatchOptions,
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -447,6 +484,7 @@ export interface ThreadManagementServiceShape {
   readonly getMessageCount: Orchestrator.OrchestratorV2["Service"]["getMessageCount"];
   readonly getRunCount: Orchestrator.OrchestratorV2["Service"]["getRunCount"];
   readonly getMessagesById: Orchestrator.OrchestratorV2["Service"]["getMessagesById"];
+  readonly hasThreadReadAuthorization: Orchestrator.OrchestratorV2["Service"]["hasThreadReadAuthorization"];
   readonly getTurnItem: (input: {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
@@ -494,10 +532,16 @@ export interface ThreadManagementServiceShape {
   readonly listAppOwnedChildThreadIds: Orchestrator.OrchestratorV2["Service"]["listAppOwnedChildThreadIds"];
   readonly getThreadLinkMetadata: Orchestrator.OrchestratorV2["Service"]["getThreadLinkMetadata"];
   readonly getThreadTitles: Orchestrator.OrchestratorV2["Service"]["getThreadTitles"];
+  readonly getThreadArchiveFamily: Orchestrator.OrchestratorV2["Service"]["getThreadArchiveFamily"];
+  readonly getThreadOwnershipAvailability: Orchestrator.OrchestratorV2["Service"]["getThreadOwnershipAvailability"];
+  readonly setThreadParents: (
+    input: ThreadPlacementInput,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadPlacementResult>>;
   /** Omit `projectId` to list every project's threads. Side chats are never listed. */
   readonly listProjectThreads: (input: {
     readonly projectId?: ProjectId | undefined;
     readonly includeSubagents: boolean;
+    readonly archived?: boolean;
   }) => Effect.Effect<ReadonlyArray<ActiveThreadListEntry>, ThreadManagementError>;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
@@ -563,6 +607,7 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly commandId: CommandId;
     readonly reason?: string | undefined;
+    readonly taskIds?: ReadonlyArray<NodeId>;
   }) => Effect.Effect<
     void,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -654,6 +699,7 @@ const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 const make = Effect.gen(function* () {
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const archiveRunner = yield* LastCodeArchiveRunner.LastCodeArchiveRunner;
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const layerScope = yield* Effect.scope;
   const agentScope = yield* AgentScope;
@@ -661,6 +707,8 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   const worktreeRestore = yield* ThreadWorktreeRestore;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -739,6 +787,14 @@ const make = Effect.gen(function* () {
             cause,
           }),
       ),
+    );
+  });
+
+  const getThreadRecords: ThreadManagementServiceShape["getThreadRecords"] = Effect.fn(
+    "ThreadManagementService.getThreadRecords",
+  )(function (threadId, fields, filter) {
+    return ensureProjectionTranscript(threadId).pipe(
+      Effect.andThen(orchestrator.getThreadRecords(threadId, fields, filter)),
     );
   });
 
@@ -837,6 +893,16 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
+      case "thread.preparation.retry":
+        return orchestrator.getThreadRecords(command.threadId, []).pipe(
+          Effect.flatMap(({ thread }) =>
+            assertProviderInstanceEnabled({
+              projectId: thread.projectId,
+              commandId: command.commandId,
+              instanceId: thread.providerInstanceId,
+            }),
+          ),
+        );
       case "prepared-run.release":
       case "prepared-run.retry":
         return orchestrator
@@ -858,11 +924,201 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(
-      Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+  const dispatchAccepted: ThreadManagementServiceShape["dispatch"] = Effect.fn(
+    "ThreadManagementService.dispatch",
+  )(function* (command, options) {
+    yield* ensureCommandTranscripts(command);
+    yield* assertDispatchTargetEnabled(command);
+    const result = yield* orchestrator.dispatch(command, options);
+    if (command.type !== "thread.archive") return result;
+    const pending = result.storedEvents.some(
+      (stored) =>
+        stored.event.threadId === command.threadId &&
+        stored.event.type === "thread.metadata-updated" &&
+        stored.event.payload.archivePending?.commandId === command.commandId &&
+        stored.event.payload.archivePending.status === "stopping",
     );
+    // Accepted no-ops and synchronous repairs have already finished. Pending
+    // requests observe their own durable outcome: a later reopen or retry must
+    // not replace the result with the latest thread state.
+    if (!pending) return result;
+    const completion = yield* orchestrator
+      .streamStoredEventsFrom({ threadId: command.threadId, afterSequence: result.sequence })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            (stored.commandId === CommandId.make(`${command.commandId}:complete`) &&
+              stored.event.type === "thread.archived" &&
+              stored.event.payload.archivedAt !== null &&
+              stored.event.payload.archivePending == null) ||
+            (stored.commandId === CommandId.make(`${command.commandId}:failed`) &&
+              stored.event.type === "thread.metadata-updated" &&
+              stored.event.payload.archivePending?.commandId === command.commandId &&
+              stored.event.payload.archivePending.status === "failed"),
+        ),
+        Stream.mapEffect((stored) =>
+          stored.event.type === "thread.metadata-updated"
+            ? Effect.fail(
+                new Orchestrator.OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause:
+                    stored.event.payload.archivePending?.error ??
+                    "Archive did not complete. The conversations remain visible.",
+                }),
+              )
+            : Effect.succeed(stored),
+        ),
+        Stream.runHead,
+      );
+    if (Option.isNone(completion))
+      return yield* new Orchestrator.OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Archive completion could not be observed.",
+      });
+    return {
+      sequence: completion.value.sequence,
+      storedEvents: [completion.value],
+    };
+  });
+
+  const dispatchWithWorkspaceLifecycle: ThreadManagementServiceShape["dispatch"] = Effect.fn(
+    "ThreadManagementService.workspaceLifecycle",
+  )(function* (command, options) {
+    if (command.type !== "thread.archive" && command.type !== "thread.delete") {
+      return yield* dispatchAccepted(command, options);
+    }
+    if (Option.isNone(workspaceLifecycle)) {
+      // Environments without saved-workspace support retain all data. A discard
+      // request cannot be downgraded into an ordinary lifecycle mutation.
+      if (command.savedWorkspace?.mode === "discard") {
+        return yield* new Orchestrator.OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: new WorktreeSuspensionRequestError({
+            reason: "unavailable",
+            message: "Saved workspace disposal is unavailable.",
+          }),
+        });
+      }
+      return yield* dispatchAccepted(command, options);
+    }
+    return yield* workspaceLifecycle.value
+      .run(
+        {
+          operation: command.type === "thread.archive" ? "archive" : "delete",
+          target: threadWorkspaceLifecycleTarget(command),
+          commandId: command.commandId,
+          ...(command.savedWorkspace === undefined
+            ? {}
+            : { savedWorkspace: command.savedWorkspace }),
+        },
+        dispatchAccepted(command, options),
+      )
+      .pipe(
+        Effect.mapError((cause) =>
+          isWorktreeSuspensionRequestError(cause)
+            ? new Orchestrator.OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              })
+            : cause,
+        ),
+      );
+  });
+
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command, options) =>
+    dispatchWithWorkspaceLifecycle(command, options).pipe(
+      Effect.tap(() =>
+        command.type === "thread.archive"
+          ? archiveRunner.awaitTemporaryProjectRemoval(command)
+          : Effect.void,
+      ),
+    );
+
+  const deleteMany: ThreadManagementServiceShape["deleteMany"] = Effect.fn(
+    "ThreadManagementService.deleteMany",
+  )(function* (input) {
+    const selected = [
+      ...new Map(input.threads.map((thread) => [thread.threadId, thread])).values(),
+    ];
+    const families = yield* Effect.forEach(selected, (thread) =>
+      projections.getOwnedThreadIds(thread.threadId),
+    ).pipe(
+      Effect.mapError(
+        () =>
+          new WorktreeSuspensionRequestError({
+            reason: "changed",
+            message: "The selected thread families could not be reviewed.",
+          }),
+      ),
+    );
+    const allThreadIds = [...new Set(families.flat())];
+    if (allThreadIds.length > 1000)
+      return yield* new WorktreeSuspensionRequestError({
+        reason: "protected",
+        message: "Delete a smaller selection of thread families.",
+      });
+    const roots = selected.filter(
+      (thread, index) =>
+        !families.some((family, other) => other !== index && family.includes(thread.threadId)),
+    );
+    const deleteReceipts = roots.map((thread) => ({
+      threadId: thread.threadId,
+      commandId: CommandId.make(`${input.commandId}:delete:${thread.threadId}`),
+    }));
+    const deletedThreadIds = new Set<ThreadId>();
+    const commit = Effect.gen(function* () {
+      for (const [index, thread] of roots.entries()) {
+        const receipt = deleteReceipts[index]!;
+        yield* dispatchAccepted({
+          type: "thread.delete",
+          ...receipt,
+          ...(thread.deleteWorktree === undefined ? {} : { deleteWorktree: thread.deleteWorktree }),
+        });
+        for (const id of families[
+          selected.findIndex((entry) => entry.threadId === thread.threadId)
+        ] ?? [])
+          deletedThreadIds.add(id);
+      }
+    });
+    const operation = Option.isSome(workspaceLifecycle)
+      ? workspaceLifecycle.value.run(
+          {
+            operation: "delete",
+            target: {
+              kind: "threads",
+              threadIds: selected.map((thread) => thread.threadId).sort(),
+            },
+            commandId: input.commandId,
+            deleteReceipts,
+            ...(input.savedWorkspace === undefined ? {} : { savedWorkspace: input.savedWorkspace }),
+          },
+          commit,
+        )
+      : input.savedWorkspace?.mode === "discard"
+        ? Effect.fail(
+            new WorktreeSuspensionRequestError({
+              reason: "unavailable",
+              message: "Saved workspace disposal is unavailable.",
+            }),
+          )
+        : commit;
+    const result = yield* operation.pipe(Effect.result);
+    if (result._tag === "Failure") {
+      const message =
+        userFacingDispatchErrorMessage(result.failure) ??
+        (isWorktreeSuspensionRequestError(result.failure)
+          ? result.failure.message
+          : "The thread selection was not fully deleted. Saved data has been retained until its exact deletion outcome can be verified.");
+      if (deletedThreadIds.size === 0)
+        return yield* new WorktreeSuspensionRequestError({ reason: "changed", message });
+      return { deletedThreadIds: [...deletedThreadIds], failureMessage: message };
+    }
+    return { deletedThreadIds: [...deletedThreadIds] };
+  });
 
   const dispatchLaunch: ThreadManagementServiceShape["dispatchLaunch"] = Effect.fn(
     "orchestrationV2.threadManagement.dispatchLaunch",
@@ -873,11 +1129,33 @@ const make = Effect.gen(function* () {
       yield* ensureCommandTranscripts(input.initialMessage, [senderThreadId]);
     }
     if (input.claim.type === "thread.create") {
-      yield* assertProviderInstanceEnabled({
-        projectId: input.claim.projectId,
-        commandId: input.initialMessage.commandId,
-        instanceId: (input.initialMessage.modelSelection ?? input.claim.modelSelection).instanceId,
-      });
+      const claimReceipt = yield* receipts
+        .getByCommandId(input.claim.commandId)
+        .pipe(Effect.orElseSucceed(() => Option.none()));
+      // Atomic launches accept the first message on the create receipt. A
+      // claim-only receipt must still check policy before accepting new work.
+      const replaysInitialMessage =
+        Option.isSome(claimReceipt) &&
+        claimReceipt.value.status === "accepted" &&
+        claimReceipt.value.commandType === "thread.create" &&
+        claimReceipt.value.threadId === input.claim.threadId &&
+        (yield* orchestrator.streamStoredEventsFrom({ threadId: input.claim.threadId }).pipe(
+          Stream.takeUntil((stored) => stored.sequence >= claimReceipt.value.resultSequence),
+          Stream.filter(
+            (stored) =>
+              stored.commandId === input.claim.commandId && stored.event.type === "run.created",
+          ),
+          Stream.runHead,
+          Effect.map(Option.isSome),
+        ));
+      if (!replaysInitialMessage) {
+        yield* assertProviderInstanceEnabled({
+          projectId: input.claim.projectId,
+          commandId: input.initialMessage.commandId,
+          instanceId: (input.initialMessage.modelSelection ?? input.claim.modelSelection)
+            .instanceId,
+        });
+      }
     } else {
       yield* assertDispatchTargetEnabled(input.initialMessage);
     }
@@ -911,7 +1189,15 @@ const make = Effect.gen(function* () {
     );
 
   const listProjectThreads: ThreadManagementServiceShape["listProjectThreads"] = (input) =>
-    orchestrator.listActiveThreads(input.projectId).pipe(
+    (input.archived === true
+      ? orchestrator
+          .getShellSnapshot({
+            location: "archive",
+            ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+          })
+          .pipe(Effect.map((snapshot) => snapshot.archivedThreads))
+      : orchestrator.listActiveThreads(input.projectId)
+    ).pipe(
       Effect.mapError(
         (cause) =>
           new ThreadManagementProjectThreadsListError({
@@ -921,10 +1207,12 @@ const make = Effect.gen(function* () {
       ),
       Effect.map((threads) =>
         threads
-          .filter((thread) =>
-            input.includeSubagents
-              ? thread.lineage.sideChat !== true
-              : isListedThreadLineage(thread.lineage) && !isDelegatedAppThread(thread),
+          .filter(
+            (thread) =>
+              thread.lineage.sideChat !== true &&
+              (input.includeSubagents ||
+                thread.lineage.independent === true ||
+                (isListedThreadLineage(thread.lineage) && !isDelegatedAppThread(thread))),
           )
           .toSorted(
             (left, right) =>
@@ -934,10 +1222,95 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const setThreadParents = Effect.fn("ThreadManagementService.setThreadParents")(function* (
+    input: ThreadPlacementInput,
+  ) {
+    const results: OrchestrationV2ThreadPlacementResult[] = [];
+    let stopped = false;
+    const validSize = input.items.length > 0 && input.items.length <= 200;
+    const unique =
+      new Set(input.items.map((item) => item.threadId)).size === input.items.length &&
+      new Set(input.items.map((item) => item.commandId)).size === input.items.length;
+    for (const item of input.items) {
+      if (!validSize || !unique) {
+        results.push({
+          ...item,
+          status: "rejected",
+          error: "Send 1–200 threads, each listed once.",
+        });
+        continue;
+      }
+      if (stopped) {
+        results.push({ ...item, status: "not_attempted" });
+        continue;
+      }
+      const result = yield* Effect.gen(function* () {
+        const receipt = yield* receipts.getByCommandId(item.commandId);
+        if (Option.isNone(receipt) || receipt.value.status !== "accepted") {
+          const shell = yield* orchestrator.getThreadShell(item.threadId);
+          if (shell === null || shell.projectId !== input.projectId)
+            return yield* new ThreadManagementThreadNotFoundError({
+              projectId: input.projectId,
+              threadId: item.threadId,
+            });
+        }
+        const dispatched = yield* dispatchAccepted({
+          type: "thread.metadata.update",
+          ...item,
+          expectedProjectId: input.projectId,
+        });
+        const event = dispatched.storedEvents.find(
+          (stored) =>
+            stored.event.type === "thread.metadata-updated" &&
+            stored.event.threadId === item.threadId,
+        )?.event;
+        if (
+          event?.type !== "thread.metadata-updated" ||
+          event.payload.projectId !== input.projectId ||
+          event.previousGroupedUnderThreadId === undefined
+        )
+          return yield* new Orchestrator.OrchestratorDispatchError({
+            commandId: item.commandId,
+            commandType: "thread.metadata.update",
+            cause: "This clientRequestId was already used for a different request. Use a new one.",
+          });
+        // Accepted retries describe their original placement, not a later move.
+        if (event.payload.groupedUnderThreadId !== item.groupedUnderThreadId)
+          return yield* new Orchestrator.OrchestratorDispatchError({
+            commandId: item.commandId,
+            commandType: "thread.metadata.update",
+            cause:
+              "This clientRequestId already moved this thread to a different parent. Use a new clientRequestId for a new move.",
+          });
+        return {
+          ...item,
+          status: "moved" as const,
+          previousGroupedUnderThreadId: event.previousGroupedUnderThreadId,
+          sequence: dispatched.sequence,
+          replayed: dispatched.replayed === true,
+        };
+      }).pipe(Effect.result);
+      if (result._tag === "Success") results.push(result.success);
+      else {
+        stopped = true;
+        results.push({
+          ...item,
+          status: "rejected",
+          error: userFacingDispatchErrorMessage(result.failure) ?? "Thread placement was rejected.",
+        });
+      }
+    }
+    return results;
+  });
+
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = Effect.fn(
     "ThreadManagementService.sendToThread",
   )(function* (input) {
-    const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
+    const target = yield* getProjectThreadRecords(input, [
+      "runs",
+      "providerTurns",
+      ...(input.mode === "cooperative" ? (["providerThreads", "providerSessions"] as const) : []),
+    ]);
     if (target.thread.archivedAt !== null) {
       return yield* new ThreadManagementThreadArchivedError({
         threadId: input.threadId,
@@ -955,7 +1328,7 @@ const make = Effect.gen(function* () {
     // A fresh send, or one that asks for a result, never joins a running turn.
     const mode =
       (input.freshContext || input.outputSchema !== undefined) &&
-      (input.mode === "steer" || input.mode === "restart")
+      (input.mode === "steer" || input.mode === "restart" || input.mode === "cooperative")
         ? "queue"
         : input.mode;
     const explicitSteer = mode === "steer" || mode === "restart";
@@ -968,6 +1341,16 @@ const make = Effect.gen(function* () {
       });
     }
 
+    const activeProviderThread =
+      mode === "cooperative"
+        ? target.providerThreads.find((thread) => thread.id === steerableRun?.providerThreadId)
+        : undefined;
+    const activeTurns =
+      mode === "cooperative"
+        ? target.providerSessions.find(
+            (session) => session.id === activeProviderThread?.providerSessionId,
+          )?.capabilities.turns
+        : undefined;
     let dispatchMode: Extract<
       OrchestrationV2Command,
       { readonly type: "message.dispatch" }
@@ -977,15 +1360,28 @@ const make = Effect.gen(function* () {
         type: mode === "restart" ? "restart_active" : "steer_active",
         targetRunId: steerableRun.id,
       };
+    } else if (
+      mode === "cooperative" &&
+      steerableRun !== undefined &&
+      activeTurns?.supportsActiveSteering === true &&
+      activeTurns.supportsStrictActiveSteering === true &&
+      activeTurns.activeSteeringInterruptsTools !== true
+    ) {
+      dispatchMode = { type: "steer_active_native", targetRunId: steerableRun.id };
     } else {
       dispatchMode = {
-        type: mode === "queue" ? "queue_after_active" : "start_immediately",
+        type:
+          mode === "queue" || mode === "cooperative" ? "queue_after_active" : "start_immediately",
       };
     }
 
     // Turn start would fail on its own after the send reported success; a replay keeps its answer.
     // A live steer and a receipt replay without a target turn need no workspace.
-    if (!missingSteeringTarget && dispatchMode.type !== "steer_active") {
+    if (
+      !missingSteeringTarget &&
+      dispatchMode.type !== "steer_active" &&
+      dispatchMode.type !== "steer_active_native"
+    ) {
       yield* worktreeRestore
         .restore(target.thread)
         .pipe(
@@ -1004,25 +1400,33 @@ const make = Effect.gen(function* () {
     }
 
     const authorization = yield* ThreadReadAuthorization;
-    yield* authorization.authorize(input.threadId, input.messageId);
-    const dispatched = yield* dispatch({
-      type: "message.dispatch",
-      commandId: input.commandId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-      ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
-      text: input.text,
-      attachments: input.attachments,
-      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      ...(input.freshContext ? { freshContext: true } : {}),
-      ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
-      dispatchMode,
-      ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
-      createdBy: input.createdBy,
-      creationSource: input.creationSource,
-    });
+    const threadReadIntent = yield* authorization.authorize(input.threadId, input.messageId);
+    const dispatched = yield* dispatch(
+      {
+        type: "message.dispatch",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
+        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+        ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
+        text: input.text,
+        attachments: input.attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.freshContext ? { freshContext: true } : {}),
+        ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
+        dispatchMode,
+        ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
+        createdBy: input.createdBy,
+        creationSource: input.creationSource,
+      },
+      threadReadIntent === undefined ? undefined : { threadReadIntent },
+    ).pipe(
+      Effect.provideService(
+        Orchestrator.PauseRecipientMustBeActive,
+        input.pauseOnlyIfActive === true,
+      ),
+    );
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],
       turnItemTypes: ["user_message"],
@@ -1781,17 +2185,20 @@ const make = Effect.gen(function* () {
   const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = Effect.fn(
     "ThreadManagementService.stopDelegatedTasks",
   )(function* (input) {
+    const cancellationOwnership = yield* DelegatedTaskCancellation;
     const { subagents } = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
     const failures: Array<
       Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
     > = [];
     const stoppedChildThreadIds = new Set<ThreadId>();
     for (const task of subagents) {
-      if (task.origin !== "app_owned") continue;
+      if (task.origin !== "app_owned" || task.ownershipReleased === true) continue;
+      if (input.taskIds !== undefined && (!input.taskIds.includes(task.id) || task.result !== null))
+        continue;
       if (task.childThreadId === null) {
         // A task in a linked environment ends here; its follower then stops it there.
         // One with its result keeps it, but its thread there may run follow-up work.
-        if (task.remoteChild === undefined) continue;
+        if (task.remoteChild === undefined && task.remoteLaunch === undefined) continue;
         const commandId = CommandId.make(`${input.commandId}:stop:${task.id}`);
         yield* (input.remoteDispatch ?? dispatch)(
           task.result === null
@@ -1823,10 +2230,13 @@ const make = Effect.gen(function* () {
         );
         continue;
       }
+      const child = yield* orchestrator.getThreadShell(task.childThreadId);
+      if (child?.lineage.independent === true) continue;
       const threadId = task.childThreadId;
       // Follow-up tasks reuse a child thread; walk its subtree only once.
       if (stoppedChildThreadIds.has(threadId)) continue;
       stoppedChildThreadIds.add(threadId);
+      const { taskIds: _parentTaskIds, ...childInput } = input;
       yield* dispatch({
         type: "thread.stop",
         commandId: CommandId.make(`${input.commandId}:stop:${threadId}`),
@@ -1834,9 +2244,11 @@ const make = Effect.gen(function* () {
         stopDelegatedTasks: false,
         ...(input.reason === undefined ? {} : { reason: input.reason }),
       }).pipe(
-        Effect.andThen(
-          stopDelegatedTasks({ threadId, commandId: input.commandId, reason: input.reason }),
-        ),
+        Effect.andThen(stopDelegatedTasks({ ...childInput, threadId })),
+        Effect.provideService(DelegatedTaskCancellation, [
+          ...cancellationOwnership,
+          { parentThreadId: input.threadId, taskId: task.id, childThreadId: threadId },
+        ]),
         Effect.catch((error) =>
           Effect.logWarning("Unable to stop a delegated task", {
             parentThreadId: input.threadId,
@@ -1849,7 +2261,7 @@ const make = Effect.gen(function* () {
     if (failures[0] !== undefined) return yield* failures[0];
   });
 
-  return ThreadManagementService.of({
+  const service = ThreadManagementService.of({
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(
@@ -1862,7 +2274,11 @@ const make = Effect.gen(function* () {
         Effect.andThen(orchestrator.searchThread(input)),
       );
     }),
+    withActionObligation: orchestrator.withActionObligation,
+    reserveActionObligation: orchestrator.reserveActionObligation,
+    disposeActionObligation: orchestrator.disposeActionObligation,
     dispatch,
+    deleteMany,
     dispatchLaunch,
     getThreadHistoryPage: Effect.fn("ThreadManagementService.getThreadHistoryPage")(
       function (threadId, cursor, throughEntryId, conversationOnly, workMode) {
@@ -1879,6 +2295,7 @@ const make = Effect.gen(function* () {
         );
       },
     ),
+    executeArchive: archiveRunner.execute,
     getTimelinePage: Effect.fn("ThreadManagementService.getTimelinePage")(
       function (threadId, options) {
         return ensureProjectionTranscript(threadId).pipe(
@@ -1903,19 +2320,21 @@ const make = Effect.gen(function* () {
         );
       },
     ),
+    hasThreadReadAuthorization: Effect.fn("ThreadManagementService.hasThreadReadAuthorization")(
+      function (threadId, authorizationId) {
+        return ensureProjectionTranscript(threadId).pipe(
+          Effect.andThen(orchestrator.hasThreadReadAuthorization(threadId, authorizationId)),
+        );
+      },
+    ),
     getTurnItem: Effect.fn("ThreadManagementService.getTurnItem")(function (input) {
       return ensureProjectionTranscript(input.threadId).pipe(
         Effect.andThen(orchestrator.getTurnItem(input)),
         Effect.map((item) => ({ item: item === null ? null : projectTurnItemForDetail(item) })),
       );
     }),
-    getThreadRecords: Effect.fn("ThreadManagementService.getThreadRecords")(
-      function (threadId, fields, filter) {
-        return ensureProjectionTranscript(threadId).pipe(
-          Effect.andThen(orchestrator.getThreadRecords(threadId, fields, filter)),
-        );
-      },
-    ),
+    getThreadRecords,
+    setThreadParents,
     getThreadProjection,
     getCheckpointContext,
     getThreadSnapshot,
@@ -1939,6 +2358,8 @@ const make = Effect.gen(function* () {
     ),
     getThreadTitles: orchestrator.getThreadTitles,
     getThreadLinkMetadata: orchestrator.getThreadLinkMetadata,
+    getThreadArchiveFamily: orchestrator.getThreadArchiveFamily,
+    getThreadOwnershipAvailability: orchestrator.getThreadOwnershipAvailability,
     listProjectThreads,
     sendToThread,
     submitRunOutput,
@@ -1961,6 +2382,8 @@ const make = Effect.gen(function* () {
     streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
     streamDomainEvents: orchestrator.streamDomainEvents,
   });
+  const recovery = yield* Effect.serviceOption(ThreadRecovery.ThreadRecoveryService);
+  return withVerifiedArchiveActivity(service, Option.getOrUndefined(recovery));
 });
 
 const layerThreadWorktreeRestoreNoop = Layer.succeed(ThreadWorktreeRestore, {
@@ -1989,10 +2412,12 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProjectionStore.ProjectionStoreV2
 > = Layer.effect(ThreadManagementService, make).pipe(
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(layerThreadWorktreeRestoreNoop),
   Layer.provide(ThreadCommandExecutor.layer),
+  Layer.provide(LastCodeArchiveRunner.layer),
 );
 
 export const layerWithLegacyImporter: Layer.Layer<
@@ -2004,4 +2429,8 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
-> = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));
+  | ProjectionStore.ProjectionStoreV2
+> = Layer.effect(ThreadManagementService, make).pipe(
+  Layer.provide(ThreadCommandExecutor.layer),
+  Layer.provide(LastCodeArchiveRunner.layer),
+);

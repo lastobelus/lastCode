@@ -2,15 +2,18 @@ import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import { ThreadReadAuthorization } from "../../../orchestration-v2/ThreadReadAuthorization.ts";
 import { expect, it } from "@effect/vitest";
 import {
+  AuthSessionId,
+  CommandId,
   EnvironmentId,
+  EventId,
   GitCommandError,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderInstanceId,
   ProviderDriverKind,
+  ProviderSessionId,
   type ServerProvider,
-  RunId,
-  type OrchestrationV2ThreadProjection,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
@@ -22,6 +25,8 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -34,9 +39,20 @@ import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as DocumentText from "../../../provider/DocumentText.ts";
-import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorCommandPreviouslyRejectedError,
+  OrchestratorDispatchError,
+  OrchestratorRuntimeModeAboveCeilingError,
+} from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
+import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "../../../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
+import * as AuthSessions from "../../../persistence/AuthSessions.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
@@ -50,45 +66,162 @@ import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
+import * as ThreadReadAuthority from "../../../threadReadAuthority/Store.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
-it.effect(
-  "keeps a launched first message tied to the requesting run when its parent advances",
-  () =>
+it.effect.each(["resolved", "unresolved", "absent"] as const)(
+  "keeps a launched first message tied to the requesting run when its parent advances (%s attribution)",
+  (attribution) =>
     Effect.gen(function* () {
       const sourceThreadId = ThreadId.make("source-thread");
       const projectId = ProjectId.make("project");
       const providerInstanceId = ProviderInstanceId.make("codex");
       const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
-      const sourceMessageId = MessageId.make("source-message");
-      let sourceRun = {
-        id: RunId.make("active-run"),
-        userMessageId: sourceMessageId,
-        ordinal: 1,
-        status: "running",
-      };
-      const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
-        Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide(NodeCrypto.layer))),
+      const database = SqlitePersistence.layerMemory;
+      const registry = ProviderAdapterRegistry.layerFromAdapters([
+        {
+          instanceId: providerInstanceId,
+          driver: ProviderDriverKind.make("codex"),
+          getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+          planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+          openSession: () => Effect.die("The launch fixture does not execute providers"),
+        },
+      ]);
+      const orchestration = ProviderReplayHarness.layerWithRegistry(
+        { name: "project-launch-authority" },
+        registry,
+        { databaseLayer: database, runEffectWorker: false },
       );
-      yield* broker.authorize({
-        threadId: sourceThreadId,
-        messageId: sourceMessageId,
-        sessionId: "requester-session",
-        alreadyStored: false,
+      const context = yield* Layer.mergeAll(
+        database,
+        AuthSessions.layer.pipe(Layer.provide(database)),
+        ThreadManagement.layer.pipe(Layer.provide(orchestration)),
+        ProjectionStore.layer.pipe(Layer.provide(database)),
+        orchestration,
+      ).pipe(Layer.build);
+      const orchestrator = Context.get(context, Orchestrator.OrchestratorV2);
+      const acceptedThreads = Context.get(context, ThreadManagement.ThreadManagementService);
+      const sessions = Context.get(context, AuthSessions.AuthSessionRepository);
+      // When set, another client's input starts after the tool has loaded its caller.
+      let advanceAfterCallerLoads = false;
+      const threads = Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () => Effect.succeed(caller),
+        getThreadRecords: (threadId, fields, filter) =>
+          Effect.gen(function* () {
+            const records = yield* acceptedThreads.getThreadRecords(threadId, fields, filter);
+            if (threadId === sourceThreadId && advanceAfterCallerLoads) {
+              advanceAfterCallerLoads = false;
+              yield* submit("between-client-session", sourceThreadId, "between-run");
+            }
+            return records;
+          }),
       });
-      const caller = {
+      const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
+        Effect.provide(
+          ThreadReadBroker.layer.pipe(
+            Layer.provide(threads),
+            Layer.provide([NodeCrypto.layer, Layer.succeedContext(context)]),
+          ),
+        ),
+      );
+      const now = yield* DateTime.now;
+      for (const sessionId of [
+        "requester-session",
+        "between-client-session",
+        "another-client-session",
+      ]) {
+        yield* sessions.create({
+          sessionId: AuthSessionId.make(sessionId),
+          subject: "paired-client",
+          method: "browser-session-cookie",
+          scopes: ["orchestration:read"],
+          issuedAt: now,
+          expiresAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) + 86_400_000),
+          client: {
+            label: null,
+            ipAddress: null,
+            userAgent: null,
+            deviceType: "unknown",
+            os: null,
+            browser: null,
+          },
+        });
+      }
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-source"),
+        threadId: sourceThreadId,
+        projectId,
+        title: "Source",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const submit = (sessionId: string, threadId: ThreadId, runId: string) =>
+        Effect.gen(function* () {
+          const messageId = MessageId.make(`${runId}-message`);
+          const before = yield* acceptedThreads.getThreadRecords(threadId, ["runs"]);
+          if (before.runs.length > 0) {
+            yield* orchestrator.dispatch({
+              type: "thread.stop",
+              commandId: CommandId.make(`stop:${runId}`),
+              threadId,
+            });
+          }
+          const threadReadIntent = yield* broker
+            .forSession(sessionId)
+            .authorize(threadId, messageId);
+          expect(threadReadIntent).toBeDefined();
+          yield* orchestrator.dispatch(
+            {
+              type: "message.dispatch",
+              commandId: CommandId.make(`accept:${runId}`),
+              threadId,
+              messageId,
+              text: "Launch a thread",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            },
+            threadReadIntent === undefined ? undefined : { threadReadIntent },
+          );
+          const records = yield* acceptedThreads.getThreadRecords(threadId, ["runs"]);
+          return records.runs.find((run) => run.userMessageId === messageId)!;
+        });
+      const activeRun = yield* submit("requester-session", sourceThreadId, "active-run");
+      const requesterRequests = yield* broker.connect("requester-session");
+      let caller = {
         id: sourceThreadId,
         projectId,
         providerInstanceId,
         modelSelection,
         runtimeMode: "full-access",
         interactionMode: "default",
-        activeRunId: "active-run",
+        activeRunId: activeRun.id,
+        lineage: { rootThreadId: sourceThreadId, parentThreadId: null, relationshipToParent: null },
         archivedAt: null,
         deletedAt: null,
       } as OrchestrationV2ThreadShell;
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      let expectLaunchAuthority = true;
+      const invocationScope: McpInvocationContext.McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "session",
+        thread: {
+          threadId: sourceThreadId,
+          providerSessionId: "session",
+          providerInstanceId,
+        },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      };
       const layerDependencies = Layer.mergeAll(
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
@@ -96,58 +229,61 @@ it.effect(
         ServerSettings.layerTest(),
         NodeCrypto.layer,
         Layer.succeed(ThreadReadBroker.ThreadReadBroker, broker),
-        Layer.succeed(McpInvocationContext.McpInvocationContext, {
-          environmentId: EnvironmentId.make("environment"),
-          requestNamespace: "session",
-          thread: {
-            threadId: sourceThreadId,
-            providerSessionId: "session",
-            providerInstanceId,
-          },
-          client: undefined,
-          issuedAt: 0,
-          capabilities: new Set(["orchestration" as const]),
-        }),
-        Layer.mock(ThreadManagement.ThreadManagementService)({
-          getThreadShell: () => Effect.succeed(caller),
-          getThreadRecords: (threadId) =>
-            Effect.succeed({
-              thread: { id: threadId },
-              runs: threadId === sourceThreadId ? [sourceRun] : [],
-              contextTransfers: [],
-            } as unknown as OrchestrationV2ThreadProjection),
-        }),
+        threads,
+        Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope),
         Layer.mock(ThreadLaunch.ThreadLaunchService)({
           launch: (input) => {
             launched.push(input);
             return Effect.gen(function* () {
-              sourceRun = {
-                id: RunId.make("later-run"),
-                userMessageId: MessageId.make("later-message"),
-                ordinal: 2,
-                status: "running",
-              };
-              yield* broker.authorize({
-                threadId: sourceThreadId,
-                messageId: sourceRun.userMessageId,
-                sessionId: "another-client-session",
-                alreadyStored: false,
+              // Another client advances the parent while the launch prepares.
+              yield* submit("another-client-session", sourceThreadId, "later-run");
+              const threadId = input.threadId!;
+              yield* orchestrator.dispatch({
+                type: "thread.create",
+                commandId: CommandId.make(`create:${threadId}`),
+                threadId,
+                projectId,
+                title: input.title,
+                modelSelection,
+                runtimeMode: input.runtimeMode,
+                interactionMode: input.interactionMode,
+                branch: null,
+                worktreePath: null,
+                createdBy: "agent",
+                creationSource: "mcp",
               });
-              if (input.initialMessage?.messageId !== undefined && input.threadId !== undefined) {
+              if (input.initialMessage?.messageId !== undefined) {
                 const authorization = yield* ThreadReadAuthorization;
-                yield* authorization.authorize(input.threadId, input.initialMessage.messageId);
+                const threadReadIntent = yield* authorization.authorize(
+                  threadId,
+                  input.initialMessage.messageId,
+                );
+                if (expectLaunchAuthority) expect(threadReadIntent).toBeDefined();
+                else expect(threadReadIntent).toBeUndefined();
+                yield* orchestrator.dispatch(
+                  {
+                    type: "message.dispatch",
+                    commandId: CommandId.make(`prompt:${threadId}`),
+                    threadId,
+                    messageId: input.initialMessage.messageId,
+                    text: input.initialMessage.text,
+                    attachments: [],
+                    dispatchMode: { type: "start_immediately" },
+                    createdBy: "agent",
+                    creationSource: "mcp",
+                  },
+                  threadReadIntent === undefined ? undefined : { threadReadIntent },
+                );
               }
               return {
-                threadId: input.threadId,
-                projection: {
-                  thread: { id: input.threadId, projectId, modelSelection },
-                  runs: [],
-                },
+                threadId,
+                projection: yield* orchestrator.getThreadProjection(threadId),
                 resumed: false,
-              } as unknown as ThreadLaunch.ThreadLaunchResult;
-            });
+              } satisfies ThreadLaunch.ThreadLaunchResult;
+            }).pipe(Effect.orDie);
           },
         }),
+        Layer.mock(DocumentText.DocumentText)({}),
         Layer.mock(Project.ProjectService)({
           getById: (id) =>
             Effect.succeed(
@@ -174,27 +310,159 @@ it.effect(
           ),
         ),
       );
+      advanceAfterCallerLoads = true;
       const result = yield* toolkit
         .handle("t3_thread_launch", { title: "Audit", message: "Review the change" })
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
       expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
+      expect(advanceAfterCallerLoads).toBe(false);
       expect(launched[0]?.initialMessage?.senderThreadId).toBe(sourceThreadId);
       expect(launched[0]?.creatorThreadId).toBe(sourceThreadId);
       const prompted = launched[0]!;
+      const launchedProjection = yield* acceptedThreads.getThreadRecords(prompted.threadId!, [
+        "runs",
+      ]);
+      const launchedRun = launchedProjection.runs.find(
+        (run) => run.userMessageId === prompted.initialMessage!.messageId,
+      )!;
+      // Only the requester's client is connected; reaching it yields a search miss.
+      yield* requesterRequests.pipe(
+        Stream.runForEach((request) =>
+          broker.respond("requester-session", {
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            result: null,
+            unavailableEnvironmentIds: [],
+          }),
+        ),
+        Effect.forkScoped,
+      );
       expect(
-        yield* broker.authorizedSession(prompted.threadId!, prompted.initialMessage!.messageId!),
-      ).toBe("requester-session");
+        yield* broker
+          .read(prompted.threadId!, launchedRun.id, {
+            threadId: ThreadId.make("remote-thread"),
+          })
+          .pipe(Effect.flip),
+      ).toMatchObject({ code: "thread_not_found" });
       const unprompted = { title: "Independent notes", creatorThreadId: "untrusted-creator" };
+      caller = {
+        ...caller,
+        lineage: {
+          rootThreadId: sourceThreadId,
+          parentThreadId: null,
+          relationshipToParent: "fork",
+          sideChat: true,
+        },
+      };
       yield* toolkit
         .handle("t3_thread_launch", unprompted)
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      expect(launched[0]?.groupThread).toBeUndefined();
       expect(launched[1]?.initialMessage).toBeUndefined();
+      expect(launched[1]?.groupThread).toBe(true);
       expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
-    }),
+      expect(launched[1]?.groupedUnderThreadId).toBeNull();
+      expect(launched[1]).toMatchObject({
+        creatorOrigin: { kind: "thread_launch", threadId: sourceThreadId, owned: true },
+      });
+
+      // A's accepted input retains its own authority after another client's run B starts.
+      const store = Context.get(context, ProjectionStore.ProjectionStoreV2);
+      const providerSessionId = ProviderSessionId.make("runtime-session");
+      const requester = yield* acceptedThreads.getThreadRecords(sourceThreadId, [
+        "attempts",
+        "providerThreads",
+      ]);
+      const attempt = requester.attempts.find((attempt) => attempt.runId === activeRun.id)!;
+      const nativeThread = requester.providerThreads.find(
+        (thread) => thread.id === attempt.providerThreadId,
+      )!;
+      expect(attempt).toBeDefined();
+      expect(nativeThread).toBeDefined();
+      yield* store.apply({
+        id: EventId.make("requester-session-attached"),
+        type: "provider-session.attached",
+        threadId: sourceThreadId,
+        occurredAt: now,
+        payload: {
+          id: providerSessionId,
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          status: "ready",
+          cwd: "/projects/source",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          extensionStatuses: [],
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("requester-provider-thread-updated"),
+        type: "provider-thread.updated",
+        threadId: sourceThreadId,
+        occurredAt: now,
+        payload: {
+          ...nativeThread,
+          providerSessionId,
+        },
+      });
+      const authority = yield* ThreadReadAuthority.make.pipe(
+        Effect.provide(Layer.succeedContext(context)),
+      );
+      yield* broker.connect("another-client-session").pipe(Effect.asVoid);
+      const currentRun = yield* submit(
+        "another-client-session",
+        sourceThreadId,
+        `current-${attribution}`,
+      );
+      caller = { ...caller, activeRunId: currentRun.id, latestRunId: currentRun.id };
+      const records = yield* acceptedThreads.getThreadRecords(sourceThreadId, ["runs"]);
+      expect(records.runs.find((run) => run.id === activeRun.id)?.completedAt).not.toBeNull();
+      expect((yield* authority.lookupGrant(sourceThreadId, "run", activeRun.id))?.sessionId).toBe(
+        "requester-session",
+      );
+      expect((yield* authority.lookupGrant(sourceThreadId, "run", currentRun.id))?.sessionId).toBe(
+        "another-client-session",
+      );
+      expectLaunchAuthority = attribution !== "unresolved";
+      yield* toolkit
+        .handle("t3_thread_launch", { title: `Audit ${attribution}`, message: "Review the change" })
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...invocationScope,
+            thread: {
+              ...invocationScope.thread!,
+              attribution,
+              ...(attribution === "absent"
+                ? {}
+                : { execution: { runId: activeRun.id, attemptId: attempt.id } }),
+            },
+          }),
+          Effect.provide(layerDependencies),
+        );
+      const child = launched.at(-1)!;
+      const childRecords = yield* acceptedThreads.getThreadRecords(child.threadId!, ["runs"]);
+      const childRun = childRecords.runs.find(
+        (run) => run.userMessageId === child.initialMessage!.messageId,
+      )!;
+      const grant = yield* authority.lookupGrant(child.threadId!, "run", childRun.id);
+      expect(grant?.sessionId).toBe(
+        attribution === "resolved"
+          ? "requester-session"
+          : attribution === "absent"
+            ? "another-client-session"
+            : undefined,
+      );
+    }).pipe(Effect.scoped),
 );
 
 const clientLaunchHarness = (input: {
   readonly runtimeModeCeiling: RuntimeMode;
+  readonly linked?: boolean;
   readonly defaultRuntimeMode?: RuntimeMode;
   readonly newWorktreesStartFromOrigin?: boolean;
   readonly defaultThreadEnvMode?: "local" | "worktree";
@@ -209,6 +477,8 @@ const clientLaunchHarness = (input: {
   readonly hostedAppUrl?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
+  readonly refusedPlacement?: { value: boolean };
+  readonly launchError?: (input: ThreadLaunch.ThreadLaunchInput) => ThreadLaunch.ThreadLaunchError;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -257,6 +527,7 @@ const clientLaunchHarness = (input: {
         sessionId: "session-1",
         label: "Claude Code",
         access: input.runtimeModeCeiling,
+        ...(input.linked === undefined ? {} : { linked: input.linked }),
         hostedAppUrl: input.hostedAppUrl,
       },
       issuedAt: 0,
@@ -282,6 +553,7 @@ const clientLaunchHarness = (input: {
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
       launch: (launch) => {
         input.launched.push(launch);
+        if (input.launchError !== undefined) return Effect.fail(input.launchError(launch));
         if (input.refusedByCeiling) {
           return Effect.fail(
             new ThreadLaunch.ThreadLaunchError({
@@ -295,6 +567,25 @@ const clientLaunchHarness = (input: {
                 runtimeMode: launch.runtimeMode,
                 maxRuntimeMode: "approval-required",
                 organization: "Example Corp",
+              }),
+            }),
+          );
+        }
+        if (input.refusedPlacement?.value && launch.groupedUnderThreadId != null) {
+          return Effect.fail(
+            new ThreadLaunch.ThreadLaunchError({
+              operation: "create-thread",
+              commandId: launch.commandId,
+              projectId: launch.projectId,
+              cause: new OrchestratorDispatchError({
+                commandId: launch.commandId,
+                commandType: "thread.create",
+                cause: new OrchestratorDispatchError({
+                  commandId: launch.commandId,
+                  commandType: "thread.create",
+                  field: "groupedUnderThreadId",
+                  cause: "The parent is not available for grouping.",
+                }),
               }),
             }),
           );
@@ -362,13 +653,16 @@ it.effect(
           readonly overrideModel?: ModelSelection;
           readonly hostedAppUrl?: string;
           readonly refusedByCeiling?: true;
+          readonly delegated?: true;
         },
       ) {
-        const { targeted, overrideModel, hostedAppUrl, refusedByCeiling, ...input } = params;
+        const { targeted, overrideModel, hostedAppUrl, refusedByCeiling, delegated, ...input } =
+          params;
         const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
         const { projectId, modelSelection, dependencies } = clientLaunchHarness({
           runtimeModeCeiling,
           defaultRuntimeMode,
+          ...(delegated === undefined ? {} : { linked: delegated }),
           launched,
           ...(overrideModel === undefined ? {} : { overrideModel }),
           ...(hostedAppUrl === undefined ? {} : { hostedAppUrl }),
@@ -382,7 +676,19 @@ it.effect(
           ),
         );
         const result = yield* toolkit
-          .handle("t3_thread_launch", targeted === false ? input : { ...input, projectId })
+          .handle("t3_thread_launch", {
+            ...input,
+            ...(targeted === false ? {} : { projectId }),
+            ...(delegated === true
+              ? {
+                  remotePreparation: {
+                    parentEnvironmentId: EnvironmentId.make("parent-environment"),
+                    parentThreadId: ThreadId.make("parent-thread"),
+                    sourceTaskId: NodeId.make("source-task"),
+                  },
+                }
+              : {}),
+          })
           .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
         return { result: result.at(-1)?.result, launched, projectId, modelSelection };
       });
@@ -394,7 +700,7 @@ it.effect(
       expect(belowCeiling.result).toMatchObject({
         projectId: belowCeiling.projectId,
         modelSelection: belowCeiling.modelSelection,
-        link: `[Fix](t3-thread://v2/environment/${belowCeiling.launched[0]?.threadId})`,
+        link: `[Fix](t3-thread://v2/environment/${encodeURIComponent(belowCeiling.launched[0]!.threadId!)})`,
       });
       expect(belowCeiling.launched[0]?.runtimeMode).toBe("approval-required");
       expect(belowCeiling.launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
@@ -418,6 +724,18 @@ it.effect(
         expect(idleTitled.result).toMatchObject({ code: "invalid_request" });
         expect(idleTitled.launched).toHaveLength(0);
       }
+
+      const delegated = yield* launchWith("full-access", "approval-required", {
+        title: "Delegated task",
+        delegated: true,
+      });
+      expect(delegated.launched[0]?.runtimeMode).toBe("full-access");
+
+      const cappedDelegation = yield* launchWith("auto-accept-edits", "approval-required", {
+        title: "Restricted delegated task",
+        delegated: true,
+      });
+      expect(cappedDelegation.launched[0]?.runtimeMode).toBe("auto-accept-edits");
 
       const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", {
         title: "Fix",
@@ -467,6 +785,59 @@ it.effect(
         message: "Example Corp limits threads to Supervised.",
       });
     }),
+);
+
+it.effect("launch names a rejected request key and hides internal causes", () =>
+  Effect.gen(function* () {
+    for (const cause of ["thread.create", "message.dispatch", "internal"] as const) {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "full-access",
+        launched,
+        launchError: (input) =>
+          new ThreadLaunch.ThreadLaunchError({
+            operation: "create-thread",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            cause:
+              cause === "internal"
+                ? new OrchestratorDispatchError({
+                    commandId: input.commandId,
+                    commandType: "thread.create",
+                    cause: new Error("private-storage-path"),
+                  })
+                : new OrchestratorCommandPreviouslyRejectedError({
+                    commandId: input.commandId,
+                    commandType: cause,
+                    detail: "private-storage-path",
+                  }),
+          }),
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const results = yield* toolkit
+        .handle("t3_thread_launch", {
+          title: "Inspection",
+          projectId,
+          clientRequestId: "rejected-creation",
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      expect(results.at(-1)?.result).toMatchObject(
+        cause === "thread.create"
+          ? {
+              code: "invalid_request",
+              message:
+                "This clientRequestId belongs to an earlier request that was rejected. Correct the input, then retry with a new clientRequestId.",
+            }
+          : { code: "orchestration_error", message: "The operation could not be completed." },
+      );
+    }
+  }).pipe(Effect.scoped),
 );
 
 it.effect("a launch steps an inherited mode down to the provider's, and refuses one it lacks", () =>
@@ -1067,6 +1438,66 @@ it.effect("a launch into an unknown project says the project was not found", () 
   }),
 );
 
+it.effect(
+  "a launch reports an unknown grouping parent and preserves null placement and retries",
+  () =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const refusedPlacement = { value: false };
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "auto",
+        launched,
+        refusedPlacement,
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const launch = (groupedUnderThreadId: ThreadId | null, clientRequestId?: string) =>
+        toolkit
+          .handle("t3_thread_launch", {
+            title: "Fix",
+            projectId,
+            groupedUnderThreadId,
+            ...(clientRequestId === undefined ? {} : { clientRequestId }),
+          })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+      for (const parentId of ["null", "missing-parent"]) {
+        const result = (yield* launch(ThreadId.make(parentId))).at(-1)?.result;
+        expect(result).toMatchObject({
+          code: "invalid_request",
+          message: expect.stringContaining("groupedUnderThreadId"),
+        });
+        expect(result).toMatchObject({ message: expect.stringContaining("JSON null") });
+      }
+      expect(launched).toHaveLength(0);
+
+      yield* launch(null);
+      expect(launched[0]?.groupedUnderThreadId).toBeNull();
+      const parentId = launched[0]!.threadId!;
+      yield* launch(parentId, "grouped-child");
+      expect(launched[1]?.groupedUnderThreadId).toBe(parentId);
+      const childId = launched[1]!.threadId;
+
+      launched.splice(0, 1);
+      expect((yield* launch(parentId, "grouped-child")).at(-1)?.result).toMatchObject({
+        threadId: childId,
+      });
+      expect(launched.at(-1)?.threadId).toBe(childId);
+      refusedPlacement.value = true;
+      const refused = (yield* launch(childId!)).at(-1)?.result;
+      expect(refused).toMatchObject({
+        code: "invalid_request",
+        message: expect.stringContaining("groupedUnderThreadId"),
+      });
+      expect(refused).toMatchObject({ message: expect.stringContaining("JSON null") });
+    }),
+);
+
 it.effect("a retried worktree launch replays after its base ref is gone", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
@@ -1280,7 +1711,8 @@ it.effect("deleting a project through MCP also discards its clone record", () =>
       harness.dependencies,
       Layer.mergeAll(
         Layer.mock(Project.ProjectService)({
-          delete: (input) => Effect.succeed(deletedProject(input.projectId)),
+          delete: (input, onCommitted = Effect.void) =>
+            onCommitted.pipe(Effect.as(deletedProject(input.projectId))),
         }),
         Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({
           discard: (projectId) => Effect.sync(() => void discarded.push(projectId)),

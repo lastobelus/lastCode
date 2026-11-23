@@ -13,7 +13,6 @@ import { useNavigate } from "@tanstack/react-router";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useGT, useMessages } from "gt-react";
 import { MessagesSquareIcon } from "lucide-react";
-import { useMemo } from "react";
 
 import { useSideThreadTrigger } from "../../hooks/useSideThreadTrigger";
 import { configuredHostedAppUrl } from "../../hostedPairing";
@@ -58,66 +57,55 @@ export function MarkdownThreadLink(props: {
   ).get(linkedEnvironmentId ?? messageEnvironmentId);
   const viaLinkedEnvironment = linkedLabel === undefined ? undefined : linkedEnvironmentId;
 
-  const resolvedAtom = useMemo(
-    () =>
-      Atom.make((get) => {
-        const reference = {
-          threadId: linkedThreadId,
-          environmentId: linkedEnvironmentId,
-          version,
-          legacyThreadId,
-        };
-        const link = { ...reference, environmentId: linkedEnvironmentId ?? null };
-        const candidates = threadLinkCandidates(link, messageEnvironmentId);
-        let settled = true;
-        const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) => {
-          const owner = environmentId ?? messageEnvironmentId;
-          const shell = get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId)));
-          if (shell !== null) return shell;
-          // A linked machine without a client connection is read through the message's environment.
-          if (owner === viaLinkedEnvironment) return undefined;
-          const saved = get(environmentSummaries.identitiesAtom).some(
-            (environment) => environment.environmentId === owner,
-          );
-          if (!saved) return undefined;
-          const lookup = get(
-            orchestrationEnvironment.threadLinkMetadata({
-              environmentId: owner,
-              input: {
-                threadIds: candidates
-                  .filter((candidate) => candidate.environmentId === owner)
-                  .map((candidate) => candidate.threadId),
-              },
-            }),
-          );
-          settled = settled && lookup._tag === "Success" && !lookup.waiting;
-          return AsyncResult.getOrElse(lookup, () => null)?.[threadId];
-        });
-        const missing = resolved.value === undefined && settled;
-        if (!missing || version === 2) return { ...resolved, missing };
-        const target = guessThreadLinkRef(
-          link,
-          get(environmentThreadShells.threadRefsAtom).filter(
-            (ref) => !candidates.some((candidate) => candidate.environmentId === ref.environmentId),
-          ),
-        );
-        return target === null
-          ? { ...resolved, missing }
-          : {
-              ...target,
-              value: get(environmentThreadShells.threadShellAtom(target)) ?? undefined,
-              missing,
-            };
-      }),
-    [
-      legacyThreadId,
-      linkedEnvironmentId,
-      linkedThreadId,
-      messageEnvironmentId,
+  const resolvedAtom = Atom.make((get) => {
+    const reference = {
+      threadId: linkedThreadId,
+      environmentId: linkedEnvironmentId,
       version,
-      viaLinkedEnvironment,
-    ],
-  );
+      legacyThreadId,
+    };
+    const link = { ...reference, environmentId: linkedEnvironmentId ?? null };
+    const candidates = threadLinkCandidates(link, messageEnvironmentId);
+    let settled = true;
+    const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) => {
+      const owner = environmentId ?? messageEnvironmentId;
+      const shell = get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId)));
+      if (shell !== null) return shell;
+      // A linked machine without a client connection is read through the message's environment.
+      if (owner === viaLinkedEnvironment) return undefined;
+      const saved = get(environmentSummaries.identitiesAtom).some(
+        (environment) => environment.environmentId === owner,
+      );
+      if (!saved) return undefined;
+      const lookup = get(
+        orchestrationEnvironment.threadLinkMetadata({
+          environmentId: owner,
+          input: {
+            threadIds: candidates
+              .filter((candidate) => candidate.environmentId === owner)
+              .map((candidate) => candidate.threadId),
+          },
+        }),
+      );
+      settled = settled && lookup._tag === "Success" && !lookup.waiting;
+      return AsyncResult.getOrElse(lookup, () => null)?.[threadId];
+    });
+    const missing = resolved.value === undefined && settled;
+    if (!missing || version === 2) return { ...resolved, missing };
+    const target = guessThreadLinkRef(
+      link,
+      get(environmentThreadShells.threadRefsAtom).filter(
+        (ref) => !candidates.some((candidate) => candidate.environmentId === ref.environmentId),
+      ),
+    );
+    return target === null
+      ? { ...resolved, missing }
+      : {
+          ...target,
+          value: get(environmentThreadShells.threadShellAtom(target)) ?? undefined,
+          missing,
+        };
+  });
   const resolved = useAtomValue(resolvedAtom);
   const metadata = resolved.value;
   const environmentId = resolved.environmentId ?? messageEnvironmentId;

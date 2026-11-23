@@ -1,8 +1,9 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { useGT, useMessages } from "gt-react";
 import { useThreadShell } from "../../state/entities";
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import {
   lastcodeSidebarCreatorDetails,
+  lastcodeSidebarCreatorRef,
   lastcodeSidebarIsAgentCreated,
   lastcodeSidebarSubagentStatusLabel,
   type LastCodeSidebarFamilyRow,
@@ -12,21 +13,29 @@ export function useLastCodeThreadFamily(
   family: LastCodeSidebarFamilyRow,
   status: ThreadStatusPill | null,
 ) {
+  const gt = useGT();
+  const messages = useMessages();
   const thread = family.thread;
+  const creatorRef = lastcodeSidebarCreatorRef(thread);
   const isAgentCreated = lastcodeSidebarIsAgentCreated(thread);
-  const creatorRef =
-    isAgentCreated && thread.creatorThreadId
-      ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
-      : null;
   const creator = useThreadShell(creatorRef);
-  const creatorDetails = lastcodeSidebarCreatorDetails(thread, creator);
+  const creatorDetails = lastcodeSidebarCreatorDetails(thread, creator, messages);
   const creatorDescription = creatorDetails.description;
-  const subagentLabel =
-    thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
-      ? `Subagent · ${lastcodeSidebarSubagentStatusLabel(thread, status)}${family.unavailableParentLabel ? ` · ${family.unavailableParentLabel}` : ""}`
-      : null;
+  const isSubagent =
+    thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true;
+  const statusLabel = isSubagent
+    ? messages(lastcodeSidebarSubagentStatusLabel(thread, status))
+    : "";
+  const subagentLabel = isSubagent
+    ? family.unavailableParentLabel
+      ? gt("Subagent · {status} · {unavailableParent}", {
+          status: statusLabel,
+          unavailableParent: family.unavailableParentLabel,
+        })
+      : gt("Subagent · {status}", { status: statusLabel })
+    : null;
   const relationshipDescription = creatorDescription ?? subagentLabel;
-  const relationshipLabel = subagentLabel ?? (isAgentCreated ? "Agent-created" : null);
+  const relationshipLabel = subagentLabel ?? (isAgentCreated ? gt("Agent-created") : null);
   const relationshipUnavailableLabel =
     family.unavailableParentLabel ??
     family.creatorGroupingWarning ??

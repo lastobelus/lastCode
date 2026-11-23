@@ -2,12 +2,80 @@ import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerActivation from "../serverActivation.ts";
 import * as Scheduler from "./Scheduler.ts";
+import { makePausedEnvironment } from "../orchestration-v2/EnvironmentAutomation.testkit.ts";
+
+it.effect("holds durable due work until explicit Resume, including startup while paused", () =>
+  Effect.gen(function* () {
+    const pause = yield* makePausedEnvironment;
+    yield* Effect.gen(function* () {
+      const scheduler = yield* Scheduler.Scheduler;
+      const runs = yield* Ref.make(0);
+      const ran = yield* Queue.unbounded<void>();
+      yield* scheduler.register(
+        "durable-follow-up",
+        Ref.update(runs, (n) => n + 1).pipe(
+          Effect.andThen(Queue.offer(ran, undefined)),
+          Effect.asVoid,
+        ),
+      );
+      yield* TestClock.adjust("15 seconds");
+      assert.equal(yield* Ref.get(runs), 0);
+      yield* pause.resume;
+      yield* TestClock.adjust("5 seconds");
+      yield* Queue.take(ran);
+      assert.equal(yield* Ref.get(runs), 1);
+      // Neither transition needs to coincide with a scheduler tick.
+      yield* pause.pause;
+      yield* pause.resume;
+      yield* TestClock.adjust("5 seconds");
+      yield* Queue.take(ran);
+      assert.equal(yield* Ref.get(runs), 2);
+    }).pipe(Effect.provide(Scheduler.layer.pipe(Layer.provide(pause.layer))));
+  }),
+);
+
+it.effect(
+  "runs control recovery while paused and releases automation even when recovery fails",
+  () =>
+    Effect.gen(function* () {
+      const pause = yield* makePausedEnvironment;
+      yield* Effect.gen(function* () {
+        const scheduler = yield* Scheduler.Scheduler;
+        const recoveries = yield* Ref.make(0);
+        const releases = yield* Ref.make(0);
+        const released = yield* Queue.unbounded<void>();
+        yield* scheduler.register(
+          "pause-delivery",
+          Ref.update(recoveries, (n) => n + 1).pipe(
+            Effect.andThen(Effect.fail("receipt recovery unavailable")),
+          ),
+          { runWhilePaused: true },
+        );
+        yield* scheduler.register(
+          "automatic-release",
+          Ref.update(releases, (n) => n + 1).pipe(
+            Effect.andThen(Queue.offer(released, undefined)),
+            Effect.asVoid,
+          ),
+        );
+        yield* TestClock.adjust("5 seconds");
+        assert.isAtLeast(yield* Ref.get(recoveries), 1);
+        assert.equal(yield* Ref.get(releases), 0);
+        yield* pause.resume;
+        yield* TestClock.adjust("5 seconds");
+        yield* Queue.take(released);
+        assert.equal(yield* Ref.get(releases), 1);
+        assert.isAtLeast(yield* Ref.get(recoveries), 2);
+      }).pipe(Effect.provide(Scheduler.layer.pipe(Layer.provide(pause.layer))));
+    }),
+);
 
 it.effect("keeps other sources running after a source defects", () =>
   Effect.gen(function* () {

@@ -32,6 +32,7 @@ import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -1431,11 +1432,19 @@ it.effect(
           },
         ],
       });
+      const threads = yield* ThreadManagementService.ThreadManagementService;
       const archive = (commandId: string, threadId: ThreadId) =>
-        orchestrator.dispatch({
-          type: "thread.archive",
-          commandId: CommandId.make(commandId),
-          threadId,
+        Effect.gen(function* () {
+          const requestId = CommandId.make(commandId);
+          yield* orchestrator.dispatch({
+            type: "thread.archive",
+            commandId: requestId,
+            threadId,
+            childDisposition: "stop_and_archive",
+            expectedChildThreadIds: [],
+          });
+          // The harness pauses effect dispatch. Run the durable archive effect explicitly.
+          yield* threads.executeArchive({ threadId, requestId });
         });
       const archivedAt = (threadId: ThreadId) =>
         orchestrator

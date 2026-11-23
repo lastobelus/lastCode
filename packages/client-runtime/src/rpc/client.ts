@@ -15,6 +15,7 @@ import {
   type ClientGuardedRpcTag,
   ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
+  type ServerConfig,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -77,7 +78,9 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.serverGetStorageCleanupReport
   | typeof WS_METHODS.serverGetDatabaseStorage
   | typeof WS_METHODS.subscribeTerminalMetadata
+  | typeof WS_METHODS.subscribeDesktopBrowserCommands
   | typeof WS_METHODS.subscribePreviewEvents
+  | typeof WS_METHODS.subscribePreviewHosting
   | typeof WS_METHODS.subscribeDiscoveredLocalServers
   | typeof WS_METHODS.subscribeDeviceState
   | typeof WS_METHODS.subscribeResourceTelemetry
@@ -285,6 +288,11 @@ export function runStreamInSession<TTag extends EnvironmentStreamCommandRpcTag>(
 }
 
 interface SubscriptionOptions<TTag extends EnvironmentSubscriptionRpcTag> {
+  /** Check each session's bootstrap config before opening a capability-dependent RPC. */
+  readonly capability?: {
+    readonly supports: (config: ServerConfig) => boolean;
+    readonly unsupportedValue: EnvironmentRpcStreamValue<TTag>;
+  };
   /** Reports defects; the subscription then waits for the next session or resubscribe. */
   readonly onDefect?: (
     cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
@@ -304,7 +312,11 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
     input: EnvironmentRpcInput<TTag>,
     stream: Stream.Stream<EnvironmentRpcStreamValue<TTag>, EnvironmentRpcStreamFailure<TTag>>,
   ) => Stream.Stream<A, EnvironmentRpcStreamFailure<TTag>>,
-  options?: SubscriptionOptions<TTag>,
+  options?: Omit<SubscriptionOptions<TTag>, "capability">,
+  capability?: {
+    readonly supports: (config: ServerConfig) => boolean;
+    readonly unsupportedValue: (session: RpcSession) => A;
+  },
 ): Stream.Stream<
   A,
   EnvironmentRpcStreamFailure<TTag>,
@@ -346,6 +358,15 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                 Stream.suspend(() =>
                   Stream.unwrap(
                     Effect.gen(function* () {
+                      if (capability !== undefined) {
+                        // Connection setup owns bootstrap failures. Keep the
+                        // subscription alive for the supervisor's next session.
+                        const config = yield* Effect.option(session.initialConfig);
+                        if (Option.isNone(config)) return Stream.empty;
+                        if (!capability.supports(config.value)) {
+                          return Stream.succeed(capability.unsupportedValue(session));
+                        }
+                      }
                       const input = yield* makeInput(session);
                       const completeObservation = yield* observer.observe({
                         environmentId: supervisor.target.environmentId,
@@ -489,7 +510,17 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
   EnvironmentRpcStreamFailure<TTag>,
   EnvironmentSupervisor.EnvironmentSupervisor
 > {
-  return subscribeDynamicMapped(tag, makeInput, (_session, _input, stream) => stream, options);
+  const capability = options?.capability;
+  return subscribeDynamicMapped(
+    tag,
+    makeInput,
+    (_session, _input, stream) => stream,
+    options,
+    capability && {
+      supports: capability.supports,
+      unsupportedValue: () => capability.unsupportedValue,
+    },
+  );
 }
 
 /** Tags each value before `switchMap` can buffer it across a session change. */
@@ -502,11 +533,16 @@ export function subscribeDynamicWithSession<TTag extends EnvironmentSubscription
   EnvironmentRpcStreamFailure<TTag>,
   EnvironmentSupervisor.EnvironmentSupervisor
 > {
+  const capability = options?.capability;
   return subscribeDynamicMapped(
     tag,
     makeInput,
     (session, _input, stream) => stream.pipe(Stream.map((value) => [session, value] as const)),
     options,
+    capability && {
+      supports: capability.supports,
+      unsupportedValue: (session) => [session, capability.unsupportedValue] as const,
+    },
   );
 }
 
@@ -518,7 +554,7 @@ export function subscribeDynamicWithSession<TTag extends EnvironmentSubscription
 export function subscribeDynamicWithInput<TTag extends EnvironmentSubscriptionRpcTag>(
   tag: TTag,
   makeInput: (session: RpcSession) => Effect.Effect<EnvironmentRpcInput<TTag>>,
-  options?: SubscriptionOptions<TTag>,
+  options?: Omit<SubscriptionOptions<TTag>, "capability">,
 ): Stream.Stream<
   readonly [input: EnvironmentRpcInput<TTag>, value: EnvironmentRpcStreamValue<TTag>],
   EnvironmentRpcStreamFailure<TTag>,

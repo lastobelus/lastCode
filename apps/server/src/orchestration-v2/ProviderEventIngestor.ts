@@ -214,6 +214,8 @@ export interface ProviderEventIngestorV2Shape {
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2DomainEvent>, ProviderEventIngestorV2Error>;
   readonly ingestNormalized: (
     input: ProviderEventIngestInput & {
+      /** The first root turn and its Stop ownership check share the caller's lock. */
+      readonly threadCommandLockHeld?: true;
       readonly writeIfRunCurrent?: {
         readonly runId: RunId;
         readonly activeAttemptId: RunAttemptId;
@@ -486,7 +488,7 @@ export const layer: Layer.Layer<
                 return [];
               const now = yield* DateTime.now;
               // Reannounced children may refresh provider metadata without replacing
-              // durable app state, including promotion and archive ownership.
+              // durable app state, including archive ownership.
               if (existing !== null)
                 return [
                   yield* makeDomainEvent(input, {
@@ -502,14 +504,7 @@ export const layer: Layer.Layer<
                   }),
                 ];
               const parentId = offered.lineage.parentThreadId;
-              const parent =
-                parentId === null
-                  ? null
-                  : yield* projections.getThread(parentId).pipe(
-                      Effect.catchTags({
-                        ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
-                      }),
-                    );
+              const parent = parentId === null ? null : yield* projections.findThread(parentId);
               const archiveOwner =
                 parent !== null && parent.archivedAt !== null && parent.deletedAt === null
                   ? (parent.archivedWith ?? {
@@ -556,8 +551,8 @@ export const layer: Layer.Layer<
               ];
             }
             case "thread_model_selection.updated": {
-              const { instanceId, changes } = input.event;
-              const thread = yield* projections.getThread(input.event.threadId).pipe(
+              const { instanceId, changes, threadId } = providerEvent;
+              const thread = yield* projections.getThread(threadId).pipe(
                 Effect.catchTags({
                   ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
                 }),
@@ -716,12 +711,12 @@ export const layer: Layer.Layer<
             }
             case "steer.updated": {
               const item = yield* projections.getTurnItem({
-                threadId: input.event.threadId,
-                itemId: idAllocator.derive.userTurnItem({ messageId: input.event.messageId }),
+                threadId: providerEvent.threadId,
+                itemId: idAllocator.derive.userTurnItem({ messageId: providerEvent.messageId }),
               });
               if (
                 item?.type !== "user_message" ||
-                item.status === input.event.status ||
+                item.status === providerEvent.status ||
                 (item.status !== "pending" && item.status !== "completed")
               ) {
                 return [];
@@ -733,8 +728,8 @@ export const layer: Layer.Layer<
                   threadId: item.threadId,
                   payload: {
                     ...item,
-                    status: input.event.status,
-                    completedAt: input.event.status === "pending" ? null : occurredAt,
+                    status: providerEvent.status,
+                    completedAt: providerEvent.status === "pending" ? null : occurredAt,
                     updatedAt: occurredAt,
                   },
                   runId: item.runId,
@@ -863,8 +858,12 @@ export const layer: Layer.Layer<
             // arrives. Later turns need fresh cleanup even after an earlier unload.
             const effects: Array<PendingOrchestrationEffectV2> = [...summaries.effects];
             const incoming = input.event;
+            const backgroundRosterOnly =
+              incoming.type === "provider_thread.updated" &&
+              incoming.sessionScoped === true &&
+              incoming.backgroundRosterOnly === true;
             if (
-              incoming.type === "provider_thread.updated" ||
+              (incoming.type === "provider_thread.updated" && !backgroundRosterOnly) ||
               (incoming.type === "provider_turn.updated" &&
                 (incoming.providerTurn.status === "pending" ||
                   incoming.providerTurn.status === "running"))
@@ -955,9 +954,9 @@ export const layer: Layer.Layer<
                 events,
               };
               return yield* (
-                effects.length === 0
+                effects.length === 0 && !backgroundRosterOnly
                   ? eventSink.write(writeInput)
-                  : eventSink.writeWithEffects({ ...writeInput, effects })
+                  : eventSink.writeWithEffects({ ...writeInput, effects, backgroundRosterOnly })
               ).pipe(retryLockTimeout, Effect.mapError(mapWriteError));
             }
             const result = yield* eventSink
@@ -1070,6 +1069,7 @@ export const layer: Layer.Layer<
                 }),
               ),
               (ingest) => {
+                if (input.threadCommandLockHeld) return ingest;
                 if (input.event.type === "app_thread.created") {
                   const { id, lineage } = input.event.appThread;
                   const threadIds = [

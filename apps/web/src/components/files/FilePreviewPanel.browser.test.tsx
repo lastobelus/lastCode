@@ -3,7 +3,7 @@ import { EnvironmentId, ThreadId, type ProjectReadFileResult } from "@t3tools/co
 import { AsyncResult } from "effect/reactivity";
 import { StrictMode, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { cdp, userEvent } from "vite-plus/test/browser";
+import { cdp, page, userEvent } from "vite-plus/test/browser";
 import { act, fakeTimers, render } from "../../../test/render";
 import appCss from "~/index.css?inline";
 import { isMacPlatform } from "~/lib/utils";
@@ -35,7 +35,12 @@ vi.mock(import("~/state/session"), async (original) => ({
 }));
 vi.mock(import("~/state/filesystem"), async (original) => ({
   ...(await original()),
-  useFilesystemReadAccess: () => ({ canReadFiles: true, isPending: false, error: null }),
+  useFilesystemReadAccess: () => ({
+    canReadFiles: true,
+    canReadThreadFiles: true,
+    isPending: false,
+    error: null,
+  }),
 }));
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
   ...(await original()),
@@ -371,7 +376,9 @@ describe("source file scroll", () => {
       label: "keeps a downward drag whose anchor stays mounted across a window shift",
       startLine: 65,
       initialScrollLine: 65,
+      intermediateScrollLine: 115,
       direction: "down" as const,
+      targetScrollLine: 225,
       targetFirstMounted: 101,
       expectedIncludedLine: 121,
     },
@@ -379,7 +386,9 @@ describe("source file scroll", () => {
       label: "keeps a downward drag whose anchor unmounts on a window shift",
       startLine: 5,
       initialScrollLine: null,
+      intermediateScrollLine: null,
       direction: "down" as const,
+      targetScrollLine: 225,
       targetFirstMounted: 101,
       expectedIncludedLine: 121,
     },
@@ -387,7 +396,9 @@ describe("source file scroll", () => {
       label: "keeps an upward drag whose anchor unmounts on a window shift",
       startLine: 385,
       initialScrollLine: 385,
+      intermediateScrollLine: null,
       direction: "up" as const,
+      targetScrollLine: 270,
       targetFirstMounted: 201,
       expectedIncludedLine: 290,
     },
@@ -396,10 +407,18 @@ describe("source file scroll", () => {
     async ({
       startLine,
       initialScrollLine,
+      intermediateScrollLine,
       direction,
+      targetScrollLine,
       targetFirstMounted,
       expectedIncludedLine,
     }) => {
+      const { innerWidth, innerHeight } = window;
+      await using _viewport = {
+        [Symbol.asyncDispose]: () => page.viewport(innerWidth, innerHeight),
+      };
+      // Leave room for the held pointer above and below the editor inside the test frame.
+      await page.viewport(800, 600);
       using _settings = setup();
       localStorage.setItem("t3code.renderMarkdown", "false");
       const style = document.createElement("style");
@@ -418,41 +437,42 @@ describe("source file scroll", () => {
       };
 
       await using screen = await render(
-        <div style={{ width: 560, height: 400, display: "flex", flexDirection: "column" }}>
-          {filePreview("notes.md")}
+        <div style={{ paddingBlock: 64 }}>
+          <div style={{ width: 560, height: 400, display: "flex", flexDirection: "column" }}>
+            {filePreview("notes.md")}
+          </div>
         </div>,
       );
 
       const shadowRoot = () => screen.container.querySelector("diffs-container")?.shadowRoot;
-      const rows = () => shadowRoot()?.querySelectorAll<HTMLElement>("[data-line]") ?? [];
+      const row = (line: number) =>
+        shadowRoot()?.querySelector<HTMLElement>(`[data-line="${line}"]`) ?? undefined;
+      const firstMountedLine = () =>
+        Number(shadowRoot()?.querySelector("[data-line]")?.getAttribute("data-line") ?? undefined);
       await vi.waitFor(() =>
-        expect(
-          shadowRoot()?.querySelector('[data-content][contenteditable="true"]'),
-        ).not.toBeNull(),
+        expect(shadowRoot()?.querySelector('[data-content][contenteditable="true"]')).toBeTruthy(),
       );
 
       const scroller = screen.container.querySelector<HTMLElement>(".file-preview-virtualizer")!;
       if (initialScrollLine !== null) {
+        await vi.waitFor(() => expect(scroller.scrollHeight).toBeGreaterThan(5000));
         if (direction === "up") {
-          await vi.waitFor(() => expect(scroller.scrollHeight).toBeGreaterThan(5000));
           scroller.scrollTop = scroller.scrollHeight;
-          await vi.waitFor(() =>
-            expect(
-              [...rows()].some((row) => row.getAttribute("data-line") === String(startLine)),
-            ).toBe(true),
-          );
+        } else {
+          // The first virtual window can end before the anchor. The fixture has uniform rows.
+          const rowHeight = row(1)?.getBoundingClientRect().height ?? 0;
+          expect(rowHeight).toBeGreaterThan(0);
+          scroller.scrollTop = (initialScrollLine - 1) * rowHeight;
         }
-        const target = [...rows()].find(
-          (row) => row.getAttribute("data-line") === String(initialScrollLine),
-        );
-        expect(target).toBeDefined();
-        target!.scrollIntoView({ block: direction === "up" ? "end" : "start" });
+        await vi.waitFor(() => expect(row(initialScrollLine)).toBeDefined());
+        const targetRect = row(initialScrollLine)!.getBoundingClientRect();
+        const viewport = scroller.getBoundingClientRect();
+        scroller.scrollTop +=
+          direction === "up" ? targetRect.bottom - viewport.bottom : targetRect.top - viewport.top;
         await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(0));
       }
 
-      const startRow = [...rows()].find(
-        (row) => row.getAttribute("data-line") === String(startLine),
-      );
+      const startRow = row(startLine);
       expect(startRow).toBeDefined();
       const startRect = startRow!.getBoundingClientRect();
       const scrollerRect = scroller.getBoundingClientRect();
@@ -470,23 +490,51 @@ describe("source file scroll", () => {
         });
 
       const startX = direction === "up" ? startRect.left + 140 : startRect.left + 2;
-      // The editor records the drag anchor on the press's selectionchange; drag only after it.
-      const anchored = new Promise((resolve) =>
-        document.addEventListener("selectionchange", resolve, { once: true }),
-      );
-      await mouse("mousePressed", startX, startRect.top + 5);
-      await anchored;
-      await mouse("mouseMoved", startRect.left + 80, nearEdgeY);
-      await mouse("mouseMoved", startRect.left + 80, outsideEdgeY);
-      await vi.waitFor(() => {
-        const firstMounted = Number(rows()[0]?.getAttribute("data-line"));
-        if (direction === "down") {
-          expect(firstMounted).toBeGreaterThanOrEqual(targetFirstMounted);
-        } else {
-          expect(firstMounted).toBeLessThanOrEqual(targetFirstMounted);
+      const dragX = startRect.left + 80;
+      const startLineOffset = scroller.scrollTop + startRect.top - scrollerRect.top;
+      const scrollToLine = (line: number) => {
+        scroller.scrollTop = startLineOffset + (line - startLine) * startRect.height;
+      };
+      let anchored = false;
+      const onSelectionChange = () => {
+        const range = document
+          .getSelection()
+          ?.getComposedRanges({ shadowRoots: [shadowRoot()!] })[0];
+        anchored ||= range?.collapsed === true && startRow!.contains(range.startContainer);
+      };
+      document.addEventListener("selectionchange", onSelectionChange);
+      try {
+        await mouse("mousePressed", startX, startRect.top + 5);
+        // The editor reads the native anchor on selectionchange.
+        await vi.waitFor(() => expect(anchored).toBe(true));
+        await mouse("mouseMoved", dragX, scrollerRect.top + scrollerRect.height / 2);
+        // Drive the window shift while the real drag is held. Native autoscroll speed varies with load.
+        if (intermediateScrollLine !== null) {
+          const beforeShift = firstMountedLine();
+          scrollToLine(intermediateScrollLine);
+          await vi.waitFor(() => {
+            expect(firstMountedLine()).toBeGreaterThan(beforeShift);
+            expect(firstMountedLine()).toBeLessThanOrEqual(startLine);
+            expect(row(startLine)).toBeDefined();
+          });
+          await mouse("mouseMoved", dragX + 1, nearEdgeY);
         }
-      });
-      await mouse("mouseReleased", startRect.left + 80, outsideEdgeY);
+        scrollToLine(targetScrollLine);
+        await vi.waitFor(() => {
+          const firstMounted = firstMountedLine();
+          if (direction === "down") {
+            expect(firstMounted).toBeGreaterThanOrEqual(targetFirstMounted);
+          } else {
+            expect(firstMounted).toBeLessThanOrEqual(targetFirstMounted);
+          }
+          expect(row(startLine)).toBeUndefined();
+        });
+        await mouse("mouseMoved", dragX + 2, nearEdgeY);
+        await mouse("mouseMoved", dragX, outsideEdgeY);
+      } finally {
+        document.removeEventListener("selectionchange", onSelectionChange);
+        await mouse("mouseReleased", dragX, outsideEdgeY);
+      }
 
       const overlayRanges = shadowRoot()!.querySelectorAll("[data-selection-range]");
       expect(overlayRanges.length).toBeGreaterThan(0);
@@ -528,19 +576,29 @@ describe("source file scroll", () => {
       byteLength: contents.length,
       truncated: false,
     };
-    const scroller = () => document.querySelector<HTMLElement>(".file-preview-virtualizer");
-
-    await using _screen = await render(
+    await using screen = await render(
       <div style={{ width: 500, height: 400, display: "flex", flexDirection: "column" }}>
         {filePreview("wrapped.ts")}
       </div>,
     );
-    await vi.waitFor(() => expect(scroller()?.scrollHeight).toBeGreaterThan(20_000));
-    const shadowRows = () =>
-      [...document.querySelectorAll("*")].flatMap((host) =>
-        host.shadowRoot ? [...host.shadowRoot.querySelectorAll<HTMLElement>("[data-line]")] : [],
+    const enableWrap = screen.getByRole("button", { name: "Enable word wrap" });
+    if (enableWrap.query()) await enableWrap.click();
+
+    const scroller = () => screen.container.querySelector<HTMLElement>(".file-preview-virtualizer");
+    const shadowRoot = () => screen.container.querySelector("diffs-container")?.shadowRoot;
+    const firstRow = () => shadowRoot()?.querySelector<HTMLElement>('[data-line="1"]');
+    await vi.waitFor(() => {
+      const row = firstRow();
+      expect(row).toBeTruthy();
+      expect(row!.getBoundingClientRect().height).toBeGreaterThan(
+        Number.parseFloat(getComputedStyle(row!).lineHeight),
       );
-    await userEvent.click(shadowRows().find((row) => row.getAttribute("data-line") === "1")!);
+      expect(scroller()?.scrollHeight).toBeGreaterThan(20_000);
+    });
+    const shadowRows = () => [
+      ...(shadowRoot()?.querySelectorAll<HTMLElement>("[data-line]") ?? []),
+    ];
+    await userEvent.click(firstRow()!);
     await vi.waitFor(() => expect(deepActiveElement()?.matches("[data-content]")).toBe(true));
     await userEvent.keyboard(
       isMacPlatform(navigator.platform) ? "{Meta>}f{/Meta}" : "{Control>}f{/Control}",

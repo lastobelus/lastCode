@@ -41,6 +41,8 @@ describe("ThreadErrorBanner", () => {
         isThreadErrorBannerDismissedForSession(newErrorKey),
       ),
     ).toBe(true);
+    expect(shouldShowThreadErrorBanner("env:thread-b", firstError, false, firstError)).toBe(false);
+    expect(shouldShowThreadErrorBanner("env:thread-b", secondError, false, firstError)).toBe(true);
   });
 
   it("reappears when a later run fails with the same error on the same thread", () => {

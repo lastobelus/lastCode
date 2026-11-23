@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button } from "~/components/ui/button";
 
 import { describePreviewError } from "./errorCodeMessages";
+import type { PreviewRecoveryRequestState } from "./previewRecoveryRequest";
 
 interface Props {
   url: string;
@@ -11,6 +12,10 @@ interface Props {
   description: string;
   onReload: () => void;
   move?: { readonly label: string; readonly onMove: () => void };
+  recoveryRequest: PreviewRecoveryRequestState;
+  restoringHostedPreview?: boolean;
+  managedHandoff?: boolean;
+  onRequestRecovery: () => void;
 }
 
 export function PreviewFileNotShown({
@@ -56,7 +61,17 @@ export function PreviewFileNotShown({
   );
 }
 
-export function PreviewUnreachable({ url, code, description, onReload, move }: Props) {
+export function PreviewUnreachable({
+  url,
+  code,
+  description,
+  onReload,
+  move,
+  recoveryRequest,
+  restoringHostedPreview = false,
+  managedHandoff = false,
+  onRequestRecovery,
+}: Props) {
   const gt = useGT();
   const m = useMessages();
   const [showDetails, setShowDetails] = useState(false);
@@ -106,6 +121,45 @@ export function PreviewUnreachable({ url, code, description, onReload, move }: P
 
         <div className="mt-8 text-xs uppercase tracking-wide text-muted-foreground/70">
           {errorLabel}
+        </div>
+
+        <div className="mt-6 flex flex-col items-start gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={
+              restoringHostedPreview ||
+              (!managedHandoff &&
+                (recoveryRequest.status === "sending" || recoveryRequest.status === "sent"))
+            }
+            onClick={managedHandoff ? onReload : onRequestRecovery}
+          >
+            {restoringHostedPreview
+              ? gt("Restoring preview…")
+              : managedHandoff
+                ? gt("Retry preview")
+                : recoveryRequest.status === "sending"
+                  ? gt("Sending request…")
+                  : recoveryRequest.status === "sent"
+                    ? gt("Request sent")
+                    : gt("Ask agent to restore preview")}
+          </Button>
+          <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
+            {restoringHostedPreview
+              ? gt("{app} is reopening this preview.", { app: "LastCode" })
+              : managedHandoff
+                ? gt(
+                    "This saved preview reopens automatically. Retry when its environment is available.",
+                  )
+                : recoveryRequest.status === "sent"
+                  ? gt(
+                      "The failed link and error were sent to this thread. Reload after the agent restores it.",
+                    )
+                  : recoveryRequest.status === "error"
+                    ? recoveryRequest.error
+                    : gt("Send this failed link and error to the agent in this thread.")}
+          </p>
         </div>
 
         <div className="mt-auto flex items-center gap-2 pt-8">
