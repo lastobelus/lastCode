@@ -184,9 +184,15 @@ import {
   compileClaudeModelSelection,
   type CompiledClaudeModelSelection,
 } from "../../claudeModelOptions.ts";
+import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import * as ServerConfig from "../../config.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import * as ProcessRunner from "../../processRunner.ts";
+import { readLastCodeBackgroundWaitEnabled } from "../../provider/LastCodeBackgroundWait.ts";
+import {
+  makeLastCodeClaudeWrappedTaskMarker,
+  withLastCodeClaudeBackgroundLimit,
+} from "../../provider/LastCodeWrappedBackgroundWait.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { spawnAndCollect } from "@t3tools/provider-core/server/snapshotProbe";
@@ -5791,6 +5797,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const host = Option.getOrUndefined(yield* Effect.serviceOption(ProviderHost));
+  const readBackgroundWait = readLastCodeBackgroundWaitEnabled(
+    host?.settings.get ?? Option.getOrUndefined(serverSettings)?.getSettings,
+  );
   const { attachmentsDir, fileSystem, path, random, idAllocator, queryRunner } = adapterOptions;
   const loadModelCatalog = (
     adapterOptions.modelCatalog ?? Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG)
@@ -6035,6 +6045,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     }),
     openSession: Effect.fn("ClaudeAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
+        const backgroundWaitEnabled = yield* readBackgroundWait;
+        const markWrappedBackgroundTasks = makeLastCodeClaudeWrappedTaskMarker(
+          backgroundWaitEnabled,
+          input.threadId,
+        );
         const promptSuggestionsEnabled = input.promptSuggestions ?? Effect.succeed(false);
         const sessionScope = yield* Effect.scope;
         const now = yield* DateTime.now;
@@ -11396,6 +11411,27 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return false;
           }
 
+          if (backgroundWaitEnabled) {
+            const roster = rosterForNativeThread(
+              yield* Ref.get(pendingBackgroundTasksByNativeThread),
+              input.nativeThreadId,
+            );
+            const marked = markWrappedBackgroundTasks(
+              roster,
+              backgroundTaskGenerations.get(input.nativeThreadId),
+              backgroundTaskOrigins.get(input.nativeThreadId),
+            );
+            if (marked.length > 0) {
+              const owed = owedBackgroundResults.get(input.nativeThreadId) ?? new Map();
+              for (const { taskId, originRunId } of marked) owed.set(taskId, originRunId);
+              owedBackgroundResults.set(input.nativeThreadId, owed);
+              yield* addTaskIdsToNativeThreadSet(
+                awaitedBackgroundTasksByNativeThread,
+                input.nativeThreadId,
+                marked.map((task) => task.taskId),
+              );
+            }
+          }
           yield* emitRosterUpdate(input.nativeThreadId, input.activeContext);
           return true;
         });
@@ -14069,6 +14105,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput.nativeThreadHasTurns ?? turnInput.providerTurnOrdinal > 1;
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
+          const sdkSettings = withLastCodeClaudeBackgroundLimit(
+            launchArgSettings === undefined
+              ? undefined
+              : claudeSdkLaunchArgSettings(launchArgSettings),
+            backgroundWaitEnabled,
+          );
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
             modelCatalog: catalog,
@@ -14085,9 +14127,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             // Delegated threads have no one typing, so they never ask for suggestions.
             promptSuggestions:
               !isDelegatedAppThread(turnInput.appThread) && (yield* promptSuggestionsEnabled),
-            ...(launchArgSettings === undefined
-              ? {}
-              : { sdkSettings: claudeSdkLaunchArgSettings(launchArgSettings) }),
+            ...(sdkSettings === undefined ? {} : { sdkSettings }),
             environment: claudeQueryEnvironment(
               adapterOptions.environment,
               turnInput.appThread,

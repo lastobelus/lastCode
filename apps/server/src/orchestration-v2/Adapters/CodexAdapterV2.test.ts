@@ -6994,6 +6994,88 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ],
   });
 
+  it.effect.each([false, true])(
+    "automatically awaits a wrapped Codex command (enabled: %s)",
+    (enabled) =>
+      Effect.gen(function* () {
+        const allowCompletion = yield* Deferred.make<void>();
+        const command = "/bin/zsh -lc 'cd /workspace && ./scripts/lc-run prepare'";
+        const harness = yield* makeCodexReplayHarness(
+          {
+            ...backgroundExecTranscript,
+            ...(enabled ? { backgroundWait: true } : {}),
+            entries: backgroundExecTranscript.entries.map((entry) => {
+              if (entry.type !== "emit_inbound") return entry;
+              const status =
+                entry.label === "item/started/command"
+                  ? "inProgress"
+                  : entry.label === "item/completed/command-late"
+                    ? "completed"
+                    : null;
+              if (status === null) return entry;
+              const params = {
+                item: { ...backgroundCommandItem(status), command },
+                threadId: BG_NATIVE_THREAD,
+                turnId: BG_NATIVE_TURN,
+              };
+              return {
+                type: "emit_inbound",
+                label: entry.label,
+                frame: {
+                  method: status === "inProgress" ? "item/started" : "item/completed",
+                  params,
+                },
+              };
+            }),
+          },
+          undefined,
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "item/completed/command-late"
+              ? Deferred.await(allowCompletion)
+              : Effect.void,
+        );
+        const turn = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-auto-await-codex"),
+          text: BG_PROMPT,
+        });
+        yield* harness.runtime.startTurn(turn);
+        yield* harness.firstTerminal;
+        assert.deepEqual(
+          harness.pendingBackgroundTasks(),
+          enabled
+            ? [{ taskId: BG_COMMAND_ITEM, kind: "command", description: command, awaited: true }]
+            : [],
+        );
+        yield* Deferred.succeed(allowCompletion, undefined);
+        yield* harness.until(() => harness.continuationRequests.length === 1);
+        assert.deepEqual(
+          harness.continuationRequests[0]?.backgroundResultContinuation,
+          enabled
+            ? {
+                providerThreadId: harness.providerThread.id,
+                originRunId: turn.runId,
+                taskIds: [BG_COMMAND_ITEM],
+              }
+            : undefined,
+        );
+        assert.deepEqual(harness.pendingBackgroundTasks(), []);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   const waitEndings = ["dispatch", "4242", BG_COMMAND_ITEM, "clear-running"];
   it.effect.each(waitEndings)("awaits only marked commands (%s)", (resolution) =>
     Effect.gen(function* () {

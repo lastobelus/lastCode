@@ -125,6 +125,10 @@ import {
   withCodexBackgroundWaitCapability,
 } from "../../provider/LastCodeBackgroundWait.ts";
 import {
+  lastCodeWrappedCommandEnvironment,
+  shouldAwaitLastCodeWrappedCommand,
+} from "../../provider/LastCodeWrappedBackgroundWait.ts";
+import {
   describeMcpElicitation,
   toMcpElicitationResponse,
 } from "../../provider/CodexMcpElicitation.ts";
@@ -2089,6 +2093,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             undefined,
             resolvedRuntime?.environment ?? adapterOptions.environment,
             serverConfig.settingsPath,
+          ).pipe(
+            Effect.map((environment) => ({
+              ...environment,
+              ...lastCodeWrappedCommandEnvironment(backgroundWaitEnabled),
+            })),
           ),
         });
         const codexZone = codexTimeZone(resolvedRuntime?.environment ?? adapterOptions.environment);
@@ -5759,9 +5768,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
             if (payload.item.type === "commandExecution") {
               if (!codexItemStatus(payload.item.status).completed) {
+                const awaited = shouldAwaitLastCodeWrappedCommand(
+                  backgroundWaitEnabled && context.subagent === null,
+                  payload.item.command,
+                );
                 yield* trackRunningCommandItem(payload.turnId, {
                   id: payload.item.id,
                   command: payload.item.command,
+                  ...(awaited ? { awaited } : {}),
                   ...(payload.item.aggregatedOutput === null ||
                   payload.item.aggregatedOutput === undefined
                     ? {}
@@ -5770,6 +5784,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     ? { processId: payload.item.processId }
                     : {}),
                 });
+                if (awaited) yield* emitAwaitedCommands(context.providerThread);
               }
               const artifacts = yield* buildCommandExecutionArtifacts(context, payload.item);
               yield* emitProviderEvent({

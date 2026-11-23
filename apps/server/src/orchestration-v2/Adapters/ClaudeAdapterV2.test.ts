@@ -116,6 +116,7 @@ import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEve
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderInstallationGate from "../../provider/ProviderInstallationGate.ts";
@@ -18543,6 +18544,91 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             McpProviderSessions.layer,
             NodeServices.layer,
             NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each([
+    { enabled: false, promoted: false },
+    { enabled: false, promoted: true },
+    { enabled: true, promoted: false },
+    { enabled: true, promoted: true },
+  ])(
+    "automatically awaits a wrapped Claude command (enabled=$enabled promoted=$promoted)",
+    ({ enabled, promoted }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const command = "CI=1 ./scripts/lc-run ci --quick";
+        const launch = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-auto-await-claude"),
+          text: "Run the wrapper.",
+          attachments: [],
+        });
+        yield* harness.runtime.startTurn(launch);
+        const settings = harness.getOpenedOptions()?.settings;
+        const env = typeof settings === "object" ? settings.env : undefined;
+        assert.equal(env?.BASH_DEFAULT_TIMEOUT_MS, enabled ? "7200000" : undefined);
+        assert.equal(env?.LASTCODE_BACKGROUND_WAIT, enabled ? "1" : undefined);
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: "wrapped-command-launch",
+              type: "message",
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: WAKE_TOOL_USE_ID,
+                  name: "Bash",
+                  input: { command, description: "Run CI", run_in_background: !promoted },
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "wrapped-command-launch",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({ ...wakeTaskStarted, description: "Run CI", is_backgrounded: !promoted }),
+        );
+        if (promoted) {
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "background_tasks_changed",
+              tasks: [{ task_id: WAKE_TASK_ID, task_type: "local_bash", description: "Run CI" }],
+              uuid: "wrapped-command-promoted",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+        }
+        yield* harness.offerAndWait(turnOneResult);
+        yield* harness.awaitTerminal(1);
+        const providerThread = providerThreadRosterEvents(harness.events).at(-1)?.providerThread;
+        const task = providerThread?.pendingBackgroundTasks?.find(
+          (task) => task.taskId === WAKE_TASK_ID,
+        );
+        assert.equal(task?.command, command);
+        assert.equal(task?.awaited, enabled ? true : undefined);
+        assert.deepEqual(
+          providerThread?.owedBackgroundResults,
+          enabled ? [{ taskId: WAKE_TASK_ID, originRunId: launch.runId }] : [],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+            ServerSettingsService.layerTest({ lastcodeBackgroundWaitEnabled: enabled }),
           ),
         ),
       ),
