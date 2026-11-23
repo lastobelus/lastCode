@@ -227,7 +227,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create owned child threads in this checkout. Omit prompt for an empty group thread. Set `topLevel:true` on a row only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread unless it is a side chat; null clears the placement parent without changing ownership. One thread or its own worktree: `t3_thread_launch`.",
+    "Create owned child threads in this checkout. Omit prompt for an empty group thread. Set `topLevel:true` on a row only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread unless it is a side chat; JSON `null` (unquoted) clears the placement parent without changing ownership. One thread or its own worktree: `t3_thread_launch`.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: Schema.Struct({
     ...OrchestratorMcpCreateThreadsResult.fields,

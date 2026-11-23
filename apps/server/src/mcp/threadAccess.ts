@@ -22,8 +22,13 @@ import {
 import { hasPendingBackgroundSubagent } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
-import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorCommandPreviouslyRejectedError,
+  OrchestratorDispatchError,
+  type OrchestratorV2Error,
+} from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import { fencingLinkOrigin } from "./linkOrigin.ts";
@@ -127,6 +132,43 @@ export const dispatchFailure = (
         message: Array.from(error.cause).slice(0, 1000).join(""),
       })
     : unavailable();
+};
+
+const isDispatchError = Schema.is(OrchestratorDispatchError);
+const isPreviouslyRejected = Schema.is(OrchestratorCommandPreviouslyRejectedError);
+
+function groupingPlacementFailure(error: unknown): OrchestratorMcpFailure | undefined {
+  while (isDispatchError(error)) {
+    if (error.field === "groupedUnderThreadId") {
+      const detail = typeof error.cause === "string" ? `${error.cause} ` : "";
+      return new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) to leave the thread ungrouped.`,
+      });
+    }
+    error = error.cause;
+  }
+}
+
+export const threadCreationInputFailure = (error: unknown, batchRow?: number) => {
+  const detail =
+    isPreviouslyRejected(error) &&
+    (error.commandType === "thread.create" || error.commandType === "delegated_task.request")
+      ? new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            "This clientRequestId belongs to an earlier request that was rejected. Correct the input, then retry with a new clientRequestId.",
+        })
+      : groupingPlacementFailure(error);
+  if (detail === undefined || batchRow === undefined) return detail;
+  const recovery =
+    batchRow > 1
+      ? ` The rows before row ${batchRow} were created. Do not resend them. Fix row ${batchRow}, then send it and any rows after it as a new call with a fresh clientRequestId.`
+      : " No rows were created by this batch attempt. Fix row 1, then retry the whole batch as a new call with a fresh clientRequestId.";
+  return new OrchestratorMcpFailure({
+    code: detail.code,
+    message: `Row ${batchRow}: ${detail.message}${recovery}`,
+  });
 };
 
 export interface CallerLimits {

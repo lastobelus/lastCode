@@ -18,10 +18,7 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import {
-  OrchestratorDispatchError,
-  OrchestratorRuntimeModeAboveCeilingError,
-} from "../../../orchestration-v2/Orchestrator.ts";
+import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
 import { outputRequestProblem } from "../../../orchestration-v2/runOutput.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
@@ -51,26 +48,18 @@ import { loadMcpCaller } from "../../McpCallerAttribution.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
 import { requireRemoteDelegationPeer } from "../../linkOrigin.ts";
-import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import {
+  newCommandId,
+  readCaller,
+  resolveProjectId,
+  threadCreationInputFailure,
+  unavailable,
+} from "../../threadAccess.ts";
 import { resolveLaunchOwnership } from "../../threadLaunchOwnership.ts";
 import { listAgentProjects, planAgentProjectRegistration } from "../../projectRegistration.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
-const isDispatchError = Schema.is(OrchestratorDispatchError);
-
-function groupingPlacementFailure(error: unknown): OrchestratorMcpFailure | undefined {
-  while (isDispatchError(error)) {
-    if (error.field === "groupedUnderThreadId") {
-      const detail = typeof error.cause === "string" ? `${error.cause} ` : "";
-      return new OrchestratorMcpFailure({
-        code: "invalid_request",
-        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) to leave the thread ungrouped.`,
-      });
-    }
-    error = error.cause;
-  }
-}
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -604,8 +593,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               });
             }
             if (error._tag === "ThreadLaunchError") {
-              const placement = groupingPlacementFailure(error.cause);
-              if (placement !== undefined) return placement;
+              const inputFailure = threadCreationInputFailure(error.cause);
+              if (inputFailure !== undefined) return inputFailure;
             }
             return unavailable();
           }),

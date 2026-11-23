@@ -40,6 +40,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as DocumentText from "../../../provider/DocumentText.ts";
 import {
+  OrchestratorCommandPreviouslyRejectedError,
   OrchestratorDispatchError,
   OrchestratorRuntimeModeAboveCeilingError,
 } from "../../../orchestration-v2/Orchestrator.ts";
@@ -477,6 +478,7 @@ const clientLaunchHarness = (input: {
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
   readonly refusedPlacement?: { value: boolean };
+  readonly launchError?: (input: ThreadLaunch.ThreadLaunchInput) => ThreadLaunch.ThreadLaunchError;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -551,6 +553,7 @@ const clientLaunchHarness = (input: {
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
       launch: (launch) => {
         input.launched.push(launch);
+        if (input.launchError !== undefined) return Effect.fail(input.launchError(launch));
         if (input.refusedByCeiling) {
           return Effect.fail(
             new ThreadLaunch.ThreadLaunchError({
@@ -782,6 +785,59 @@ it.effect(
         message: "Example Corp limits threads to Supervised.",
       });
     }),
+);
+
+it.effect("launch names a rejected request key and hides internal causes", () =>
+  Effect.gen(function* () {
+    for (const cause of ["thread.create", "message.dispatch", "internal"] as const) {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "full-access",
+        launched,
+        launchError: (input) =>
+          new ThreadLaunch.ThreadLaunchError({
+            operation: "create-thread",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            cause:
+              cause === "internal"
+                ? new OrchestratorDispatchError({
+                    commandId: input.commandId,
+                    commandType: "thread.create",
+                    cause: new Error("private-storage-path"),
+                  })
+                : new OrchestratorCommandPreviouslyRejectedError({
+                    commandId: input.commandId,
+                    commandType: cause,
+                    detail: "private-storage-path",
+                  }),
+          }),
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const results = yield* toolkit
+        .handle("t3_thread_launch", {
+          title: "Inspection",
+          projectId,
+          clientRequestId: "rejected-creation",
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      expect(results.at(-1)?.result).toMatchObject(
+        cause === "thread.create"
+          ? {
+              code: "invalid_request",
+              message:
+                "This clientRequestId belongs to an earlier request that was rejected. Correct the input, then retry with a new clientRequestId.",
+            }
+          : { code: "orchestration_error", message: "The operation could not be completed." },
+      );
+    }
+  }).pipe(Effect.scoped),
 );
 
 it.effect("a launch steps an inherited mode down to the provider's, and refuses one it lacks", () =>

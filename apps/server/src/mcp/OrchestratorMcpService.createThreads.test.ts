@@ -179,6 +179,98 @@ const createParent = Effect.gen(function* () {
   return { requests };
 });
 
+it.effect("names invalid grouping inputs without creating a thread", () =>
+  Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    yield* createParent;
+    for (const prompt of [undefined, "Inspect this project"]) {
+      for (const groupedUnderThreadId of ["null", "missing-thread"]) {
+        const clientRequestId = `bad-group:${prompt === undefined ? "empty" : "prompted"}:${groupedUnderThreadId}`;
+        const error = yield* service
+          .createThreads(scope, {
+            clientRequestId,
+            threads: [
+              {
+                title: "Invalid grouping",
+                groupedUnderThreadId: ThreadId.make(groupedUnderThreadId),
+                ...(prompt === undefined ? {} : { prompt }),
+              },
+            ],
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /^Row 1:/);
+        assert.include(error.message, "groupedUnderThreadId");
+        assert.include(error.message, "JSON null");
+        assert.include(error.message, "No rows were created");
+        assert.include(error.message, "fresh clientRequestId");
+        const retry = yield* service
+          .createThreads(scope, {
+            clientRequestId,
+            threads: [{ title: "Corrected grouping", groupedUnderThreadId: null }],
+          })
+          .pipe(Effect.flip);
+        assert.equal(retry.code, "invalid_request");
+        assert.include(retry.message, "clientRequestId");
+      }
+    }
+    const records = yield* service.listThreads(scope, {});
+    assert.lengthOf(records.threads, 1);
+    const fresh = yield* service.createThreads(scope, {
+      clientRequestId: "corrected-with-new-key",
+      threads: [{ title: "Corrected grouping", groupedUnderThreadId: null }],
+    });
+    assert.isNull(fresh.threads[0]?.groupedUnderThreadId);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("identifies which rows need retry after partial batch creation", () =>
+  Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    yield* createParent;
+    const clientRequestId = "partial-batch";
+    const alreadyCreated = { title: "First child", prompt: "Check the project" };
+    const invalid = { title: "Second child", groupedUnderThreadId: ThreadId.make("null") };
+    const corrected = { ...invalid, groupedUnderThreadId: null };
+    const remaining = { title: "Third child" };
+
+    for (const [row, field] of [
+      [invalid, "groupedUnderThreadId"],
+      [corrected, "clientRequestId"],
+    ] as const) {
+      const error = yield* service
+        .createThreads(scope, { clientRequestId, threads: [alreadyCreated, row, remaining] })
+        .pipe(Effect.flip);
+      assert.equal(error.code, "invalid_request");
+      assert.match(error.message, /^Row 2:/);
+      assert.include(error.message, field);
+      assert.include(error.message, "The rows before row 2 were created");
+      assert.include(error.message, "send it and any rows after it as a new call");
+    }
+
+    const partial = yield* service.listThreads(scope, {});
+    assert.lengthOf(partial.threads, 2);
+    assert.equal(
+      partial.threads.filter((thread) => thread.title === alreadyCreated.title).length,
+      1,
+    );
+    const retry = yield* service.createThreads(scope, {
+      clientRequestId: "partial-batch-recovery",
+      threads: [corrected, remaining],
+    });
+    assert.deepEqual(
+      retry.threads.map((thread) => thread.title),
+      [corrected.title, remaining.title],
+    );
+    const recovered = yield* service.listThreads(scope, {});
+    assert.lengthOf(recovered.threads, 4);
+    assert.equal(
+      recovered.threads.filter((thread) => thread.title === alreadyCreated.title).length,
+      1,
+    );
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect(
   "creates empty containers, moves a large family through the service and discovers paged children",
   () =>
