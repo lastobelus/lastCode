@@ -406,6 +406,24 @@ export interface OrchestratorV2DispatchResult {
   readonly replayed?: true;
 }
 
+export interface OrchestratorV2LaunchDispatchInput {
+  /** Binds remote read authority before execution is accepted, including an atomic first run. */
+  readonly beforeInitialMessage?: Effect.Effect<void>;
+  readonly claim: Extract<
+    OrchestrationV2ServerCommand,
+    { readonly type: "thread.create" | "thread.metadata.update" }
+  >;
+  readonly initialMessage: Extract<
+    OrchestrationV2ServerCommand,
+    { readonly type: "message.dispatch" }
+  >;
+}
+
+export interface OrchestratorV2LaunchDispatchResult {
+  readonly claimed: OrchestratorV2DispatchResult;
+  readonly initialMessage: OrchestratorV2DispatchResult;
+}
+
 export interface OrchestratorV2Shape {
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   readonly recoverDelegatedTasks: Effect.Effect<void>;
@@ -437,6 +455,9 @@ export interface OrchestratorV2Shape {
     readonly threadId: ThreadId;
     readonly limitRecovery: OrchestrationV2LimitRecoveryUpdate;
   }) => Effect.Effect<void, OrchestratorV2Error>;
+  readonly dispatchLaunch: (
+    input: OrchestratorV2LaunchDispatchInput,
+  ) => Effect.Effect<OrchestratorV2LaunchDispatchResult, OrchestratorV2Error>;
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, OrchestratorV2Error>;
@@ -636,6 +657,12 @@ export function threadHasUnfinishedWork(records: {
     ) || records.runtimeRequests.some((request) => request.status === "pending")
   );
 }
+
+/** Trusted steering recovery paths may finish an already accepted delivery. */
+export const AcceptedSteeringContinuation = Context.Reference<MessageId | null>(
+  "t3/orchestration-v2/AcceptedSteeringContinuation",
+  { defaultValue: () => null },
+);
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
@@ -878,6 +905,17 @@ function mayStartSubagentFollowup(
     command.createdBy === "user" ||
     command.creationSource === "mcp" ||
     command.usageLimitContinuationOfRunId !== undefined
+  );
+}
+
+function advancesQueueBeforeMessage(command: OrchestrationV2ServerCommand): boolean {
+  return (
+    command.type === "message.dispatch" &&
+    command.restartContinuationOfRunId === undefined &&
+    command.steerFollowUpOfRunId === undefined &&
+    (command.dispatchMode.type === "start_immediately" ||
+      command.dispatchMode.type === "queue_after_active" ||
+      command.dispatchMode.type === "defer_start")
   );
 }
 
@@ -3634,6 +3672,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(message.senderThreadId === undefined ? {} : { senderThreadId: message.senderThreadId }),
         ...(message.linkedSender === undefined ? {} : { linkedSender: message.linkedSender }),
       }).pipe(
+        Effect.provideService(AcceptedSteeringContinuation, message.id),
         Effect.catchCause((cause) =>
           Effect.logWarning("Failed to requeue an unread steer", {
             threadId,
@@ -5416,6 +5455,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                       }),
                       remarksThrough: startedAt,
                       remarkIds: [],
+                      reactionKeys: [],
+                      reactionCounts: {},
                       wakes: 0,
                     },
                     command.until,
@@ -7149,6 +7190,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return thread;
   });
 
+  const ensureMessageSenderActive = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+  ) {
+    if (command.senderThreadId === undefined || command.senderThreadId === command.threadId) return;
+    const sender = yield* projectionStore
+      .getThread(command.senderThreadId)
+      .pipe(mapDispatchError(command));
+    if (
+      sender.archivedAt !== null ||
+      sender.deletedAt !== null ||
+      sender.archivePending?.status === "stopping"
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Sender thread ${command.senderThreadId} is not active.`,
+      });
+    }
+  });
+
   const dispatchMessage = Effect.fn("Orchestrator.dispatchMessage")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -7377,6 +7438,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? command.senderThreadId === command.threadId && isActiveRun(run)
         : run.id === command.restartContinuationOfRunId,
     )?.delegatedTaskId;
+
+    if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is not active.`,
+      });
+    }
+    // Steering recovery can reroute an accepted message after its original sender archives.
+    if (
+      command.senderThreadId !== undefined &&
+      command.senderThreadId !== command.threadId &&
+      !(
+        (yield* AcceptedSteeringContinuation) === command.messageId &&
+        projection.messages.some(
+          (message) =>
+            message.id === command.messageId && message.senderThreadId === command.senderThreadId,
+        )
+      )
+    ) {
+      yield* ensureMessageSenderActive(command);
+    }
 
     if (projection.thread.settledOverride !== null) {
       const now = yield* DateTime.now;
@@ -16346,14 +16429,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // A restart continuation resumes the ended run, so it must not be overtaken by the queue.
     // A steer follow-up takes its place first and starts the queue after it commits. A send that
     // beats the run-end reaction places the ended run's unread steers before it starts anything.
-    if (
-      command.type === "message.dispatch" &&
-      command.restartContinuationOfRunId === undefined &&
-      command.steerFollowUpOfRunId === undefined &&
-      (command.dispatchMode.type === "start_immediately" ||
-        command.dispatchMode.type === "queue_after_active" ||
-        command.dispatchMode.type === "defer_start")
-    ) {
+    if (command.type === "message.dispatch" && advancesQueueBeforeMessage(command)) {
       yield* mapDispatchError(command)(
         requeueUnreadSteers(command.threadId).pipe(
           Effect.andThen(startNextQueuedRun(command.threadId, { latestRunEnded: true })),
@@ -16587,24 +16663,73 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     } satisfies OrchestratorV2DispatchResult;
   }, withCommandMetrics);
 
-  // Follow-up intake and Stop serialize on the parent before taking the child lock.
-  const withSubagentParentLock = <A, E, R>(threadId: ThreadId, dispatch: Effect.Effect<A, E, R>) =>
+  const withThreadDispatchLocks = Effect.fn("Orchestrator.withThreadDispatchLocks")(
+    function* <A, E, R>(threadIds: Iterable<ThreadId>, effect: Effect.Effect<A, E, R>) {
+      const participants = Array.from(new Set(threadIds));
+      if (participants.length < 2)
+        return yield* participants.reduceRight(
+          (locked, threadId) => threadDispatch.withLock(threadId, locked),
+          effect,
+        );
+      // Lineage is immutable. One ancestry order preserves parent-before-child
+      // cancellation and question cleanup without reversing cross-thread sends.
+      const parents = new Map<ThreadId, ThreadId | null>();
+      const paths: Array<{
+        readonly threadId: ThreadId;
+        readonly path: ReadonlyArray<ThreadId>;
+      }> = [];
+      for (const threadId of participants) {
+        const path: Array<ThreadId> = [];
+        let ancestor: ThreadId | null = threadId;
+        while (ancestor !== null) {
+          path.unshift(ancestor);
+          if (!parents.has(ancestor)) {
+            const thread = yield* findThread(ancestor);
+            parents.set(ancestor, thread?.lineage.parentThreadId ?? null);
+          }
+          ancestor = parents.get(ancestor) ?? null;
+        }
+        paths.push({ threadId, path });
+      }
+      const ordered = paths.toSorted((left, right) => {
+        for (let index = 0; index < Math.min(left.path.length, right.path.length); index++) {
+          const a = left.path[index]!;
+          const b = right.path[index]!;
+          if (a !== b) return a < b ? -1 : 1;
+        }
+        return left.path.length - right.path.length;
+      });
+      return yield* ordered.reduceRight(
+        (locked, { threadId }) => threadDispatch.withLock(threadId, locked),
+        effect,
+      );
+    },
+  );
+
+  const withSubagentFollowupLocks = <A, E, R>(
+    threadId: ThreadId,
+    effect: Effect.Effect<A, E, R>,
+  ) =>
     appOwnedSubagentParentThreadId(threadId).pipe(
-      Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
-      Effect.flatMap((parentThreadId) =>
-        parentThreadId === undefined ? dispatch : threadDispatch.withLock(parentThreadId, dispatch),
-      ),
+      Effect.flatMap((parentThreadId) => {
+        const child = threadDispatch.withLock(threadId, effect);
+        return parentThreadId === undefined ? child : threadDispatch.withLock(parentThreadId, child);
+      }),
     );
 
-  // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
+  // dispatchWithReceiptEffect owns the span; this wrapper selects the participant locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
-    const dispatch = threadDispatch.withLock(
-      commandThreadId(command),
-      dispatchWithReceiptEffect(command),
-    );
-    // A fork holds its source's lock, so a source deletion and its fork never interleave. A
-    // parent's lock comes before its side chats' locks. A side chat fork from a side chat or a
-    // fork onto an existing thread would invert that order; dispatch rejects both, so they skip it.
+    const message =
+      command.type === "thread.metadata.update"
+        ? metadataUpdateContinuation(command)
+        : command.type === "thread.create"
+          ? threadCreateInitialMessage(command)
+          : command;
+    const threadId = commandThreadId(command);
+    const threadIds = new Set([threadId]);
+    if (message?.type === "message.dispatch" && message.senderThreadId !== undefined) {
+      threadIds.add(message.senderThreadId);
+    }
     if (command.type === "thread.fork" && command.sourceThreadId !== command.targetThreadId) {
       const source = yield* findThread(command.sourceThreadId);
       const target = yield* findThread(command.targetThreadId);
@@ -16612,45 +16737,56 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         source === null ||
         target !== null ||
         (command.sideChat === true && source.lineage.sideChat === true);
-      return yield* skipsSourceLock
-        ? dispatch
-        : threadDispatch.withLock(command.sourceThreadId, dispatch);
+      if (!skipsSourceLock) threadIds.add(command.sourceThreadId);
+    }
+    if (
+      command.type === "runtime-request.respond" ||
+      (command.type !== "thread.create" &&
+        message?.type === "message.dispatch" &&
+        (mayStartSubagentFollowup(message) || advancesQueueBeforeMessage(command)))
+    ) {
+      const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId).pipe(
+        Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+      );
+      if (parentThreadId !== undefined) threadIds.add(parentThreadId);
     }
     if (
       command.type === "thread.delete" ||
       command.type === "thread.archive" ||
       command.type === "thread.unarchive"
     ) {
-      const cascade = threadDispatch.withLock(
-        command.threadId,
-        liveSideChatIds(command.threadId).pipe(
-          Effect.flatMap((sideChatIds) =>
-            sideChatIds.reduce(
-              (locked, sideChatId) => threadDispatch.withLock(sideChatId, locked),
-              dispatchWithReceiptEffect(command, sideChatIds),
-            ),
-          ),
-        ),
-      );
+      const cascade = Effect.gen(function* () {
+        // A concurrent fork requires a fresh participant set before the cascade can commit.
+        while (true) {
+          const sideChatIds = yield* liveSideChatIds(command.threadId);
+          const result = yield* withThreadDispatchLocks(
+            [...threadIds, ...sideChatIds],
+            Effect.gen(function* () {
+              const currentSideChatIds = yield* liveSideChatIds(command.threadId);
+              if (currentSideChatIds.some((id) => !sideChatIds.includes(id))) return undefined;
+              return yield* dispatchWithReceiptEffect(command, currentSideChatIds);
+            }),
+          );
+          if (result !== undefined) return result;
+        }
+      });
       return yield* command.type === "thread.delete"
         ? threadDispatch.withDeletionLock(cascade)
         : cascade;
     }
+    return yield* withThreadDispatchLocks(threadIds, dispatchWithReceiptEffect(command));
+  }, (effect, command) => {
     // Taken before the lineage read, so a message whose read yields keeps its
     // place ahead of later messages to the same thread.
     const message =
-      command.type === "thread.metadata.update" ? metadataUpdateContinuation(command) : command;
-    if (message?.type === "message.dispatch")
-      return yield* messageIntake.withLock(
-        message.threadId,
-        mayStartSubagentFollowup(message)
-          ? withSubagentParentLock(message.threadId, dispatch)
-          : dispatch,
-      );
-    // Answering a message-mode question can also start a follow-up.
-    return yield* command.type === "runtime-request.respond"
-      ? withSubagentParentLock(command.threadId, dispatch)
-      : dispatch;
+      command.type === "thread.metadata.update"
+        ? metadataUpdateContinuation(command)
+        : command.type === "thread.create"
+          ? threadCreateInitialMessage(command)
+          : command;
+    return message?.type === "message.dispatch"
+      ? messageIntake.withLock(message.threadId, effect)
+      : effect;
   });
 
   const parentTaskSyncRetries = yield* FiberSet.make();
@@ -16704,14 +16840,123 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
   });
+
+  const dispatchLaunch = Effect.fn("orchestrationV2.dispatchLaunch")(function* (
+    input: OrchestratorV2LaunchDispatchInput,
+  ): Effect.fn.Return<OrchestratorV2LaunchDispatchResult, OrchestratorV2Error> {
+    const { claim, initialMessage } = input;
+    if (claim.threadId !== initialMessage.threadId) {
+      return yield* new OrchestratorDispatchError({
+        commandId: initialMessage.commandId,
+        commandType: initialMessage.type,
+        cause: "A thread launch must claim and message the same thread.",
+      });
+    }
+    const threadIds = new Set([claim.threadId]);
+    if (initialMessage.senderThreadId !== undefined) threadIds.add(initialMessage.senderThreadId);
+    if (
+      claim.type === "thread.metadata.update" &&
+      (initialMessage.createdBy === "user" ||
+        initialMessage.creationSource === "mcp" ||
+        advancesQueueBeforeMessage(initialMessage))
+    ) {
+      const parentThreadId = yield* appOwnedSubagentParentThreadId(claim.threadId).pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: claim.threadId, cause }),
+        ),
+      );
+      if (parentThreadId !== undefined) threadIds.add(parentThreadId);
+    }
+    const dispatch = withThreadDispatchLocks(
+      threadIds,
+      Effect.gen(function* () {
+        const claimReceipt = yield* commandReceipts
+          .getByCommandId(claim.commandId)
+          .pipe(mapDispatchError(claim));
+        if (
+          Option.isSome(claimReceipt) &&
+          claimReceipt.value.threadId !== claim.threadId
+        ) {
+          return yield* new OrchestratorCommandIdConflictError({
+            commandId: claim.commandId,
+            commandType: claim.type,
+            receiptThreadId: claimReceipt.value.threadId,
+            commandThreadId: claim.threadId,
+          });
+        }
+        const receipt = yield* commandReceipts
+          .getByCommandId(initialMessage.commandId)
+          .pipe(mapDispatchError(initialMessage));
+        if (
+          Option.isSome(receipt) &&
+          receipt.value.threadId !== initialMessage.threadId
+        ) {
+          return yield* new OrchestratorCommandIdConflictError({
+            commandId: initialMessage.commandId,
+            commandType: initialMessage.type,
+            receiptThreadId: receipt.value.threadId,
+            commandThreadId: initialMessage.threadId,
+          });
+        }
+        const replayedClaim = Option.isSome(claimReceipt)
+          ? yield* replayCommandReceipt(claim, claimReceipt.value)
+          : undefined;
+        if (replayedClaim?.storedEvents.some((stored) => stored.event.type === "run.created")) {
+          if (input.beforeInitialMessage !== undefined) yield* input.beforeInitialMessage;
+          return { claimed: replayedClaim, initialMessage: replayedClaim };
+        }
+        // Refuse an inactive sender before claiming a target. Accepted retries
+        // still go through the normal receipt validation after the sender archives.
+        if (Option.isNone(receipt)) yield* ensureMessageSenderActive(initialMessage);
+        if (
+          (claim.type === "thread.metadata.update" ||
+            (Option.isSome(claimReceipt) && claimReceipt.value.status === "accepted")) &&
+          !(Option.isSome(receipt) && receipt.value.status === "accepted")
+        ) {
+          // Reuse preflight and a previous create can precede these locks.
+          // Refuse an inactive target without consuming the pending message receipt.
+          const target = yield* projectionStore
+            .getThread(claim.threadId)
+            .pipe(mapDispatchError(initialMessage));
+          if (
+            target.archivedAt !== null ||
+            target.deletedAt !== null ||
+            target.archivePending?.status === "stopping"
+          ) {
+            return yield* new OrchestratorDispatchError({
+              commandId: initialMessage.commandId,
+              commandType: initialMessage.type,
+              cause: `Thread ${claim.threadId} is not active.`,
+            });
+          }
+        }
+        const atomicInitialMessage =
+          replayedClaim === undefined &&
+          claim.type === "thread.create" &&
+          claim.initialMessage !== undefined;
+        if (atomicInitialMessage && input.beforeInitialMessage !== undefined) {
+          yield* input.beforeInitialMessage;
+        }
+        const claimed = replayedClaim ?? (yield* dispatchWithReceiptEffect(claim));
+        if (!atomicInitialMessage && input.beforeInitialMessage !== undefined) {
+          yield* input.beforeInitialMessage;
+        }
+        const dispatched = claimed.storedEvents.some((stored) => stored.event.type === "run.created")
+          ? claimed
+          : yield* dispatchWithReceiptEffect(initialMessage);
+        return { claimed, initialMessage: dispatched };
+      }),
+    );
+    return yield* dispatch;
+  }, (effect, input) => messageIntake.withLock(input.initialMessage.threadId, effect));
+
   const handleRunUpdate = Effect.fn("Orchestrator.handleRunUpdate")(
     function* (stored: OrchestrationV2StoredEvent) {
       if (stored.event.type !== "run.updated") return;
       const threadId = stored.event.threadId;
       const run = stored.event.payload;
-      // Take parent and child locks sequentially, never nested: delegation holds the parent
-      // while writing child events, so nesting parent inside child would invert the order.
-      // The keyed semaphores are neither reentrant nor deadlock-aware.
+      // Finish child-side processing before taking the parent lock for finalization.
+      // Unread steering can register a follow-up, so that step holds both in ancestry order.
       if (delegatedTaskTerminalStatus(run.status) !== null) {
         // Before the parent hears of the failure: a pending continuation keeps the task open.
         if (run.status === "failed" && run.restartContinuationOfRunId !== undefined) {
@@ -16736,33 +16981,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
             ),
           );
-        yield* threadDispatch
-          .withLock(
-            threadId,
-            (run.status === "completed"
-              ? releaseUnattendedHolds(threadId, run.id)
-              : Effect.void
-            ).pipe(
-              Effect.andThen(
-                requeueUnreadSteers(threadId, [run.id]).pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.logWarning("Failed to read unread steers", { threadId, cause }),
-                  ),
+        yield* withSubagentFollowupLocks(
+          threadId,
+          (run.status === "completed" ? releaseUnattendedHolds(threadId, run.id) : Effect.void).pipe(
+            Effect.andThen(
+              requeueUnreadSteers(threadId, [run.id]).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Failed to read unread steers", { threadId, cause }),
                 ),
               ),
-              Effect.andThen(
-                startNextQueuedRun(threadId, {
-                  endedRunId: run.id,
-                  ...(run.status === "failed" ? { failedRunId: run.id } : {}),
-                }),
-              ),
             ),
-          )
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Failed to start the next queued V2 run", { threadId, cause }),
+            Effect.andThen(
+              startNextQueuedRun(threadId, {
+                endedRunId: run.id,
+                ...(run.status === "failed" ? { failedRunId: run.id } : {}),
+              }),
             ),
-          );
+          ),
+        ).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to start the next queued V2 run", { threadId, cause }),
+          ),
+        );
       }
       yield* updateDelegatedParentTask(threadId, run.id);
     },
@@ -17003,7 +17243,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         Effect.forEach(
           threadIds,
           (threadId) =>
-            threadDispatch.withLock(threadId, requeueUnreadSteers(threadId)).pipe(
+            withSubagentFollowupLocks(threadId, requeueUnreadSteers(threadId)).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to requeue an unread steer during recovery", {
                   threadId,
@@ -17221,6 +17461,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
     }),
+    dispatchLaunch,
     searchThreadStream: (input) =>
       projectionStore
         .searchThreadStream(input)

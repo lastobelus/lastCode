@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 
@@ -190,6 +190,36 @@ describe("SessionControl", () => {
     expect(events).toEqual(["navigation committed", "latest"]);
   });
 
+  it("finishes running work, skips expired queued actions, and accepts fresh work", async () => {
+    let now = 0;
+    using _clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const control = new SessionControl("agent");
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const running = control.agent(
+      "agent",
+      async () => {
+        events.push("started");
+        started.resolve();
+        await finish.promise;
+        events.push("finished");
+      },
+      100,
+    );
+    await started.promise;
+    const expired = expect(
+      control.agent("agent", async () => events.push("expired"), 100),
+    ).rejects.toMatchObject({ name: "TimeoutError" });
+    const next = control.agent("agent", async () => events.push("next"), 200);
+    // No timer fires: expiry must be checked when the queue resumes.
+    now = 100;
+    expect(events).toEqual(["started"]);
+    finish.resolve();
+    await Promise.all([running, expired, next]);
+    expect(events).toEqual(["started", "finished", "next"]);
+  });
+
   it("returns an action result before tracked navigation but drains it before already queued actions", async () => {
     const control = new SessionControl("agent");
     const committed = Promise.withResolvers<void>();
@@ -212,6 +242,48 @@ describe("SessionControl", () => {
     await control.agent("agent", async () => control.track(committed.promise));
     committed.reject(new Error("navigation failed"));
     await expect(control.agent("agent", async () => "resumed")).resolves.toBe("resumed");
+  });
+
+  it.each(["release", "disconnect"] as const)(
+    "%s drains every viewer navigation and cleanup before agent actions",
+    async (handoff) => {
+      const control = new SessionControl("agent");
+      await control.take("viewer");
+      const slow = Promise.withResolvers<void>();
+      const replacement = Promise.withResolvers<void>();
+      const events: string[] = [];
+      await control.human("viewer", async () => control.trackUntilHandoff(slow.promise));
+      await control.human("viewer", async () => control.trackUntilHandoff(replacement.promise));
+      await control.human("viewer", async () => events.push("human typed"));
+      const handingOff = control[handoff]("viewer", async () => {
+        events.push("input released");
+      });
+      const resumed = control.agent("agent", async () => events.push("agent resumed"));
+      replacement.resolve();
+      await replacement.promise;
+      expect(events).toEqual(["human typed"]);
+      slow.reject(new Error("navigation replaced"));
+      await Promise.all([handingOff, resumed]);
+      expect(events).toEqual(["human typed", "input released", "agent resumed"]);
+    },
+  );
+
+  it("closing does not wait for a viewer navigation or allow it to revive control", async () => {
+    const control = new SessionControl("agent");
+    await control.take("viewer");
+    const navigation = Promise.withResolvers<void>();
+    await control.human("viewer", async () => control.trackUntilHandoff(navigation.promise));
+    const queued = expect(control.human("viewer", async () => "stale input")).rejects.toThrow(
+      "closed",
+    );
+    await control.close();
+    await queued;
+    await expect(control.agent("agent", async () => "late action")).rejects.toThrow("closed");
+    await expect(control.take("viewer")).rejects.toThrow("closed");
+    navigation.reject(new Error("page closed"));
+    await control.disconnect("viewer");
+    expect(control.controller).toBeNull();
+    expect(control.generation).toBe(2);
   });
 
   it("only lets the assigned agent act and restores that agent after human control", async () => {

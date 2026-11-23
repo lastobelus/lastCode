@@ -18,6 +18,7 @@ export const WEB_LINK_READY_CHANNEL = "desktop:web-link-ready";
 export const QUIT_SHORTCUT_CHANNEL = "desktop:quit-shortcut";
 export const TRACKPAD_SCROLL_BEGIN_CHANNEL = "desktop:trackpad-scroll-begin";
 export const TRACKPAD_SCROLL_END_CHANNEL = "desktop:trackpad-scroll-end";
+export const REPORT_RUNNING_ACTION_COUNT_CHANNEL = "desktop:report-running-action-count";
 export const GET_WINDOW_FULLSCREEN_STATE_CHANNEL = "desktop:get-window-fullscreen-state";
 export const WINDOW_FULLSCREEN_STATE_CHANNEL = "desktop:window-fullscreen-state";
 export const SYNC_HTML_FULLSCREEN_CHANNEL = "desktop:sync-html-fullscreen";
@@ -34,6 +35,11 @@ export const CLI_COMMAND_GET_STATE_CHANNEL = "desktop:cli-command-get-state";
 export const CLI_COMMAND_INSTALL_CHANNEL = "desktop:cli-command-install";
 export const CLI_COMMAND_UNINSTALL_CHANNEL = "desktop:cli-command-uninstall";
 export const CLI_COMMAND_ADD_TO_PATH_CHANNEL = "desktop:cli-command-add-to-path";
+export const LASTCODE_SETTINGS_GET_CHANNEL = "desktop:lastcode-settings-get";
+export const LASTCODE_SETTINGS_SET_LOCAL_NIGHTLIES_CHANNEL =
+  "desktop:lastcode-settings-set-local-nightlies";
+export const LASTCODE_SETTINGS_IMPORT_PREVIEW_CHANNEL = "desktop:lastcode-settings-import-preview";
+export const LASTCODE_SETTINGS_IMPORT_CHANNEL = "desktop:lastcode-settings-import";
 export const GET_APP_BRANDING_CHANNEL = "desktop:get-app-branding";
 export const GET_RELAY_TELEMETRY_ENABLED_CHANNEL = "desktop:get-relay-telemetry-enabled";
 export const GET_SYSTEM_LOCALE_CHANNEL = "desktop:get-system-locale";
@@ -154,3 +160,9 @@ export const COMPLETE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:complete-legacy-lo
 export const RESTART_AUDIO_SERVICE_CHANNEL = "desktop:restart-audio-service";
 
 export const START_FILE_DRAG_CHANNEL = "desktop:start-file-drag";
+
+export const DESKTOP_BROWSER_COMMAND_CHANNEL = "desktop:browser:command";
+export const DESKTOP_BROWSER_EVENT_CHANNEL = "desktop:browser:event";
+export const DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL = "desktop:browser:surface-request";
+export const DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL = "desktop:browser:surface-response";
+export const DESKTOP_BROWSER_PRESENTATION_CHANNEL = "desktop:browser:presentation";
