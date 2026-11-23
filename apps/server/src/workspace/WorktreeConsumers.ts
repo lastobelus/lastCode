@@ -661,9 +661,9 @@ export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObserv
 
 type WorktreeConsumerSweep = {
   readonly inventory: SweepInventory;
-  readonly freshTargets: TargetObservation;
+  readonly freshObservation: TargetObservation;
   readonly screeningPaths: Effect.Effect<ReadonlyArray<string> | null>;
-  readonly screeningTargets: TargetObservation;
+  readonly screeningObservation: TargetObservation;
 };
 
 class WorktreeConsumerSweepContext extends Context.Reference<WorktreeConsumerSweep | undefined>(
@@ -676,22 +676,29 @@ const captureWorktreePaths = (sweep: WorktreeConsumerSweep | undefined) =>
     sweep === undefined ? capture : measureProcessCapture(capture, sweep.inventory.measurement),
   );
 
-export const makeSweepWorktreeConsumers = Effect.gen(function* () {
-  const inventory = makeSweepInventory();
-  const capture = yield* ProcessPaths;
-  const screeningPaths = yield* Effect.cached(
-    measureProcessCapture(capture, inventory.measurement),
-  );
-  return {
-    inventory,
-    provide: Effect.provideService(WorktreeConsumerSweepContext, {
+export const makeSweepWorktreeConsumers = Effect.fn("WorktreeConsumers.makeSweepWorktreeConsumers")(
+  function* (targetedWorktreeCount?: number) {
+    const inventory = makeSweepInventory();
+    const capture = yield* ProcessPaths;
+    const screeningPaths = yield* Effect.cached(
+      measureProcessCapture(capture, inventory.measurement),
+    );
+    const freshObservation: TargetObservation = { sweep: inventory };
+    return {
       inventory,
-      freshTargets: { sweep: inventory },
-      screeningPaths,
-      screeningTargets: makeSweepTargets(inventory),
-    }),
-  };
-});
+      provide: Effect.provideService(WorktreeConsumerSweepContext, {
+        inventory,
+        freshObservation,
+        screeningPaths,
+        // Distinct worktrees rarely share target evidence; keep each walk local to its check.
+        screeningObservation:
+          targetedWorktreeCount === 1
+            ? freshObservation
+            : { sweep: inventory, captures: new WeakMap() },
+      }),
+    };
+  },
+);
 
 const sweepResolutions = (captures: CaptureResolutionCache, paths: readonly string[]) => {
   const previous = captures.get(paths);
@@ -1163,7 +1170,7 @@ export const worktreeConsumerPreflightReason = Effect.fn(
         return "Worktree root is not canonical.";
       // An owned preview may itself be the runtime; the final removal guard
       // checks runtime descriptors again after preview shutdown.
-      await processPathsUseRoot(canonicalRoot, paths, sweep?.freshTargets, true);
+      await processPathsUseRoot(canonicalRoot, paths, sweep?.freshObservation, true);
       return null;
     },
     catch: (cause) =>
@@ -1215,7 +1222,7 @@ export const worktreeConsumerReason = Effect.fnUntraced(function* (
   return yield* worktreeConsumerReasonWithCapture(
     canonicalRoot,
     capturedPaths === undefined ? captureWorktreePaths(sweep) : Effect.succeed(capturedPaths),
-    observation ?? sweep?.freshTargets,
+    observation ?? sweep?.freshObservation,
   );
 });
 
@@ -1227,6 +1234,6 @@ export const screenWorktreeConsumerReason = Effect.fnUntraced(function* (canonic
     : worktreeConsumerReasonWithCapture(
         canonicalRoot,
         sweep.screeningPaths,
-        sweep.screeningTargets,
+        sweep.screeningObservation,
       );
 });

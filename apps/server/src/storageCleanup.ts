@@ -4901,14 +4901,6 @@ const make = Effect.gen(function* () {
     );
     const runOutputs = scheduledGroup !== "housekeeping";
     const runHousekeeping = scheduledGroup !== "outputs";
-    const worktreeConsumers = yield* WorktreeConsumers.makeSweepWorktreeConsumers;
-    // One lazy observation for both resource passes; retain the original array's
-    // native identity metadata. Final removal scans remain independent and fresh.
-    const {
-      paths: observationProcessPaths,
-      targets: observationTargets,
-      annotate: annotateInventory,
-    } = yield* WorktreeConsumers.makeSweepObservation(processPaths, worktreeConsumers.inventory);
     const automaticWork: AutomaticOutputWork | undefined =
       trigger === "automatic"
         ? {
@@ -4923,6 +4915,16 @@ const make = Effect.gen(function* () {
                   ),
           }
         : undefined;
+    const worktreeConsumers = yield* WorktreeConsumers.makeSweepWorktreeConsumers(
+      automaticWork?.paths?.size,
+    );
+    // One lazy observation for both resource passes; retain the original array's
+    // native identity metadata. Final removal scans remain independent and fresh.
+    const {
+      paths: observationProcessPaths,
+      targets: observationTargets,
+      annotate: annotateInventory,
+    } = yield* WorktreeConsumers.makeSweepObservation(processPaths, worktreeConsumers.inventory);
     yield* audit({
       event: "sweep-start",
       runId,

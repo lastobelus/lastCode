@@ -1744,6 +1744,58 @@ describe("Fresh native observation retry", () => {
 });
 
 describe("worktree removal guard", () => {
+  const denseScreeningPaths = () => {
+    const files = ["one", "two", "three", "four"].map((name) => `/system/example/${name}`);
+    darwinFixture(
+      "p101\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+        files.map((path, index) => `f${index + 4}\0tREG\0n${path}\0\n`).join(""),
+    );
+    const stats = targetFixture();
+    stats.set("/system/example", objectStat(11n, true));
+    for (const [index, path] of files.entries()) stats.set(path, objectStat(BigInt(12 + index)));
+  };
+
+  it.effect("keeps fallback walk evidence local to each worktree screen", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      yield* Effect.gen(function* () {
+        expect(
+          yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example"),
+        ).toBeNull();
+        expect(
+          yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example/dist"),
+        ).toBeNull();
+      }).pipe(worktrees.provide);
+      expect(native.execFile).toHaveBeenCalledOnce();
+      expect(native.opendir.mock.calls.map(([path]) => path)).toEqual([
+        "/workspace/example",
+        "/workspace/example/dist",
+        "/workspace/example/dist",
+      ]);
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+    ),
+  );
+
+  it.effect("uses direct path resolutions when a sweep targets one worktree", () =>
+    Effect.gen(function* () {
+      denseScreeningPaths();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers(1);
+      expect(
+        yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example").pipe(
+          worktrees.provide,
+        ),
+      ).toBeNull();
+      expect(native.lstat).not.toHaveBeenCalledWith("/system/example", { bigint: true });
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+    ),
+  );
+
   it.effect("counts fresh worktree checks and preview preflight in the worktree inventory", () =>
     Effect.gen(function* () {
       const root = "/workspace/example";
@@ -1757,7 +1809,7 @@ describe("worktree removal guard", () => {
         if (path.startsWith("/system/example/")) throw missing();
         return path;
       });
-      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers;
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
       const outputs = yield* WorktreeConsumers.makeSweepObservation(
         inventory("darwin"),
         worktrees.inventory,
@@ -1800,16 +1852,8 @@ describe("worktree removal guard", () => {
     Effect.gen(function* () {
       const root = "/workspace/example";
       const lateRoot = "/workspace/other";
-      const outsideFiles = ["one", "two", "three", "four"].map((name) => `/system/example/${name}`);
-      darwinFixture(
-        "p101\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
-          outsideFiles.map((path, index) => `f${index + 4}\0tREG\0n${path}\0\n`).join(""),
-      );
-      const stats = targetFixture();
-      stats.set("/system/example", objectStat(11n, true));
-      for (const [index, path] of outsideFiles.entries())
-        stats.set(path, objectStat(BigInt(12 + index)));
-      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers;
+      denseScreeningPaths();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
       const outputs = yield* WorktreeConsumers.makeSweepObservation(
         inventory("darwin"),
         worktrees.inventory,
@@ -1835,7 +1879,7 @@ describe("worktree removal guard", () => {
           pathResolutions: 6,
         },
       });
-      const next = yield* WorktreeConsumers.makeSweepWorktreeConsumers;
+      const next = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
       expect(
         yield* WorktreeConsumers.screenWorktreeConsumerReason(lateRoot).pipe(next.provide),
       ).toBe("A process is using a file or directory in the worktree.");
