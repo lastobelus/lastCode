@@ -42,6 +42,8 @@ describe("wrapped LastCode commands", () => {
     "./scripts/lc-run prepare && vp run dev",
     "./scripts/lc-run prepare | tee output",
     "cd /worktree; ./scripts/lc-run prepare",
+    'cd "$PWD" && ./scripts/lc-run prepare',
+    "cd -P /worktree && ./scripts/lc-run prepare",
     "echo cd /worktree && ./scripts/lc-run prepare",
     "cd '/worktree && ./scripts/lc-run prepare'",
     "sh -c './scripts/lc-run prepare; vp run dev'",
