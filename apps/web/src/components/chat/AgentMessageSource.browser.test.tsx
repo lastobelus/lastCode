@@ -50,6 +50,9 @@ it("reveals the sender's project and ancestors on hover without subscribing clos
   await userEvent.hover(screen.getByRole("button", { name: "Open sending thread" }));
   const tooltip = page.getByRole("tooltip");
   await expect.element(tooltip).toBeVisible();
+  const viewport = tooltip.element().querySelector('[data-slot="tooltip-viewport"]');
+  expect(viewport).not.toBeNull();
+  expect(getComputedStyle(viewport!).padding).toBe("0px");
   await vi.waitFor(() => {
     expect(tooltip.element().textContent).toContain("Example project");
     expect(tooltip.element().textContent).toContain("Parent thread");

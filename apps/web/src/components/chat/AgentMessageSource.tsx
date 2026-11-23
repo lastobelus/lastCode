@@ -6,7 +6,7 @@ import { useId } from "react";
 import { useProject, useQuietThreadShells } from "../../state/entities";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { isSidebarSubagentThread } from "../Sidebar.logic";
-import { ThreadHoverCardPopup } from "../ThreadHoverCard";
+import { LastCodeThreadHoverCardPopup } from "../LastCodeThreadHoverCardPopup";
 import { lastcodeSidebarThreadPath } from "../lastcodeSidebarFamilies.logic";
 import { InlineButton } from "../ui/button";
 import { Tooltip, TooltipTrigger } from "../ui/tooltip";
@@ -37,15 +37,14 @@ export function AgentMessageSource({
       >
         <T>Sent by another agent</T>
       </TooltipTrigger>
-      <ThreadHoverCardPopup
+      <LastCodeThreadHoverCardPopup
         id={descriptionId}
         role="tooltip"
         align="end"
-        viewportPadding="none"
         className="max-w-[min(50ch,var(--available-width))]"
       >
         <SenderBreadcrumb senderRef={senderRef} currentThreadRef={currentThreadRef} />
-      </ThreadHoverCardPopup>
+      </LastCodeThreadHoverCardPopup>
     </Tooltip>
   );
 }
