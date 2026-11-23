@@ -12,8 +12,9 @@ export function isThreadAnnotationHidden(annotation: ThreadAnnotation | null | u
 export function isThreadAnnotationVisibleInPalette(
   thread: { readonly annotation?: ThreadAnnotation | null | undefined; readonly title: string },
   query: string,
+  hiddenByOwner = false,
 ): boolean {
-  if (!isThreadAnnotationHidden(thread.annotation)) return true;
+  if (!hiddenByOwner && !isThreadAnnotationHidden(thread.annotation)) return true;
   const titleQuery = query.trim().toLowerCase();
   return titleQuery.length > 0 && thread.title.toLowerCase().includes(titleQuery);
 }

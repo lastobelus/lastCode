@@ -40,6 +40,24 @@ describe("LastCode palette thread listing", () => {
     expect(threads.filter(listed)).toEqual([owner, launched]);
   });
 
+  it("requires a matching title search for an owned child hidden with its parent", () => {
+    const child = { ...launched, title: "Verify child", branch: "topic-branch" };
+    const annotationHidden = new Set([lastcodeSidebarThreadKey(child)]);
+    const isListed = (query: string, tags = new Set<string>()) =>
+      lastCodePaletteThreadPredicate(
+        [owner, child],
+        new Set(),
+        tags,
+        query,
+        annotationHidden,
+      )(child);
+
+    expect(isListed("")).toBe(false);
+    expect(isListed("topic-branch")).toBe(false);
+    expect(isListed("  VERIFY  ")).toBe(true);
+    expect(isListed("verify", annotationHidden)).toBe(false);
+  });
+
   it("keeps visible children listed when the owner has a hidden tag", () => {
     const listed = lastCodePaletteThreadPredicate(threads, delegatedUnderParent, hidden, "");
     expect(threads.filter(listed)).toEqual([launched, delegated, subagent]);

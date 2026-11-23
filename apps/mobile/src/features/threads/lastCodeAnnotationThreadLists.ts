@@ -34,8 +34,15 @@ export function getLastCodeAnnotationOrderedSection(
 export function filterLastCodeMobilePaletteThreads(
   threads: readonly EnvironmentThreadShell[],
   query: string,
+  annotationHiddenThreadKeys: ReadonlySet<string>,
 ) {
-  const visible = threads.filter((thread) => isThreadAnnotationVisibleInPalette(thread, query));
+  const visible = threads.filter((thread) =>
+    isThreadAnnotationVisibleInPalette(
+      thread,
+      query,
+      annotationHiddenThreadKeys.has(scopedThreadKey(thread.environmentId, thread.id)),
+    ),
+  );
   return visible.length === threads.length ? threads : visible;
 }
 

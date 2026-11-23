@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import {
@@ -10,6 +11,7 @@ import {
   useThreadShells,
   useVisibleThreadShells,
 } from "../../state/entities";
+import { environmentThreadShells } from "../../state/threads";
 import type { SidebarThreadSummary } from "../../types";
 import {
   lastcodeSidebarOwnerRef,
@@ -22,12 +24,14 @@ export function lastCodePaletteThreadPredicate(
   delegatedUnderParent: ReadonlySet<string>,
   tagHidden: ReadonlySet<string>,
   query: string,
+  annotationHiddenThreadKeys?: ReadonlySet<string>,
 ) {
-  const annotationHidden = new Set(
-    threads
-      .filter((thread) => isThreadAnnotationHidden(thread.annotation))
-      .map(lastcodeSidebarThreadKey),
-  );
+  const annotationHidden = new Set(annotationHiddenThreadKeys);
+  for (const thread of threads) {
+    if (isThreadAnnotationHidden(thread.annotation)) {
+      annotationHidden.add(lastcodeSidebarThreadKey(thread));
+    }
+  }
   const availableOwners =
     query.trim().length > 0
       ? new Set(
@@ -43,11 +47,12 @@ export function lastCodePaletteThreadPredicate(
       : null;
   return (thread: SidebarThreadSummary) => {
     const ref = scopeThreadRef(thread.environmentId, thread.id);
+    const key = scopedThreadKey(ref);
     if (
       thread.lineage.sideChat === true ||
       thread.deletedAt !== null ||
-      tagHidden.has(scopedThreadKey(ref)) ||
-      !isThreadAnnotationVisibleInPalette(thread, query)
+      tagHidden.has(key) ||
+      !isThreadAnnotationVisibleInPalette(thread, query, annotationHidden.has(key))
     )
       return false;
     if (!isShownUnderParent(ref, thread.lineage, delegatedUnderParent)) return true;
@@ -73,9 +78,16 @@ export function useLastCodeCommandPaletteThreadListing(query: string) {
   const visibleThreads = useVisibleThreadShells(!lastCodeSidebar);
   const delegatedUnderParent = useDelegatedUnderParent();
   const tagHidden = useLastCodeTagHiddenThreadKeys(allThreads);
+  const annotationHidden = useAtomValue(environmentThreadShells.annotationHiddenThreadKeysAtom);
   if (!lastCodeSidebar)
     return {
-      threads: visibleThreads.filter((thread) => isThreadAnnotationVisibleInPalette(thread, query)),
+      threads: visibleThreads.filter((thread) =>
+        isThreadAnnotationVisibleInPalette(
+          thread,
+          query,
+          annotationHidden.has(lastcodeSidebarThreadKey(thread)),
+        ),
+      ),
       delegatedUnderParent,
     };
   return {
@@ -85,6 +97,7 @@ export function useLastCodeCommandPaletteThreadListing(query: string) {
       delegatedUnderParent,
       tagHidden,
       query,
+      annotationHidden,
     ),
   };
 }

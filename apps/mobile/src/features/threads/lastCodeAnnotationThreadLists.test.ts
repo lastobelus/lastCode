@@ -39,11 +39,13 @@ const annotated = makeThreadShellFixture({
 describe("mobile annotation navigation", () => {
   it("uses a trimmed title match at the command palette seam", () => {
     const visible = makeThreadShellFixture({ environmentId, id: ThreadId.make("visible") });
-    const threads = [annotated, visible];
-    expect(filterLastCodeMobilePaletteThreads(threads, "")).toEqual([visible]);
-    expect(filterLastCodeMobilePaletteThreads(threads, "  ")).toEqual([visible]);
-    expect(filterLastCodeMobilePaletteThreads(threads, "next-release")).toEqual([visible]);
-    expect(filterLastCodeMobilePaletteThreads(threads, "  PAIRING  ")).toEqual(threads);
+    const inherited = { ...annotated, id: ThreadId.make("inherited"), annotation: null };
+    const hidden = new Set([scopedThreadKey(environmentId, inherited.id)]);
+    const threads = [annotated, inherited, visible];
+    expect(filterLastCodeMobilePaletteThreads(threads, "", hidden)).toEqual([visible]);
+    expect(filterLastCodeMobilePaletteThreads(threads, "  ", hidden)).toEqual([visible]);
+    expect(filterLastCodeMobilePaletteThreads(threads, "next-release", hidden)).toEqual([visible]);
+    expect(filterLastCodeMobilePaletteThreads(threads, "  PAIRING  ", hidden)).toEqual(threads);
   });
 
   it("retains the open drawer row only when it belongs to that environment's input", () => {
