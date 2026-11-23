@@ -52,11 +52,10 @@ done
 
 The comparison reports one model and effort at a time. The codified pass bar is 20 complete samples per arm in each of the six cases, a majority of correct wrapper samples and at least as many correct samples as Actions **in each case**, zero post-instruction wrapper polls, and lower mean raw tokens per task across the six cases. The report includes per-case raw costs to expose any regressions hidden by the aggregate. A missing trace or missing usage makes the decision incomplete. A valid failure counts, including its measured tokens. The live break tests and soak in #824 remain separate gates.
 
-To reuse the saved arm A Luna run, start the arm B server from this checkout and choose a new output name. The arm A fixtures and scoring match the saved run. Both arms use that run's exit-code matcher, which can reject reports that bold the exit code. The server revisions differ, so pass the exact saved arm A head to record both revisions.
+To compare runs from different revisions, use results scored by the same rubric and pass arm A's exact recorded head. The comparison reads the saved grades as written. Earlier runs that rejected Markdown formatting around exit codes need an offline regrade before comparison with the corrected rubric.
 
 ```sh
-node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna-pr833
-node evals/background-wait/compare.ts "$a/background-wait-eval/luna/results.json" "$b/background-wait-eval/luna-pr833/results.json" --baseline-head 7203dc52fc8f208dbebcafc21737241ac9dbfd73
+node evals/background-wait/compare.ts "$a_results" "$b_results" --baseline-head "$a_head"
 ```
 
 For a smoke run, use a separate output name with `--samples 1 --case prepare,quick-ci,standing-watch`. The fixture uses the checked-out wrapper as shipped. The comparison JSON includes `redundantMarksPerWrapperWait`, the number of redundant marks divided by background wait instructions observed.

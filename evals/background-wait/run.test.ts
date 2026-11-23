@@ -457,6 +457,8 @@ describe("real-session evidence", () => {
         ...input,
         traces: [[], [...trace]],
         wrapperWakeIds: ["worker-command"],
+        workerMessage: "**Result ID** `result-example`\n**Exit code:** `3`",
+        finalMessage: "Quick CI's exit code was **3**. Result ID `result-example`.",
       }),
     ).toMatchObject({ correct: true, holds: 0, holdExpected: 1, holdEngaged: false });
     const holds = awaitedWrapperIds(

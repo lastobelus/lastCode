@@ -92,9 +92,9 @@ export function gradeSample(input: GradeInput): SampleResult {
     resultId !== undefined &&
     message.includes(resultId) &&
     new RegExp(
-      `\\bexit(?:ed)?(?:\\s+(?:with|status|code))*[\\s:=(]*${scenario.exitCode}\\b`,
+      `\\bexit(?:ed)?(?:\\s+(?:with|status|code))*(?:\\s+was)?[\\s:=(]*${scenario.exitCode}\\b`,
       "iu",
-    ).test(message.replaceAll("`", ""));
+    ).test(message.replaceAll(/[`*_]/gu, ""));
   if (!reportsResult(finalMessage) || !reportsResult(workerMessage)) {
     problems.push("Final response omitted the exact result ID or exit code.");
   }
