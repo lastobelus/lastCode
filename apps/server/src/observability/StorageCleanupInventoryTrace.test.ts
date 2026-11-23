@@ -42,6 +42,13 @@ it("shows inventory for completed sweeps and retains all sweep spans", () => {
           { kind: "socket", process: "worker", walks: 2 },
           { kind: "vnode", process: "node", walks: 3 },
         ],
+        worktrees: {
+          ...metrics,
+          processCaptures: 6,
+          processCaptureMs: 42,
+          treeWalks: 8,
+          walkTriggers: [{ kind: "socket", process: "preview", walks: 8 }],
+        },
       },
     },
     { value: emptyStorageCleanupInventoryTrace() },
@@ -89,4 +96,6 @@ it("shows inventory for completed sweeps and retains all sweep spans", () => {
   assert.include(formatted, "Walk triggers            socket worker (2), vnode node (3)");
   assert.include(formatted, "Recent-use skips         4");
   assert.include(formatted, "Target revalidations     3 in 225ms");
+  assert.include(formatted, "Worktree consumers\n      Native capture attempts  6 in 42ms");
+  assert.include(formatted, "Walk triggers            socket preview (8)");
 });

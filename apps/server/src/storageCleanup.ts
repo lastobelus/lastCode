@@ -4101,7 +4101,9 @@ const make = Effect.gen(function* () {
                 return "folder is a symbolic link";
             }
           }
-          return yield* WorktreeConsumers.worktreeConsumerReason(consumerRoot);
+          return yield* screening
+            ? WorktreeConsumers.screenWorktreeConsumerReason(consumerRoot)
+            : WorktreeConsumers.worktreeConsumerReason(consumerRoot);
         });
         const settingsChangedSinceCheck = Effect.gen(function* () {
           const currentSettings = yield* settingsService.getSettings;
@@ -4899,13 +4901,6 @@ const make = Effect.gen(function* () {
     );
     const runOutputs = scheduledGroup !== "housekeeping";
     const runHousekeeping = scheduledGroup !== "outputs";
-    // One lazy observation for both resource passes; retain the original array's
-    // native identity metadata. Final removal scans remain independent and fresh.
-    const {
-      paths: observationProcessPaths,
-      targets: observationTargets,
-      annotate: annotateInventory,
-    } = yield* WorktreeConsumers.makeSweepObservation(processPaths);
     const automaticWork: AutomaticOutputWork | undefined =
       trigger === "automatic"
         ? {
@@ -4920,6 +4915,16 @@ const make = Effect.gen(function* () {
                   ),
           }
         : undefined;
+    const worktreeConsumers = yield* WorktreeConsumers.makeSweepWorktreeConsumers(
+      automaticWork?.paths?.size,
+    );
+    // One lazy observation for both resource passes; retain the original array's
+    // native identity metadata. Final removal scans remain independent and fresh.
+    const {
+      paths: observationProcessPaths,
+      targets: observationTargets,
+      annotate: annotateInventory,
+    } = yield* WorktreeConsumers.makeSweepObservation(processPaths, worktreeConsumers.inventory);
     yield* audit({
       event: "sweep-start",
       runId,
@@ -4991,7 +4996,6 @@ const make = Effect.gen(function* () {
       ),
       Effect.when(Effect.succeed(runOutputs)),
     );
-    yield* annotateInventory;
     const deletedWorktrees = yield* cleanWorktrees(
       serverSettings,
       now,
@@ -4999,6 +5003,7 @@ const make = Effect.gen(function* () {
       runId,
       automaticWork,
     ).pipe(
+      worktreeConsumers.provide,
       Effect.catch((error) =>
         Effect.gen(function* () {
           const entry: CleanupWorkingEntry = {
@@ -5027,7 +5032,7 @@ const make = Effect.gen(function* () {
       sweptDeletions = deletionsAtStart;
     }
     if (runHousekeeping && (trigger === "manual" || automaticRequest?.full === true || scheduled))
-      yield* savedWorkspaces.sweep;
+      yield* savedWorkspaces.sweep.pipe(worktreeConsumers.provide);
     if (
       runHousekeeping &&
       automaticWork?.paths == null &&
@@ -5162,6 +5167,7 @@ const make = Effect.gen(function* () {
       omittedCount: latestReport.omittedCount,
     });
     yield* SubscriptionRef.set(reportRef, latestReport);
+    yield* annotateInventory;
     if (scheduledGroup !== "all")
       nextScheduledGroup = scheduledGroup === "outputs" ? "housekeeping" : "outputs";
     return latestReport;

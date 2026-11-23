@@ -1744,6 +1744,153 @@ describe("Fresh native observation retry", () => {
 });
 
 describe("worktree removal guard", () => {
+  const denseScreeningPaths = () => {
+    const files = ["one", "two", "three", "four"].map((name) => `/system/example/${name}`);
+    darwinFixture(
+      "p101\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+        files.map((path, index) => `f${index + 4}\0tREG\0n${path}\0\n`).join(""),
+    );
+    const stats = targetFixture();
+    stats.set("/system/example", objectStat(11n, true));
+    for (const [index, path] of files.entries()) stats.set(path, objectStat(BigInt(12 + index)));
+  };
+
+  it.effect("keeps fallback walk evidence local to each worktree screen", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      yield* Effect.gen(function* () {
+        expect(
+          yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example"),
+        ).toBeNull();
+        expect(
+          yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example/dist"),
+        ).toBeNull();
+      }).pipe(worktrees.provide);
+      expect(native.execFile).toHaveBeenCalledOnce();
+      expect(native.opendir.mock.calls.map(([path]) => path)).toEqual([
+        "/workspace/example",
+        "/workspace/example/dist",
+        "/workspace/example/dist",
+      ]);
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+    ),
+  );
+
+  it.effect("uses direct path resolutions when a sweep targets one worktree", () =>
+    Effect.gen(function* () {
+      denseScreeningPaths();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers(1);
+      expect(
+        yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example").pipe(
+          worktrees.provide,
+        ),
+      ).toBeNull();
+      expect(native.lstat).not.toHaveBeenCalledWith("/system/example", { bigint: true });
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+    ),
+  );
+
+  it.effect("counts fresh worktree checks and preview preflight in the worktree inventory", () =>
+    Effect.gen(function* () {
+      const root = "/workspace/example";
+      darwinFixture(
+        "p101\0c/private/fixture/bin/worker\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          "f4\0tREG\0D0x12\0i99\0n/system/example/file\0\n" +
+          "f5\0tunix\0n/system/example/socket\0\n",
+      );
+      targetFixture();
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path.startsWith("/system/example/")) throw missing();
+        return path;
+      });
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      const outputs = yield* WorktreeConsumers.makeSweepObservation(
+        inventory("darwin"),
+        worktrees.inventory,
+      );
+      yield* Effect.gen(function* () {
+        expect(yield* WorktreeConsumers.worktreeConsumerReason(root)).toBeNull();
+        expect(yield* WorktreeConsumers.worktreeConsumerPreflightReason(root)).toBeNull();
+      }).pipe(worktrees.provide);
+      yield* outputs.annotate;
+      const metrics = (yield* Effect.currentSpan).attributes.get(
+        STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+      );
+      expect(metrics).toMatchObject({
+        processCaptures: 0,
+        treeWalks: 0,
+        worktrees: {
+          processCaptures: 2,
+          pathResolutions: 6,
+          uniquePaths: 3,
+          cachedPathChecks: 0,
+          directoryChecks: 0,
+          treeWalks: 2,
+          objectsVisited: 8,
+          targetRevalidations: 0,
+          walkTriggers: [
+            { kind: "socket", process: "worker", walks: 2 },
+            { kind: "vnode", process: "worker", walks: 2 },
+          ],
+        },
+      });
+      expect(JSON.stringify(metrics)).not.toContain("/private/fixture");
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+      Effect.withSpan("StorageCleanup.sweep"),
+    ),
+  );
+
+  it.effect("shares only screening captures and keeps a late consumer on the fresh guard", () =>
+    Effect.gen(function* () {
+      const root = "/workspace/example";
+      const lateRoot = "/workspace/other";
+      denseScreeningPaths();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      const outputs = yield* WorktreeConsumers.makeSweepObservation(
+        inventory("darwin"),
+        worktrees.inventory,
+      );
+      yield* Effect.gen(function* () {
+        expect(yield* WorktreeConsumers.screenWorktreeConsumerReason(root)).toBeNull();
+        darwinFixture(`p101\0\nfcwd\0tDIR\0n${lateRoot}\0\n`);
+        expect(yield* WorktreeConsumers.screenWorktreeConsumerReason(lateRoot)).toBeNull();
+        expect(native.execFile).toHaveBeenCalledOnce();
+        expect(yield* WorktreeConsumers.worktreeConsumerReason(lateRoot)).toBe(
+          "A process is using a file or directory in the worktree.",
+        );
+        expect(native.execFile).toHaveBeenCalledTimes(2);
+      }).pipe(worktrees.provide);
+      yield* outputs.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        worktrees: {
+          processCaptures: 2,
+          cachedPathChecks: 4,
+          directoryChecks: 2,
+          pathResolutions: 6,
+        },
+      });
+      const next = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      expect(
+        yield* WorktreeConsumers.screenWorktreeConsumerReason(lateRoot).pipe(next.provide),
+      ).toBe("A process is using a file or directory in the worktree.");
+      expect(native.execFile).toHaveBeenCalledTimes(3);
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+      Effect.withSpan("StorageCleanup.sweep"),
+    ),
+  );
+
   it.effect("checks the complete process inventory before releasing previews", () =>
     Effect.gen(function* () {
       const paths = ["/workspace/example/preview", "not-an-absolute-path"];

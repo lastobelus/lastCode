@@ -11,7 +11,7 @@ const StorageCleanupWalkTrigger = Schema.Struct({
 
 export type StorageCleanupWalkTrigger = typeof StorageCleanupWalkTrigger.Type;
 
-const StorageCleanupInventoryTrace = Schema.Struct({
+const StorageCleanupInventoryCounters = Schema.Struct({
   processCaptures: Schema.Finite,
   processCaptureMs: Schema.Finite,
   uniquePaths: Schema.Finite,
@@ -28,6 +28,11 @@ const StorageCleanupInventoryTrace = Schema.Struct({
   targetRevalidationMs: Schema.Finite,
   skippedRecentUsageChecks: Schema.optional(Schema.Finite),
   walkTriggers: Schema.optional(Schema.Array(StorageCleanupWalkTrigger)),
+});
+
+const StorageCleanupInventoryTrace = Schema.Struct({
+  ...StorageCleanupInventoryCounters.fields,
+  worktrees: Schema.optional(StorageCleanupInventoryCounters),
 });
 
 export const emptyStorageCleanupInventoryTrace = () => ({
@@ -71,29 +76,39 @@ export const formatStorageCleanupInventory = (
   sweeps: readonly InventorySweep[],
   formatEnd: (value: number) => string,
   formatMs: (value: number) => string,
-) =>
-  sweeps.length === 0
+) => {
+  const formatCounters = (inventory: typeof StorageCleanupInventoryCounters.Type) => [
+    `Native capture attempts  ${inventory.processCaptures} in ${formatMs(inventory.processCaptureMs)}`,
+    `Path resolutions         ${inventory.pathResolutions} for ${inventory.uniquePaths} distinct paths in ${formatMs(inventory.pathResolutionMs)}`,
+    `Cached path checks       ${inventory.cachedPathChecks} in ${formatMs(inventory.cachedPathCheckMs)}`,
+    `Directory checks         ${inventory.directoryChecks} in ${formatMs(inventory.directoryCheckMs)}`,
+    `Tree walks               ${inventory.treeWalks} visiting ${inventory.objectsVisited} objects in ${formatMs(inventory.treeWalkMs)}`,
+    ...(inventory.walkTriggers && inventory.walkTriggers.length > 0
+      ? [
+          `Walk triggers            ${inventory.walkTriggers
+            .map((trigger) => `${trigger.kind} ${trigger.process} (${trigger.walks})`)
+            .join(", ")}`,
+        ]
+      : []),
+    ...(inventory.skippedRecentUsageChecks !== undefined
+      ? [`Recent-use skips         ${inventory.skippedRecentUsageChecks}`]
+      : []),
+    `Target revalidations     ${inventory.targetRevalidations} in ${formatMs(inventory.targetRevalidationMs)}`,
+  ];
+  return sweeps.length === 0
     ? []
     : [
         "",
         "Storage cleanup usage inventory by completed sweep",
         ...sweeps.flatMap(({ endMs, inventory }) => [
           `  ${formatEnd(endMs)}`,
-          `    Native capture attempts  ${inventory.processCaptures} in ${formatMs(inventory.processCaptureMs)}`,
-          `    Path resolutions         ${inventory.pathResolutions} for ${inventory.uniquePaths} distinct paths in ${formatMs(inventory.pathResolutionMs)}`,
-          `    Cached path checks       ${inventory.cachedPathChecks} in ${formatMs(inventory.cachedPathCheckMs)}`,
-          `    Directory checks         ${inventory.directoryChecks} in ${formatMs(inventory.directoryCheckMs)}`,
-          `    Tree walks               ${inventory.treeWalks} visiting ${inventory.objectsVisited} objects in ${formatMs(inventory.treeWalkMs)}`,
-          ...(inventory.walkTriggers && inventory.walkTriggers.length > 0
-            ? [
-                `    Walk triggers            ${inventory.walkTriggers
-                  .map((trigger) => `${trigger.kind} ${trigger.process} (${trigger.walks})`)
-                  .join(", ")}`,
-              ]
-            : []),
-          ...(inventory.skippedRecentUsageChecks !== undefined
-            ? [`    Recent-use skips         ${inventory.skippedRecentUsageChecks}`]
-            : []),
-          `    Target revalidations     ${inventory.targetRevalidations} in ${formatMs(inventory.targetRevalidationMs)}`,
+          ...formatCounters(inventory).map((line) => `    ${line}`),
+          ...(inventory.worktrees === undefined
+            ? []
+            : [
+                "    Worktree consumers",
+                ...formatCounters(inventory.worktrees).map((line) => `      ${line}`),
+              ]),
         ]),
       ];
+};
