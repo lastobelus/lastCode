@@ -681,12 +681,17 @@ export const t3SubagentContext = async (model: Model, device = true, browser = t
  * descriptions and schemas (loaded on demand here, sent up front by harnesses without
  * deferred tools). Tokens are estimated at 4 characters each.
  */
-const t3ContextReport = (model: Model) => {
+const t3ContextReport = (model: Model, backgroundWait: boolean) => {
   const size = (chars: number) => `${chars} chars (~${Math.round(chars / 4)} tokens)`;
   const descriptions = t3Tools.reduce((sum, tool) => sum + valueText(tool.description).length, 0);
   const schemas = JSON.stringify(t3Tools).length;
+  const systemText = isCodex(model)
+    ? JSON.stringify(
+        buildCodexAdditionalContext({ model }, { browser: true, device: true, backgroundWait }),
+      )
+    : t3SystemAppend(model);
   return [
-    `- T3 context: system text ${size((isCodex(model) ? JSON.stringify(buildCodexAdditionalContext({ model }, { browser: true, device: true })) : t3SystemAppend(model)).length)}`,
+    `- T3 context: system text ${size(systemText.length)}`,
     `tool descriptions ${size(descriptions)}`,
     `full tool schemas ${size(schemas)} across ${t3Tools.length} tools.`,
   ].join(", ");
@@ -828,6 +833,7 @@ const buildCodexBase = (
     readonly deviceAccess?: boolean;
     /** false: the thread has no agent browser access, so T3's text leaves the browser out. */
     readonly browserAccess?: boolean;
+    readonly codexBackgroundWait?: boolean;
     readonly arm?: Arm;
   },
 ): Base => {
@@ -864,7 +870,11 @@ const buildCodexBase = (
   });
   const context = buildCodexAdditionalContext(
     { model: options.model, reasoningEffort: effort },
-    { browser: options.browserAccess ?? true, device: options.deviceAccess ?? true },
+    {
+      browser: options.browserAccess ?? true,
+      device: options.deviceAccess ?? true,
+      backgroundWait: options.codexBackgroundWait === true,
+    },
   );
   input.push(
     ...Object.entries(context).map(([key, entry]) =>
@@ -3163,6 +3173,7 @@ const Flags = Schema.Struct({
   "user-instructions": Schema.Literals(["keep", "drop"]),
   arm: Schema.Literals(ARMS),
   "dry-run": Schema.Boolean,
+  "codex-background-wait": Schema.Boolean,
   "stop-on-regression": Schema.Boolean,
   "regression-budget": Schema.optional(PositiveIntOrZero),
   context: Schema.Boolean,
@@ -3205,6 +3216,7 @@ const main = Effect.gen(function* () {
       // `raw` runs without T3's PR, CI and issue tools, to compare against the CLIs.
       arm: { ...string, default: "tools" },
       "dry-run": { type: "boolean", default: false },
+      "codex-background-wait": { type: "boolean", default: false },
       "stop-on-regression": { type: "boolean", default: false },
       "regression-budget": string,
       // Prints the size of T3's text and tool schemas, then exits. Needs no template or key.
@@ -3213,7 +3225,7 @@ const main = Effect.gen(function* () {
   });
   const flags = yield* decodeFlags({ template: "", ...values });
   if (flags.context) {
-    process.stdout.write(`${t3ContextReport(flags.model)}\n`);
+    process.stdout.write(`${t3ContextReport(flags.model, flags["codex-background-wait"])}\n`);
     return;
   }
   if (flags["stop-on-regression"] && flags.baseline === undefined) {
@@ -3317,6 +3329,7 @@ const main = Effect.gen(function* () {
               forge,
               deviceAccess,
               browserAccess,
+              codexBackgroundWait: flags["codex-background-wait"],
               arm: flags.arm,
             }),
           ),
@@ -3516,7 +3529,11 @@ const main = Effect.gen(function* () {
   const summary = summarize(
     rows,
     {
-      header: [header, t3ContextReport(flags.model), ...stopped].join("\n"),
+      header: [
+        header,
+        t3ContextReport(flags.model, flags["codex-background-wait"]),
+        ...stopped,
+      ].join("\n"),
       shellModel: config.shellModel,
       model: config.model,
     },

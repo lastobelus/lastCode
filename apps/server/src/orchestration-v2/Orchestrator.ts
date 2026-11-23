@@ -21521,11 +21521,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (event.type === "subagent.updated")
       return !isOrchestrationV2WorkActive(event.payload.status);
     if (event.type !== "provider-thread.updated") return false;
-    const holding = new Set(
-      (event.payload.pendingBackgroundTasks ?? [])
+    const holding = new Set([
+      ...(event.payload.pendingBackgroundTasks ?? [])
         .filter((task) => backgroundWorkHoldsCompletion([task]))
         .map((task) => task.taskId),
-    );
+      ...(event.payload.owedBackgroundResults ?? []).map((result) => result.taskId),
+    ]);
     const previous = holdingTaskIdsByProviderThread.get(event.payload.id);
     if (holding.size > 0) holdingTaskIdsByProviderThread.set(event.payload.id, holding);
     else holdingTaskIdsByProviderThread.delete(event.payload.id);

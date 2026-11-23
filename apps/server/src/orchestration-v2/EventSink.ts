@@ -41,6 +41,7 @@ import { makeRunOutcomeRecorder, type RunOutcome } from "./RunMetrics.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventStore from "./EventStore.ts";
+import { mergeProviderBackgroundRoster } from "./LastCodeProviderBackgroundRoster.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
@@ -146,6 +147,8 @@ export interface EventSinkV2Shape {
      * The batch must not also change that run's lifecycle.
      */
     readonly updateDelegatedCompletionOnly?: boolean;
+    /** Rebuilds provider-thread.updated events against the current session's stored row. */
+    readonly backgroundRosterOnly?: boolean;
     readonly unlessNativeThreadOwned?: Pick<
       OrchestrationV2ProviderThread,
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
@@ -742,9 +745,12 @@ const layerBase: Layer.Layer<
           if (input.beforeCommit !== undefined) yield* input.beforeCommit;
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
-          const events = input.updateDelegatedCompletionOnly
+          let events = input.updateDelegatedCompletionOnly
             ? yield* updateDelegatedCompletionOnly(input.events, () => true)
             : input.events;
+          if (input.backgroundRosterOnly === true) {
+            events = yield* mergeProviderBackgroundRoster(events, projectionStore);
+          }
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(events)

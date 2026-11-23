@@ -59,6 +59,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import { codexBackgroundWaitForAttachedSession } from "../provider/LastCodeBackgroundWait.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import {
@@ -642,6 +643,7 @@ export const layerWithOptions = (
       const prepareMcpSession = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
+        attachedBackgroundWait?: boolean,
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
           ? mcpSessions
@@ -658,11 +660,14 @@ export const layerWithOptions = (
                 >(["orchestration", "worktree", "pull-requests", "issues"]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
-                const backgroundWait = yield* registry.get(providerInstanceId).pipe(
-                  Effect.flatMap((adapter) => adapter.getCapabilities()),
-                  Effect.map((adapter) => adapter.tools.supportsBackgroundWait === true),
-                  Effect.option,
-                );
+                const backgroundWait =
+                  attachedBackgroundWait === undefined
+                    ? yield* registry.get(providerInstanceId).pipe(
+                        Effect.flatMap((adapter) => adapter.getCapabilities()),
+                        Effect.map((adapter) => adapter.tools.supportsBackgroundWait === true),
+                        Effect.option,
+                      )
+                    : Option.some(attachedBackgroundWait);
                 if (Option.getOrElse(backgroundWait, () => false)) {
                   capabilities.add("background-wait");
                 }
@@ -2019,7 +2024,11 @@ export const layerWithOptions = (
               Effect.uninterruptible,
             );
             if (attached !== undefined) {
-              const prepared = yield* prepareMcpSession(input.threadId, input.providerInstanceId);
+              const prepared = yield* prepareMcpSession(
+                input.threadId,
+                input.providerInstanceId,
+                codexBackgroundWaitForAttachedSession(attached),
+              );
               preparedForCleanup = prepared;
               if (prepared.mcpCredentialId !== undefined) {
                 const mcpCredentialId = prepared.mcpCredentialId;

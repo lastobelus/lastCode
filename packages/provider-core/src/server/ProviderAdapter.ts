@@ -116,6 +116,8 @@ export const ProviderAdapterV2Event = Schema.Union([
     pendingBackgroundWork: Schema.optional(Schema.Boolean),
     /** Persist idle background snapshots before a run subscriber exists. */
     sessionScoped: Schema.optional(Schema.Boolean),
+    /** A session-scoped write of the background roster alone. */
+    backgroundRosterOnly: Schema.optional(Schema.Literal(true)),
     retainedNativeTurnIds: Schema.optional(Schema.Array(Schema.String)),
   }),
   Schema.Struct({

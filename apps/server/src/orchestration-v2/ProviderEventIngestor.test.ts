@@ -684,6 +684,61 @@ layer("ProviderEventIngestorV2", (it) => {
         ["provider-thread.updated"],
       );
       assert.equal(latestThreadSequence, 2);
+
+      // A wake can be admitted before the session's adapter has registered its turn.
+      const current = {
+        ...providerThread,
+        status: "active" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 2,
+        pendingBackgroundTasks: [
+          { taskId: "stopped", kind: "command" as const, awaited: true as const },
+        ],
+        owedBackgroundResults: [{ taskId: "command", originRunId: RunId.make("run:origin") }],
+      };
+      const input = {
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+      };
+      yield* ingestor.ingestNormalized({
+        ...input,
+        event: { type: "provider_thread.updated", driver: CODEX_DRIVER, providerThread: current },
+      });
+      const clearedRoster = {
+        type: "provider_thread.updated" as const,
+        driver: CODEX_DRIVER,
+        sessionScoped: true,
+        backgroundRosterOnly: true as const,
+        providerThread: {
+          ...providerThread,
+          lastRunOrdinal: 1,
+          pendingBackgroundTasks: [],
+          owedBackgroundResults: [],
+        },
+      };
+      const cleared = yield* ingestor.ingestNormalized({
+        ...input,
+        event: clearedRoster,
+      });
+      assert.lengthOf(cleared, 1);
+      const [saved] = (yield* projectionStore.getThreadProjection(threadEvent.threadId))
+        .providerThreads;
+      assert.equal(saved?.lastRunOrdinal, 2);
+      assert.equal(saved?.status, "active");
+      assert.deepEqual(saved?.pendingBackgroundTasks, []);
+      assert.deepEqual(saved?.owedBackgroundResults, []);
+
+      const replacedSession = ProviderSessionId.make("provider-session:replaced");
+      const discarded = yield* ingestor.ingestNormalized({
+        ...input,
+        providerSessionId: replacedSession,
+        event: {
+          ...clearedRoster,
+          providerThread: { ...current, providerSessionId: replacedSession },
+        },
+      });
+      assert.isEmpty(discarded);
     }),
   );
 
