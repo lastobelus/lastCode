@@ -1,7 +1,7 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
-  isThreadAnnotationHidden,
+  isThreadAnnotationHiddenInList,
   isThreadAnnotationVisibleInPalette,
 } from "@t3tools/shared/threadAnnotation";
 
@@ -15,7 +15,7 @@ export function filterLastCodeAnnotationThreadRows(
 ): readonly EnvironmentThreadShell[] {
   const visible = threads.filter(
     (thread) =>
-      !isThreadAnnotationHidden(thread.annotation) ||
+      !isThreadAnnotationHiddenInList(thread) ||
       scopedThreadKey(thread.environmentId, thread.id) === retainedThreadKey,
   );
   return visible.length === threads.length ? threads : visible;

@@ -54,6 +54,15 @@ describe("mobile annotation navigation", () => {
     expect(filterLastCodeAnnotationThreadRows([remote], key)).toEqual([]);
   });
 
+  it.each(["hasPendingApprovals", "hasPendingUserInput"] as const)(
+    "keeps a hidden thread in the list while %s is true",
+    (request) => {
+      const waiting = { ...annotated, [request]: true };
+      expect(filterLastCodeAnnotationThreadRows([waiting])).toEqual([waiting]);
+      expect(filterLastCodeAnnotationThreadRows([{ ...waiting, [request]: false }])).toEqual([]);
+    },
+  );
+
   it("moves among visible rows while reserving the order key of a hidden neighbor", () => {
     const hiddenKey = pinOrderKeyBetween("b", "m");
     expect(hiddenKey).not.toBeNull();
