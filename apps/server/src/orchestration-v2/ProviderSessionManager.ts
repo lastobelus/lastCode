@@ -59,7 +59,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
-import { codexBackgroundWaitForAttachedSession } from "../provider/LastCodeCodexBackgroundWait.ts";
+import { codexBackgroundWaitForAttachedSession } from "../provider/LastCodeBackgroundWait.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import {

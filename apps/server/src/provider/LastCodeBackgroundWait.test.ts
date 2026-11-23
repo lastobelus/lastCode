@@ -29,8 +29,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import { CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES } from "./CodexDeveloperInstructions.ts";
 import {
   codexBackgroundWaitForAttachedSession,
-  readCodexBackgroundWait,
-} from "./LastCodeCodexBackgroundWait.ts";
+  readLastCodeBackgroundWaitEnabled,
+} from "./LastCodeBackgroundWait.ts";
 
 const defaultCodexSettings = Schema.decodeSync(CodexSettings)({});
 
@@ -58,7 +58,7 @@ it.effect("advertises background wait only to opted-in Codex sessions", () =>
       fileSystem: yield* FileSystem.FileSystem,
       idAllocator: yield* IdAllocator.IdAllocatorV2,
       serverConfig: yield* makeReplayServerConfig("lastcode-codex-background-wait"),
-      readBackgroundWait: readCodexBackgroundWait(settings.getSettings),
+      readBackgroundWait: readLastCodeBackgroundWaitEnabled(settings.getSettings),
     });
     const threadId = ThreadId.make("thread-background-wait");
     const environmentId = EnvironmentId.make("background-wait-environment");
@@ -119,7 +119,7 @@ it.effect("advertises background wait only to opted-in Codex sessions", () =>
     });
     NodeAssert.equal(yield* configuredToolVisible, false);
     yield* prepareCredential;
-    yield* settings.updateSettings({ lastcodeCodexBackgroundWaitEnabled: true });
+    yield* settings.updateSettings({ lastcodeBackgroundWaitEnabled: true });
     NodeAssert.equal(yield* configuredToolVisible, true);
     // The first credential was issued before the setting changed.
     const before = yield* open("wait-disabled");
@@ -128,7 +128,7 @@ it.effect("advertises background wait only to opted-in Codex sessions", () =>
     yield* prepareCredential;
     const after = yield* open("wait-enabled");
     NodeAssert.equal(typeof after.awaitBackgroundTasks, "function");
-    yield* settings.updateSettings({ lastcodeCodexBackgroundWaitEnabled: false });
+    yield* settings.updateSettings({ lastcodeBackgroundWaitEnabled: false });
     NodeAssert.equal(yield* configuredToolVisible, false);
     NodeAssert.equal(yield* toolVisible(codexBackgroundWaitForAttachedSession(after)), true);
 

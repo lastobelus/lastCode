@@ -1,6 +1,6 @@
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
 import { buildRuntimeInstructionSections } from "@t3tools/provider-core/server/runtimeInstructions";
-import { codexBackgroundWaitInstructions } from "./LastCodeCodexBackgroundWait.ts";
+import { codexBackgroundWaitInstructions } from "./LastCodeBackgroundWait.ts";
 
 import {
   T3_CODE_BROWSER_TOOL_INSTRUCTIONS,

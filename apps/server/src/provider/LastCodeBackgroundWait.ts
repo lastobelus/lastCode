@@ -1,22 +1,19 @@
 import type { OrchestrationV2ProviderSession, RunId } from "@t3tools/contracts";
-import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
+import type { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderAdapterV2SessionRuntime } from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderContinuationRequest } from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 
-export function readCodexBackgroundWait(settings?: ProviderHost["Service"]["settings"]["get"]) {
+export function readLastCodeBackgroundWaitEnabled(
+  settings?: ProviderHost["Service"]["settings"]["get"],
+): Effect.Effect<boolean> {
   return (
     settings?.pipe(
-      Effect.map((value) => value.lastcodeCodexBackgroundWaitEnabled),
+      Effect.map((value) => value.lastcodeBackgroundWaitEnabled),
       Effect.orElseSucceed(() => false),
     ) ?? Effect.succeed(false)
   );
 }
-
-export const loadCodexBackgroundWaitReader = Effect.serviceOption(ProviderHost).pipe(
-  Effect.map((host) => readCodexBackgroundWait(Option.getOrUndefined(host)?.settings.get)),
-);
 
 export function withCodexBackgroundWaitCapability(
   capabilities: OrchestrationV2ProviderSession["capabilities"],

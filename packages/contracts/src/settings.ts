@@ -1596,7 +1596,8 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  lastcodeCodexBackgroundWaitEnabled: Schema.Boolean.pipe(
+  /** Enables LastCode background waits, currently for Codex. Applies to new provider sessions. */
+  lastcodeBackgroundWaitEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   lastcodePullRequestWatchQuietMinutes: LastCodePullRequestWatchQuietMinutes.pipe(
@@ -2069,7 +2070,7 @@ export const ServerSettingsPatch = Schema.Struct({
     }),
   ),
   environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
-  lastcodeCodexBackgroundWaitEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeBackgroundWaitEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodePullRequestWatchQuietMinutes: Schema.optionalKey(LastCodePullRequestWatchQuietMinutes),
   lastcodeAnnotationPrCheckMinutes: Schema.optionalKey(LastCodeAnnotationPrCheckMinutes),
   lastcodeLocalCi: Schema.optionalKey(

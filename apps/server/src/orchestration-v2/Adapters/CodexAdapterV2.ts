@@ -120,10 +120,9 @@ import {
   codexBackgroundResultRequest,
   codexBackgroundWaitForNewSession,
   codexBackgroundWaitHook,
-  loadCodexBackgroundWaitReader,
-  readCodexBackgroundWait,
+  readLastCodeBackgroundWaitEnabled,
   withCodexBackgroundWaitCapability,
-} from "../../provider/LastCodeCodexBackgroundWait.ts";
+} from "../../provider/LastCodeBackgroundWait.ts";
 import {
   describeMcpElicitation,
   toMcpElicitationResponse,
@@ -154,6 +153,7 @@ import {
   type ProviderAdapterDriverCreateInput,
 } from "@t3tools/provider-core/server/adapterDriver";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import { backgroundWorkNotification } from "@t3tools/provider-core/server/notification";
 import {
   makeProviderFailure,
@@ -1984,6 +1984,7 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
     homePath: homeLayout.effectiveHomePath ?? "",
     launchArgs: codexHomeLaunchArgs(yield* Path.Path, homeLayout, config.launchArgs),
   } satisfies CodexSettings;
+  const host = Option.getOrUndefined(yield* Effect.serviceOption(ProviderHost));
 
   return yield* makeCodexAdapterV2({
     instanceId,
@@ -1999,7 +2000,7 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
     idAllocator,
     serverConfig,
     continuationRequests,
-    readBackgroundWait: yield* loadCodexBackgroundWaitReader,
+    readBackgroundWait: readLastCodeBackgroundWaitEnabled(host?.settings.get),
     watchCommandStops: portDiscovery.watchAgentCommandStops,
     ...hooks,
   });
@@ -2040,7 +2041,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     threadId === null ? Effect.undefined : mcpSessions.read(threadId);
   const { clientFactory, digest, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
-  const readBackgroundWait = adapterOptions.readBackgroundWait ?? readCodexBackgroundWait();
+  const readBackgroundWait =
+    adapterOptions.readBackgroundWait ?? readLastCodeBackgroundWaitEnabled();
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
