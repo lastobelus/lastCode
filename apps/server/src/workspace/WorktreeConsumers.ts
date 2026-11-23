@@ -573,16 +573,18 @@ type CaptureResolutions = {
   readonly sharedPaths: ReadonlyMap<string, { readonly parent: string; token?: string }>;
 };
 
-type SweepObservation = {
-  readonly captures: WeakMap<ReadonlyArray<string>, CaptureResolutions>;
+type CaptureResolutionCache = WeakMap<ReadonlyArray<string>, CaptureResolutions>;
+
+type SweepInventory = {
   readonly resolvedPaths: Set<string>;
   readonly measurement: InventoryMeasurement;
   readonly walkTriggerCounts: Map<string, StorageCleanupWalkTrigger>;
 };
 
 export type TargetObservation = {
-  readonly targets: WeakMap<ReadonlyArray<string>, Map<string, TargetEntry>>;
-  readonly sweep?: SweepObservation;
+  readonly targets?: WeakMap<ReadonlyArray<string>, Map<string, TargetEntry>>;
+  readonly captures?: CaptureResolutionCache;
+  readonly sweep?: SweepInventory;
 };
 
 /** Native tree evidence is scoped to the capture that supplied its object identities. */
@@ -594,55 +596,105 @@ export const recordSkippedUsageCheck = (observation?: TargetObservation): void =
   }
 };
 
+const makeSweepInventory = (): SweepInventory => ({
+  resolvedPaths: new Set(),
+  measurement: emptyStorageCleanupInventoryTrace(),
+  walkTriggerCounts: new Map(),
+});
+
+const makeSweepTargets = (sweep: SweepInventory): TargetObservation => ({
+  targets: new WeakMap(),
+  captures: new WeakMap(),
+  sweep,
+});
+
+const measureProcessCapture = (
+  capture: Effect.Effect<ReadonlyArray<string> | null>,
+  measurement: InventoryMeasurement,
+) =>
+  Effect.suspend(() => {
+    const start = performance.now();
+    return capture.pipe(
+      Effect.provideService(ProcessCaptureCounter, () => {
+        measurement.processCaptures++;
+      }),
+      Effect.ensuring(
+        Effect.sync(() => {
+          measurement.processCaptureMs += performance.now() - start;
+        }),
+      ),
+    );
+  });
+
+const inventorySnapshot = (sweep: SweepInventory) => ({
+  ...sweep.measurement,
+  uniquePaths: sweep.resolvedPaths.size,
+  walkTriggers: [...sweep.walkTriggerCounts.values()]
+    .toSorted(
+      (left, right) =>
+        right.walks - left.walks ||
+        left.kind.localeCompare(right.kind) ||
+        left.process.localeCompare(right.process),
+    )
+    .slice(0, MAX_TRACE_WALK_TRIGGERS),
+});
+
 export const makeSweepObservation = Effect.fn("WorktreeConsumers.makeSweepObservation")(function* (
   capture: Effect.Effect<ReadonlyArray<string> | null>,
+  worktreeInventory?: SweepInventory,
 ) {
-  const measurement = emptyStorageCleanupInventoryTrace();
-  const sweep: SweepObservation = {
-    captures: new WeakMap(),
-    resolvedPaths: new Set(),
-    measurement,
-    walkTriggerCounts: new Map(),
-  };
-  const paths = yield* Effect.cached(
-    Effect.suspend(() => {
-      const start = performance.now();
-      return capture.pipe(
-        Effect.provideService(ProcessCaptureCounter, () => {
-          measurement.processCaptures++;
-        }),
-        Effect.ensuring(
-          Effect.sync(() => {
-            measurement.processCaptureMs += performance.now() - start;
-          }),
-        ),
-      );
-    }),
-  );
-  const targets: TargetObservation = { targets: new WeakMap(), sweep };
+  const sweep = makeSweepInventory();
+  const paths = yield* Effect.cached(measureProcessCapture(capture, sweep.measurement));
   return {
     paths,
-    targets,
-    annotate: Effect.suspend(() => {
-      const walkTriggers = [...sweep.walkTriggerCounts.values()]
-        .toSorted(
-          (left, right) =>
-            right.walks - left.walks ||
-            left.kind.localeCompare(right.kind) ||
-            left.process.localeCompare(right.process),
-        )
-        .slice(0, MAX_TRACE_WALK_TRIGGERS);
-      return Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
-        ...measurement,
-        uniquePaths: sweep.resolvedPaths.size,
-        walkTriggers,
-      });
+    targets: makeSweepTargets(sweep),
+    annotate: Effect.suspend(() =>
+      Effect.annotateCurrentSpan(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE, {
+        ...inventorySnapshot(sweep),
+        ...(worktreeInventory === undefined
+          ? {}
+          : { worktrees: inventorySnapshot(worktreeInventory) }),
+      }),
+    ),
+  };
+});
+
+type WorktreeConsumerSweep = {
+  readonly inventory: SweepInventory;
+  readonly freshTargets: TargetObservation;
+  readonly screeningPaths: Effect.Effect<ReadonlyArray<string> | null>;
+  readonly screeningTargets: TargetObservation;
+};
+
+class WorktreeConsumerSweepContext extends Context.Reference<WorktreeConsumerSweep | undefined>(
+  "t3/workspace/WorktreeConsumerSweep",
+  { defaultValue: () => undefined },
+) {}
+
+const captureWorktreePaths = (sweep: WorktreeConsumerSweep | undefined) =>
+  Effect.flatMap(ProcessPaths, (capture) =>
+    sweep === undefined ? capture : measureProcessCapture(capture, sweep.inventory.measurement),
+  );
+
+export const makeSweepWorktreeConsumers = Effect.gen(function* () {
+  const inventory = makeSweepInventory();
+  const capture = yield* ProcessPaths;
+  const screeningPaths = yield* Effect.cached(
+    measureProcessCapture(capture, inventory.measurement),
+  );
+  return {
+    inventory,
+    provide: Effect.provideService(WorktreeConsumerSweepContext, {
+      inventory,
+      freshTargets: { sweep: inventory },
+      screeningPaths,
+      screeningTargets: makeSweepTargets(inventory),
     }),
   };
 });
 
-const sweepResolutions = (sweep: SweepObservation, paths: readonly string[]) => {
-  const previous = sweep.captures.get(paths);
+const sweepResolutions = (captures: CaptureResolutionCache, paths: readonly string[]) => {
+  const previous = captures.get(paths);
   if (previous !== undefined) return previous;
   const byParent = Map.groupBy(
     [...new Set(paths)].filter(
@@ -657,7 +709,7 @@ const sweepResolutions = (sweep: SweepObservation, paths: readonly string[]) => 
     for (const child of children) sharedPaths.set(child, { parent });
   }
   const capture: CaptureResolutions = { sharedPaths };
-  sweep.captures.set(paths, capture);
+  captures.set(paths, capture);
   return capture;
 };
 
@@ -698,7 +750,7 @@ type PathResolution = { readonly path: string } | { readonly error: unknown };
 
 const resolveProcessPath = async (
   path: string,
-  sweep?: SweepObservation,
+  sweep?: SweepInventory,
 ): Promise<PathResolution> => {
   const start = sweep === undefined ? 0 : performance.now();
   if (sweep !== undefined) {
@@ -716,10 +768,11 @@ const resolveProcessPath = async (
 
 const makeProcessPathResolver = (
   paths: readonly string[],
-  sweep: SweepObservation,
+  sweep: SweepInventory,
+  captures: CaptureResolutionCache,
   reuse = true,
 ) => {
-  const capture = sweepResolutions(sweep, paths);
+  const capture = sweepResolutions(captures, paths);
   const reusedParents = new Map<string, string | null>();
   const checkedParents = new Map<string, string | null>();
   return {
@@ -839,13 +892,14 @@ const targetEvidence = async (
   const sweep = observation?.sweep;
   const measurement = sweep?.measurement;
   const walk = (identities: boolean) => {
-    if (measurement === undefined) return targetIdentities(root, identities, paths);
+    if (sweep === undefined) return targetIdentities(root, identities, paths);
+    const { measurement, walkTriggerCounts } = sweep;
     const start = performance.now();
     measurement.treeWalks++;
     for (const trigger of walkTriggers) {
       const key = `${trigger.kind}\0${trigger.process}`;
-      const previous = sweep!.walkTriggerCounts.get(key);
-      sweep!.walkTriggerCounts.set(key, {
+      const previous = walkTriggerCounts.get(key);
+      walkTriggerCounts.set(key, {
         ...trigger,
         walks: (previous?.walks ?? 0) + 1,
       });
@@ -854,11 +908,12 @@ const targetEvidence = async (
       measurement.treeWalkMs += performance.now() - start;
     });
   };
-  if (observation === undefined) return walk(collectIdentities);
-  let targets = observation.targets.get(paths);
+  const cachedTargets = observation?.targets;
+  if (cachedTargets === undefined) return walk(collectIdentities);
+  let targets = cachedTargets.get(paths);
   if (!targets) {
     targets = new Map();
-    observation.targets.set(paths, targets);
+    cachedTargets.set(paths, targets);
   }
   const collect = (identities: boolean) => {
     const entry: TargetEntry = {
@@ -1011,19 +1066,20 @@ export const processPathsUseRoot = async (
 ): Promise<boolean> => {
   if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
   const sweep = observation?.sweep;
+  const captures = observation?.captures;
   const scan = (resolvePath: (path: string) => Promise<PathResolution>) =>
     scanProcessPaths(canonicalRoot, paths, completeProof, resolvePath, sweep !== undefined);
   let evidence;
-  if (sweep === undefined) {
-    evidence = await scan(resolveProcessPath);
+  if (sweep === undefined || captures === undefined) {
+    evidence = await scan((path) => resolveProcessPath(path, sweep));
   } else {
-    const resolver = makeProcessPathResolver(paths, sweep);
+    const resolver = makeProcessPathResolver(paths, sweep, captures);
     const first = await scan(resolver.resolve).then(
       (value) => ({ value }),
       (error: unknown) => ({ error }),
     );
     if (!(await resolver.isStillValid())) {
-      evidence = await scan(makeProcessPathResolver(paths, sweep, false).resolve);
+      evidence = await scan(makeProcessPathResolver(paths, sweep, captures, false).resolve);
     } else {
       if ("error" in first) throw first.error;
       evidence = first.value;
@@ -1091,7 +1147,8 @@ const runtimeKeptReason = async (root: string): Promise<string | null> => {
 export const worktreeConsumerPreflightReason = Effect.fn(
   "WorktreeConsumers.worktreeConsumerPreflightReason",
 )(function* (canonicalRoot: string) {
-  const paths = yield* yield* ProcessPaths;
+  const sweep = yield* WorktreeConsumerSweepContext;
+  const paths = yield* captureWorktreePaths(sweep);
   if (paths === null) return "Process file-consumer inventory is unavailable.";
   const mounts = yield* yield* DependencyMounts.MountPoints;
   if (mounts === null) return "Mount inventory is unavailable.";
@@ -1106,7 +1163,7 @@ export const worktreeConsumerPreflightReason = Effect.fn(
         return "Worktree root is not canonical.";
       // An owned preview may itself be the runtime; the final removal guard
       // checks runtime descriptors again after preview shutdown.
-      await processPathsUseRoot(canonicalRoot, paths, undefined, true);
+      await processPathsUseRoot(canonicalRoot, paths, sweep?.freshTargets, true);
       return null;
     },
     catch: (cause) =>
@@ -1116,14 +1173,14 @@ export const worktreeConsumerPreflightReason = Effect.fn(
   }).pipe(Effect.catch((reason) => Effect.succeed(reason)));
 });
 
-/** Call under the canonical workspace lease immediately before removing generated files or a checkout. */
-export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsumerReason")(
+// Both entry points use this span to keep capture and scan timings comparable.
+const worktreeConsumerReasonWithCapture = Effect.fn("WorktreeConsumers.worktreeConsumerReason")(
   function* (
     canonicalRoot: string,
-    capturedPaths?: ReadonlyArray<string> | null,
+    capture: Effect.Effect<ReadonlyArray<string> | null>,
     observation?: TargetObservation,
   ) {
-    const paths = capturedPaths === undefined ? yield* yield* ProcessPaths : capturedPaths;
+    const paths = yield* capture;
     if (paths === null) return "Process file-consumer inventory is unavailable.";
     const mounts = yield* yield* DependencyMounts.MountPoints;
     if (mounts === null) return "Mount inventory is unavailable.";
@@ -1147,3 +1204,29 @@ export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsu
     }).pipe(Effect.catch((reason) => Effect.succeed(reason)));
   },
 );
+
+/** Call under the canonical workspace lease immediately before removing generated files or a checkout. */
+export const worktreeConsumerReason = Effect.fnUntraced(function* (
+  canonicalRoot: string,
+  capturedPaths?: ReadonlyArray<string> | null,
+  observation?: TargetObservation,
+) {
+  const sweep = yield* WorktreeConsumerSweepContext;
+  return yield* worktreeConsumerReasonWithCapture(
+    canonicalRoot,
+    capturedPaths === undefined ? captureWorktreePaths(sweep) : Effect.succeed(capturedPaths),
+    observation ?? sweep?.freshTargets,
+  );
+});
+
+/** A shared capture can only veto removal. A miss requires the fresh guard under the lease. */
+export const screenWorktreeConsumerReason = Effect.fnUntraced(function* (canonicalRoot: string) {
+  const sweep = yield* WorktreeConsumerSweepContext;
+  return yield* sweep === undefined
+    ? worktreeConsumerReason(canonicalRoot)
+    : worktreeConsumerReasonWithCapture(
+        canonicalRoot,
+        sweep.screeningPaths,
+        sweep.screeningTargets,
+      );
+});

@@ -4503,7 +4503,7 @@ it.live("shares worktree screening reads across a cleanup pass", () => {
       expect(counts, evidence).toMatchObject({
         ownerSnapshots: 1,
         ownerPathQueries: workspaceCount,
-        captures: workspaceCount,
+        captures: 1,
         measurements: workspaceCount,
       });
       expect(counts.registryReads, evidence).toBeLessThanOrEqual(1);
