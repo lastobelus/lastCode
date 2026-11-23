@@ -268,6 +268,31 @@ const waitLine = wrapperWaitInstruction();
 const wrapperResult =
   /\[lc-run\] (?:prepare|prepare-checkpoint|ci|wait-checkpoint|package): (?:success|attention|blocked) \(exit \d+\)/u;
 
+export function wrapperWakeIds(db: NodeSqlite.DatabaseSync, threadId: string): string[] {
+  // A fast command can wake the next run between status snapshots. The continuation
+  // records which awaited command delivered a result to that run.
+  const wakes = db
+    .prepare(`
+      SELECT task.value AS task_id, json_extract(message.payload_json, '$.text') AS text
+      FROM orchestration_v2_projection_runs AS run
+      JOIN orchestration_v2_projection_messages AS message
+        ON message.message_id = json_extract(run.payload_json, '$.userMessageId')
+      JOIN json_each(run.payload_json, '$.backgroundResultContinuation.taskIds') AS task
+      WHERE run.thread_id = ? AND run.status = 'completed' AND task.type = 'text'
+    `)
+    .all(threadId);
+  return wakes.flatMap(({ task_id, text }) => {
+    const header = typeof text === "string" ? (text.split("\n", 1)[0] ?? "") : "";
+    return typeof task_id === "string" &&
+      typeof text === "string" &&
+      header.startsWith("Background command completed") &&
+      wrapperCall(header) &&
+      wrapperResult.test(text)
+      ? [task_id]
+      : [];
+  });
+}
+
 function wrapperCall(args: string): boolean {
   return /(?:\.\/scripts\/lc-run|scripts\/lastcode-run\.ts)\s+(?:prepare(?:-checkpoint)?|ci|wait-checkpoint|package)\b/u.test(
     args,
@@ -288,6 +313,11 @@ export function gradeTrace(
 ) {
   const calls = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
   const wrapperCells = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
+  const waitToolOutputs = new Set(
+    trace.flatMap((event) =>
+      event.kind === "output" && event.body.includes("t3_background_wait") ? [event.id] : [],
+    ),
+  );
   let waiting: "action" | "wrapper" | undefined;
   let wrapperCalls = 0;
   let terminalWrapperOutputs = 0;
@@ -313,23 +343,28 @@ export function gradeTrace(
       if (cellId !== undefined) wrapperCells.delete(cellId);
       calls.set(event.id, launch ?? event);
       if (waiting) {
-        const poll =
-          /write_stdin|TaskOutput|inspect_action_run|thread[ /_-]+(?:show|read|wait)|\b(?:tail|sleep|ps|jobs|pgrep)\b|terminal.*(?:log|read|status)/iu.test(
-            event.name + " " + event.args,
-          );
-        if (poll) {
-          polls++;
-          extraCallsWhileWaiting++;
-        } else if (waiting === "wrapper" && callsTool(event, "t3_background_wait")) {
+        if (waiting === "wrapper" && callsTool(event, "t3_background_wait")) {
           redundantMarks++;
         } else if (
           waiting === "wrapper" &&
-          event.args.includes("background_wait") &&
-          (/tool_?search/iu.test(event.name) ||
-            (event.name === "exec" && event.args.includes("ALL_TOOLS")))
+          ((/tool_?search/iu.test(event.name) && event.args.includes("background_wait")) ||
+            (event.name === "exec" &&
+              event.args.includes("ALL_TOOLS") &&
+              (event.args.includes("background_wait") ||
+                (/\bbackground\b/u.test(event.args) && waitToolOutputs.has(event.id)))))
         ) {
           waitToolLookups++;
         } else {
+          const request = event.name + " " + event.args;
+          const poll =
+            waiting === "action"
+              ? /write_stdin|TaskOutput|inspect_action_run|thread[ /_-]+(?:show|read|wait)|\b(?:tail|sleep|ps|jobs|pgrep)\b|terminal.*(?:log|read|status)/iu.test(
+                  request,
+                )
+              : /\b(?:write_stdin|TaskOutput)\b/iu.test(request) ||
+                (/\b(?:exec_command|Bash)\b/iu.test(request) &&
+                  /\b(?:tail|sleep|ps|jobs|pgrep)\b/u.test(event.args));
+          if (poll) polls++;
           extraCallsWhileWaiting++;
         }
       }

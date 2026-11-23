@@ -125,7 +125,7 @@ export function compare(a: Results, b: Results, subsequentTurns: number, baselin
   const reliable = summaries.every(
     ({ a, b }) => b.correct >= a.correct && b.correct > b.scheduled / 2,
   );
-  const zeroPolls = totals.b.polls === 0 && totals.b.extraCallsWhileWaiting === 0;
+  const zeroPolls = totals.b.polls === 0;
   const aRaw = completeMean(aResults, (row) => row.rawTokens);
   const bRaw = completeMean(bResults, (row) => row.rawTokens);
   const cheaper = aRaw !== null && bRaw !== null && bRaw < aRaw;

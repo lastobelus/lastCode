@@ -51,7 +51,8 @@ interface GradeInput {
   delegationCorrect: boolean;
   turns: number;
   expectedTurnCounts: number[];
-  holds: number;
+  holds: readonly string[];
+  wrapperWakeIds: readonly string[];
   actionWakes: number;
   workerMessage: string;
   finalMessage: string;
@@ -92,9 +93,9 @@ export function gradeSample(input: GradeInput): SampleResult {
     resultId !== undefined &&
     message.includes(resultId) &&
     new RegExp(
-      `\\bexit(?:ed)?(?:\\s+(?:with|status|code))*[\\s:=(]*${scenario.exitCode}\\b`,
+      `\\bexit(?:ed)?(?:\\s+(?:with|status|code))*(?:\\s+was)?[\\s:=(]*${scenario.exitCode}\\b`,
       "iu",
-    ).test(message.replaceAll("`", ""));
+    ).test(message.replaceAll(/[`*_]/gu, ""));
   if (!reportsResult(finalMessage) || !reportsResult(workerMessage)) {
     problems.push("Final response omitted the exact result ID or exit code.");
   }
@@ -131,8 +132,10 @@ export function gradeSample(input: GradeInput): SampleResult {
     ) {
       problems.push("Worker did not use the wrapper for each operation.");
     }
-    if (arm === "b" && input.holds < (holdExpected ?? 0))
-      problems.push("Expected wait hold was not observed.");
+    if (arm === "b" && new Set([...input.holds, ...input.wrapperWakeIds]).size < worker.markers)
+      problems.push(
+        "Expected wrapper wait had neither an observed hold nor a delivered result wake.",
+      );
     if (extraCallsWhileWaiting !== 0)
       problems.push("An unexpected tool was called after the instruction to end the turn.");
   }
@@ -158,8 +161,8 @@ export function gradeSample(input: GradeInput): SampleResult {
     redundantMarks,
     waitToolLookups,
     extraCallsWhileWaiting,
-    holdEngaged: input.holds > 0,
-    holds: input.holds,
+    holdEngaged: input.holds.length > 0,
+    holds: input.holds.length,
     holdExpected,
     wallSeconds: input.wallSeconds,
     firstInput: completeUsage ? (parent?.contexts[0] ?? null) : null,

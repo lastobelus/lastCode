@@ -12,6 +12,7 @@ import {
   ownedWorkerLookup,
   readCodexRollout,
   readNative,
+  wrapperWakeIds,
 } from "./observe.ts";
 import { wrapperWaitInstruction } from "./project.ts";
 
@@ -57,6 +58,52 @@ describe("real-session evidence", () => {
       expect(parseLastCodeWrappedAction(scenario.wrapper)).toBeDefined();
   });
 
+  it("gates zero polls only on arm B's polls", () => {
+    const data = (arm: "a" | "b", polls: number, extraCallsWhileWaiting: number): Results => ({
+      version: 1,
+      config: {
+        arm,
+        head: "fixture",
+        provider: "codex",
+        model: "fixture",
+        scale: 1,
+        base: "/eval",
+      },
+      samples: [
+        {
+          caseId: "prepare",
+          index: 1,
+          title: "Prepare Dependencies",
+          holds: [],
+          result: {
+            finished: true,
+            correct: false,
+            problems: [],
+            turns: 1,
+            requests: 1,
+            tokens: { input: 9, cached: 0, output: 1 },
+            rawTokens: 10,
+            polls,
+            redundantMarks: 1,
+            waitToolLookups: 1,
+            extraCallsWhileWaiting,
+            holdEngaged: false,
+            holds: 0,
+            holdExpected: 0,
+            wallSeconds: 1,
+            firstInput: 9,
+            contextGrowth: 0,
+            standing: { guidance: 0, toolDefinitions: 0, backgroundWaitInstruction: 0 },
+            standingAcrossRequests: 0,
+          },
+        },
+      ],
+    });
+    const a = data("a", 3, 3);
+    expect(compare(a, data("b", 0, 1), 5).gates.zeroPolls).toBe(true);
+    expect(compare(a, data("b", 1, 1), 5).gates.zeroPolls).toBe(false);
+  });
+
   it("finds a local owned worker from the app's task record", () => {
     using db = new NodeSqlite.DatabaseSync(":memory:");
     db.exec(`
@@ -69,6 +116,37 @@ describe("real-session evidence", () => {
         ('parent', 'elsewhere', 'app_owned');
     `);
     expect(ownedWorkerLookup(db).all("parent", "project")).toEqual([{ thread_id: "worker" }]);
+  });
+
+  it("finds a delivered wrapper wake even when no status snapshot caught the hold", () => {
+    using db = new NodeSqlite.DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE orchestration_v2_projection_runs(thread_id, status, payload_json);
+      CREATE TABLE orchestration_v2_projection_messages(message_id, payload_json);
+    `);
+    const addRun = db.prepare("INSERT INTO orchestration_v2_projection_runs VALUES (?, ?, ?)");
+    const addMessage = db.prepare("INSERT INTO orchestration_v2_projection_messages VALUES (?, ?)");
+    const completion =
+      "Background command completed (exit 0): /bin/zsh -lc './scripts/lc-run prepare'\n\n" +
+      "[lc-run] prepare: success (exit 0)\nResult ID result-example.";
+    for (const [id, thread, status, message, taskIds] of [
+      ["own", "worker", "completed", completion, ["exec-wrapped"]],
+      ["other", "another-thread", "completed", completion, ["exec-other"]],
+      ["queued", "worker", "queued", completion, ["exec-queued"]],
+      ["manual", "worker", "completed", completion, undefined],
+      ["unrelated", "worker", "completed", "Background command completed: ls", ["exec-ls"]],
+    ] as const) {
+      addRun.run(
+        thread,
+        status,
+        JSON.stringify({
+          userMessageId: id,
+          backgroundResultContinuation: taskIds === undefined ? undefined : { taskIds },
+        }),
+      );
+      addMessage.run(id, JSON.stringify({ text: message }));
+    }
+    expect(wrapperWakeIds(db, "worker")).toEqual(["exec-wrapped"]);
   });
 
   it("counts Codex request usage once and excludes cached tokens from double counting", () => {
@@ -318,7 +396,7 @@ describe("real-session evidence", () => {
     expect(trace).toMatchObject({ lists: 1, actions: 1, actionWaits: 1, polls: 1 });
   });
 
-  it("requires a hold in the owned Quick CI worker thread when the landed wait line appears", () => {
+  it("requires evidence of the owned Quick CI worker's wrapper wait", () => {
     const scenario = cases.find((entry) => entry.id === "quick-ci")!;
     const input: Parameters<typeof gradeSample>[0] = {
       arm: "b",
@@ -328,7 +406,8 @@ describe("real-session evidence", () => {
       delegationCorrect: true,
       turns: 4,
       expectedTurnCounts: [2, 2],
-      holds: 0,
+      holds: [],
+      wrapperWakeIds: [],
       actionWakes: 0,
       workerMessage: "Result ID result-example, exit code 3.",
       finalMessage: "Result ID result-example, exit code 3.",
@@ -364,6 +443,15 @@ describe("real-session evidence", () => {
       holdExpected: 1,
       holdEngaged: false,
     });
+    expect(
+      gradeSample({
+        ...input,
+        traces: [[], [...trace]],
+        wrapperWakeIds: ["worker-command"],
+        workerMessage: "**Result ID** `result-example`\n**Exit code:** `3`",
+        finalMessage: "Quick CI's exit code was **3**. Result ID `result-example`.",
+      }),
+    ).toMatchObject({ correct: true, holds: 0, holdExpected: 1, holdEngaged: false });
     const holds = awaitedWrapperIds(
       [
         { taskId: "native-child", kind: "subagent", awaited: true },
@@ -385,7 +473,12 @@ describe("real-session evidence", () => {
         kind: "call",
         id: "lookup",
         name: "exec",
-        args: 'text(ALL_TOOLS.filter(x => x.name.includes("background_wait")))',
+        args: 'text(ALL_TOOLS.filter(x => x.name.includes("background")))',
+      },
+      {
+        kind: "output",
+        id: "lookup",
+        body: "mcp__t3_code__t3_background_wait Keep this thread in Working.",
       },
       {
         kind: "call",
@@ -395,14 +488,27 @@ describe("real-session evidence", () => {
       },
       trace[2],
     ] as const;
-    expect(
-      gradeSample({ ...input, traces: [[], [...withMark]], holds: holds.length }),
-    ).toMatchObject({
+    expect(gradeSample({ ...input, traces: [[], [...withMark]], holds })).toMatchObject({
       correct: true,
       redundantMarks: 1,
       waitToolLookups: 1,
       extraCallsWhileWaiting: 0,
     });
+    expect(
+      gradeSample({
+        ...input,
+        traces: [
+          [],
+          [
+            trace[0],
+            trace[1],
+            { kind: "call", id: "thread", name: "mcp__t3_code__t3_thread_read", args: "{}" },
+            trace[2],
+          ],
+        ],
+        holds,
+      }),
+    ).toMatchObject({ correct: false, polls: 0, extraCallsWhileWaiting: 1 });
     const registered = wrapperWaitInstruction();
     expect(wrapperWaitInstruction("original")).toBe(wait);
     expect(Buffer.byteLength(registered)).toBeLessThan(Buffer.byteLength(wait));

@@ -16,6 +16,7 @@ import {
   readLines,
   readNative,
   record,
+  wrapperWakeIds,
   type PendingWork,
 } from "./observe.ts";
 import {
@@ -342,6 +343,7 @@ async function observeFamily(input: {
     endedAt: endedAt || quietSince || Date.now(),
     delegatedCompletions: Number(wakes.get(rootId)?.delegated),
     actionWakes: Number(wakes.get(latest.at(-1)!.thread.threadId)?.actions),
+    wrapperWakeIds: arm === "b" ? wrapperWakeIds(db, latest.at(-1)!.thread.threadId) : [],
   };
 }
 
@@ -410,7 +412,8 @@ function sampleMetrics(input: {
       ),
     turns: latest.reduce((sum, snapshot) => sum + snapshot.thread.runCount, 0),
     expectedTurnCounts: latest.map(({ thread }) => thread.runCount),
-    holds: sample.holds.length,
+    holds: sample.holds,
+    wrapperWakeIds: observations.wrapperWakeIds,
     actionWakes: observations.actionWakes,
     workerMessage: finalMessage(worker),
     finalMessage: finalMessage(parent),
