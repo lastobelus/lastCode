@@ -13,11 +13,16 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as NetAddress from "effect/net/NetAddress";
+import * as Stream from "effect/Stream";
 import { HttpServer } from "effect/http";
 
-import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as McpToolAccessTestkit from "../mcp/McpToolAccess.testkit.ts";
+import { layerStandard } from "../mcp/toolkits/preview/handlers.ts";
+import { PreviewStandardToolkit } from "../mcp/toolkits/preview/tools.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as Broker from "../mcp/PreviewAutomationBroker.ts";
-import { make } from "./PublishedDocumentPreview.ts";
+import { make, PublishedDocumentPreview } from "./PublishedDocumentPreview.ts";
 
 const owner = ThreadId.make("document-owner");
 const other = ThreadId.make("other-document-owner");
@@ -55,7 +60,14 @@ const fixture = (
         Layer.mock(Broker.PreviewAutomationBroker)({
           invoke: <A>(input: Broker.PreviewAutomationInvokeInput) => {
             navigations.push(input);
-            return Effect.succeed({ available: true, ...(input.input as object) } as A);
+            return Effect.succeed({
+              available: true,
+              visible: false,
+              loading: false,
+              tabId: PreviewTabId.make("document-tab"),
+              title: null,
+              ...(input.input as object),
+            } as A);
           },
         }),
       ),
@@ -100,7 +112,7 @@ it.effect.each([
     }),
 );
 
-it.effect("rechecks the calling thread's publication before every navigation", () =>
+it.effect("preview_open rechecks the calling thread's publication before every navigation", () =>
   Effect.gen(function* () {
     const publications = new Map<ThreadId, AssetCreateUrlResult>([
       [owner, signed("owner-original")],
@@ -121,17 +133,44 @@ it.effect("rechecks the calling thread's publication before every navigation", (
             );
       }),
     );
-    expect((yield* preview.open(scope(owner), request)).url).toContain("/owner-original/");
-    expect((yield* preview.open(scope(other), request)).url).toContain("/other-document/");
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(PublishedDocumentPreview, preview),
+      // Ordinary browser navigation must not handle published-document targets.
+      Layer.mock(Broker.PreviewAutomationBroker)({}),
+      McpToolAccessTestkit.liveThreadsLayer,
+    );
+    const open = (threadId: ThreadId, input = request) =>
+      Effect.gen(function* () {
+        const toolkit = yield* PreviewStandardToolkit.pipe(
+          Effect.provide(McpToolAccess.HandlersLayer.layer(layerStandard)),
+        );
+        const results = yield* toolkit
+          .handle("preview_open", input)
+          .pipe(Stream.unwrap, Stream.runCollect);
+        return results.at(-1);
+      }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope(threadId)),
+        Effect.provide(dependencies),
+      );
+    expect(yield* open(owner)).toMatchObject({
+      isFailure: false,
+      result: { url: expect.stringContaining("/owner-original/") },
+    });
+    expect(yield* open(other)).toMatchObject({
+      isFailure: false,
+      result: { url: expect.stringContaining("/other-document/") },
+    });
     publications.set(owner, signed("owner-revised"));
-    expect((yield* preview.open(scope(owner), request)).url).toContain("/owner-revised/");
+    expect(yield* open(owner)).toMatchObject({
+      isFailure: false,
+      result: { url: expect.stringContaining("/owner-revised/") },
+    });
     publications.delete(owner);
     for (const input of [
       request,
       { ...request, target: { kind: "published-document" as const, path: "private.html" } },
     ]) {
-      const denied = yield* preview.open(scope(owner), input).pipe(Effect.flip);
-      expect(denied).toMatchObject({
+      expect(yield* open(owner, input).pipe(Effect.flip)).toMatchObject({
         _tag: "PreviewAutomationPublishedDocumentError",
         threadId: owner,
         reason: "file-unavailable",
