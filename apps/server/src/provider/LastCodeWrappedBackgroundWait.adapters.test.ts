@@ -154,18 +154,9 @@ const codexCommand = "/bin/zsh -lc 'cd /workspace && ./scripts/lc-run prepare'";
 const codexTaskId = "call-wrapped-codex";
 const codexProcessId = "4242";
 
-type CodexCommandCompletion =
-  | "after-turn"
-  | "marked"
-  | "yielded"
-  | "parallel"
-  | "foreground"
-  | "interrupted";
+type CodexCommandCompletion = "after-turn" | "marked" | "yielded" | "foreground" | "interrupted";
 
-const codexTranscript = Effect.fnUntraced(function* (
-  completion: CodexCommandCompletion,
-  rolloutDirectory: string,
-) {
+const codexTranscript = Effect.fnUntraced(function* (completion: CodexCommandCompletion) {
   const recorded = yield* readReplayFixtureTranscript(
     new URL("../orchestration-v2/testkit/fixtures/simple/codex_transcript.ndjson", import.meta.url),
   ).pipe(Effect.flatMap(CodexOrchestratorReplayHarness.decodeTranscript));
@@ -183,56 +174,7 @@ const codexTranscript = Effect.fnUntraced(function* (
   }
   const nativeThreadId = terminal.frame.params.threadId;
   const nativeTurnId = terminal.frame.params.turn.id;
-  const rolloutPath = `${rolloutDirectory}/rollout-replay-${nativeThreadId}.jsonl`;
-  const hasLaunchReceipt =
-    completion === "foreground" || completion === "parallel" || completion === "yielded";
-  if (hasLaunchReceipt) {
-    const plainToolOutput =
-      "Chunk ID: f42e9a\nWall time: 1.0 seconds\nProcess running with session ID 4242\nOutput:\nStarting wrapper";
-    const parallelToolOutput = JSON.stringify({
-      chunk_id: "f42e9a",
-      session_id: 4242,
-      output: "Starting wrapper",
-    });
-    const output =
-      completion === "parallel"
-        ? [
-            {
-              type: "input_text",
-              text: `Script completed\nOutput:\n${parallelToolOutput}`,
-            },
-          ]
-        : completion === "foreground"
-          ? "Chunk ID: f42e9a\nWall time: 1.0 seconds\nProcess exited with code 3\nOutput:\nWrapped command finished"
-          : plainToolOutput;
-    const fileSystem = yield* FileSystem.FileSystem;
-    yield* fileSystem.writeFileString(
-      rolloutPath,
-      [
-        { type: "event_msg", payload: { type: "task_started", turn_id: "prior-turn" } },
-        {
-          type: "response_item",
-          payload: { type: "function_call_output", output: plainToolOutput },
-        },
-        { type: "event_msg", payload: { type: "task_complete", turn_id: "prior-turn" } },
-        { type: "event_msg", payload: { type: "task_started", turn_id: nativeTurnId } },
-        {
-          type: "response_item",
-          payload: {
-            type: typeof output === "string" ? "function_call_output" : "custom_tool_call_output",
-            output,
-          },
-        },
-        { type: "event_msg", payload: { type: "task_complete", turn_id: nativeTurnId } },
-      ]
-        .map((entry) => JSON.stringify(entry))
-        .join("\n") + "\n",
-    );
-  }
-  const commandFrame = (
-    completed: boolean,
-    parallel = false,
-  ): CodexReplay.CodexAppServerReplayEntry => ({
+  const commandFrame = (completed: boolean): CodexReplay.CodexAppServerReplayEntry => ({
     type: "emit_inbound",
     label: completed ? "wrapped command completed" : "wrapped command started",
     frame: {
@@ -242,10 +184,10 @@ const codexTranscript = Effect.fnUntraced(function* (
         turnId: nativeTurnId,
         item: {
           type: "commandExecution",
-          id: parallel ? "call-parallel-tool" : codexTaskId,
-          command: parallel ? "other-tool" : codexCommand,
+          id: codexTaskId,
+          command: codexCommand,
           cwd: "/workspace",
-          processId: parallel ? null : codexProcessId,
+          processId: codexProcessId,
           source: "unifiedExecStartup",
           status: completed ? "completed" : "inProgress",
           commandActions: [{ type: "unknown", command: codexCommand }],
@@ -257,12 +199,13 @@ const codexTranscript = Effect.fnUntraced(function* (
     },
   });
   const launched = [...recorded.entries.slice(0, terminalIndex), commandFrame(false)];
-  const usage = recorded.entries.find(
-    (entry) => entry.type === "emit_inbound" && entry.label === "thread/tokenUsage/updated",
-  );
-  if (usage === undefined) return yield* Effect.die("The fixture must include token usage.");
-  if (completion === "parallel") launched.push(commandFrame(false, true));
-  if (completion === "yielded") launched.push(usage);
+  if (completion === "yielded") {
+    const usage = recorded.entries.find(
+      (entry) => entry.type === "emit_inbound" && entry.label === "thread/tokenUsage/updated",
+    );
+    if (usage === undefined) return yield* Effect.die("The fixture must include token usage.");
+    launched.push(usage);
+  }
   const turnEnd =
     completion === "interrupted"
       ? {
@@ -276,51 +219,13 @@ const codexTranscript = Effect.fnUntraced(function* (
           },
         }
       : terminal;
-  const threadStart = recorded.entries.find(
-    (entry) => entry.type === "emit_inbound" && entry.label === "thread/start",
-  );
-  if (
-    threadStart?.type !== "emit_inbound" ||
-    !Predicate.isObject(threadStart.frame) ||
-    !Predicate.isObject(threadStart.frame.result) ||
-    !Predicate.isObject(threadStart.frame.result.thread)
-  ) {
-    return yield* Effect.die("The Codex replay fixture must include thread metadata.");
-  }
-  const launchReceiptRequest: CodexReplay.CodexAppServerReplayEntry[] = hasLaunchReceipt
-    ? [
-        {
-          type: "expect_outbound",
-          label: "thread/read launch receipt",
-          frame: {
-            id: 7,
-            method: "thread/read",
-            params: { threadId: nativeThreadId, includeTurns: false },
-          },
-        },
-        {
-          type: "emit_inbound",
-          label: "thread/read launch receipt",
-          frame: {
-            id: 7,
-            result: { thread: { ...threadStart.frame.result.thread, path: rolloutPath } },
-          },
-        },
-      ]
-    : [];
   return {
     ...recorded,
     entries: [
       ...launched,
       ...(completion === "after-turn"
         ? [turnEnd, commandFrame(true)]
-        : [
-            commandFrame(true),
-            commandFrame(true),
-            ...(completion === "parallel" ? [commandFrame(true, true), usage] : []),
-            turnEnd,
-          ]),
-      ...launchReceiptRequest,
+        : [commandFrame(true), commandFrame(true), turnEnd]),
     ],
   };
 });
@@ -332,7 +237,6 @@ it.effect.each([
   { enabled: true, release: false, completion: "marked" },
   { enabled: true, release: true, completion: "marked" },
   { enabled: true, release: false, completion: "yielded" },
-  { enabled: true, release: false, completion: "parallel" },
   { enabled: true, release: false, completion: "foreground" },
   { enabled: true, release: false, completion: "interrupted" },
 ] satisfies ReadonlyArray<{
@@ -346,10 +250,7 @@ it.effect.each([
       const beforeTerminal = completion !== "after-turn";
       const seen = yield* observation;
       const allowCompletion = yield* Deferred.make<void>();
-      const fileSystem = yield* FileSystem.FileSystem;
-      const rolloutDirectory = yield* fileSystem.makeTempDirectoryScoped();
-      const transcript = yield* codexTranscript(completion, rolloutDirectory);
-      const replay = yield* CodexReplay.makeReplayDriver(transcript, {
+      const replay = yield* CodexReplay.makeReplayDriver(yield* codexTranscript(completion), {
         beforeEmitInbound: (entry) =>
           entry.label === "wrapped command completed"
             ? Deferred.await(allowCompletion)
@@ -442,7 +343,6 @@ it.effect.each([
       };
       if (completion === "foreground" || completion === "interrupted") {
         yield* runtime.acknowledgeTurnTerminal!(acknowledgment);
-        yield* seen.until(() => seen.roster()?.providerThread.owedBackgroundResults?.length === 0);
         assert.deepEqual(seen.roster()?.providerThread.pendingBackgroundTasks, []);
         assert.deepEqual(seen.roster()?.providerThread.owedBackgroundResults, []);
         assert.lengthOf(seen.requests, 0);

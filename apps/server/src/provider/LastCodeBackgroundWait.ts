@@ -8,9 +8,6 @@ import type { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderAdapterV2SessionRuntime } from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderContinuationRequest } from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as Effect from "effect/Effect";
-import type { FileSystem } from "effect/FileSystem";
-import * as Option from "effect/Option";
-import * as Predicate from "effect/Predicate";
 
 export function readLastCodeBackgroundWaitEnabled(
   settings?: ProviderHost["Service"]["settings"]["get"],
@@ -61,24 +58,34 @@ export function codexBackgroundWaitInstructions(enabled: boolean): string {
     : "";
 }
 
-type CodexLaunchReceipt = {
-  readonly nativeThreadId: string;
-  readonly nativeTurnId: string;
-  readonly processId: string;
-};
-
-type CodexDeferredBackgroundWake = {
-  readonly request: ProviderContinuationRequest;
-  readonly launchReceipt?: CodexLaunchReceipt;
-  terminalTurnId?: ProviderTurnId;
-};
+export function codexBackgroundCommandNeedsWake(
+  settled: boolean,
+  awaited: boolean,
+  command:
+    | { readonly explicitlyAwaited?: boolean; readonly toolBatchesAtLaunch?: number }
+    | undefined,
+  completedToolBatches: number | undefined,
+): boolean {
+  if (settled) return true;
+  if (!awaited) return false;
+  // Codex publishes token usage after draining the sampling step's tool calls.
+  // If the command survived that boundary, the launch returned a session, not an exit result.
+  return (
+    command?.explicitlyAwaited === true ||
+    (command?.toolBatchesAtLaunch !== undefined &&
+      (completedToolBatches ?? 0) > command.toolBatchesAtLaunch)
+  );
+}
 
 export interface CodexOwedBackgroundCommand {
   readonly taskId: string;
   readonly originRunId: RunId;
   readonly providerThreadId: ProviderThreadId;
   readonly processId: string | undefined;
-  deferredWake?: CodexDeferredBackgroundWake;
+  deferredWake?: {
+    readonly request: ProviderContinuationRequest;
+    terminalTurnId?: ProviderTurnId;
+  };
 }
 
 export function settleCodexDeferredBackgroundWakes(
@@ -112,109 +119,18 @@ export function takeCodexDeferredBackgroundWakes(
   owedCommands: ReadonlyMap<string, CodexOwedBackgroundCommand>,
   providerThreadId: ProviderThreadId,
   providerTurnId: ProviderTurnId,
-): CodexDeferredBackgroundWake[] {
-  const wakes: CodexDeferredBackgroundWake[] = [];
+): ProviderContinuationRequest[] {
+  const wakes: ProviderContinuationRequest[] = [];
   for (const owed of owedCommands.values()) {
     if (
       owed.providerThreadId !== providerThreadId ||
       owed.deferredWake?.terminalTurnId !== providerTurnId
     )
       continue;
-    wakes.push(owed.deferredWake);
+    wakes.push(owed.deferredWake.request);
     delete owed.deferredWake;
   }
   return wakes;
-}
-
-const CODEX_ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024;
-
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
-function containsCodexSession(output: unknown, processId: string): boolean {
-  const texts = Array.isArray(output)
-    ? output.flatMap((part: unknown) =>
-        Predicate.isObject(part) && part.type === "input_text" && typeof part.text === "string"
-          ? [part.text]
-          : [],
-      )
-    : typeof output === "string"
-      ? [output]
-      : [];
-  for (const text of texts) {
-    // Plain exec_command output has a header before stdout. Code mode can print the
-    // structured result inside its own tool output, including in a parallel batch.
-    const nativeSession =
-      /^(?:Chunk ID: [^\n]+\n)?Wall time: [^\n]+\n(?:Process exited with code [^\n]+\n)?Process running with session ID (\d+)\b/u.exec(
-        text,
-      )?.[1];
-    if (nativeSession === processId) return true;
-    for (const line of text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("{")) continue;
-      const result = parseJson(trimmed);
-      if (
-        Predicate.isObject(result) &&
-        typeof result.chunk_id === "string" &&
-        (typeof result.session_id === "number" || typeof result.session_id === "string") &&
-        String(result.session_id) === processId &&
-        typeof result.output === "string"
-      )
-        return true;
-    }
-  }
-  return false;
-}
-
-/** Codex's command item is identical for foreground and yielded launches. Read only the
- * owning turn's model-visible tool results to confirm an early automatic wait. */
-export function codexRolloutConfirmsBackgroundLaunch(
-  fileSystem: FileSystem,
-  path: string | null | undefined,
-  receipt: CodexLaunchReceipt,
-): Effect.Effect<boolean> {
-  if (
-    path == null ||
-    !path.split("/").at(-1)?.startsWith("rollout-") ||
-    !path.endsWith(`-${receipt.nativeThreadId}.jsonl`)
-  )
-    return Effect.succeed(false);
-  return Effect.gen(function* () {
-    const info = yield* fileSystem.stat(path);
-    if (info.type !== "File") return false;
-    const file = yield* fileSystem.open(path, { flag: "r" });
-    const size = (yield* file.stat).size;
-    const start =
-      size > BigInt(CODEX_ROLLOUT_TAIL_BYTES) ? size - BigInt(CODEX_ROLLOUT_TAIL_BYTES) : 0n;
-    const bytes = yield* file.readAlloc(CODEX_ROLLOUT_TAIL_BYTES, { position: start });
-    let owningTurn = false;
-    const lines = new TextDecoder().decode(Option.getOrUndefined(bytes)).split("\n");
-    for (const line of lines.slice(start === 0n ? 0 : 1)) {
-      const row = parseJson(line);
-      if (!Predicate.isObject(row) || !Predicate.isObject(row.payload)) continue;
-      const item = row.payload;
-      if (row.type === "event_msg") {
-        if (item.type === "task_started") owningTurn = item.turn_id === receipt.nativeTurnId;
-        if (item.type === "task_complete" && item.turn_id === receipt.nativeTurnId) break;
-      }
-      if (
-        owningTurn &&
-        row.type === "response_item" &&
-        (item.type === "function_call_output" || item.type === "custom_tool_call_output") &&
-        containsCodexSession(item.output, receipt.processId)
-      )
-        return true;
-    }
-    return false;
-  }).pipe(
-    Effect.scoped,
-    Effect.orElseSucceed(() => false),
-  );
 }
 
 export function codexBackgroundResultRequest(
