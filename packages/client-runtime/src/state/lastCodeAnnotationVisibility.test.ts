@@ -2,6 +2,7 @@ import {
   CommandId,
   EnvironmentId,
   MessageId,
+  RunId,
   RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ShellSnapshot,
@@ -79,6 +80,15 @@ it("hides an owned family across environments while keeping a child waiting for 
   expect(
     hiddenKeys([parent, first, { ...second, hasPendingUserInput: true }, grandchild, independent]),
   ).toEqual(new Set(["local:parent", "local:first", "local:grandchild"]));
+  expect(
+    hiddenKeys([
+      parent,
+      first,
+      { ...second, pendingSubagentRequest: "user_input" },
+      grandchild,
+      independent,
+    ]),
+  ).toEqual(new Set(["local:parent", "local:first", "local:grandchild"]));
   expect(hiddenKeys([{ ...parent, annotation: null }, ...others])).toEqual(new Set());
 });
 
@@ -87,6 +97,8 @@ it("lists a linked delegated child until its pending request is answered", () =>
   const child = {
     ...v2ThreadShell,
     id: ThreadId.make("delegated"),
+    activityRunStatus: "running" as const,
+    latestRunId: RunId.make("delegated-run"),
     delegatedFrom: { environmentId: local, threadId: parent.id, title: parent.title },
   };
   const waiting = {
@@ -146,6 +158,17 @@ it("lists a linked delegated child until its pending request is answered", () =>
         registry.get(shells.annotationPendingChildThreadKeysAtom),
       ),
     ).toEqual(ref);
+    registry.set(snapshots(linked), {
+      ...v2ShellSnapshot,
+      threads: [
+        {
+          ...waiting,
+          pendingRuntimeRequest: { ...waiting.pendingRuntimeRequest, kind: "command" },
+        },
+      ],
+    });
+    expect(visible()).toEqual([parent.id, child.id]);
+    registry.set(snapshots(linked), { ...v2ShellSnapshot, threads: [waiting] });
     registry.set(parentHiddenTags, ["private"]);
     expect(visible()).toEqual([]);
     registry.set(parentHiddenTags, null);

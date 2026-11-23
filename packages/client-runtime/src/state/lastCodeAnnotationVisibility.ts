@@ -21,10 +21,15 @@ type AnnotationVisibilityThread = Pick<
   | "creatorOrigin"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
+  | "pendingSubagentRequest"
 >;
 
-function needsAnswer(thread: AnnotationVisibilityThread) {
+function needsOwnAnswer(thread: AnnotationVisibilityThread) {
   return thread.hasPendingApprovals || thread.hasPendingUserInput;
+}
+
+function needsAnswer(thread: AnnotationVisibilityThread) {
+  return needsOwnAnswer(thread) || thread.pendingSubagentRequest != null;
 }
 
 export function getLastCodeAnnotationVisibility(threads: readonly AnnotationVisibilityThread[]) {
@@ -48,14 +53,13 @@ export function getLastCodeAnnotationVisibility(threads: readonly AnnotationVisi
     const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
     if (seen.has(key)) continue;
     seen.add(key);
-    const hiddenByAnnotation = !needsAnswer(thread);
-    if (hiddenByAnnotation) hidden.add(key);
+    if (!needsAnswer(thread)) hidden.add(key);
     const children = childrenByOwner.get(key);
     if (!children) continue;
     for (const child of children) {
       remaining.push(child);
-      // Some children normally appear inside their parent's row.
-      if (hiddenByAnnotation && needsAnswer(child)) {
+      // The parent's request indicator can be for this same child.
+      if (!needsOwnAnswer(thread) && needsAnswer(child)) {
         pendingChildren.add(scopedThreadKey(scopeThreadRef(child.environmentId, child.id)));
       }
     }
