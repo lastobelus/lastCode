@@ -52,17 +52,13 @@ export function repositoryFile(relativePath: string) {
   return NodeFS.readFileSync(NodePath.join(root, relativePath), "utf8");
 }
 
-export type WrapperLine = "original" | "registered";
 const wrapperScript = "scripts/lastcode-run.ts";
 const waitInstructionDeclaration = /^const WAIT_INSTRUCTION\s*=\s*("(?:[^"\\]|\\.)*");/mu;
 
-export function wrapperWaitInstruction(variant: WrapperLine = "registered"): string {
-  const source =
-    variant === "original"
-      ? git(["show", `${baselineHead}:${wrapperScript}`])
-      : repositoryFile(wrapperScript);
-  const literal = source.match(waitInstructionDeclaration)?.[1];
-  if (literal === undefined) throw new Error("Could not read the wrapper's wait instruction.");
+export function wrapperWaitInstruction(): string {
+  const literal = repositoryFile(wrapperScript).match(waitInstructionDeclaration)?.[1];
+  if (literal === undefined)
+    throw new Error(`${wrapperScript}: expected WAIT_INSTRUCTION to be a string literal.`);
   return JSON.parse(literal) as string;
 }
 
@@ -70,27 +66,13 @@ function shellArg(value: string): string {
   return "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
-export function makeProject(
-  workspace: string,
-  arm: Arm,
-  scenario: Scenario,
-  seconds: number,
-  waitInstruction?: string,
-) {
+export function makeProject(workspace: string, arm: Arm, scenario: Scenario, seconds: number) {
   NodeFS.mkdirSync(workspace);
   const scripts = NodePath.join(workspace, "scripts");
   const shared = NodePath.join(workspace, "packages/shared/src");
   NodeFS.mkdirSync(NodePath.join(scripts, "lib"), { recursive: true });
   NodeFS.mkdirSync(shared, { recursive: true });
-  const wrapperSource = repositoryFile(wrapperScript);
-  const fixtureWrapper =
-    waitInstruction === undefined
-      ? wrapperSource
-      : wrapperSource.replace(
-          waitInstructionDeclaration,
-          () => `const WAIT_INSTRUCTION = ${JSON.stringify(waitInstruction)};`,
-        );
-  NodeFS.writeFileSync(NodePath.join(workspace, wrapperScript), fixtureWrapper);
+  NodeFS.copyFileSync(NodePath.join(root, wrapperScript), NodePath.join(workspace, wrapperScript));
   NodeFS.copyFileSync(
     NodePath.join(root, "scripts/lib/lastcode-action-kit.ts"),
     NodePath.join(scripts, "lib/lastcode-action-kit.ts"),

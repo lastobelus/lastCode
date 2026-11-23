@@ -132,7 +132,6 @@ export function compare(a: Results, b: Results, subsequentTurns: number, baselin
   return {
     outcome: !sufficient ? "incomplete" : reliable && zeroPolls && cheaper ? "pass" : "fail",
     heads: { a: a.config.head, b: b.config.head },
-    wrapperLine: b.config.wrapperLine ?? null,
     formulaInputs: { typicalContext, subsequentTurns },
     summaries,
     totals,

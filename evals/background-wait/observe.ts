@@ -264,7 +264,6 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
   };
 }
 
-const waitLine = wrapperWaitInstruction();
 const wrapperResult =
   /\[lc-run\] (?:prepare|prepare-checkpoint|ci|wait-checkpoint|package): (?:success|attention|blocked) \(exit \d+\)/u;
 
@@ -308,7 +307,7 @@ function callsTool(call: Extract<TraceEvent, { kind: "call" }>, name: string) {
 
 export function gradeTrace(
   trace: TraceEvent[],
-  waitInstruction = waitLine,
+  waitInstruction = wrapperWaitInstruction(),
   followWrapperCells = false,
 ) {
   const calls = new Map<string, Extract<TraceEvent, { kind: "call" }>>();

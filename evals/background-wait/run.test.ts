@@ -24,8 +24,7 @@ const native = (...rows: object[]) =>
         JSON.stringify({ event: { stage: "decoded", payload } }),
     )
     .join("\n");
-const wait =
-  "[lc-run] If you are this LastCode thread's main agent, ran ./scripts/lc-run as a simple command, and the shell reports it running in the background, end your turn. LastCode will wake the thread with the result. Do not poll. You may prefix the command with cd <literal path> &&, with no cd options or shell expansion. For other shell constructs and native subagent runs, collect the result before returning.";
+const wait = wrapperWaitInstruction();
 
 describe("real-session evidence", () => {
   it("requires an exact opt-in to reuse a baseline recorded at another head", () => {
@@ -244,7 +243,6 @@ describe("real-session evidence", () => {
   });
 
   it("links a yielded wrapper cell to the wait result that first shows the instruction", () => {
-    const instruction = wrapperWaitInstruction();
     const trace = [
       {
         kind: "call",
@@ -258,23 +256,34 @@ describe("real-session evidence", () => {
         body: "Script running with cell ID g1:2\nWall time: 1.0 seconds\nOutput:\n",
       },
       { kind: "call", id: "other", name: "wait", args: '{"cell_id":"g1:3"}' },
-      { kind: "output", id: "other", body: instruction },
+      { kind: "output", id: "other", body: wait },
       { kind: "call", id: "wait", name: "wait", args: '{"cell_id":"g1:2"}' },
       { kind: "output", id: "wait", body: "Script running with cell ID g1:2\nOutput:\n" },
       { kind: "call", id: "resume", name: "wait", args: '{"cell_id":"g1:2"}' },
       {
         kind: "output",
         id: "resume",
-        body: `Script completed\nOutput:\n${JSON.stringify({ session_id: 123, output: instruction })}`,
+        body: `Script completed\nOutput:\n${JSON.stringify({ session_id: 123, output: wait })}`,
       },
       { kind: "turn-end" },
     ] as const;
-    expect(gradeTrace([...trace], instruction, true)).toMatchObject({
+    expect(gradeTrace([...trace], wait, true)).toMatchObject({
       wrapperCalls: 1,
       markers: 1,
       polls: 0,
       extraCallsWhileWaiting: 0,
     });
+    expect(
+      gradeTrace(
+        [
+          ...trace.slice(0, -1),
+          { kind: "call", id: "poll", name: "write_stdin", args: '{"session_id":123,"chars":""}' },
+          { kind: "turn-end" },
+        ],
+        wait,
+        true,
+      ),
+    ).toMatchObject({ wrapperCalls: 1, markers: 1, polls: 1 });
   });
 
   it("treats a foreground Claude result as completion and ignores native child tool blocks", () => {
@@ -448,8 +457,6 @@ describe("real-session evidence", () => {
         ...input,
         traces: [[], [...trace]],
         wrapperWakeIds: ["worker-command"],
-        workerMessage: "**Result ID** `result-example`\n**Exit code:** `3`",
-        finalMessage: "Quick CI's exit code was **3**. Result ID `result-example`.",
       }),
     ).toMatchObject({ correct: true, holds: 0, holdExpected: 1, holdEngaged: false });
     const holds = awaitedWrapperIds(
@@ -509,10 +516,7 @@ describe("real-session evidence", () => {
         holds,
       }),
     ).toMatchObject({ correct: false, polls: 0, extraCallsWhileWaiting: 1 });
-    const registered = wrapperWaitInstruction();
-    expect(wrapperWaitInstruction("original")).toBe(wait);
-    expect(Buffer.byteLength(registered)).toBeLessThan(Buffer.byteLength(wait));
-    expect(gradeTrace([trace[0], { ...trace[1], body: registered }, trace[2]])).toMatchObject({
+    expect(gradeTrace([...trace])).toMatchObject({
       markers: 1,
       redundantMarks: 0,
     });

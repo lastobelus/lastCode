@@ -7,7 +7,6 @@ import {
   sumUsage,
 } from "./observe.ts";
 import type { Arm, Scenario } from "./cases.ts";
-import type { WrapperLine } from "./project.ts";
 
 export interface SampleResult {
   finished: boolean;
@@ -93,9 +92,9 @@ export function gradeSample(input: GradeInput): SampleResult {
     resultId !== undefined &&
     message.includes(resultId) &&
     new RegExp(
-      `\\bexit(?:ed)?(?:\\s+(?:with|status|code))*(?:\\s+was)?[\\s:=(]*${scenario.exitCode}\\b`,
+      `\\bexit(?:ed)?(?:\\s+(?:with|status|code))*[\\s:=(]*${scenario.exitCode}\\b`,
       "iu",
-    ).test(message.replaceAll(/[`*_]/gu, ""));
+    ).test(message.replaceAll("`", ""));
   if (!reportsResult(finalMessage) || !reportsResult(workerMessage)) {
     problems.push("Final response omitted the exact result ID or exit code.");
   }
@@ -197,7 +196,6 @@ export interface Results {
     provider: "codex" | "claudeAgent";
     model: string;
     effort?: string;
-    wrapperLine?: WrapperLine;
     head: string;
     scale: number;
     base: string;
@@ -214,8 +212,7 @@ export function median(numbers: number[]): number {
 
 export function printCases(data: Results) {
   for (const id of new Set(data.samples.map((sample) => sample.caseId))) {
-    const variant = data.config.wrapperLine === undefined ? "" : ` (${data.config.wrapperLine})`;
-    console.log(`\n${id}, arm ${data.config.arm.toUpperCase()}${variant}`);
+    console.log(`\n${id}, arm ${data.config.arm.toUpperCase()}`);
     console.table(
       data.samples
         .filter((sample) => sample.caseId === id)

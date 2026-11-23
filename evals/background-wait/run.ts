@@ -6,8 +6,16 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeUtil from "node:util";
 
+import { codexBackgroundWaitInstructions } from "../../apps/server/src/provider/LastCodeBackgroundWait.ts";
 import { cases, projectNotes, taskPrompt, type Arm, type Scenario } from "./cases.ts";
-import { gradeSample, printCases, type Results, type Sample, type WorkEvent } from "./metrics.ts";
+import {
+  gradeSample,
+  printCases,
+  type Results,
+  type Sample,
+  type SampleResult,
+  type WorkEvent,
+} from "./metrics.ts";
 import {
   awaitedWrapperIds,
   nativeLogName,
@@ -35,7 +43,6 @@ const usage = `Usage: node evals/background-wait/run.ts --base-dir <dir> --arm a
   --model <slug> --out <name> [--provider codex|claudeAgent]
   [--case <id[,id...]>] [--samples <20>] [--concurrency <2>] [--effort <level>]
   [--duration-scale <1>] [--timeout-seconds <900>] [--dry-run]
-  [--wrapper-line original|registered]  Arm B only (default: registered)
 
 --init creates an empty eval home for the selected provider (default: codex).
 --dry-run prints the run plan without opening or creating any state.`;
@@ -49,7 +56,6 @@ function options() {
       provider: { type: "string" },
       model: { type: "string" },
       effort: { type: "string" },
-      "wrapper-line": { type: "string" },
       case: { type: "string" },
       samples: { type: "string", default: "20" },
       concurrency: { type: "string", default: "2" },
@@ -233,8 +239,12 @@ function standing(arm: Arm, scenario: Scenario, provider: Results["config"]["pro
     const source = repositoryFile(file);
     return names
       .map((name) => {
-        const def = source.split(`Tool.make("${name}", {`)[1]?.split("\n  success:")[0];
-        if (def === undefined) throw new Error(`Cannot read tool definition for ${name}.`);
+        const [def, boundary] =
+          source.split(`Tool.make("${name}", {`)[1]?.split("\n  success:", 2) ?? [];
+        if (def === undefined || boundary === undefined)
+          throw new Error(
+            `${file}: expected the Tool.make definition for ${name} through its success field.`,
+          );
         return name + def;
       })
       .join("\n");
@@ -249,17 +259,22 @@ function standing(arm: Arm, scenario: Scenario, provider: Results["config"]["pro
   const background = definitions("apps/server/src/mcp/toolkits/orchestrator/tools.ts", [
     "t3_background_wait",
   ]);
-  const serverInstructions = repositoryFile(
-    "packages/provider-core/src/server/orchestrationInstructions.ts",
-  )
-    .split("  `- A delegated child owns its resumable Project Actions")[1]
-    ?.split("`,\n  `### Find mentioned threads")[0];
-  const backgroundInstruction = repositoryFile("apps/server/src/provider/LastCodeBackgroundWait.ts")
-    .split(' ? "\\n\\nFor a background result you need, ')[1]
-    ?.split('"')[0];
-  if (!serverInstructions || !backgroundInstruction)
-    throw new Error("Action or background-wait guidance moved.");
+  const orchestrationSource = "packages/provider-core/src/server/orchestrationInstructions.ts";
+  const [serverInstructions, boundary] =
+    repositoryFile(orchestrationSource)
+      .split("  `- A delegated child owns its resumable Project Actions")[1]
+      ?.split("`,\n  `### Find mentioned threads", 2) ?? [];
+  if (!serverInstructions || boundary === undefined)
+    throw new Error(
+      `${orchestrationSource}: expected the delegated Project Actions section before Find mentioned threads.`,
+    );
   const isClaude = provider === "claudeAgent";
+  const needsCodexWait = arm === "b" && !isClaude;
+  const backgroundInstruction = needsCodexWait ? codexBackgroundWaitInstructions(true).trim() : "";
+  if (needsCodexWait && backgroundInstruction === "")
+    throw new Error(
+      "apps/server/src/provider/LastCodeBackgroundWait.ts: codexBackgroundWaitInstructions(true) returned no guidance.",
+    );
   const project =
     guidance(arm) +
     "\n## This project\n\n" +
@@ -269,10 +284,7 @@ function standing(arm: Arm, scenario: Scenario, provider: Results["config"]["pro
   return {
     guidance: approx(project + serverInstructions),
     toolDefinitions: approx(actions + (arm === "b" || isClaude ? background : "")),
-    backgroundWaitInstruction:
-      arm === "b" && !isClaude
-        ? approx("For a background result you need, " + backgroundInstruction)
-        : 0,
+    backgroundWaitInstruction: approx(backgroundInstruction),
   };
 }
 
@@ -360,6 +372,7 @@ function sampleMetrics(input: {
   scenario: Scenario;
   config: Results["config"];
   waitInstruction: string;
+  standingEstimate: SampleResult["standing"];
   observations: Awaited<ReturnType<typeof observeFamily>>;
 }) {
   const { base, sample, scenario, config, observations, waitInstruction } = input;
@@ -424,7 +437,7 @@ function sampleMetrics(input: {
       : null,
     waitInstruction,
     wallSeconds: Math.round((endedAt - sample.launchedAt!) / 100) / 10,
-    standing: standing(config.arm, scenario, config.provider),
+    standing: input.standingEstimate,
   });
 }
 
@@ -460,13 +473,7 @@ async function main() {
   const model = flags.model;
   const out = flags.out;
   if (!model || !out || !/^[a-zA-Z0-9_-]+$/u.test(out)) throw new Error(usage);
-  if (arm === "a" && flags["wrapper-line"] !== undefined)
-    throw new Error("--wrapper-line only applies to arm B.");
-  const wrapperLine = arm === "b" ? (flags["wrapper-line"] ?? "registered") : undefined;
-  if (wrapperLine !== undefined && wrapperLine !== "registered" && wrapperLine !== "original") {
-    throw new Error("--wrapper-line must be original or registered.");
-  }
-  const waitInstruction = wrapperWaitInstruction(wrapperLine);
+  const waitInstruction = wrapperWaitInstruction();
   const scale = positive(flags["duration-scale"], "duration-scale", false);
   const samples = positive(flags.samples, "samples");
   const concurrency = positive(flags.concurrency, "concurrency");
@@ -479,6 +486,9 @@ async function main() {
   });
   if (new Set(selected).size !== selected.length) throw new Error("Duplicate case id.");
   const seconds = (scenario: Scenario) => Math.max(1, Math.round(scenario.seconds * scale));
+  const standingByCase = new Map(
+    chosen.map((scenario) => [scenario.id, standing(arm, scenario, provider)]),
+  );
   if (flags["dry-run"]) {
     console.log(
       JSON.stringify(
@@ -488,8 +498,7 @@ async function main() {
           provider,
           model,
           effort: flags.effort,
-          wrapperLine,
-          ...(wrapperLine === undefined ? {} : { waitInstruction }),
+          ...(arm === "b" ? { waitInstruction } : {}),
           out,
           samples,
           concurrency,
@@ -499,7 +508,7 @@ async function main() {
             expectedStages: "stages" in scenario ? scenario.stages : 1,
             delegated: "delegated" in scenario,
             guidanceBytes: Buffer.byteLength(guidance(arm)),
-            standing: standing(arm, scenario, provider),
+            standing: standingByCase.get(scenario.id)!,
             prompt: taskPrompt(scenario, arm, model, flags.effort),
           })),
         },
@@ -538,7 +547,6 @@ async function main() {
         provider,
         model,
         ...(flags.effort ? { effort: flags.effort } : {}),
-        ...(wrapperLine === undefined ? {} : { wrapperLine }),
         head: git(["rev-parse", "HEAD"]).trim(),
         scale,
         base,
@@ -581,13 +589,7 @@ async function main() {
         if (sample.workspace === undefined) {
           const directory = NodeFS.mkdtempSync(NodePath.join(output, "sample-"));
           const workspace = NodePath.join(directory, "project");
-          makeProject(
-            workspace,
-            arm,
-            scenario,
-            seconds(scenario),
-            wrapperLine === "original" ? waitInstruction : undefined,
-          );
+          makeProject(workspace, arm, scenario, seconds(scenario));
           sample.workspace = workspace;
           save();
         }
@@ -650,6 +652,7 @@ async function main() {
           config,
           observations,
           waitInstruction,
+          standingEstimate: standingByCase.get(scenario.id)!,
         });
         save();
         console.log(

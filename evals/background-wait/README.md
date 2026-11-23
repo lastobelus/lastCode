@@ -52,24 +52,14 @@ done
 
 The comparison reports one model and effort at a time. The codified pass bar is 20 complete samples per arm in each of the six cases, a majority of correct wrapper samples and at least as many correct samples as Actions **in each case**, zero post-instruction wrapper polls, and lower mean raw tokens per task across the six cases. The report includes per-case raw costs to expose any regressions hidden by the aggregate. A missing trace or missing usage makes the decision incomplete. A valid failure counts, including its measured tokens. The live break tests and soak in #824 remain separate gates.
 
-To reuse the arm A Luna run from before the wrapper trace-grading fix, keep its results file and run arm B from this checkout with `--wrapper-line registered`. Both revisions use the same server and arm A fixtures and scoring. Pin the saved arm A head explicitly so the comparison records both revisions:
+To reuse the saved arm A Luna run, start the arm B server from this checkout and choose a new output name. The arm A fixtures and scoring match the saved run. Both arms use that run's exit-code matcher, which can reject reports that bold the exit code. The server revisions differ, so pass the exact saved arm A head to record both revisions.
 
 ```sh
-node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna --wrapper-line registered
-node evals/background-wait/compare.ts "$a/background-wait-eval/luna/results.json" "$b/background-wait-eval/luna/results.json" --baseline-head 7203dc52fc8f208dbebcafc21737241ac9dbfd73
+node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna-pr833
+node evals/background-wait/compare.ts "$a/background-wait-eval/luna/results.json" "$b/background-wait-eval/luna-pr833/results.json" --baseline-head 7203dc52fc8f208dbebcafc21737241ac9dbfd73
 ```
 
-### Pilot the wrapper wording
-
-Reuse the same two running dev servers. Use a fresh `--out` name for each run so the original pilot remains available. Arm B defaults to `registered`. Selecting `original` substitutes the landed wait line in each synthetic checkout. The same server, wrapper logic, fixture, and guidance run in both variants.
-
-```sh
-node evals/background-wait/run.ts --base-dir "$a" --arm a --model gpt-6-luna --out luna-pilot-fixed --samples 1 --case quick-ci,standing-watch
-node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna-pilot-original --samples 1 --case quick-ci,standing-watch --wrapper-line original
-node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna-pilot-registered --samples 1 --case quick-ci,standing-watch --wrapper-line registered
-```
-
-Compare `redundantMarks`, `waitToolLookups`, and raw tokens for the two arm B runs. The comparison JSON includes `redundantMarksPerWrapperWait`, the number of redundant marks divided by background wait instructions observed. Run the usual A/B comparison once against each B output. Pilot comparisons print the measurements and exit with `incomplete` because the sample count is below the decision threshold.
+For a smoke run, use a separate output name with `--samples 1 --case prepare,quick-ci,standing-watch`. The fixture uses the checked-out wrapper as shipped. The comparison JSON includes `redundantMarksPerWrapperWait`, the number of redundant marks divided by background wait instructions observed.
 
 ## Optional Claude comparison
 
