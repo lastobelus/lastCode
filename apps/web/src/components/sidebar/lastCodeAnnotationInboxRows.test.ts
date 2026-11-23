@@ -34,16 +34,15 @@ it("keeps the selected inbox row among annotation-hidden rows, including an open
   const threads = [open, elsewhere, visible];
   const childRef = { environmentId: child.environmentId, threadId: child.id };
   const selectedAncestor = resolveListedAncestorThreadRef(childRef, [...threads, child]);
+  const hidden = new Set([lastcodeSidebarThreadKey(open), lastcodeSidebarThreadKey(elsewhere)]);
 
-  expect(filterLastCodeAnnotationInboxRows(threads, null)).toEqual([visible]);
-  expect(filterLastCodeAnnotationInboxRows(threads, lastcodeSidebarThreadKey(open))).toEqual([
-    open,
-    visible,
-  ]);
-  expect(filterLastCodeAnnotationInboxRows(threads, scopedThreadKey(selectedAncestor))).toEqual([
-    open,
-    visible,
-  ]);
+  expect(filterLastCodeAnnotationInboxRows(threads, null, hidden)).toEqual([visible]);
+  expect(
+    filterLastCodeAnnotationInboxRows(threads, lastcodeSidebarThreadKey(open), hidden),
+  ).toEqual([open, visible]);
+  expect(
+    filterLastCodeAnnotationInboxRows(threads, scopedThreadKey(selectedAncestor), hidden),
+  ).toEqual([open, visible]);
 });
 
 it("uses unread status for a reveal without a completed run until it is visited", () => {

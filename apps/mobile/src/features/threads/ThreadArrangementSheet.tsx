@@ -19,7 +19,11 @@ import { scopedThreadKey } from "../../lib/scopedEntities";
 import { deriveThreadArrangementSizing } from "../../lib/layout";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { threadListEnvironmentsAtom } from "../../state/presentation";
-import { steadyNavigationThreadShellsAtom, steadyShellsHoldingAtom } from "../../state/threads";
+import {
+  steadyAnnotationHiddenThreadKeysAtom,
+  steadyNavigationThreadShellsAtom,
+  steadyShellsHoldingAtom,
+} from "../../state/threads";
 import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../../state/olderSettledShelf";
 import {
@@ -185,9 +189,10 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
     fontScale,
   });
   const orderCandidates = useAtomValue(steadyNavigationThreadShellsAtom);
+  const annotationHidden = useAtomValue(steadyAnnotationHiddenThreadKeysAtom);
   const threads = useMemo(
-    () => filterLastCodeAnnotationThreadRows(orderCandidates),
-    [orderCandidates],
+    () => filterLastCodeAnnotationThreadRows(orderCandidates, annotationHidden),
+    [orderCandidates, annotationHidden],
   );
   const configs = useAtomValue(environmentServerConfigsAtom);
   const listEnvironments = useAtomValue(threadListEnvironmentsAtom);

@@ -1,9 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import {
-  isThreadAnnotationHiddenInList,
-  isThreadAnnotationVisibleInPalette,
-} from "@t3tools/shared/threadAnnotation";
+import { isThreadAnnotationVisibleInPalette } from "@t3tools/shared/threadAnnotation";
 
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { getThreadListV2OrderedSection } from "./threadListV2";
@@ -11,23 +8,25 @@ import { createThreadMovePlanner, type ThreadMoveDestination } from "./threadOrd
 
 export function filterLastCodeAnnotationThreadRows(
   threads: readonly EnvironmentThreadShell[],
+  hidden: ReadonlySet<string>,
   retainedThreadKey?: string | null,
 ): readonly EnvironmentThreadShell[] {
-  const visible = threads.filter(
-    (thread) =>
-      !isThreadAnnotationHiddenInList(thread) ||
-      scopedThreadKey(thread.environmentId, thread.id) === retainedThreadKey,
-  );
+  if (hidden.size === 0) return threads;
+  const visible = threads.filter((thread) => {
+    const key = scopedThreadKey(thread.environmentId, thread.id);
+    return key === retainedThreadKey || !hidden.has(key);
+  });
   return visible.length === threads.length ? threads : visible;
 }
 
 export function getLastCodeAnnotationOrderedSection(
   input: Parameters<typeof getThreadListV2OrderedSection>[0],
+  hidden: ReadonlySet<string>,
   retainedThreadKey?: string | null,
 ) {
   return getThreadListV2OrderedSection({
     ...input,
-    threads: filterLastCodeAnnotationThreadRows(input.threads, retainedThreadKey),
+    threads: filterLastCodeAnnotationThreadRows(input.threads, hidden, retainedThreadKey),
   });
 }
 
@@ -43,12 +42,17 @@ export function filterLastCodeMobilePaletteThreads(
 export function planLastCodeAnnotationThreadMove(
   input: Parameters<typeof getThreadListV2OrderedSection>[0] & {
     readonly retainedThreadKey?: string | null | undefined;
+    readonly annotationHiddenThreadKeys: ReadonlySet<string>;
     readonly reorderableEnvironmentIds: ReadonlySet<EnvironmentId>;
     readonly movedId: string;
     readonly direction: ThreadMoveDestination;
   },
 ) {
-  const ordered = getLastCodeAnnotationOrderedSection(input, input.retainedThreadKey);
+  const ordered = getLastCodeAnnotationOrderedSection(
+    input,
+    input.annotationHiddenThreadKeys,
+    input.retainedThreadKey,
+  );
   const assignments = createThreadMovePlanner({
     allThreads: input.threads,
     ordered,

@@ -9,18 +9,6 @@ export function isThreadAnnotationHidden(annotation: ThreadAnnotation | null | u
   return annotation?.resolvedAt === null && annotation.hideUntil !== undefined;
 }
 
-export function isThreadAnnotationHiddenInList(thread: {
-  readonly annotation?: ThreadAnnotation | null | undefined;
-  readonly hasPendingApprovals: boolean;
-  readonly hasPendingUserInput: boolean;
-}): boolean {
-  return (
-    isThreadAnnotationHidden(thread.annotation) &&
-    !thread.hasPendingApprovals &&
-    !thread.hasPendingUserInput
-  );
-}
-
 export function isThreadAnnotationVisibleInPalette(
   thread: { readonly annotation?: ThreadAnnotation | null | undefined; readonly title: string },
   query: string,

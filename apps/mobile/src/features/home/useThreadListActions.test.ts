@@ -103,7 +103,7 @@ vi.mock("../../state/atom-registry", async () => {
             ? state.holdingRows
             : atom === "thread-shells"
               ? state.shells
-              : atom === "queued-thread-keys"
+              : atom === "queued-thread-keys" || atom === "annotation-hidden-thread-keys"
                 ? new Set<string>()
                 : new Map(
                     [...state.scopes.keys()].map((environmentId) => [
@@ -188,6 +188,7 @@ vi.mock("../../state/threads", () => ({
     navigationThreadShellsAtom: "thread-shells",
   },
   steadyNavigationThreadShellsAtom: "thread-shells",
+  steadyAnnotationHiddenThreadKeysAtom: "annotation-hidden-thread-keys",
   steadyShellsHoldingAtom: "steady-shells-holding",
   threadEnvironment: {
     loadArchiveFamily: "archive-family",

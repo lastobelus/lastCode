@@ -17,6 +17,7 @@ import {
 import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
+import { createLastCodeAnnotationHiddenThreadKeysAtom } from "./lastCodeAnnotationVisibility.ts";
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
 import { getArchiveRecoveryRows } from "./threadArchive.ts";
 import {
@@ -813,6 +814,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     threadShellsAtom,
     visibleThreadShellsAtom,
     hiddenThreadKeysAtom,
+    annotationHiddenThreadKeysAtom: createLastCodeAnnotationHiddenThreadKeysAtom(threadShellsAtom),
     anyEnvironmentHidingAtom,
     quietThreadShellsAtom,
     navigationThreadShellsAtom,

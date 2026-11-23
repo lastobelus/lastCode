@@ -172,7 +172,7 @@ import {
 import { environmentPresentations } from "../state/presentation";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
-import { threadEnvironment } from "../state/threads";
+import { environmentThreadShells, threadEnvironment } from "../state/threads";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../state/olderSettledShelf";
 import { terminalEnvironment } from "../state/terminal";
 import { useThreadSearch } from "../state/queries";
@@ -381,6 +381,7 @@ type SidebarOptimisticDrop = {
 
 interface SidebarThreadPartitionInput {
   readonly threads: readonly EnvironmentThreadShell[];
+  readonly annotationHiddenThreadKeys: ReadonlySet<string>;
   readonly routeRowThreadKey: string | null;
   readonly scopedProjectKeys: ReadonlySet<string> | null;
   /** Tasks linked environments run for a listed thread; they show under it. */
@@ -516,6 +517,9 @@ function useSidebarThreads(input: {
 
   const partition = partitionSidebarThreads({
     threads,
+    annotationHiddenThreadKeys: useAtomValue(
+      environmentThreadShells.annotationHiddenThreadKeysAtom,
+    ),
     routeRowThreadKey,
     scopedProjectKeys,
     delegatedUnderParent,
@@ -668,7 +672,11 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     scopedProjectKeys,
     delegatedUnderParent,
   );
-  const visible = filterLastCodeAnnotationInboxRows(candidates, input.routeRowThreadKey);
+  const visible = filterLastCodeAnnotationInboxRows(
+    candidates,
+    input.routeRowThreadKey,
+    input.annotationHiddenThreadKeys,
+  );
   const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];

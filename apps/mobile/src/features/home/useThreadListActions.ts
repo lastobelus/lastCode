@@ -26,6 +26,7 @@ import { readEnvironmentScope } from "../../state/session";
 import { clearComposerDraft } from "../../state/use-composer-drafts";
 import {
   environmentThreadShells,
+  steadyAnnotationHiddenThreadKeysAtom,
   steadyNavigationThreadShellsAtom,
   steadyShellsHoldingAtom,
   threadEnvironment,
@@ -746,6 +747,7 @@ export function useThreadListActions(retainedThreadKey?: string | null): {
       settlementEnvironmentIds: new Set(configs.keys()),
       snoozeEnvironmentIds: new Set(configs.keys()),
       retainedThreadKey,
+      annotationHiddenThreadKeys: appAtomRegistry.get(steadyAnnotationHiddenThreadKeysAtom),
       reorderableEnvironmentIds: new Set(
         [...configs.keys()].filter((environmentId) => connectedEnvironmentIds.has(environmentId)),
       ),
