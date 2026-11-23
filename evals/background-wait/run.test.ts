@@ -1,9 +1,18 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Use an in-memory copy of the worker lookup tables.
+import * as NodeSqlite from "node:sqlite";
 import { describe, expect, it } from "vite-plus/test";
 
 import { parseLastCodeWrappedAction } from "../../packages/shared/src/lastcodeWrappedCommands.ts";
 import { cases } from "./cases.ts";
 import { gradeSample } from "./metrics.ts";
-import { awaitedWrapperIds, gradeTrace, readCodexRollout, readNative } from "./observe.ts";
+import {
+  awaitedWrapperIds,
+  gradeTrace,
+  ownedWorkerLookup,
+  readCodexRollout,
+  readNative,
+} from "./observe.ts";
+import { wrapperWaitInstruction } from "./project.ts";
 
 const native = (...rows: object[]) =>
   rows
@@ -20,6 +29,20 @@ describe("real-session evidence", () => {
   it("passes real wrapper syntax for every fixture", () => {
     for (const scenario of cases)
       expect(parseLastCodeWrappedAction(scenario.wrapper)).toBeDefined();
+  });
+
+  it("finds a local owned worker from the app's task record", () => {
+    using db = new NodeSqlite.DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE orchestration_v2_projection_threads(thread_id, project_id, created_at);
+      CREATE TABLE orchestration_v2_projection_subagents(thread_id, child_thread_id, origin);
+      INSERT INTO orchestration_v2_projection_threads VALUES
+        ('worker', 'project', 1), ('native', 'project', 2), ('elsewhere', 'other-project', 3);
+      INSERT INTO orchestration_v2_projection_subagents VALUES
+        ('parent', 'worker', 'app_owned'), ('parent', 'native', 'provider_native'),
+        ('parent', 'elsewhere', 'app_owned');
+    `);
+    expect(ownedWorkerLookup(db).all("parent", "project")).toEqual([{ thread_id: "worker" }]);
   });
 
   it("counts Codex request usage once and excludes cached tokens from double counting", () => {
@@ -79,6 +102,15 @@ describe("real-session evidence", () => {
           payload: {
             type: "custom_tool_call",
             name: "exec",
+            call_id: "mark",
+            input: 'await tools.mcp__t3_code__t3_background_wait({taskIds:["1"]})',
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
             call_id: "2",
             input: "await tools.write_stdin({session_id:1,chars:''})",
           },
@@ -99,9 +131,10 @@ describe("real-session evidence", () => {
         .join("\n"),
     );
     expect(trace.turns).toBe(2);
-    expect(gradeTrace(trace.trace)).toMatchObject({
+    expect(gradeTrace(trace.trace, wait)).toMatchObject({
       markers: 1,
       polls: 1,
+      redundantMarks: 1,
       extraCallsWhileWaiting: 1,
     });
   });
@@ -250,6 +283,7 @@ describe("real-session evidence", () => {
       ],
       native: [],
       traces: null,
+      waitInstruction: wait,
       wallSeconds: 55,
       standing: { guidance: 100, toolDefinitions: 0, backgroundWaitInstruction: 0 },
     };
@@ -284,8 +318,37 @@ describe("real-session evidence", () => {
       "codex",
     );
     expect(holds).toEqual(["worker-command"]);
-    expect(gradeSample({ ...input, traces: [[], [...trace]], holds: holds.length })).toMatchObject({
+    const withMark = [
+      trace[0],
+      trace[1],
+      {
+        kind: "call",
+        id: "lookup",
+        name: "exec",
+        args: 'text(ALL_TOOLS.filter(x => x.name.includes("background_wait")))',
+      },
+      {
+        kind: "call",
+        id: "mark",
+        name: "mcp__t3_code__t3_background_wait",
+        args: '{"taskIds":["1"]}',
+      },
+      trace[2],
+    ] as const;
+    expect(
+      gradeSample({ ...input, traces: [[], [...withMark]], holds: holds.length }),
+    ).toMatchObject({
       correct: true,
+      redundantMarks: 1,
+      waitToolLookups: 1,
+      extraCallsWhileWaiting: 0,
+    });
+    const registered = wrapperWaitInstruction();
+    expect(wrapperWaitInstruction("original")).toBe(wait);
+    expect(Buffer.byteLength(registered)).toBeLessThan(Buffer.byteLength(wait));
+    expect(gradeTrace([trace[0], { ...trace[1], body: registered }, trace[2]])).toMatchObject({
+      markers: 1,
+      redundantMarks: 0,
     });
   });
 });

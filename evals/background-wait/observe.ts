@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
+import type * as NodeSqlite from "node:sqlite";
 
 import { wrapperWaitInstruction } from "./project.ts";
 
@@ -88,6 +89,16 @@ export interface PendingWork {
   kind: string;
   awaited?: boolean;
   description?: string;
+}
+
+export function ownedWorkerLookup(db: NodeSqlite.DatabaseSync) {
+  return db.prepare(`
+    SELECT DISTINCT child.thread_id
+    FROM orchestration_v2_projection_subagents AS task
+    JOIN orchestration_v2_projection_threads AS child ON child.thread_id = task.child_thread_id
+    WHERE task.thread_id = ? AND task.origin = 'app_owned' AND child.project_id = ?
+    ORDER BY child.created_at, child.thread_id
+  `);
 }
 
 export function awaitedWrapperIds(tasks: readonly PendingWork[], provider: string): string[] {
@@ -270,32 +281,46 @@ function callsTool(call: Extract<TraceEvent, { kind: "call" }>, name: string) {
   );
 }
 
-export function gradeTrace(trace: TraceEvent[]) {
+export function gradeTrace(trace: TraceEvent[], waitInstruction = waitLine) {
   const calls = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
-  let waiting = false;
+  let waiting: "action" | "wrapper" | undefined;
   let wrapperCalls = 0;
   let terminalWrapperOutputs = 0;
   let markers = 0;
   let lists = 0;
   let actions = 0;
   let polls = 0;
+  let redundantMarks = 0;
+  let waitToolLookups = 0;
   let extraCallsWhileWaiting = 0;
   let actionWaits = 0;
   for (const event of trace) {
     if (event.kind === "turn-end") {
-      waiting = false;
+      waiting = undefined;
       continue;
     }
     if (event.kind === "call") {
       calls.set(event.id, event);
       if (waiting) {
-        extraCallsWhileWaiting++;
-        if (
+        const poll =
           /write_stdin|TaskOutput|inspect_action_run|thread[ /_-]+(?:show|read|wait)|\b(?:tail|sleep|ps|jobs|pgrep)\b|terminal.*(?:log|read|status)/iu.test(
             event.name + " " + event.args,
-          )
-        )
+          );
+        if (poll) {
           polls++;
+          extraCallsWhileWaiting++;
+        } else if (waiting === "wrapper" && callsTool(event, "t3_background_wait")) {
+          redundantMarks++;
+        } else if (
+          waiting === "wrapper" &&
+          event.args.includes("background_wait") &&
+          (/tool_?search/iu.test(event.name) ||
+            (event.name === "exec" && event.args.includes("ALL_TOOLS")))
+        ) {
+          waitToolLookups++;
+        } else {
+          extraCallsWhileWaiting++;
+        }
       }
       if (callsTool(event, "list_project_actions")) lists++;
       if (callsTool(event, "run_project_action_and_resume")) actions++;
@@ -308,13 +333,13 @@ export function gradeTrace(trace: TraceEvent[]) {
       callsTool(call, "run_project_action_and_resume") &&
       /"delivery"\s*:\s*"armed"/u.test(event.body.replaceAll('\\"', '"'))
     ) {
-      waiting = true;
+      waiting = "action";
       actionWaits++;
     }
     if (call === undefined || !wrapperCall(call.args)) continue;
     if (wrapperResult.test(event.body)) terminalWrapperOutputs++;
-    else if (event.body.includes(waitLine)) {
-      waiting = true;
+    else if (event.body.includes(waitInstruction)) {
+      waiting = "wrapper";
       markers++;
     }
   }
@@ -326,6 +351,8 @@ export function gradeTrace(trace: TraceEvent[]) {
     actions,
     actionWaits,
     polls,
+    redundantMarks,
+    waitToolLookups,
     extraCallsWhileWaiting,
   };
 }

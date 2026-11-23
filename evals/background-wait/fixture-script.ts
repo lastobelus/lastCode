@@ -110,6 +110,9 @@ export async function runFixture(config: FixtureConfig) {
     milestones,
     at: Date.now(),
   });
+  // Project Actions discard the structured report when the process exits nonzero.
+  // Give the Action's stdout tail the same result ID the wrapper gets from the report.
+  if (config.exitCode !== 0 && process.env.T3CODE_ACTION_RUN_ID) console.log(summary);
   return {
     outcome: config.exitCode === 0 ? ("success" as const) : ("attention" as const),
     summary,

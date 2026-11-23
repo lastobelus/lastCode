@@ -7,6 +7,7 @@ import {
   sumUsage,
 } from "./observe.ts";
 import type { Arm, Scenario } from "./cases.ts";
+import type { WrapperLine } from "./project.ts";
 
 export interface SampleResult {
   finished: boolean;
@@ -17,6 +18,8 @@ export interface SampleResult {
   tokens: Usage | null;
   rawTokens: number | null;
   polls: number | null;
+  redundantMarks: number | null;
+  waitToolLookups: number | null;
   extraCallsWhileWaiting: number | null;
   holdEngaged: boolean;
   holds: number;
@@ -55,6 +58,7 @@ interface GradeInput {
   work: WorkEvent[];
   native: NativeEvidence[];
   traces: TraceEvent[][] | null;
+  waitInstruction?: string;
   wallSeconds: number;
   standing: SampleResult["standing"];
 }
@@ -98,9 +102,11 @@ export function gradeSample(input: GradeInput): SampleResult {
     problems.push("Final response omitted the artifact path.");
   }
 
-  const observed = traces?.map(gradeTrace);
+  const observed = traces?.map((trace) => gradeTrace(trace, input.waitInstruction));
   const worker = observed?.at(-1);
   const polls = observed?.reduce((sum, trace) => sum + trace.polls, 0) ?? null;
+  const redundantMarks = observed?.reduce((sum, trace) => sum + trace.redundantMarks, 0) ?? null;
+  const waitToolLookups = observed?.reduce((sum, trace) => sum + trace.waitToolLookups, 0) ?? null;
   const extraCallsWhileWaiting =
     observed?.reduce((sum, trace) => sum + trace.extraCallsWhileWaiting, 0) ?? null;
   const holdExpected = worker === undefined ? null : arm === "a" ? stages : worker.markers;
@@ -128,7 +134,7 @@ export function gradeSample(input: GradeInput): SampleResult {
     if (arm === "b" && input.holds < (holdExpected ?? 0))
       problems.push("Expected wait hold was not observed.");
     if (extraCallsWhileWaiting !== 0)
-      problems.push("A tool was called after the instruction to end the turn.");
+      problems.push("An unexpected tool was called after the instruction to end the turn.");
   }
   const completeUsage =
     native.length === input.expectedTurnCounts.length &&
@@ -149,6 +155,8 @@ export function gradeSample(input: GradeInput): SampleResult {
     tokens,
     rawTokens: tokens === null ? null : tokens.input + tokens.output,
     polls,
+    redundantMarks,
+    waitToolLookups,
     extraCallsWhileWaiting,
     holdEngaged: input.holds > 0,
     holds: input.holds,
@@ -186,6 +194,7 @@ export interface Results {
     provider: "codex" | "claudeAgent";
     model: string;
     effort?: string;
+    wrapperLine?: WrapperLine;
     head: string;
     scale: number;
     base: string;
@@ -202,7 +211,8 @@ export function median(numbers: number[]): number {
 
 export function printCases(data: Results) {
   for (const id of new Set(data.samples.map((sample) => sample.caseId))) {
-    console.log(`\n${id}, arm ${data.config.arm.toUpperCase()}`);
+    const variant = data.config.wrapperLine === undefined ? "" : ` (${data.config.wrapperLine})`;
+    console.log(`\n${id}, arm ${data.config.arm.toUpperCase()}${variant}`);
     console.table(
       data.samples
         .filter((sample) => sample.caseId === id)
@@ -217,6 +227,8 @@ export function printCases(data: Results) {
           output: result?.tokens?.output ?? null,
           raw: result?.rawTokens ?? null,
           polls: result?.polls ?? null,
+          redundantMarks: result?.redundantMarks ?? null,
+          waitToolLookups: result?.waitToolLookups ?? null,
           hold: result === undefined ? null : `${result.holds}/${result.holdExpected ?? "?"}`,
           standing: result?.standingAcrossRequests ?? null,
           seconds: result?.wallSeconds ?? null,

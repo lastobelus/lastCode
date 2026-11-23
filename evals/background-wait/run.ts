@@ -11,6 +11,7 @@ import { gradeSample, printCases, type Results, type Sample, type WorkEvent } fr
 import {
   awaitedWrapperIds,
   nativeLogName,
+  ownedWorkerLookup,
   readCodexRollout,
   readLines,
   readNative,
@@ -25,6 +26,7 @@ import {
   registerProject,
   repositoryFile,
   root,
+  wrapperWaitInstruction,
 } from "./project.ts";
 
 const usage = `Usage: node evals/background-wait/run.ts --base-dir <dir> --arm a|b
@@ -32,6 +34,7 @@ const usage = `Usage: node evals/background-wait/run.ts --base-dir <dir> --arm a
   --model <slug> --out <name> [--provider codex|claudeAgent]
   [--case <id[,id...]>] [--samples <20>] [--concurrency <2>] [--effort <level>]
   [--duration-scale <1>] [--timeout-seconds <900>] [--dry-run]
+  [--wrapper-line original|registered]  Arm B only (default: registered)
 
 --init creates an empty eval home for the selected provider (default: codex).
 --dry-run prints the run plan without opening or creating any state.`;
@@ -45,6 +48,7 @@ function options() {
       provider: { type: "string" },
       model: { type: "string" },
       effort: { type: "string" },
+      "wrapper-line": { type: "string" },
       case: { type: "string" },
       samples: { type: "string", default: "20" },
       concurrency: { type: "string", default: "2" },
@@ -282,18 +286,14 @@ async function observeFamily(input: {
 }) {
   const { base, sample, scenario, arm, db } = input;
   const rootId = sample.threadId!;
-  const descendants = db.prepare(`
-    SELECT thread_id FROM orchestration_v2_projection_threads
-    WHERE project_id = ? AND json_extract(payload_json, '$.delegatedFrom.threadId') = ?
-    ORDER BY created_at, thread_id
-  `);
+  const workers = ownedWorkerLookup(db);
   let quietSince: number | undefined;
   let latest: Snapshot[] = [];
   let settled = false;
   let finished = false;
   const deadline = Date.now() + input.timeoutMs;
   while (true) {
-    const rows = descendants.all(sample.projectId!, rootId);
+    const rows = workers.all(rootId, sample.projectId!);
     latest = await Promise.all(
       [rootId, ...rows.map((row) => String(row.thread_id))].map((id) => show(base, id)),
     );
@@ -357,9 +357,10 @@ function sampleMetrics(input: {
   sample: Sample;
   scenario: Scenario;
   config: Results["config"];
+  waitInstruction: string;
   observations: Awaited<ReturnType<typeof observeFamily>>;
 }) {
-  const { base, sample, scenario, config, observations } = input;
+  const { base, sample, scenario, config, observations, waitInstruction } = input;
   const { latest, finished, endedAt } = observations;
   const parent = latest[0]!;
   const worker = latest.at(-1)!;
@@ -418,6 +419,7 @@ function sampleMetrics(input: {
     traces: evidence.every(({ trace }) => trace !== undefined)
       ? evidence.map(({ trace }) => trace!)
       : null,
+    waitInstruction,
     wallSeconds: Math.round((endedAt - sample.launchedAt!) / 100) / 10,
     standing: standing(config.arm, scenario, config.provider),
   });
@@ -455,6 +457,13 @@ async function main() {
   const model = flags.model;
   const out = flags.out;
   if (!model || !out || !/^[a-zA-Z0-9_-]+$/u.test(out)) throw new Error(usage);
+  if (arm === "a" && flags["wrapper-line"] !== undefined)
+    throw new Error("--wrapper-line only applies to arm B.");
+  const wrapperLine = arm === "b" ? (flags["wrapper-line"] ?? "registered") : undefined;
+  if (wrapperLine !== undefined && wrapperLine !== "registered" && wrapperLine !== "original") {
+    throw new Error("--wrapper-line must be original or registered.");
+  }
+  const waitInstruction = wrapperWaitInstruction(wrapperLine);
   const scale = positive(flags["duration-scale"], "duration-scale", false);
   const samples = positive(flags.samples, "samples");
   const concurrency = positive(flags.concurrency, "concurrency");
@@ -476,6 +485,8 @@ async function main() {
           provider,
           model,
           effort: flags.effort,
+          wrapperLine,
+          ...(wrapperLine === undefined ? {} : { waitInstruction }),
           out,
           samples,
           concurrency,
@@ -524,6 +535,7 @@ async function main() {
         provider,
         model,
         ...(flags.effort ? { effort: flags.effort } : {}),
+        ...(wrapperLine === undefined ? {} : { wrapperLine }),
         head: git(["rev-parse", "HEAD"]).trim(),
         scale,
         base,
@@ -566,7 +578,13 @@ async function main() {
         if (sample.workspace === undefined) {
           const directory = NodeFS.mkdtempSync(NodePath.join(output, "sample-"));
           const workspace = NodePath.join(directory, "project");
-          makeProject(workspace, arm, scenario, seconds(scenario));
+          makeProject(
+            workspace,
+            arm,
+            scenario,
+            seconds(scenario),
+            wrapperLine === "original" ? waitInstruction : undefined,
+          );
           sample.workspace = workspace;
           save();
         }
@@ -622,7 +640,14 @@ async function main() {
             "Sample is still active at the observation deadline. Resume the run to keep observing it.",
           );
         }
-        sample.result = sampleMetrics({ base, sample, scenario, config, observations });
+        sample.result = sampleMetrics({
+          base,
+          sample,
+          scenario,
+          config,
+          observations,
+          waitInstruction,
+        });
         save();
         console.log(
           `${sample.caseId} ${sample.index}/${samples}: ${sample.result.correct ? "correct" : sample.result.problems.join(" ")}`,

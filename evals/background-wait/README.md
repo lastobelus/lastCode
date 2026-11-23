@@ -28,7 +28,7 @@ vp run dev:server --home-dir "$a" --no-seed --host 127.0.0.1 --port 44191 --dev-
 vp run dev:server --home-dir "$b" --no-seed --host 127.0.0.1 --port 44192 --dev-url http://127.0.0.1:45192
 ```
 
-Use `--dry-run` to print the plan. For a pilot, add `--samples 1 --case quick-ci,standing-watch` to each command below and use `--out luna-pilot`. Those cases cover the delegated worker and the three-stage watcher. Inspect `problems` in the results if a sample fails.
+Use `--dry-run` to print the plan. Inspect `problems` in the results if a sample fails.
 
 Run one arm at a time at the same concurrency. The default is 20 fresh threads per case and two active samples at once.
 
@@ -51,6 +51,18 @@ done
 ```
 
 The comparison reports one model and effort at a time. The codified pass bar is 20 complete samples per arm in each of the six cases, a majority of correct wrapper samples and at least as many correct samples as Actions **in each case**, zero post-instruction wrapper polls, and lower mean raw tokens per task across the six cases. The report includes per-case raw costs to expose any regressions hidden by the aggregate. A missing trace or missing usage makes the decision incomplete. A valid failure counts, including its measured tokens. The live break tests and soak in #824 remain separate gates.
+
+### Pilot the wrapper wording
+
+Reuse the same two running dev servers. Use a fresh `--out` name for each run so the original pilot remains available. Arm B defaults to `registered`. Selecting `original` substitutes the landed wait line in each synthetic checkout. The same server, wrapper logic, fixture, and guidance run in both variants.
+
+```sh
+node evals/background-wait/run.ts --base-dir "$a" --arm a --model gpt-6-luna --out luna-pilot-fixed --samples 1 --case quick-ci,standing-watch
+node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna-pilot-original --samples 1 --case quick-ci,standing-watch --wrapper-line original
+node evals/background-wait/run.ts --base-dir "$b" --arm b --model gpt-6-luna --out luna-pilot-registered --samples 1 --case quick-ci,standing-watch --wrapper-line registered
+```
+
+Compare `redundantMarks`, `waitToolLookups`, and raw tokens for the two arm B runs. The comparison JSON includes `redundantMarksPerWrapperWait`, the number of redundant marks divided by background wait instructions observed. Run the usual A/B comparison once against each B output. Pilot comparisons print the measurements and exit with `incomplete` because the sample count is below the decision threshold.
 
 ## Optional Claude comparison
 
@@ -88,7 +100,9 @@ Repeat the same command with the same `--out` name. The runner saves launch inte
 
 A fresh synthetic Git project and random result IDs distinguish genuine completion from an early or guessed reply. The wrapper fixture uses the production wrapper implementation and argument parser, with dependency-free operations substituted under the real script names. The Action uses the same operations and production structured-report emitter. The standing watch uses the existing `wait-checkpoint` command slot in its own isolated fixture because the server only marks supported wrapper invocations. The baseline explicitly names its one saved Action, and the delegated baseline is authorized to own it in this isolated environment. That gives Actions a favorable comparison against production workflows involving parent-mediated handoff. A like-for-like mediated baseline would need to provision and verify an opted-in Action targeting each worker's newly created worktree, then record the parent's result relay and the child's follow-up. Reusing the parent's checkout would change the case. The matrix covers child-owned Actions and leaves the cost and reliability of mediation unmeasured.
 
-The runner observes the thread state independently of the model. Wall time runs from dispatch intent to the family's last recorded run completion, so restarting an observer does not add the downtime to the sample. It records the entire thread family's turns and tokens for the delegated case. When a LastCode thread's main agent backgrounds a simple wrapper command, the invocation must have an observed server-marked command and no model tool calls between the visible wait instruction and turn end. Polls include `write_stdin`, `TaskOutput` and recognizable shell or MCP status reads. The grader also rejects any other tool call in that interval. A complete foreground output needs no hold, including the longer default Claude foreground path. Codex rollout files provide the actual model-facing tool and output sequence; the LastCode app-server item log omits `write_stdin`. Claude uses SDK tool blocks. The CLI status observer runs outside the model and contributes no requests to the sample.
+The runner observes the thread state independently of the model. Wall time runs from dispatch intent to the family's last recorded run completion. The delegated case finds the worker from the local app-owned task record and sums both threads' turns and tokens. Quick CI exits 3 in both arms. The Action puts the result ID on stdout because failed Actions omit their structured report from the wake.
+
+When a LastCode thread's main agent backgrounds a simple wrapper command, the invocation must have an observed server-marked hold. A poll or other unexpected tool call between the visible wait instruction and turn end fails the grade. Polls include `write_stdin`, `TaskOutput` and recognizable shell or MCP status reads. A call to `t3_background_wait` after the wrapper's line and a lookup for that tool count separately as overhead and leave the correctness grade unchanged. A complete foreground output needs no hold. Codex rollout files provide the actual tool sequence, including `write_stdin`. Claude uses SDK tool blocks. The CLI status observer contributes no model requests.
 
 ## Cost
 

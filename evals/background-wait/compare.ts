@@ -52,6 +52,10 @@ const completeMean = (
   return available.length === rows.length && available.length > 0 ? mean(available) : null;
 };
 const rounded = (value: number | null) => (value === null ? null : Math.round(value));
+const total = (rows: (SampleResult | undefined)[], get: (row: SampleResult) => number | null) => {
+  const available = values(rows, get);
+  return available.length === rows.length ? available.reduce((sum, value) => sum + value, 0) : null;
+};
 
 export function compare(a: Results, b: Results, subsequentTurns: number) {
   const cases = paired(a, b);
@@ -59,7 +63,7 @@ export function compare(a: Results, b: Results, subsequentTurns: number) {
   const bResults = cases.flatMap((row) => row.b);
   const firstInputs = values(aResults, (row) => row.firstInput);
   const typicalContext = firstInputs.length === 0 ? null : median(firstInputs);
-  const summarize = (rows: (SampleResult | undefined)[]) => {
+  const summarize = (rows: (SampleResult | undefined)[], wrapper = false) => {
     const growth = values(rows, (row) => row.contextGrowth);
     const typicalGrowth =
       growth.length === rows.length && growth.length > 0 ? median(growth) : null;
@@ -69,6 +73,8 @@ export function compare(a: Results, b: Results, subsequentTurns: number) {
         ? null
         : rounded(turns * typicalContext + typicalGrowth * later);
     const requests = completeMean(rows, (row) => row.requests);
+    const redundantMarks = total(rows, (row) => row.redundantMarks);
+    const wrapperWaits = wrapper ? total(rows, (row) => row.holdExpected) : null;
     return {
       correct: rows.filter((row) => row?.correct).length,
       counted: rows.filter((row) => row !== undefined).length,
@@ -81,12 +87,13 @@ export function compare(a: Results, b: Results, subsequentTurns: number) {
       output: rounded(completeMean(rows, (row) => row.tokens?.output ?? null)),
       standingAcrossRequests: rounded(completeMean(rows, (row) => row.standingAcrossRequests)),
       holds: rows.reduce((sum, row) => sum + (row?.holds ?? 0), 0),
-      polls: rows.every((row) => row?.polls != null)
-        ? rows.reduce((sum, row) => sum + (row?.polls ?? 0), 0)
-        : null,
-      extraCallsWhileWaiting: rows.every((row) => row?.extraCallsWhileWaiting != null)
-        ? rows.reduce((sum, row) => sum + (row?.extraCallsWhileWaiting ?? 0), 0)
-        : null,
+      polls: total(rows, (row) => row.polls),
+      redundantMarks,
+      waitToolLookups: total(rows, (row) => row.waitToolLookups),
+      wrapperWaits,
+      redundantMarksPerWrapperWait:
+        wrapperWaits && redundantMarks !== null ? redundantMarks / wrapperWaits : null,
+      extraCallsWhileWaiting: total(rows, (row) => row.extraCallsWhileWaiting),
       typicalGrowth,
       projection: formula(subsequentTurns),
       projectionSensitivity: Object.fromEntries(
@@ -97,9 +104,9 @@ export function compare(a: Results, b: Results, subsequentTurns: number) {
   const summaries = cases.map((row) => ({
     case: row.case,
     a: summarize(row.a),
-    b: summarize(row.b),
+    b: summarize(row.b, true),
   }));
-  const totals = { a: summarize(aResults), b: summarize(bResults) };
+  const totals = { a: summarize(aResults), b: summarize(bResults, true) };
   const full = cases.length === 6 && cases.every((row) => row.a.length === 20);
   const sufficient =
     full &&
@@ -121,6 +128,7 @@ export function compare(a: Results, b: Results, subsequentTurns: number) {
   const cheaper = aRaw !== null && bRaw !== null && bRaw < aRaw;
   return {
     outcome: !sufficient ? "incomplete" : reliable && zeroPolls && cheaper ? "pass" : "fail",
+    wrapperLine: b.config.wrapperLine ?? null,
     formulaInputs: { typicalContext, subsequentTurns },
     summaries,
     totals,
