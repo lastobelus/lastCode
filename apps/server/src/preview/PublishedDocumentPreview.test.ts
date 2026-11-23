@@ -38,11 +38,11 @@ const scope = (threadId = owner): McpInvocationContext.McpThreadInvocationScope 
   capabilities: new Set(["preview"]),
   issuedAt: 1,
 });
-const request: PreviewAutomationMcpOpenInput = {
+const request = {
   target: { kind: "published-document", path: "report.html" },
   open: false,
   reuseExistingTab: false,
-};
+} satisfies PreviewAutomationMcpOpenInput;
 const signed = (token: string): AssetCreateUrlResult => ({
   relativeUrl: `/api/assets/${token}/report.html`,
   expiresAt: 1,
@@ -165,18 +165,20 @@ it.effect("preview_open rechecks the calling thread's publication before every n
       isFailure: false,
       result: { url: expect.stringContaining("/owner-revised/") },
     });
+    const unavailable = {
+      _tag: "PreviewAutomationPublishedDocumentError",
+      threadId: owner,
+      reason: "file-unavailable",
+      cause: { _tag: "AssetWorkspaceResolutionError" },
+    };
+    expect(
+      yield* open(owner, {
+        ...request,
+        target: { kind: "published-document", path: "private.html" },
+      }).pipe(Effect.flip),
+    ).toMatchObject(unavailable);
     publications.delete(owner);
-    for (const input of [
-      request,
-      { ...request, target: { kind: "published-document" as const, path: "private.html" } },
-    ]) {
-      expect(yield* open(owner, input).pipe(Effect.flip)).toMatchObject({
-        _tag: "PreviewAutomationPublishedDocumentError",
-        threadId: owner,
-        reason: "file-unavailable",
-        cause: { _tag: "AssetWorkspaceResolutionError" },
-      });
-    }
+    expect(yield* open(owner).pipe(Effect.flip)).toMatchObject(unavailable);
     expect(navigations).toHaveLength(3);
   }),
 );
