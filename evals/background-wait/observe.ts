@@ -1,0 +1,331 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+
+import { wrapperWaitInstruction } from "./project.ts";
+
+type Data = Record<string, unknown>;
+
+export function record(value: unknown): Data {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Data)
+    : {};
+}
+
+function text(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(text).join("\n");
+  const item = record(value);
+  return typeof item.text === "string"
+    ? item.text
+    : typeof item.content === "string"
+      ? item.content
+      : JSON.stringify(value ?? "");
+}
+
+function number(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+export function readLines(input: string, native = false): Data[] {
+  const result: Data[] = [];
+  for (const line of input.split("\n")) {
+    if (line.trim() === "") continue;
+    const payload = native ? line.match(/^\[[^\]]+\] NTIVE: (.*)$/u)?.[1] : line;
+    if (payload === undefined) continue;
+    // A truncated or partial record makes the sample incomplete.
+    result.push(record(JSON.parse(payload)));
+  }
+  return result;
+}
+
+export function nativeLogName(threadId: string): string {
+  const segment = threadId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/gu, "-")
+    .replace(/-+/gu, "-")
+    .replace(/^[-_]+|[-_]+$/gu, "")
+    .slice(0, 80)
+    .replace(/[-_]+$/gu, "");
+  if (!segment) throw new Error("Thread id has no usable log segment.");
+  const suffix =
+    threadId.length > 80
+      ? "-" + NodeCrypto.createHash("sha256").update(threadId).digest("hex").slice(0, 16)
+      : "";
+  return `events.${segment === "pending" ? "_pending" : segment}${suffix}.log`;
+}
+
+export interface Usage {
+  input: number;
+  cached: number;
+  output: number;
+}
+
+const zero: Usage = { input: 0, cached: 0, output: 0 };
+export function sumUsage(all: readonly Usage[]): Usage {
+  return all.reduce(
+    (sum, row) => ({
+      input: sum.input + row.input,
+      cached: sum.cached + row.cached,
+      output: sum.output + row.output,
+    }),
+    zero,
+  );
+}
+
+export interface NativeEvidence {
+  requests: number;
+  turns: number;
+  usage: Usage;
+  contexts: number[];
+  trace: TraceEvent[];
+  rolloutPaths: string[];
+  complete: boolean;
+}
+
+export interface PendingWork {
+  taskId: string;
+  kind: string;
+  awaited?: boolean;
+  description?: string;
+}
+
+export function awaitedWrapperIds(tasks: readonly PendingWork[], provider: string): string[] {
+  return tasks
+    .filter(
+      (task) =>
+        task.kind === "command" &&
+        task.awaited === true &&
+        // The thread CLI exposes descriptions, not raw commands. Codex uses the command
+        // as its description. Claude may use the agent's label for the Bash tool call.
+        (provider === "claudeAgent" ||
+          /(?:scripts\/lc-run|scripts\/lastcode-run\.ts)\b/u.test(task.description ?? "")),
+    )
+    .map((task) => task.taskId);
+}
+
+export type TraceEvent =
+  | { kind: "turn-end" }
+  | { kind: "call"; id: string; name: string; args: string }
+  | { kind: "output"; id: string; body: string };
+
+function traceCall(item: Data, keys: { id: string; args: string }): TraceEvent | undefined {
+  const id = item[keys.id];
+  return typeof id === "string" && typeof item.name === "string"
+    ? { kind: "call", id, name: item.name, args: text(item[keys.args]) }
+    : undefined;
+}
+
+function traceOutput(id: unknown, body: unknown): TraceEvent | undefined {
+  return typeof id === "string" ? { kind: "output", id, body: text(body) } : undefined;
+}
+
+export function readCodexRollout(input: string): { trace: TraceEvent[]; turns: number } {
+  const trace: TraceEvent[] = [];
+  let turns = 0;
+  for (const row of readLines(input)) {
+    const item = record(row.payload);
+    if (row.type === "event_msg" && item.type === "task_complete") {
+      turns++;
+      trace.push({ kind: "turn-end" });
+    }
+    if (row.type !== "response_item") continue;
+    const event =
+      item.type === "function_call" || item.type === "custom_tool_call"
+        ? traceCall(item, {
+            id: "call_id",
+            args: item.type === "function_call" ? "arguments" : "input",
+          })
+        : item.type === "function_call_output" || item.type === "custom_tool_call_output"
+          ? traceOutput(item.call_id, item.output)
+          : undefined;
+    if (event) trace.push(event);
+  }
+  return { trace, turns };
+}
+
+export function readNative(input: string, provider: "codex" | "claudeAgent"): NativeEvidence {
+  const usage: Usage[] = [];
+  const contexts = new Map<string, number>();
+  const trace: TraceEvent[] = [];
+  const rolloutPaths = new Set<string>();
+  const turns = new Set<string>();
+  const accounted = new Set<string>();
+  const requestIds = new Set<string>();
+  const reportedClaudeRequestIds = new Set<string>();
+
+  for (const row of readLines(input, true)) {
+    const frame = record(record(row.event).payload);
+    if (provider === "codex") {
+      const thread = record(record(frame.result).thread);
+      if (typeof thread.path === "string") rolloutPaths.add(thread.path);
+      const params = record(frame.params);
+      if (frame.method === "turn/completed") {
+        const turn = record(params.turn);
+        if (typeof turn.id === "string") turns.add(turn.id);
+      }
+      if (frame.method !== "thread/tokenUsage/updated") continue;
+      const totals = record(params.tokenUsage);
+      const last = record(totals.last);
+      const total = record(totals.total);
+      if (typeof last.inputTokens !== "number" || typeof total.totalTokens !== "number") continue;
+      const key = `${params.threadId}:${params.turnId}:${total.totalTokens}`;
+      if (accounted.has(key)) continue;
+      accounted.add(key);
+      const request = {
+        input: number(last.inputTokens),
+        cached: number(last.cachedInputTokens),
+        output: number(last.outputTokens),
+      };
+      if (request.input === 0 && request.output === 0) continue;
+      contexts.set(key, request.input);
+      usage.push(request);
+      continue;
+    }
+
+    const msg = record(frame.message);
+    if (frame.type === "assistant" && typeof msg.id === "string") {
+      const id = msg.id;
+      const tokens = record(msg.usage);
+      if (typeof tokens.input_tokens === "number") {
+        contexts.set(
+          id,
+          number(tokens.input_tokens) +
+            number(tokens.cache_creation_input_tokens) +
+            number(tokens.cache_read_input_tokens),
+        );
+        requestIds.add(id);
+      }
+      const rootToolBlocks =
+        frame.parent_tool_use_id == null && Array.isArray(msg.content)
+          ? msg.content.map(record)
+          : [];
+      for (const item of rootToolBlocks) {
+        if (item.type !== "tool_use" || typeof item.id !== "string" || accounted.has(item.id))
+          continue;
+        accounted.add(item.id);
+        const event = traceCall(item, { id: "id", args: "input" });
+        if (event) trace.push(event);
+      }
+    }
+    if (frame.type === "user" && frame.parent_tool_use_id == null) {
+      for (const item of Array.isArray(msg.content) ? msg.content.map(record) : []) {
+        if (item.type !== "tool_result") continue;
+        const event = traceOutput(item.tool_use_id, item.content);
+        if (event) trace.push(event);
+      }
+    }
+    if (frame.type === "result" && typeof frame.uuid === "string" && !turns.has(frame.uuid)) {
+      turns.add(frame.uuid);
+      trace.push({ kind: "turn-end" });
+      const counts = Object.values(record(frame.model_usage_since_last_result)).map(record);
+      for (const model of counts) {
+        usage.push({
+          input:
+            number(model.inputTokens) +
+            number(model.cacheReadInputTokens) +
+            number(model.cacheCreationInputTokens),
+          cached: number(model.cacheReadInputTokens),
+          output: number(model.outputTokens),
+        });
+      }
+      if (counts.length > 0 && Array.isArray(frame.begun_message_ids)) {
+        for (const id of frame.begun_message_ids)
+          if (typeof id === "string") reportedClaudeRequestIds.add(id);
+      }
+    }
+  }
+
+  return {
+    requests: provider === "codex" ? usage.length : reportedClaudeRequestIds.size,
+    turns: turns.size,
+    usage: sumUsage(usage),
+    contexts: [...contexts.values()],
+    trace,
+    rolloutPaths: [...rolloutPaths],
+    complete:
+      turns.size > 0 &&
+      usage.length > 0 &&
+      (provider === "codex" ||
+        (reportedClaudeRequestIds.size > 0 &&
+          reportedClaudeRequestIds.size === requestIds.size &&
+          [...requestIds].every((id) => reportedClaudeRequestIds.has(id)))),
+  };
+}
+
+const waitLine = wrapperWaitInstruction();
+const wrapperResult =
+  /\[lc-run\] (?:prepare|prepare-checkpoint|ci|wait-checkpoint|package): (?:success|attention|blocked) \(exit \d+\)/u;
+
+function wrapperCall(args: string): boolean {
+  return /(?:\.\/scripts\/lc-run|scripts\/lastcode-run\.ts)\s+(?:prepare(?:-checkpoint)?|ci|wait-checkpoint|package)\b/u.test(
+    args,
+  );
+}
+
+function callsTool(call: Extract<TraceEvent, { kind: "call" }>, name: string) {
+  return (
+    call.name.endsWith(name) ||
+    (call.name === "exec" && new RegExp(`\\b(?:mcp[\\w-]*__)?${name}\\s*\\(`, "u").test(call.args))
+  );
+}
+
+export function gradeTrace(trace: TraceEvent[]) {
+  const calls = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
+  let waiting = false;
+  let wrapperCalls = 0;
+  let terminalWrapperOutputs = 0;
+  let markers = 0;
+  let lists = 0;
+  let actions = 0;
+  let polls = 0;
+  let extraCallsWhileWaiting = 0;
+  let actionWaits = 0;
+  for (const event of trace) {
+    if (event.kind === "turn-end") {
+      waiting = false;
+      continue;
+    }
+    if (event.kind === "call") {
+      calls.set(event.id, event);
+      if (waiting) {
+        extraCallsWhileWaiting++;
+        if (
+          /write_stdin|TaskOutput|inspect_action_run|thread[ /_-]+(?:show|read|wait)|\b(?:tail|sleep|ps|jobs|pgrep)\b|terminal.*(?:log|read|status)/iu.test(
+            event.name + " " + event.args,
+          )
+        )
+          polls++;
+      }
+      if (callsTool(event, "list_project_actions")) lists++;
+      if (callsTool(event, "run_project_action_and_resume")) actions++;
+      if (wrapperCall(event.args)) wrapperCalls++;
+      continue;
+    }
+    const call = calls.get(event.id);
+    if (
+      call !== undefined &&
+      callsTool(call, "run_project_action_and_resume") &&
+      /"delivery"\s*:\s*"armed"/u.test(event.body.replaceAll('\\"', '"'))
+    ) {
+      waiting = true;
+      actionWaits++;
+    }
+    if (call === undefined || !wrapperCall(call.args)) continue;
+    if (wrapperResult.test(event.body)) terminalWrapperOutputs++;
+    else if (event.body.includes(waitLine)) {
+      waiting = true;
+      markers++;
+    }
+  }
+  return {
+    wrapperCalls,
+    terminalWrapperOutputs,
+    markers,
+    lists,
+    actions,
+    actionWaits,
+    polls,
+    extraCallsWhileWaiting,
+  };
+}
