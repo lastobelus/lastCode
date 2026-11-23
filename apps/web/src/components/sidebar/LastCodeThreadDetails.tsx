@@ -5,7 +5,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { SidebarThreadSummary } from "../../types";
 import { readEnvironmentSupportsThreadAnnotations } from "../../state/entities";
 import { ThreadAnnotationHoverPopover } from "../thread-annotation/ThreadAnnotation";
-import { ThreadHoverCardPopup } from "../ThreadHoverCard";
+import { LastCodeThreadHoverCardPopup } from "../LastCodeThreadHoverCardPopup";
 import { Tooltip, TooltipTrigger } from "../ui/tooltip";
 import { Popover, PopoverPopup } from "../ui/popover";
 import { checkTaskPermission } from "./lastcodeSidebarPermission";
@@ -41,15 +41,9 @@ export function LastCodeThreadCleanupOverlay({
           />
         }
       />
-      <ThreadHoverCardPopup
-        align="start"
-        side="right"
-        sideOffset={4}
-        variant="glass"
-        viewportPadding="none"
-      >
+      <LastCodeThreadHoverCardPopup align="start" side="right" sideOffset={4} variant="glass">
         <div className="text-left">{content}</div>
-      </ThreadHoverCardPopup>
+      </LastCodeThreadHoverCardPopup>
     </Tooltip>
   );
 }

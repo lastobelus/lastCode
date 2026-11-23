@@ -102,14 +102,11 @@ function TooltipTrigger(props: TooltipPrimitive.Trigger.Props) {
   );
 }
 
-function TooltipPositioner({ className, ...props }: TooltipPrimitive.Positioner.Props) {
+function TooltipPositioner(props: TooltipPrimitive.Positioner.Props) {
   const titlebarHeight = useNativeTitlebarHeight();
   return (
     <TooltipPrimitive.Positioner
-      className={cn(
-        "pointer-events-none z-[140] max-w-(--available-width) transition-[top,left,right,bottom,transform] data-instant:transition-none",
-        className,
-      )}
+      className="pointer-events-none z-[140] max-w-(--available-width) transition-[top,left,right,bottom,transform] data-instant:transition-none"
       collisionPadding={{
         top: COLLISION_PADDING + titlebarHeight,
         right: COLLISION_PADDING,
@@ -128,8 +125,6 @@ function TooltipPopup({
   sideOffset = 4,
   side = "top",
   variant = "default",
-  viewportPadding = "default",
-  animated = true,
   anchor,
   children,
   ...props
@@ -138,19 +133,11 @@ function TooltipPopup({
   side?: TooltipPrimitive.Positioner.Props["side"];
   sideOffset?: TooltipPrimitive.Positioner.Props["sideOffset"];
   variant?: "default" | "glass" | "code";
-  viewportPadding?: "default" | "none";
-  animated?: boolean;
   anchor?: TooltipPrimitive.Positioner.Props["anchor"];
 }) {
   return (
     <TooltipPrimitive.Portal>
-      <TooltipPositioner
-        align={align}
-        anchor={anchor}
-        className={!animated ? "transition-none" : undefined}
-        side={side}
-        sideOffset={sideOffset}
-      >
+      <TooltipPositioner align={align} anchor={anchor} side={side} sideOffset={sideOffset}>
         <TooltipPrimitive.Popup
           className={cn(
             "relative flex origin-(--transform-origin) rounded-md text-popover-foreground text-xs transition-[scale,opacity] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-md)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] data-ending-style:scale-98 data-starting-style:scale-98 data-ending-style:opacity-0 data-starting-style:opacity-0 data-instant:duration-0 dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
@@ -160,16 +147,12 @@ function TooltipPopup({
             variant === "code"
               ? "max-w-120 wrap-anywhere text-left font-mono text-[11px] leading-relaxed"
               : "max-w-80 wrap-anywhere whitespace-normal leading-snug",
-            !animated && "transition-none",
             className,
           )}
           data-slot="tooltip-popup"
           {...props}
         >
-          <div
-            className={cn("min-w-0", viewportPadding === "none" ? "p-0" : "px-2 py-1")}
-            data-slot="tooltip-viewport"
-          >
+          <div className="min-w-0 px-2 py-1" data-slot="tooltip-viewport">
             {children}
           </div>
         </TooltipPrimitive.Popup>
