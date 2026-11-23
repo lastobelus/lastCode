@@ -18621,6 +18621,47 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           providerThread?.owedBackgroundResults,
           enabled ? [{ taskId: WAKE_TASK_ID, originRunId: launch.runId }] : [],
         );
+        if (enabled) {
+          assert.deepEqual(
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: false,
+            }),
+            { matched: [WAKE_TASK_ID] },
+          );
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "background_tasks_changed",
+              tasks: [
+                {
+                  task_id: WAKE_TASK_ID,
+                  task_type: "local_bash",
+                  description: "Run CI is still running",
+                },
+              ],
+              uuid: "wrapped-command-after-release",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* harness.until(() =>
+            providerThreadRosterEvents(harness.events).some(
+              (event) =>
+                event.providerThread.pendingBackgroundTasks?.some(
+                  (entry) =>
+                    entry.taskId === WAKE_TASK_ID &&
+                    entry.description === "Run CI is still running",
+                ) === true,
+            ),
+          );
+          const released = providerThreadRosterEvents(harness.events).at(-1)?.providerThread;
+          assert.isUndefined(
+            released?.pendingBackgroundTasks?.find((entry) => entry.taskId === WAKE_TASK_ID)
+              ?.awaited,
+          );
+          assert.deepEqual(released?.owedBackgroundResults, []);
+        }
       }).pipe(
         Effect.provide(
           Layer.mergeAll(

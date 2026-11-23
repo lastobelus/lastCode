@@ -6994,9 +6994,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ],
   });
 
-  it.effect.each([false, true])(
-    "automatically awaits a wrapped Codex command (enabled: %s)",
-    (enabled) =>
+  it.effect.each([
+    { enabled: false, release: false },
+    { enabled: true, release: false },
+    { enabled: true, release: true },
+  ])(
+    "automatically awaits a wrapped Codex command (enabled=$enabled release=$release)",
+    ({ enabled, release }) =>
       Effect.gen(function* () {
         const allowCompletion = yield* Deferred.make<void>();
         const command = "/bin/zsh -lc 'cd /workspace && ./scripts/lc-run prepare'";
@@ -7048,7 +7052,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.deepEqual(
           harness.pendingBackgroundTasks(),
           enabled
-            ? [{ taskId: BG_COMMAND_ITEM, kind: "command", description: command, awaited: true }]
+            ? [
+                {
+                  taskId: BG_COMMAND_ITEM,
+                  kind: "command",
+                  description: command,
+                  awaited: true,
+                  runId: turn.runId,
+                },
+              ]
             : [],
         );
         yield* Deferred.succeed(allowCompletion, undefined);
@@ -7064,7 +7076,32 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             : undefined,
         );
         assert.deepEqual(harness.pendingBackgroundTasks(), []);
+        if (enabled) {
+          const roster = () =>
+            harness.events.findLast((event) => event.type === "provider_thread.updated");
+          const owed = { taskId: BG_COMMAND_ITEM, originRunId: turn.runId };
+          assert.isTrue(roster()?.backgroundRosterOnly);
+          assert.deepEqual(roster()?.providerThread.owedBackgroundResults, [owed]);
+          if (release) {
+            assert.deepEqual(
+              yield* harness.runtime.awaitBackgroundTasks!({
+                providerThread: harness.providerThread,
+                taskIds: ["4242"],
+                awaited: false,
+              }),
+              { matched: ["4242"] },
+            );
+          }
+          const admitted = yield* harness.continuationRequests[0]!.dispatchIfCurrent!(
+            Effect.sync(() => {
+              assert.deepEqual(roster()?.providerThread.owedBackgroundResults, [owed]);
+            }),
+          );
+          assert.equal(Option.isSome(admitted), !release);
+          yield* harness.until(() => roster()?.providerThread.owedBackgroundResults?.length === 0);
+        }
       }).pipe(
+        Effect.scoped,
         Effect.provide(
           Layer.mergeAll(
             IdAllocator.layer,
