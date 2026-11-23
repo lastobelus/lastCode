@@ -41,6 +41,7 @@ import {
   ProviderDriverKind,
   ProviderMcpSignInError,
   ProviderSetupError,
+  type RunId,
   type ServerProviderCompatibilityAdvisory,
   type ServerProviderModel,
   isDelegatedAppThread,
@@ -2355,6 +2356,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const runningCommandItemsByTurn = yield* Ref.make(
           new Map<string, Map<string, TrackedRunningCommandItem>>(),
         );
+        const owedBackgroundCommands = new Map<
+          string,
+          {
+            readonly taskId: string;
+            readonly originRunId: RunId;
+            readonly providerThreadId: ProviderThreadId;
+            readonly processId: string | undefined;
+          }
+        >();
         const runningDynamicToolsByTurn = yield* Ref.make(
           new Map<string, Map<string, CodexDynamicToolItem>>(),
         );
@@ -2814,9 +2824,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         const emitAwaitedCommands = Effect.fn("CodexAdapterV2.emitAwaitedCommands")(function* (
           providerThread: OrchestrationV2ProviderThread,
-          updateOwedResults?: (
-            current: NonNullable<OrchestrationV2ProviderThread["owedBackgroundResults"]>,
-          ) => OrchestrationV2ProviderThread["owedBackgroundResults"],
         ) {
           const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
           if (nativeThreadId == null) return;
@@ -2827,21 +2834,25 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ];
           const pendingBackgroundTasks = contexts
             .filter((context) => context.providerThread.id === providerThread.id)
-            .flatMap((context) => [...(commands.get(context.nativeTurnId)?.values() ?? [])])
-            .filter((item) => item.awaited === true)
-            .map((item) => ({
-              taskId: item.id,
-              kind: "command" as const,
-              description: item.command,
-              awaited: true as const,
-            }));
+            .flatMap((context) =>
+              [...(commands.get(context.nativeTurnId)?.values() ?? [])]
+                .filter((item) => item.awaited === true)
+                .map((item) => ({
+                  taskId: item.id,
+                  kind: "command" as const,
+                  description: item.command,
+                  awaited: true as const,
+                  runId: context.projectionRunId ?? undefined,
+                })),
+            );
+          const owedBackgroundResults = [...owedBackgroundCommands.values()]
+            .filter((owed) => owed.providerThreadId === providerThread.id)
+            .map(({ taskId, originRunId }) => ({ taskId, originRunId }));
           const current = rootProviderThreads.get(nativeThreadId) ?? providerThread;
           const updated = {
             ...current,
             pendingBackgroundTasks,
-            ...(updateOwedResults === undefined
-              ? {}
-              : { owedBackgroundResults: updateOwedResults(current.owedBackgroundResults ?? []) }),
+            owedBackgroundResults,
             updatedAt: yield* DateTime.now,
           };
           rootProviderThreads.set(nativeThreadId, updated);
@@ -2851,9 +2862,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             driver: CODEX_PROVIDER,
             providerThread: updated,
             // These writes must persist even without a subscribed turn.
-            ...(updateOwedResults === undefined
-              ? {}
-              : { sessionScoped: true, backgroundRosterOnly: true }),
+            sessionScoped: true,
+            backgroundRosterOnly: true,
           });
         });
 
@@ -5874,11 +5884,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (payload.item.type === "commandExecution") {
               // Other tools can retain the context after thread closure.
               if (context.closedCommandItemIds?.has(payload.item.id)) return;
-              const awaited =
-                backgroundWaitEnabled &&
-                (yield* Ref.get(runningCommandItemsByTurn))
-                  .get(payload.turnId)
-                  ?.get(payload.item.id)?.awaited === true;
+              const tracked = (yield* Ref.get(runningCommandItemsByTurn))
+                .get(payload.turnId)
+                ?.get(payload.item.id);
+              const awaited = backgroundWaitEnabled && tracked?.awaited === true;
               const turnDrained = yield* clearRunningCommandItem(payload.turnId, payload.item.id);
               const userStopped = yield* Ref.modify(userStoppedCommandItemIds, (current) => {
                 const updated = new Set(current);
@@ -5895,14 +5904,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   ?.has(payload.item.id);
               const owedResult =
                 awaited && shouldWake && context.projectionRunId !== null
-                  ? { taskId: payload.item.id, originRunId: context.projectionRunId }
+                  ? {
+                      taskId: payload.item.id,
+                      originRunId: context.projectionRunId,
+                      providerThreadId: context.providerThread.id,
+                      processId: tracked?.processId ?? payload.item.processId ?? undefined,
+                    }
                   : undefined;
               // Replace the live command with its owed result in the same roster write.
-              if (awaited)
-                yield* emitAwaitedCommands(
-                  context.providerThread,
-                  owedResult === undefined ? undefined : (current) => [...current, owedResult],
-                );
+              if (owedResult !== undefined)
+                owedBackgroundCommands.set(owedResult.taskId, owedResult);
+              if (awaited) yield* emitAwaitedCommands(context.providerThread);
               const artifacts = yield* buildCommandExecutionArtifacts(context, payload.item);
               yield* emitProviderEvent({
                 type: "node.updated",
@@ -5949,22 +5961,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   if (owedResult === undefined) {
                     yield* continuationRequests.offer(request);
                   } else {
-                    const clear = () =>
-                      turnTerminalizationPermit.withPermits(1)(
-                        emitAwaitedCommands(context.providerThread, (current) =>
-                          current.filter(
-                            (owed) =>
-                              owed.taskId !== owedResult.taskId ||
-                              owed.originRunId !== owedResult.originRunId,
-                          ),
-                        ),
-                      );
+                    const isCurrent = () =>
+                      owedBackgroundCommands.get(owedResult.taskId) === owedResult;
+                    const clear = Effect.suspend(() => {
+                      if (!isCurrent()) return Effect.void;
+                      owedBackgroundCommands.delete(owedResult.taskId);
+                      return emitAwaitedCommands(context.providerThread);
+                    });
                     // Admission validates the owed result against the persisted roster.
                     yield* emitProviderEvent({
                       type: "events.barrier",
                       driver: CODEX_PROVIDER,
                       after: continuationRequests.offer(
-                        codexBackgroundResultRequest(request, owedResult, clear),
+                        codexBackgroundResultRequest(request, owedResult, {
+                          isCurrent,
+                          clear,
+                          serialize: (effect) => turnTerminalizationPermit.withPermits(1)(effect),
+                        }),
                       ),
                     });
                   }
@@ -8420,10 +8433,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 const commands = contexts.flatMap((context) => [
                   ...(running.get(context.nativeTurnId)?.values() ?? []),
                 ]);
-                const matches = (item: TrackedRunningCommandItem, taskId: string) =>
-                  item.processId === taskId || item.id === taskId;
-                const matched = [...new Set(taskIds)].filter((taskId) =>
-                  commands.some((item) => matches(item, taskId)),
+                const owed = awaited
+                  ? []
+                  : [...owedBackgroundCommands.values()].filter(
+                      ({ providerThreadId }) => providerThreadId === providerThread.id,
+                    );
+                const matches = (id: string, processId: string | undefined, taskId: string) =>
+                  id === taskId || processId === taskId;
+                const matched = [...new Set(taskIds)].filter(
+                  (taskId) =>
+                    commands.some((item) => matches(item.id, item.processId, taskId)) ||
+                    owed.some((item) => matches(item.taskId, item.processId, taskId)),
                 );
                 if (matched.length === 0) return { matched };
                 yield* Ref.update(runningCommandItemsByTurn, (current) => {
@@ -8431,13 +8451,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   for (const context of contexts) {
                     const items = new Map(current.get(context.nativeTurnId));
                     for (const [id, item] of items) {
-                      if (matched.some((taskId) => matches(item, taskId)))
+                      if (matched.some((taskId) => matches(item.id, item.processId, taskId)))
                         items.set(id, { ...item, awaited });
                     }
                     updated.set(context.nativeTurnId, items);
                   }
                   return updated;
                 });
+                for (const item of owed) {
+                  if (matched.some((taskId) => matches(item.taskId, item.processId, taskId))) {
+                    owedBackgroundCommands.delete(item.taskId);
+                  }
+                }
                 yield* emitAwaitedCommands(providerThread);
                 return { matched };
               },

@@ -3,6 +3,7 @@ import type { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderAdapterV2SessionRuntime } from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderContinuationRequest } from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 export function readLastCodeBackgroundWaitEnabled(
   settings?: ProviderHost["Service"]["settings"]["get"],
@@ -56,7 +57,11 @@ export function codexBackgroundWaitInstructions(enabled: boolean): string {
 export function codexBackgroundResultRequest(
   request: ProviderContinuationRequest,
   owed: { readonly taskId: string; readonly originRunId: RunId },
-  clear: () => Effect.Effect<void>,
+  state: {
+    readonly isCurrent: () => boolean;
+    readonly clear: Effect.Effect<void>;
+    readonly serialize: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+  },
 ): ProviderContinuationRequest {
   return {
     ...request,
@@ -65,8 +70,18 @@ export function codexBackgroundResultRequest(
       originRunId: owed.originRunId,
       taskIds: [owed.taskId],
     },
-    // Transfer the hold only after the continuation run has been recorded.
-    dispatchIfCurrent: (dispatch) => dispatch.pipe(Effect.tap(clear), Effect.asSome),
-    clearIfCurrent: clear,
+    // Clearing and admitting a retained result are mutually exclusive.
+    dispatchIfCurrent: (dispatch) =>
+      state.serialize(
+        Effect.suspend(() =>
+          state.isCurrent()
+            ? dispatch.pipe(
+                Effect.tap(() => state.clear),
+                Effect.asSome,
+              )
+            : Effect.succeed(Option.none()),
+        ),
+      ),
+    clearIfCurrent: () => state.serialize(state.clear),
   };
 }

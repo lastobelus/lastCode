@@ -14,7 +14,11 @@ export const mergeProviderBackgroundRoster = Effect.fnUntraced(function* (
         .getThreadRecords(event.threadId, ["providerThreads"], {
           providerThreadIds: [event.payload.id],
         })
-        .pipe(Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(null)));
+        .pipe(
+          Effect.catchTags({
+            ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+          }),
+        );
       const current = projection?.providerThreads[0];
       if (
         current === undefined ||

@@ -6994,7 +6994,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ],
   });
 
-  it.effect("holds only explicitly awaited root commands until they finish", () =>
+  const waitEndings = ["dispatch", "4242", BG_COMMAND_ITEM];
+  it.effect.each(waitEndings)("awaits only marked commands (%s)", (resolution) =>
     Effect.gen(function* () {
       const settled = yield* Deferred.make<void>();
       const completed = yield* Deferred.make<void>();
@@ -7122,7 +7123,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       );
       yield* harness.until(() => tasks().length === 1);
       assert.deepEqual(tasks(), [
-        { taskId: BG_COMMAND_ITEM, kind: "command", description: BG_COMMAND, awaited: true },
+        {
+          taskId: BG_COMMAND_ITEM,
+          kind: "command",
+          description: BG_COMMAND,
+          awaited: true,
+          runId: firstTurn.runId,
+        },
       ]);
       yield* Deferred.succeed(settled, undefined);
       yield* harness.firstTerminal;
@@ -7136,6 +7143,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         { matched: ["4242"] },
       );
       yield* harness.until(() => tasks().length === 0);
+      assert.isTrue(
+        harness.events.findLast((event) => event.type === "provider_thread.updated")
+          ?.backgroundRosterOnly,
+      );
       assert.isTrue(yield* harness.hasPendingBackgroundWork);
       yield* wait!({ providerThread: harness.providerThread, taskIds: ["4242"], awaited: true });
       yield* harness.until(() => tasks().length === 1);
@@ -7206,11 +7217,26 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.deepEqual(tasks(), []);
       assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
 
-      yield* wake!.dispatchIfCurrent!(
-        Effect.sync(() => {
-          assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
-        }),
-      );
+      if (resolution !== "dispatch") {
+        assert.deepEqual(
+          yield* wait!({
+            providerThread: harness.providerThread,
+            taskIds: [resolution],
+            awaited: false,
+          }),
+          { matched: [resolution] },
+        );
+        const skipped = yield* wake!.dispatchIfCurrent!(
+          Effect.die("cleared result woke the thread"),
+        );
+        assert.isTrue(Option.isNone(skipped));
+      } else {
+        yield* wake!.dispatchIfCurrent!(
+          Effect.sync(() => {
+            assert.deepEqual(latestRoster()?.providerThread.owedBackgroundResults, [owedResult]);
+          }),
+        );
+      }
       yield* harness.until(
         () => latestRoster()?.providerThread.owedBackgroundResults?.length === 0,
       );

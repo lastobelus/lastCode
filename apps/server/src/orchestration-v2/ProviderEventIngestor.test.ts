@@ -691,6 +691,9 @@ layer("ProviderEventIngestorV2", (it) => {
         status: "active" as const,
         firstRunOrdinal: 1,
         lastRunOrdinal: 2,
+        pendingBackgroundTasks: [
+          { taskId: "stopped", kind: "command" as const, awaited: true as const },
+        ],
         owedBackgroundResults: [{ taskId: "command", originRunId: RunId.make("run:origin") }],
       };
       const input = {
@@ -706,8 +709,13 @@ layer("ProviderEventIngestorV2", (it) => {
         type: "provider_thread.updated" as const,
         driver: CODEX_DRIVER,
         sessionScoped: true,
-        backgroundRosterOnly: true,
-        providerThread: { ...providerThread, lastRunOrdinal: 1, owedBackgroundResults: [] },
+        backgroundRosterOnly: true as const,
+        providerThread: {
+          ...providerThread,
+          lastRunOrdinal: 1,
+          pendingBackgroundTasks: [],
+          owedBackgroundResults: [],
+        },
       };
       const cleared = yield* ingestor.ingestNormalized({
         ...input,
@@ -718,6 +726,7 @@ layer("ProviderEventIngestorV2", (it) => {
         .providerThreads;
       assert.equal(saved?.lastRunOrdinal, 2);
       assert.equal(saved?.status, "active");
+      assert.deepEqual(saved?.pendingBackgroundTasks, []);
       assert.deepEqual(saved?.owedBackgroundResults, []);
 
       const replacedSession = ProviderSessionId.make("provider-session:replaced");
