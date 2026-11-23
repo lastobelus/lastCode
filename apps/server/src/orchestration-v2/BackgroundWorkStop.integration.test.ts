@@ -28,6 +28,7 @@ import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -44,6 +45,7 @@ const stopEarlierBackgroundWork = ({
   backgroundWorkAfterStop,
   stalledRun,
   workflowMember = false,
+  markRootCommand = false,
 }: {
   readonly wakeAfterStop?: boolean;
   readonly failedStart?: boolean;
@@ -51,6 +53,7 @@ const stopEarlierBackgroundWork = ({
   readonly stopWithQueue?: "thread.stop" | "run.interrupt";
   readonly olderStart?: boolean;
   readonly workflowMember?: boolean;
+  readonly markRootCommand?: boolean;
   readonly stalledRun?: "missing-session-terminal" | "returned-interrupt" | "superseded-attempt";
 }) =>
   Effect.gen(function* () {
@@ -84,6 +87,28 @@ const stopEarlierBackgroundWork = ({
               lastError: null,
             },
             events: Stream.fromQueue(events),
+            ...(markRootCommand
+              ? {
+                  awaitBackgroundTasks: ({ providerThread, taskIds, awaited }) =>
+                    Queue.offer(events, {
+                      type: "provider_thread.updated",
+                      driver,
+                      sessionScoped: true,
+                      backgroundRosterOnly: true,
+                      providerThread: {
+                        ...providerThread,
+                        pendingBackgroundTasks: awaited
+                          ? taskIds.map((taskId) => ({
+                              taskId,
+                              kind: "command" as const,
+                              awaited: true as const,
+                              runId: started[0]!.runId,
+                            }))
+                          : [],
+                      },
+                    }).pipe(Effect.as({ matched: taskIds })),
+                }
+              : {}),
             ...(failedStart
               ? {
                   hasPendingBackgroundWorkForThread: (providerThread) =>
@@ -538,6 +563,21 @@ const stopEarlierBackgroundWork = ({
           event.payload.id === first.runId &&
           event.payload.status === "waiting",
       );
+      if (markRootCommand) {
+        const threads = yield* ThreadManagementService.ThreadManagementService;
+        const marked = yield* watch(
+          (event) =>
+            event.type === "provider-thread.updated" &&
+            event.payload.pendingBackgroundTasks?.some((task) => task.awaited === true) === true,
+        );
+        const result = yield* threads.awaitBackgroundTasks({
+          threadId,
+          taskIds: [devServerId],
+          awaited: true,
+        });
+        assert.deepEqual(result, { matched: [devServerId], unmatched: [] });
+        yield* Fiber.join(marked);
+      }
       yield* Queue.offer(events, {
         type: "provider_turn.updated",
         driver,
@@ -558,6 +598,14 @@ const stopEarlierBackgroundWork = ({
 
       const codexProviderThread = (yield* orchestrator.getThreadProjection(threadId))
         .providerThreads[0]!;
+      if (markRootCommand) {
+        const shell = yield* orchestrator.getThreadShell(threadId);
+        assert.deepEqual(
+          shell?.pendingBackgroundTasks?.filter((task) => task.awaited === true),
+          [{ taskId: devServerId, kind: "command", awaited: true, runId: first.runId }],
+        );
+        return;
+      }
       const backgroundTasks = [
         { taskId: "sleep", description: "Wait before the recheck", kind: "command" as const },
       ];
@@ -1112,6 +1160,10 @@ const stopEarlierBackgroundWork = ({
 
 it.effect("Stop reaches background work an earlier provider thread still runs", () =>
   stopEarlierBackgroundWork({}),
+);
+
+it.effect("a session-scoped Codex wait survives the marking turn's completion", () =>
+  stopEarlierBackgroundWork({ markRootCommand: true }),
 );
 
 it.effect("Stop settles workflow members without subagent turn items", () =>
