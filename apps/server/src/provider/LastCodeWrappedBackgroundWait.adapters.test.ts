@@ -154,7 +154,9 @@ const codexCommand = "/bin/zsh -lc 'cd /workspace && ./scripts/lc-run prepare'";
 const codexTaskId = "call-wrapped-codex";
 const codexProcessId = "4242";
 
-const codexTranscript = Effect.gen(function* () {
+type CodexCommandCompletion = "after-turn" | "marked" | "yielded" | "foreground" | "interrupted";
+
+const codexTranscript = Effect.fnUntraced(function* (completion: CodexCommandCompletion) {
   const recorded = yield* readReplayFixtureTranscript(
     new URL("../orchestration-v2/testkit/fixtures/simple/codex_transcript.ndjson", import.meta.url),
   ).pipe(Effect.flatMap(CodexOrchestratorReplayHarness.decodeTranscript));
@@ -190,34 +192,65 @@ const codexTranscript = Effect.gen(function* () {
           status: completed ? "completed" : "inProgress",
           commandActions: [{ type: "unknown", command: codexCommand }],
           aggregatedOutput: completed ? "Wrapped command finished" : null,
-          exitCode: completed ? 0 : null,
+          exitCode: completed ? 3 : null,
           durationMs: null,
         },
       },
     },
   });
+  const launched = [...recorded.entries.slice(0, terminalIndex), commandFrame(false)];
+  if (completion === "yielded") {
+    const usage = recorded.entries.find(
+      (entry) => entry.type === "emit_inbound" && entry.label === "thread/tokenUsage/updated",
+    );
+    if (usage === undefined) return yield* Effect.die("The fixture must include token usage.");
+    launched.push(usage);
+  }
+  const turnEnd =
+    completion === "interrupted"
+      ? {
+          ...terminal,
+          frame: {
+            ...terminal.frame,
+            params: {
+              ...terminal.frame.params,
+              turn: { ...terminal.frame.params.turn, status: "interrupted" },
+            },
+          },
+        }
+      : terminal;
   return {
     ...recorded,
     entries: [
-      ...recorded.entries.slice(0, terminalIndex),
-      commandFrame(false),
-      terminal,
-      commandFrame(true),
+      ...launched,
+      ...(completion === "after-turn"
+        ? [turnEnd, commandFrame(true)]
+        : [commandFrame(true), commandFrame(true), turnEnd]),
     ],
   };
 });
 
 it.effect.each([
-  { enabled: false, release: false },
-  { enabled: true, release: false },
-  { enabled: true, release: true },
-])(
-  "retains an awaited Codex command after its turn completes (enabled=$enabled release=$release)",
-  ({ enabled, release }) =>
+  { enabled: false, release: false, completion: "after-turn" },
+  { enabled: true, release: false, completion: "after-turn" },
+  { enabled: true, release: true, completion: "after-turn" },
+  { enabled: true, release: false, completion: "marked" },
+  { enabled: true, release: true, completion: "marked" },
+  { enabled: true, release: false, completion: "yielded" },
+  { enabled: true, release: false, completion: "foreground" },
+  { enabled: true, release: false, completion: "interrupted" },
+] satisfies ReadonlyArray<{
+  enabled: boolean;
+  release: boolean;
+  completion: CodexCommandCompletion;
+}>)(
+  "hands off a wrapped Codex command result (enabled=$enabled release=$release completion=$completion)",
+  ({ enabled, release, completion }) =>
     Effect.gen(function* () {
+      const beforeTerminal = completion !== "after-turn";
       const seen = yield* observation;
       const allowCompletion = yield* Deferred.make<void>();
-      const replay = yield* CodexReplay.makeReplayDriver(yield* codexTranscript, {
+      const replay = yield* CodexReplay.makeReplayDriver(yield* codexTranscript(completion), {
         beforeEmitInbound: (entry) =>
           entry.label === "wrapped command completed"
             ? Deferred.await(allowCompletion)
@@ -257,9 +290,15 @@ it.effect.each([
         "Respond with the following text: fixture simple ok",
       );
       yield* seen.watch(runtime);
-      yield* seen.until(() => seen.events.some((event) => event.type === "turn.terminal"));
-      const terminal = seen.events.find((event) => event.type === "turn.terminal");
-      assert.equal(terminal?.status, "completed");
+      yield* seen.until(() =>
+        beforeTerminal
+          ? seen
+              .roster()
+              ?.providerThread.pendingBackgroundTasks?.some(
+                (task) => task.taskId === codexTaskId && task.awaited === true,
+              ) === true
+          : seen.events.some((event) => event.type === "turn.terminal"),
+      );
       assert.isFalse(
         seen.events.some(
           (event) =>
@@ -283,7 +322,38 @@ it.effect.each([
           : [],
       );
 
+      if (completion === "marked" || completion === "interrupted") {
+        assert.deepEqual(
+          yield* runtime.awaitBackgroundTasks!({
+            providerThread: turn.providerThread,
+            taskIds: [codexProcessId],
+            awaited: true,
+          }),
+          { matched: [codexProcessId] },
+        );
+      }
       yield* Deferred.succeed(allowCompletion, undefined);
+      const owed = { taskId: codexTaskId, originRunId: turn.runId };
+      yield* seen.until(() => seen.events.some((event) => event.type === "turn.terminal"));
+      const terminal = seen.events.find((event) => event.type === "turn.terminal")!;
+      assert.equal(terminal.status, completion === "interrupted" ? "interrupted" : "completed");
+      const acknowledgment = {
+        providerThreadId: terminal.providerThreadId,
+        providerTurnId: terminal.providerTurnId,
+      };
+      if (completion === "foreground" || completion === "interrupted") {
+        yield* runtime.acknowledgeTurnTerminal!(acknowledgment);
+        assert.deepEqual(seen.roster()?.providerThread.pendingBackgroundTasks, []);
+        assert.deepEqual(seen.roster()?.providerThread.owedBackgroundResults, []);
+        assert.lengthOf(seen.requests, 0);
+        return;
+      }
+      if (beforeTerminal) {
+        assert.deepEqual(seen.roster()?.providerThread.owedBackgroundResults, [owed]);
+        assert.lengthOf(seen.requests, 0);
+        yield* runtime.acknowledgeTurnTerminal!(acknowledgment);
+        yield* runtime.acknowledgeTurnTerminal!(acknowledgment);
+      }
       yield* seen.until(() => seen.requests.length === 1);
       const wake = seen.requests[0]!;
       assert.deepEqual(
@@ -299,7 +369,8 @@ it.effect.each([
       assert.deepEqual(seen.roster()?.providerThread.pendingBackgroundTasks ?? [], []);
       if (!enabled) return;
 
-      const owed = { taskId: codexTaskId, originRunId: turn.runId };
+      assert.include(wake.detail, "Wrapped command finished");
+      assert.equal(wake.notification?.outcome, "failed");
       assert.isTrue(seen.roster()?.backgroundRosterOnly);
       assert.deepEqual(seen.roster()?.providerThread.owedBackgroundResults, [owed]);
       if (release) {
@@ -318,6 +389,7 @@ it.effect.each([
         ),
       );
       assert.equal(Option.isSome(admitted), !release);
+      assert.lengthOf(seen.requests, 1);
       yield* seen.until(() => seen.roster()?.providerThread.owedBackgroundResults?.length === 0);
     }).pipe(Effect.scoped, Effect.provide(services)),
 );
