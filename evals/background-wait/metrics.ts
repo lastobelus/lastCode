@@ -197,6 +197,7 @@ export interface Results {
     model: string;
     effort?: string;
     head: string;
+    serverCli?: string;
     scale: number;
     base: string;
   };

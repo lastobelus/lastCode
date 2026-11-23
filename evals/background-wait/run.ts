@@ -29,12 +29,14 @@ import {
 } from "./observe.ts";
 import {
   cli,
+  configureFixtureAction,
   git,
   guidance,
   makeProject,
   registerProject,
   repositoryFile,
   root,
+  serverCliOverride,
   wrapperWaitInstruction,
 } from "./project.ts";
 
@@ -180,6 +182,7 @@ function checkHome(base: string, arm: Arm, provider: Results["config"]["provider
   }
   if (runtime.pid < 1 || !Number.isInteger(runtime.pid)) throw new Error("Invalid dev server PID.");
   process.kill(runtime.pid, 0);
+  return origin;
 }
 
 interface Snapshot {
@@ -205,7 +208,7 @@ interface Snapshot {
 
 async function show(base: string, threadId: string): Promise<Snapshot> {
   return JSON.parse(
-    await cli(base, ["thread", "show", "--messages", "3", "--json", threadId]),
+    await cli(base, ["thread", "show"], ["--messages", "3", "--json", threadId]),
   ) as Snapshot;
 }
 
@@ -498,6 +501,7 @@ async function main() {
           provider,
           model,
           effort: flags.effort,
+          serverCli: serverCliOverride,
           ...(arm === "b" ? { waitInstruction } : {}),
           out,
           samples,
@@ -548,6 +552,7 @@ async function main() {
         model,
         ...(flags.effort ? { effort: flags.effort } : {}),
         head: git(["rev-parse", "HEAD"]).trim(),
+        ...(serverCliOverride === undefined ? {} : { serverCli: serverCliOverride }),
         scale,
         base,
       };
@@ -608,24 +613,27 @@ async function main() {
           save();
         }
         if (sample.threadId === undefined) {
-          checkHome(base, arm, config.provider);
+          const origin = checkHome(base, arm, config.provider);
+          await configureFixtureAction(base, origin, db, sample.projectId, scenario.actionId);
           sample.launchedAt = Date.now();
           save();
           const started = JSON.parse(
-            await cli(base, [
-              "thread",
-              "start",
-              "--provider",
-              config.provider,
-              "--model",
-              config.model,
-              ...(config.effort ? ["--option", `effort=${config.effort}`] : []),
-              "--title",
-              sample.title,
-              "--json",
-              sample.projectId,
-              taskPrompt(scenario, arm, config.model, config.effort),
-            ]),
+            await cli(
+              base,
+              ["thread", "start"],
+              [
+                "--provider",
+                config.provider,
+                "--model",
+                config.model,
+                ...(config.effort ? ["--option", `effort=${config.effort}`] : []),
+                "--title",
+                sample.title,
+                "--json",
+                sample.projectId,
+                taskPrompt(scenario, arm, config.model, config.effort),
+              ],
+            ),
           ) as { threadId?: string };
           if (!started.threadId) throw new Error(`No thread receipt for ${sample.title}.`);
           sample.threadId = started.threadId;

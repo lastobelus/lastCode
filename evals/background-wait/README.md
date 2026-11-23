@@ -18,6 +18,8 @@ CODEX_HOME="$b/codex-home" codex login
 
 Use the same Codex account and backend for both arms. Keep native session persistence enabled and use matching provider settings in the two homes.
 
+If the servers already run from another checkout, set `LASTCODE_EVAL_SERVER_CLI` to that checkout's absolute `apps/server/src/bin.ts` path. The CLI must match the running server's database schema. The runner records the supplied path in the results.
+
 Start the dev servers in separate terminals. Use the same `eval_root` value in each terminal. Keep the `a` and `b` variables in the shell running the eval. The source's wrapper flag applies to newly started provider sessions.
 
 ```sh
@@ -30,7 +32,7 @@ vp run dev:server --home-dir "$b" --no-seed --host 127.0.0.1 --port 44192 --dev-
 
 Use `--dry-run` to print the plan. Inspect `problems` in the results if a sample fails.
 
-Run one arm at a time at the same concurrency. The default is 20 fresh threads per case and two active samples at once.
+Run one arm at a time at the same concurrency. The default is 20 fresh threads per case and two active samples at once. Before launching each sample, the runner saves its opted-in Action in that project's settings through the running server and checks the effective Action. This also works in homes that have migrated their legacy project settings.
 
 ```sh
 node evals/background-wait/run.ts --base-dir "$a" --arm a --model gpt-6-luna --out luna
@@ -98,7 +100,7 @@ A fresh synthetic Git project and random result IDs distinguish genuine completi
 
 The runner observes the thread state independently of the model. Wall time runs from dispatch intent to the family's last recorded run completion. The delegated case finds the worker from the local app-owned task record and sums both threads' turns and tokens. Quick CI exits 3 in both arms. The Action puts the result ID on stdout because failed Actions omit their structured report from the wake.
 
-When a LastCode thread's main agent backgrounds a simple wrapper command, the grader requires a sampled hold or a recorded continuation that delivered the wrapper result. A short hold can fall between CLI status snapshots. The reported hold count comes from those snapshots. A complete foreground output needs no hold. The zero-polls gate counts only arm B's shell polls between the visible wait instruction and turn end, including `write_stdin` and `TaskOutput`. Other unexpected tool calls still fail the sample. Calls to `t3_background_wait` after the wrapper's line and lookups for that tool count as overhead. Codex rollout files provide the tool sequence and Claude uses SDK tool blocks. The CLI status observer contributes no model requests.
+When a LastCode thread's main agent backgrounds a wrapper command, the grader requires a sampled hold or a recorded continuation that delivered the wrapper result. The server can also mark a chain of literal simple commands joined by `&&` or `;` when the wrapper is the final step. The fixture uses the shipped wrapper line, which remains unchanged. A short hold can fall between CLI status snapshots. The reported hold count comes from those snapshots. A complete foreground output needs no hold. The zero-polls gate counts only arm B's shell polls between the visible wait instruction and turn end, including `write_stdin` and `TaskOutput`. Other unexpected tool calls still fail the sample. Calls to `t3_background_wait` after the wrapper's line and lookups for that tool count as overhead. Codex rollout files provide the tool sequence and Claude uses SDK tool blocks. The CLI status observer contributes no model requests.
 
 ## Cost
 

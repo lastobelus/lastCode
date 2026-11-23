@@ -441,7 +441,7 @@ describe("real-session evidence", () => {
         kind: "call",
         id: "1",
         name: "exec_command",
-        args: '{"cmd":"cd /home/user/eval/worker && ./scripts/lc-run ci --quick"}',
+        args: '{"cmd":"cd /home/user/eval/worker && git rev-parse --short HEAD; ./scripts/lc-run ci --quick"}',
       },
       { kind: "output", id: "1", body: wait },
       { kind: "turn-end" },
@@ -469,7 +469,8 @@ describe("real-session evidence", () => {
           taskId: "worker-command",
           kind: "command",
           awaited: true,
-          description: "cd /home/user/eval/worker && ./scripts/lc-run ci --quick",
+          description:
+            "cd /home/user/eval/worker && git rev-parse --short HEAD; ./scripts/lc-run ci --quick",
         },
       ],
       "codex",
