@@ -721,6 +721,8 @@ describe("getChangeRequest commits", () => {
         Effect.succeed({
           author: baseDetail.author,
           comments: baseDetail.comments,
+          commentCount: baseDetail.comments.length,
+          truncated: false,
           commits: [
             {
               oid: "graphql-newest",
@@ -737,7 +739,6 @@ describe("getChangeRequest commits", () => {
               authors: [],
             },
           ],
-          truncated: false,
         }),
       listReviewThreadComments: () => Effect.succeed({ ...baseThreadComments, commits }),
     });
@@ -821,8 +822,9 @@ describe("getChangeRequestActivity", () => {
         Effect.succeed({
           author: null,
           comments: [dismissedReview(body)],
-          commits: [],
+          commentCount: 1,
           truncated: false,
+          commits: [],
         }),
       listReviewThreadComments: () => Effect.succeed(threadComments),
     });
@@ -850,7 +852,13 @@ describe("getChangeRequestActivity", () => {
   const failingThreadRead = (error: GitHubPullRequestApi.GitHubPullRequestApiError) =>
     Layer.mock(GitHubPullRequestApi.GitHubPullRequestApi)({
       getPullRequestActivity: () =>
-        Effect.succeed({ author: null, comments: [], commits: [], truncated: false }),
+        Effect.succeed({
+          author: null,
+          comments: [],
+          commentCount: 0,
+          commits: [],
+          truncated: false,
+        }),
       listReviewThreadComments: () => Effect.fail(error),
     });
   const retryAt = 1_900_000_000_000;

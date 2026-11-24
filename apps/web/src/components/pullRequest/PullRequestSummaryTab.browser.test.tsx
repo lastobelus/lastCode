@@ -110,8 +110,6 @@ const detail: PullRequestDetailView = {
   },
 };
 
-// The comment filter persists to localStorage, so tests that touch it start and end empty.
-
 const tab = (value = detail) => (
   <PullRequestSummaryTab
     scrollerRef={() => {}}
