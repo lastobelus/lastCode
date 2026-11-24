@@ -1,12 +1,11 @@
-import { settlePromise } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentId, PreviewHostingLeaseSummary, ThreadId } from "@t3tools/contracts";
 import { resolveMobileMarkdownMediaSource } from "../../lib/markdownMediaSource";
 import { getBrowseDirectoryPath } from "@t3tools/client-runtime/state/projects";
 import { maskMarkdownFrontmatter } from "@t3tools/shared/markdownFrontmatter";
-import { useGT } from "gt-react-native";
+import { msg, useGT } from "gt-react-native";
 import { useState } from "react";
 import { StackActions, useNavigation } from "@react-navigation/native";
-import { View } from "react-native";
 import { LegendList } from "@legendapp/list/react-native";
 import {
   LARGE_MARKDOWN_CHUNK_MAX_CHARS,
@@ -14,8 +13,16 @@ import {
   withMarkdownDefinitions,
 } from "@t3tools/shared/markdownChunks";
 import { NativeScrollView } from "../../native/NativeScrollViewMarker";
+import * as Option from "effect/Option";
+import { MediaVideoPlayer } from "../../components/MediaVideoPlayer";
+import {
+  openThreadFeedMarkdownUrl,
+  preparedThreadFeedMediaActionsSource,
+} from "../../lib/prepareThreadFeedPreview";
+import { Alert, View } from "react-native";
 import { RefreshControl } from "../../components/ui/RefreshControl";
 
+import { m } from "../../i18n/messages";
 import { tryOpenWebLink } from "../../lib/openExternalUrl";
 import { FONT_FAMILIES } from "../../lib/fontFamilies";
 import { resolveNativeMarkdownTypography } from "../../lib/appearancePreferences";
@@ -24,6 +31,7 @@ import {
   ThreadMarkdownImage,
   ThreadMarkdownImageView,
   ThreadMarkdownImageUnavailable,
+  ThreadMarkdownPreparedUri,
 } from "../threads/ThreadMarkdownImage";
 import { ThreadMarkdownVideo } from "../threads/ThreadMarkdownVideo";
 import { markdownFileEmbedLabel, resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
@@ -39,10 +47,19 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
 import {
   SelectableMarkdownText,
   type MarkdownImageRenderer,
+  type MarkdownImageSourceResolver,
   type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
 import { fileRoutePathSegments, resolveWorkspaceFilePath } from "./filePath";
 import { SourceFileSurface } from "./SourceFileSurface";
+import { previewEnvironment } from "../../state/preview";
+import {
+  useCreateManagedPreviewResourceUrl,
+  useOpenManagedBrowserPreview,
+  useRenewPreviewDocumentUrl,
+} from "../browser/useOpenManagedBrowserPreview";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { usePreparedConnection, useConfiguredPreviewEnvironmentUrl } from "../../state/session";
 
 interface MarkdownPreviewStyles {
   readonly nativeTextStyle: NativeMarkdownTextStyle;
@@ -99,6 +116,20 @@ export function FileMarkdownPreview(props: {
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
+  const listHostedPreviews = useAtomCommand(previewEnvironment.hostingList, {
+    reportFailure: false,
+  });
+  const recoverHostedPreviewLease = useAtomCommand(previewEnvironment.hostingRecover, {
+    reportFailure: false,
+  });
+  const preparedConnection = usePreparedConnection(props.environmentId);
+  const threadRef =
+    props.threadId === null
+      ? null
+      : { environmentId: props.environmentId, threadId: props.threadId };
+  const openManagedBrowser = useOpenManagedBrowserPreview(threadRef);
+  const createResourceUrl = useCreateManagedPreviewResourceUrl(threadRef);
+  const renewDocumentUrl = useRenewPreviewDocumentUrl(threadRef);
   const handlePullToRefresh = async () => {
     if (!props.onRefresh) {
       return;
@@ -111,6 +142,60 @@ export function FileMarkdownPreview(props: {
   const markdownDirectory = getBrowseDirectoryPath(
     resolveWorkspaceFilePath(props.cwd, props.relativePath),
   );
+  const connection = Option.getOrNull(preparedConnection);
+  const knownEnvironmentUrl = useConfiguredPreviewEnvironmentUrl(props.environmentId, connection);
+  const previewPreparationInput = (purpose: "navigation" | "resource") =>
+    threadRef === null || connection === null
+      ? null
+      : {
+          threadRef,
+          purpose,
+          createResourceUrl,
+          renewDocumentUrl,
+          environmentUrl: connection.httpBaseUrl,
+          knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
+          list: async () => {
+            const result = await listHostedPreviews({
+              environmentId: props.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            return result.value;
+          },
+          recover: async (
+            lease: PreviewHostingLeaseSummary,
+            options: { readonly bootstrap: boolean },
+          ) => {
+            const result = await recoverHostedPreviewLease({
+              environmentId: props.environmentId,
+              input: {
+                threadId: threadRef.threadId,
+                leaseId: lease.leaseId,
+                url: lease.url,
+                bootstrap: options.bootstrap,
+              },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            return result.value;
+          },
+        };
+  const prepareMediaUrl = (href: string) =>
+    openThreadFeedMarkdownUrl(previewPreparationInput("resource"), href, (url) => url);
+  const openExternalLink = (href: string) => {
+    void openThreadFeedMarkdownUrl(
+      previewPreparationInput("navigation"),
+      href,
+      async (url) => {
+        await tryOpenWebLink(url, "markdown-link");
+      },
+      openManagedBrowser,
+    ).catch(() =>
+      Alert.alert(
+        m(msg("Preview unavailable")),
+        m(msg("The preview could not be restored. Tap the link to retry.")),
+      ),
+    );
+  };
   const renderImage: MarkdownImageRenderer = (image) => {
     const media = resolveMobileMarkdownMediaSource(image.href, {
       threadId: props.threadId ?? undefined,
@@ -143,30 +228,61 @@ export function FileMarkdownPreview(props: {
       );
     }
     if (media?.access === "direct") {
-      if (media.kind === "video") {
-        return (
-          <ThreadMarkdownVideo
-            source={{
-              type: "media",
-              name: media.name,
-              mimeType: media.mimeType,
-              uri: normalizeNativeMarkdownUrl(media.uri),
-              actionsSource: preview?.source.actionsSource,
-            }}
-            thumbnailVisible
-          />
-        );
-      }
+      const originalUri = normalizeNativeMarkdownUrl(media.uri);
+      const sourceKey = JSON.stringify([
+        props.environmentId,
+        props.threadId,
+        connection?.httpBaseUrl,
+        originalUri,
+      ]);
       return (
-        <ThreadMarkdownImageView
-          uri={normalizeNativeMarkdownUrl(media.uri)}
-          sourceKey={media.uri}
-          unavailable={false}
-          alt={image.alt}
-          format={media.mimeType === "image/svg+xml" ? "svg" : undefined}
-          actionsSource={preview?.source.actionsSource}
-          onPressPreview={setExpandedFile}
-        />
+        <ThreadMarkdownPreparedUri
+          key={image.href}
+          uri={originalUri}
+          sourceKey={sourceKey}
+          prepareUrl={prepareMediaUrl}
+        >
+          {({ uri, status }) =>
+            media.kind === "video" ? (
+              <MediaVideoPlayer
+                uri={uri}
+                unavailable={status === "unavailable"}
+                name={image.alt ?? "Video"}
+                thumbnailKey={sourceKey}
+                thumbnailVisible
+                actionsSource={preparedThreadFeedMediaActionsSource(
+                  preview?.source.actionsSource,
+                  uri ?? originalUri,
+                )}
+                resolvePlaybackUri={() => prepareMediaUrl(originalUri)}
+              />
+            ) : (
+              <ThreadMarkdownImageView
+                uri={uri}
+                sourceKey={sourceKey}
+                unavailable={status === "unavailable"}
+                alt={image.alt}
+                format={media.mimeType === "image/svg+xml" ? "svg" : undefined}
+                actionsSource={preparedThreadFeedMediaActionsSource(
+                  preview?.source.actionsSource,
+                  uri ?? originalUri,
+                )}
+                onPressPreview={(source) => {
+                  void prepareMediaUrl(originalUri).then((url) =>
+                    setExpandedFile({
+                      ...source,
+                      uri: url,
+                      actionsSource: preparedThreadFeedMediaActionsSource(
+                        source.actionsSource,
+                        url,
+                      ),
+                    }),
+                  );
+                }}
+              />
+            )
+          }
+        </ThreadMarkdownPreparedUri>
       );
     }
     if (props.captured || media === null || media.access === "unavailable") {
@@ -191,12 +307,18 @@ export function FileMarkdownPreview(props: {
     );
   };
   const styles = useMarkdownPreviewStyles();
-  const resolveImageSource = useMarkdownImageSource({
+  const resolveNativeImageSource = useMarkdownImageSource({
     environmentId: props.environmentId,
     threadId: props.threadId,
     workspaceRoot: markdownDirectory,
     captured: props.captured,
   });
+  const resolveImageSource: MarkdownImageSourceResolver = async (image) => {
+    const source = await resolveNativeImageSource(image);
+    return source && /^(?:https?:)?\/\//i.test(image.href)
+      ? { ...source, uri: await prepareMediaUrl(source.uri) }
+      : source;
+  };
   const openMedia = (href: string, imageEmbed = false) => {
     const media = resolveMarkdownMediaPreview(href, {
       environmentId: props.environmentId,
@@ -220,15 +342,52 @@ export function FileMarkdownPreview(props: {
       }
       return true;
     }
-    if (media.kind === "video") setExpandedVideo(media.source);
-    else setExpandedFile(media.source);
+    const open = (uri?: string) => {
+      if (media.kind === "video") {
+        setExpandedVideo(
+          uri
+            ? {
+                ...media.source,
+                uri,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  uri,
+                ),
+              }
+            : media.source,
+        );
+      } else {
+        setExpandedFile(
+          uri
+            ? {
+                ...media.source,
+                uri,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  uri,
+                ),
+              }
+            : media.source,
+        );
+      }
+    };
+    if ("uri" in media.source && /^https?:\/\//i.test(media.source.uri)) {
+      void prepareMediaUrl(media.source.uri)
+        .then(open)
+        .catch(() =>
+          Alert.alert(
+            m(msg("Preview unavailable")),
+            m(msg("The preview could not be restored. Tap the link to retry.")),
+          ),
+        );
+    } else open();
     return true;
   };
   const onImagePress = (href: string) => {
     openMedia(href, true);
   };
   const onLinkPress = (href: string) => {
-    if (!openMedia(href)) void tryOpenWebLink(href, "markdown-link");
+    if (!openMedia(href)) openExternalLink(href);
   };
 
   const refreshControl = props.onRefresh ? (

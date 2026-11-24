@@ -111,7 +111,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
+import { classifyMarkdownImageSource } from "@t3tools/shared/markdownImages";
 import {
   contextCompactionTokenCounts,
   resolveViewedImageAsset,
@@ -289,6 +289,11 @@ import { htmlRenderRowHeight, ThreadHtmlRender } from "./HtmlRenderWebView";
 import { ThreadMcpApp } from "./McpAppWebView";
 import { assetEnvironment, useAssetUrl, useRefreshAssetUrl } from "../../state/assets";
 import { previewEnvironment } from "../../state/preview";
+import {
+  useCreateManagedPreviewResourceUrl,
+  useOpenManagedBrowserPreview,
+  useRenewPreviewDocumentUrl,
+} from "../browser/useOpenManagedBrowserPreview";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import {
   readEnvironmentScope,
@@ -297,12 +302,14 @@ import {
 } from "../../state/session";
 import { environmentProjects, projectEnvironment } from "../../state/projects";
 import {
+  needsWorkspaceBasenameLookup,
+  WORKSPACE_BASENAME_LOOKUP_LIMIT,
+} from "@t3tools/shared/workspaceBasenameLookup";
+import {
   agentWorkingDirectories,
   findAgentDirectoryMatch,
-  needsWorkspaceBasenameLookup,
   pickProjectLinkMatch,
   pickWorkspaceLinkMatch,
-  WORKSPACE_BASENAME_LOOKUP_LIMIT,
   workspaceLinkLookupQuery,
 } from "@t3tools/client-runtime/workspace-basename-lookup";
 import {
@@ -1272,7 +1279,9 @@ function ThreadMarkdownVideoPlaceholder(props: { readonly unavailable: boolean }
       style={{ height: 180 }}
     >
       {props.unavailable ? (
-        <Text className="text-xs text-foreground-muted">Video unavailable</Text>
+        <Text className="text-xs text-foreground-muted">
+          <T>Video unavailable</T>
+        </Text>
       ) : (
         <AppActivityIndicator />
       )}
@@ -2968,7 +2977,7 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
           ) : null}
           {props.detailedOutputAvailable && !detailsAvailable ? (
             <Text className="mt-0.5 text-xs text-foreground-muted">
-              Detailed output retained in the Action terminal.
+              <T>Detailed output retained in the Action terminal.</T>
             </Text>
           ) : null}
         </View>
@@ -3349,6 +3358,18 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const recoverHostedPreviewLease = useAtomCommand(previewEnvironment.hostingRecover, {
     reportFailure: false,
   });
+  const openManagedBrowser = useOpenManagedBrowserPreview({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+  });
+  const createResourceUrl = useCreateManagedPreviewResourceUrl({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+  });
+  const renewDocumentUrl = useRenewPreviewDocumentUrl({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+  });
   const preparedConnection = usePreparedConnection(props.environmentId);
   const hasPreparedConnection = Option.isSome(preparedConnection);
   const environmentUrl = Option.isSome(preparedConnection)
@@ -3358,7 +3379,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     props.environmentId,
     Option.getOrNull(preparedConnection),
   );
-  const previewPreparationInput = (url: string) => {
+  const previewPreparationInput = (
+    url: string,
+    purpose: "navigation" | "resource" = "navigation",
+  ) => {
     if (!hasPreparedConnection) return null;
     return {
       threadRef: {
@@ -3366,6 +3390,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         threadId: props.threadId,
       },
       url,
+      purpose,
+      createResourceUrl,
+      renewDocumentUrl,
       environmentUrl,
       knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
       list: async () => {
@@ -3707,34 +3734,41 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           };
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
-              openVideo({
-                ...media.source,
-                uri: url,
-                actionsSource: preparedThreadFeedMediaActionsSource(
-                  media.source.actionsSource,
-                  url,
-                ),
-              }),
+            void openThreadFeedMarkdownUrl(
+              previewPreparationInput(mediaUrl, "resource"),
+              mediaUrl,
+              (url) =>
+                openVideo({
+                  ...media.source,
+                  uri: url,
+                  actionsSource: preparedThreadFeedMediaActionsSource(
+                    media.source.actionsSource,
+                    url,
+                  ),
+                }),
             );
           } else {
             openVideo(media.source);
           }
         } else {
           const openImage = (source: FilePreviewSource) => {
-            if (!request.signal.aborted) openPreview(scope, { file: withGallery ? withGallery(source) : source });
+            if (!request.signal.aborted)
+              openPreview(scope, { file: withGallery ? withGallery(source) : source });
           };
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
-              openImage({
-                ...media.source,
-                uri: url,
-                actionsSource: preparedThreadFeedMediaActionsSource(
-                  media.source.actionsSource,
-                  url,
-                ),
-              }),
+            void openThreadFeedMarkdownUrl(
+              previewPreparationInput(mediaUrl, "resource"),
+              mediaUrl,
+              (url) =>
+                openImage({
+                  ...media.source,
+                  uri: url,
+                  actionsSource: preparedThreadFeedMediaActionsSource(
+                    media.source.actionsSource,
+                    url,
+                  ),
+                }),
             );
           } else {
             openImage(media.source);
@@ -3775,10 +3809,12 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       const path = fileTarget?.fullPath ?? fileTarget?.relativePath;
       if (!path || (!props.workspaceRoot && !fileTarget?.fullPath)) {
         Dialog.alert(
-          "File unavailable",
+          m(msg("File unavailable")),
           /^~(?:[\\/]|$)/.test(presentation.path)
-            ? "The host home directory is unknown. Ask for an absolute file link."
-            : "The workspace is unavailable, so this relative file link cannot be resolved.",
+            ? m(msg("The host home directory is unknown. Ask for an absolute file link."))
+            : m(
+                msg("The workspace is unavailable, so this relative file link cannot be resolved."),
+              ),
         );
         return;
       }
@@ -3798,7 +3834,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     if (presentation.href) {
       if (/^https?:\/\//i.test(presentation.href) && isPdfFile({ name: presentation.href })) {
         void openThreadFeedMarkdownUrl(
-          previewPreparationInput(presentation.href),
+          previewPreparationInput(presentation.href, "resource"),
           presentation.href,
           (url) => {
             if (request.signal.aborted) return;
@@ -3808,19 +3844,24 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           },
         ).catch(() =>
           Dialog.alert(
-            "Preview unavailable",
-            "The preview could not be restored. Tap the link to retry.",
+            m(msg("Preview unavailable")),
+            m(msg("The preview could not be restored. Tap the link to retry.")),
           ),
         );
         return;
       }
       const linkUrl = presentation.href;
-      void openThreadFeedMarkdownUrl(previewPreparationInput(linkUrl), linkUrl, (url) =>
-        openPullRequest(url),
+      void openThreadFeedMarkdownUrl(
+        previewPreparationInput(linkUrl),
+        linkUrl,
+        async (url) => {
+          await openPullRequest(url);
+        },
+        openManagedBrowser,
       ).catch(() =>
         Dialog.alert(
-          "Preview unavailable",
-          "The preview could not be restored. Tap the link to retry.",
+          m(msg("Preview unavailable")),
+          m(msg("The preview could not be restored. Tap the link to retry.")),
         ),
       );
     }

@@ -15,6 +15,7 @@ import {
   isListedThreadLineage,
   isLiveSubagentShell,
   isOlderSettledThreadShell,
+  isOwnedSubagentThread,
   OrchestrationProjectShell as ProjectShellSchema,
   OrchestrationV2ThreadShell as ThreadShellSchema,
 } from "@t3tools/contracts";
@@ -208,7 +209,8 @@ function shellTrimFacts(rows: ReadonlyArray<ShellTrimRow>): ShellTrimFacts {
     if (row.lineage.relationshipToParent === "subagent") {
       subagentThreadIds.add(row.id);
       if (row.lineage.parentThreadId) subagentParentIds.add(row.lineage.parentThreadId);
-    } else if (
+    }
+    if (
       isListedThreadLineage(row.lineage) &&
       row.settledOverride === "settled" &&
       row.settledAt !== null
@@ -254,8 +256,9 @@ function omitIdleSubagentShellsWith(
 ): ReadonlyArray<OrchestrationV2ThreadShell> {
   return threads.filter(
     (thread) =>
-      thread.lineage.relationshipToParent !== "subagent" ||
+      !isOwnedSubagentThread(thread) ||
       isLiveSubagentShell(thread) ||
+      thread.worktreeCleanup != null ||
       facts.subagentParentIds.has(thread.id) ||
       facts.remoteTaskParentIds.has(thread.id),
   );
@@ -376,7 +379,7 @@ function shellSubscriberThreadIds(
   const facts = shellTrimFacts(index);
   const subagents = index.filter(
     (entry) =>
-      entry.lineage.relationshipToParent === "subagent" &&
+      isOwnedSubagentThread(entry) &&
       (!options.omitIdleSubagents ||
         entry.mayBeLive ||
         entry.hasRemoteTasks ||
@@ -389,7 +392,7 @@ function shellSubscriberThreadIds(
   const keptSubagentIds = new Set(subagents.map((entry) => entry.id));
   const beforeMs = facts.olderSettledBeforeMs;
   return index.flatMap((entry) =>
-    entry.lineage.relationshipToParent === "subagent"
+    isOwnedSubagentThread(entry)
       ? keptSubagentIds.has(entry.id)
         ? [entry.id]
         : []
@@ -529,6 +532,7 @@ export type ShellApplicationEvent =
   | {
       readonly sequence: number;
       readonly event: Pick<OrchestrationV2StoredEvent["event"], "threadId">;
+      readonly relatedThreadId?: OrchestrationV2ThreadShell["id"];
     };
 
 /** Focused subagents receive these updates through their thread subscription. */
@@ -569,23 +573,68 @@ export function toShellApplicationEvent(stored: ApplicationStoredEvent): ShellAp
         type: stored.type,
         sequence: stored.sequence,
       }
-    : { sequence: stored.sequence, event: { threadId: stored.event.threadId } };
+    : {
+        sequence: stored.sequence,
+        event: {
+          threadId: stored.event.threadId,
+        },
+        ...(stored.event.type === "subagent.updated" &&
+        stored.event.payload.origin === "provider_native" &&
+        stored.event.payload.childThreadId !== null &&
+        stored.event.payload.childThreadId !== stored.event.threadId
+          ? { relatedThreadId: stored.event.payload.childThreadId }
+          : {}),
+      };
 }
 
-export function coalesceShellApplicationEvents<A extends ShellApplicationEvent>(
-  events: ReadonlyArray<A>,
-): ReadonlyArray<A> {
-  const latestByAggregate = new Map<string, A>();
+export function coalesceShellApplicationEvents(
+  events: ReadonlyArray<ShellApplicationEvent>,
+): ReadonlyArray<ShellApplicationEvent> {
+  const latestByAggregate = new Map<string, ShellApplicationEvent>();
   for (const stored of events) {
-    const key =
-      "aggregateKind" in stored
-        ? `project:${stored.aggregateId}`
-        : `thread:${stored.event.threadId}`;
-    latestByAggregate.set(key, stored);
+    if ("aggregateKind" in stored) {
+      latestByAggregate.set(`project:${stored.aggregateId}`, stored);
+    } else {
+      for (const threadId of [stored.event.threadId, stored.relatedThreadId]) {
+        if (threadId === undefined) continue;
+        // Reinsert newest targets so same-sequence native pairs retain parent-first order.
+        latestByAggregate.delete(`thread:${threadId}`);
+        latestByAggregate.set(`thread:${threadId}`, {
+          sequence: stored.sequence,
+          event: { threadId },
+        });
+      }
+    }
   }
   return Array.from(latestByAggregate.values()).sort(
     (left, right) => left.sequence - right.sequence,
   );
+}
+
+/** Refresh every target of one stored event before the client advances its cursor. */
+export function attachRelatedThreadShellItems(items: ReadonlyArray<ShellDelta>) {
+  const result: Array<(typeof items)[number]> = [];
+  for (const item of items) {
+    const previous = result.at(-1);
+    if (
+      previous !== undefined &&
+      previous.sequence === item.sequence &&
+      (previous.kind === "thread.updated" || previous.kind === "thread.removed") &&
+      (item.kind === "thread.updated" || item.kind === "thread.removed")
+    ) {
+      result[result.length - 1] = {
+        ...previous,
+        ...(item.kind === "thread.updated"
+          ? { relatedThreads: [...(previous.relatedThreads ?? []), item.thread] }
+          : {
+              relatedRemovedThreadIds: [...(previous.relatedRemovedThreadIds ?? []), item.threadId],
+            }),
+      };
+    } else {
+      result.push(item);
+    }
+  }
+  return result;
 }
 
 /** Emit the authoritative initial snapshot before marked enrichment. */
@@ -764,6 +813,15 @@ export function skipUnchangedThreadShells<A extends OrchestrationV2ShellStreamIt
     return stream.pipe(
       Stream.filterEffect((item) =>
         Effect.map(Clock.currentTimeMillis, (now) => {
+          const hasRelated =
+            (item.kind === "thread.updated" || item.kind === "thread.removed") &&
+            ((item.relatedThreads?.length ?? 0) > 0 ||
+              (item.relatedRemovedThreadIds?.length ?? 0) > 0);
+          if (item.kind === "thread.updated" || item.kind === "thread.removed") {
+            for (const threadId of item.relatedRemovedThreadIds ?? []) lastSent.delete(threadId);
+            for (const thread of item.relatedThreads ?? [])
+              lastSent.set(thread.id, { thread, sentAt: now });
+          }
           if (item.kind === "thread.removed") {
             lastSent.delete(item.threadId);
             return true;
@@ -772,6 +830,7 @@ export function skipUnchangedThreadShells<A extends OrchestrationV2ShellStreamIt
           const previous = lastSent.get(item.thread.id);
           if (
             previous !== undefined &&
+            !hasRelated &&
             now - previous.sentAt < UNCHANGED_THREAD_SHELL_RESEND_MS &&
             sameThreadShell(
               { ...item.thread, updatedAt: previous.thread.updatedAt },
@@ -788,6 +847,10 @@ export function skipUnchangedThreadShells<A extends OrchestrationV2ShellStreamIt
   });
 }
 
+/**
+ * Converts a committed event and the affected thread's current shell into one
+ * delta. Deleted threads keep a shell while worktree cleanup is pending.
+ */
 export function shellStreamItemFromThreadShell(input: {
   readonly stored: Extract<ShellApplicationEvent, { readonly event: unknown }>;
   readonly shell: OrchestrationV2ThreadShell | null;
@@ -796,7 +859,10 @@ export function shellStreamItemFromThreadShell(input: {
   { readonly kind: "thread.updated" | "thread.removed" }
 > {
   if (input.shell !== null) {
-    if (input.shell.archivedAt !== null) {
+    if (
+      input.shell.archivedAt !== null &&
+      !(input.shell.deletedAt !== null && input.shell.worktreeCleanup != null)
+    ) {
       return {
         kind: "thread.removed",
         sequence: input.stored.sequence,

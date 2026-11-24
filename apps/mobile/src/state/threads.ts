@@ -55,21 +55,24 @@ const steadyShells = createSteadyShellAtoms({
  * changes once when environments connect, not once per environment.
  */
 export const steadyShellsHoldingAtom = steadyShells.holdingAtom;
-export const steadyNavigationThreadShellsAtom = createEnvironmentThreadShellAtoms({
+const steadyThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   snapshotAtom: steadyShells.snapshotAtom,
   hiddenThreadTagsAtom: serverEnvironment.hiddenThreadTagsAtom,
-}).navigationThreadShellsAtom;
-export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
-  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
-  pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
 });
+export const steadyNavigationThreadShellsAtom = steadyThreadShells.navigationThreadShellsAtom;
+export const steadyAnnotationHiddenThreadKeysAtom =
+  steadyThreadShells.annotationHiddenThreadKeysAtom;
 export const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime, (ref) =>
   Atom.map(environmentThreadShells.threadShellAtom(ref), (thread) => thread !== null),
 );
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
   environmentThreads.stateAtom,
 );
+export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
+  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
+  pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
+});
 
 // Long enough for the opened screen to subscribe; its subscription keeps the thread after this.
 const OPENING_THREAD_HOLD_MS = 3_000;

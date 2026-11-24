@@ -22,6 +22,7 @@ import {
   type PullRequestSummary,
   type ServerSettings as ContractServerSettings,
   type ServerSettingsPatch,
+  type TerminalSummary,
 } from "@t3tools/contracts";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -46,6 +47,7 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerActivation from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -594,6 +596,9 @@ interface HarnessOptions {
   readonly hasActiveSubprocess?: (input: { readonly threadId: string }) => Effect.Effect<boolean>;
   readonly currentThreads?: ReadonlyArray<OrchestrationV2AppThread>;
   readonly projections?: ProjectionStore.ProjectionStoreV2Shape;
+  readonly terminalSummaries?: ReadonlyArray<TerminalSummary>;
+  readonly ownedPreviewTerminalIds?: ReadonlyArray<string>;
+  readonly previewListFailure?: boolean;
 }
 
 const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options: HarnessOptions) {
@@ -622,7 +627,28 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   const invalidatedCwds = yield* Ref.make<ReadonlyArray<string>>([]);
   const domainEvents = yield* PubSub.unbounded<OrchestrationV2DomainEvent>();
   const observedEvents = yield* Queue.unbounded<EventId>();
-  const closedIdle = yield* Queue.unbounded<{ readonly threadId: string }>();
+  const closedIdle = yield* Queue.unbounded<{
+    readonly threadId: string;
+    readonly terminalId?: string;
+    readonly excludedTerminalIds?: ReadonlyArray<string>;
+  }>();
+  const previewListCalls = yield* Ref.make<ReadonlyArray<string | undefined>>([]);
+  const terminalSummaries =
+    options.terminalSummaries ??
+    (options.currentThreads ?? []).map((thread, index) => ({
+      threadId: thread.id,
+      terminalId: `idle-${index}`,
+      cwd: "/workspace",
+      worktreePath: null,
+      status: "running" as const,
+      pid: 100 + index,
+      exitCode: null,
+      exitSignal: null,
+      hasRunningSubprocess: false,
+      label: "shell",
+      updatedAt: NOW,
+    }));
+  const ownedPreviewTerminalIds = new Set(options.ownedPreviewTerminalIds ?? []);
   const scriptRuns =
     yield* Queue.unbounded<ProjectSetupScriptRunner.ProjectSetupScriptRunnerInput>();
 
@@ -742,6 +768,41 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       closeOnSettle: (input) =>
         Queue.offer(closedIdle, input).pipe(Effect.andThen(options.onCloseIdle?.() ?? Effect.void)),
       hasActiveSubprocess: (input) => options.hasActiveSubprocess?.(input) ?? Effect.succeed(false),
+      metadata: Effect.succeed(terminalSummaries),
+    }),
+    Layer.mock(PreviewHosting.PreviewHosting)({
+      launch: () => Effect.die("Unexpected preview launch"),
+      recover: () => Effect.die("Unexpected preview recovery"),
+      list: (threadId) =>
+        Ref.update(previewListCalls, (calls) => [...calls, threadId]).pipe(
+          Effect.andThen(
+            options.previewListFailure
+              ? Effect.fail(
+                  new PreviewHosting.PreviewHostingError({
+                    operation: "read",
+                    statePath: "/fixture/preview-hosting.json",
+                  }),
+                )
+              : Effect.succeed(
+                  [...ownedPreviewTerminalIds].map((terminalId, index) => ({
+                    id: `preview-lease-${index}`,
+                    threadId: threadId ?? "thread-preview",
+                    terminalId,
+                    command: "pnpm dev --port 5173",
+                    cwd: "/workspace",
+                    worktreePath: null,
+                    url: `http://localhost:5173/preview-${index}`,
+                    handedOffAt: NOW,
+                    expiresAt: NOW,
+                    status: "active" as const,
+                  })),
+                ),
+          ),
+        ),
+      ownsTerminal: (_threadId, terminalId) =>
+        Effect.succeed(ownedPreviewTerminalIds.has(terminalId)),
+      removeThread: () => Effect.void,
+      protectedWorkspacePaths: () => Effect.succeed([]),
     }),
     Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
       runForThread: (input) =>
@@ -796,6 +857,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     closedIdle,
     scriptRuns,
     observedEvents,
+    previewListCalls,
     publishEvent: (event: OrchestrationV2DomainEvent) => PubSub.publish(domainEvents, event),
     updateSettings,
     publishRefresh: PubSub.publish(pullRequestRefreshes, 1),
@@ -1192,7 +1254,10 @@ describe("ThreadSettlementServiceV2 worker", () => {
           yield* fixture.publishEvent(finished);
           // Cleanup of the following event marks delivery of the run event before draining.
           yield* fixture.publishEvent(settledEvent(marker));
-          expect(yield* Queue.take(fixture.closedIdle)).toEqual({ threadId: marker.id });
+          expect(yield* Queue.take(fixture.closedIdle)).toEqual({
+            threadId: marker.id,
+            excludedTerminalIds: [],
+          });
           yield* service.drain;
           expect((yield* Ref.get(fixture.commands)).map((command) => command.threadId)).toEqual([
             empty.id,
@@ -1221,8 +1286,14 @@ describe("ThreadSettlementServiceV2 worker", () => {
             relationshipToParent: "subagent" as const,
           },
         };
+        const promoted = {
+          ...child,
+          id: ThreadId.make("manual-promoted"),
+          branch: null,
+          lineage: { ...child.lineage, independent: true },
+        };
         const marker = appThread("marker", "settled");
-        for (const thread of [parent, child, marker]) {
+        for (const thread of [parent, child, promoted, marker]) {
           yield* store.apply({
             type: "thread.created",
             id: EventId.make(`created:${thread.id}`),
@@ -1253,6 +1324,11 @@ describe("ThreadSettlementServiceV2 worker", () => {
           const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
           yield* startHarness(service, fixture.activation, fixture.snapshotReads);
           expect(yield* Ref.get(fixture.commands)).toEqual([]);
+          expect(yield* store.getSettlementCandidates(child.id)).toEqual([]);
+          const candidateIds = (yield* store.getSettlementCandidates(promoted.id)).map(
+            (thread) => thread.id,
+          );
+          expect(candidateIds).toEqual([promoted.id]);
           expect(yield* Ref.get(fixture.branchCalls)).toEqual([]);
           // Avoid a settings-change sweep: the parent event must trigger the child dispatch.
           yield* Ref.set(fixture.settings, {
@@ -1268,8 +1344,14 @@ describe("ThreadSettlementServiceV2 worker", () => {
           yield* store.apply(event);
           yield* fixture.publishEvent(event);
           yield* fixture.publishEvent(settledEvent(marker));
-          expect(yield* Queue.take(fixture.closedIdle)).toEqual({ threadId: parent.id });
-          expect(yield* Queue.take(fixture.closedIdle)).toEqual({ threadId: marker.id });
+          expect(yield* Queue.take(fixture.closedIdle)).toEqual({
+            threadId: parent.id,
+            excludedTerminalIds: [],
+          });
+          expect(yield* Queue.take(fixture.closedIdle)).toEqual({
+            threadId: marker.id,
+            excludedTerminalIds: [],
+          });
           yield* service.drain;
           expect(yield* Ref.get(fixture.commands)).toEqual([
             expect.objectContaining({
@@ -2310,7 +2392,10 @@ describe("ThreadSettlementServiceV2 terminals", () => {
           yield* startHarness(service, fixture.activation, fixture.snapshotReads);
           yield* fixture.publishEvent(settledEvent(settled));
           yield* fixture.publishEvent(settledEvent(marker));
-          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), { threadId: marker.id });
+          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+            threadId: marker.id,
+            excludedTerminalIds: [],
+          });
           assert.strictEqual((yield* Queue.take(fixture.scriptRuns)).threadId, marker.id);
         }).pipe(Effect.provide(fixture.layer));
       }),
@@ -2425,8 +2510,14 @@ describe("ThreadSettlementServiceV2 terminals", () => {
         // only if the shared-worktree child was skipped. Both still close.
         yield* fixture.publishEvent(settledEvent(shared));
         yield* fixture.publishEvent(settledEvent(own));
-        assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), { threadId: shared.id });
-        assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), { threadId: own.id });
+        assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+          threadId: shared.id,
+          excludedTerminalIds: [],
+        });
+        assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+          threadId: own.id,
+          excludedTerminalIds: [],
+        });
         assert.strictEqual((yield* Queue.take(fixture.scriptRuns)).threadId, own.id);
       }).pipe(Effect.provide(fixture.layer));
     }),
@@ -2536,4 +2627,122 @@ describe("isSnoozed", () => {
       }),
     ).toBeNull();
   });
+  it.effect("keeps a managed preview terminal when a thread settles", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = appThread("settled-preview-thread", "settled");
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([]),
+          currentThreads: [thread],
+          terminalSummaries: [
+            {
+              threadId: thread.id,
+              terminalId: "preview-terminal",
+              cwd: "/workspace",
+              worktreePath: null,
+              status: "running",
+              pid: 101,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "preview",
+              updatedAt: NOW,
+            },
+            {
+              threadId: thread.id,
+              terminalId: "idle-shell",
+              cwd: "/workspace",
+              worktreePath: null,
+              status: "running",
+              pid: 102,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "shell",
+              updatedAt: NOW,
+            },
+            {
+              threadId: thread.id,
+              terminalId: "idle-shell-2",
+              cwd: "/workspace",
+              worktreePath: null,
+              status: "running",
+              pid: 103,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "shell",
+              updatedAt: NOW,
+            },
+          ],
+          ownedPreviewTerminalIds: ["preview-terminal"],
+        });
+
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          yield* fixture.publishEvent(settledEvent(thread));
+          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+            threadId: thread.id,
+            excludedTerminalIds: ["preview-terminal"],
+          });
+          assert.equal(yield* Queue.size(fixture.closedIdle), 0);
+          assert.deepStrictEqual(yield* Ref.get(fixture.previewListCalls), [thread.id]);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("still closes ordinary idle terminals when preview leases cannot be read", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = appThread("settled-preview-read-failure", "settled");
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([]),
+          currentThreads: [thread],
+          terminalSummaries: [
+            {
+              threadId: thread.id,
+              terminalId: "preview-retained",
+              cwd: "/workspace",
+              worktreePath: null,
+              status: "running",
+              pid: 101,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "preview",
+              updatedAt: NOW,
+            },
+            {
+              threadId: thread.id,
+              terminalId: "idle-shell",
+              cwd: "/workspace",
+              worktreePath: null,
+              status: "running",
+              pid: 102,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "shell",
+              updatedAt: NOW,
+            },
+          ],
+          previewListFailure: true,
+        });
+
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          yield* fixture.publishEvent(settledEvent(thread));
+          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+            threadId: thread.id,
+            excludedTerminalIds: ["preview-retained"],
+          });
+          assert.equal(yield* Queue.size(fixture.closedIdle), 0);
+          assert.deepStrictEqual(yield* Ref.get(fixture.previewListCalls), [thread.id]);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
 });

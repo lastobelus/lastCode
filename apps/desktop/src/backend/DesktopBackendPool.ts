@@ -19,6 +19,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import { msg } from "gt-i18n";
 
 import * as FileSystem from "effect/FileSystem";
+import { DesktopBrowserTransportError, EnvironmentId } from "@t3tools/contracts";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -32,6 +33,7 @@ import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
+import * as BrowserProfileScope from "../preview/BrowserProfileScope.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
@@ -40,6 +42,7 @@ import { m } from "../i18n/messages.ts";
 
 const { logInfo: logBackendPoolInfo, logWarning: logBackendPoolWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-pool");
+const decodeEnvironmentId = Schema.decodeEffect(EnvironmentId);
 
 const makeRecovery = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -152,6 +155,14 @@ export const layer = Layer.effect(
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
     const { primaryBackendStartup } = yield* DesktopState.DesktopState;
     const recovery = yield* makeRecovery;
+    const browserHost = yield* DesktopBrowserHost.DesktopBrowserHost;
+    const browserProfileContext =
+      yield* Effect.context<
+        Exclude<
+          Effect.Services<ReturnType<typeof BrowserProfileScope.browserProfileScope>>,
+          DesktopBackendPool
+        >
+      >();
     // Parent instance scopes to the pool so shutdown runs stop finalizers before the OS kills backends.
     const layerScope = yield* Scope.Scope;
     const factoryContext = yield* Effect.context<BackendInstanceFactoryRequirements>();
@@ -261,6 +272,31 @@ export const layer = Layer.effect(
                 ),
               ),
           }),
+      // The server publishes its identity before it can send browser commands.
+      // Bind here so scheduled work does not depend on the renderer mounting.
+      prepareDesktopBrowser: Effect.gen(function* () {
+        const environmentId = yield* fileSystem
+          .readFileString(environment.path.join(environment.stateDir, "environment-id"))
+          .pipe(
+            Effect.withSpan("desktop.browser.readLocalIdentity"),
+            Effect.flatMap((raw) =>
+              decodeEnvironmentId(raw.trim()).pipe(
+                Effect.withSpan("desktop.browser.decodeLocalIdentity"),
+              ),
+            ),
+          );
+        yield* browserHost
+          .bindEnvironment("local", environmentId, (profileId) =>
+            BrowserProfileScope.browserProfileScope(environmentId, profileId).pipe(
+              Effect.provide(browserProfileContext),
+              Effect.provideService(DesktopBackendPool, pool),
+              Effect.mapError(
+                () => new DesktopBrowserTransportError({ reason: "profile-unavailable" }),
+              ),
+            ),
+          )
+          .pipe(Effect.withSpan("desktop.browser.bindLocalEnvironment"));
+      }).pipe(Effect.orDie),
       // Absorb window errors so readiness can reset restartAttempt.
       onReady: (httpBaseUrl, pid) =>
         FiberHandle.run(updateMarkerWait, releaseUpdateMarker(httpBaseUrl, pid)).pipe(
@@ -409,7 +445,7 @@ export const layer = Layer.effect(
       }).pipe(Effect.ensuring(finish));
     });
 
-    return DesktopBackendPool.of({
+    const pool = DesktopBackendPool.of({
       get: Effect.fn("DesktopBackendPool.get")(function (id) {
         return SynchronizedRef.get(instancesRef).pipe(
           Effect.map((instances) => {
@@ -429,6 +465,7 @@ export const layer = Layer.effect(
       register,
       unregister,
     });
+    return pool;
   }),
 );
 

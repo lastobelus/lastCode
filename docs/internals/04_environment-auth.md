@@ -76,7 +76,19 @@ any file the server's OS user can read (for example, artifacts an agent writes i
 relative paths and writes remain constrained by
 [`WorkspaceFileSystem.ts`](../../apps/server/src/workspace/WorkspaceFileSystem.ts).
 
+`orchestration:read` also permits opening an individual file linked in a visible
+assistant message or proposed plan. Local and inherited publications follow the
+conversation timeline. Deleted conversations and rows hidden by rollback cannot
+grant this access; active forks retain their displayed inherited publications.
+The server derives relative paths from the thread's workspace and matches the
+rendered reference. Explicit links may publish files outside the workspace;
+workspace links and bare filename lookup remain
+contained by lexical and real-path checks. This lets a conversation reader open
+its reports without granting host-file browsing. It does not grant access to the
+containing directory, unlinked files, or writes.
+
 Signed asset URLs are bearer credentials for a single canonical file, rechecked by device/inode
 identity on serve ([`AssetAccess.ts`](../../apps/server/src/assets/AssetAccess.ts)). They never
-grant access to sibling files, and because `filesystem:read` is checked only at mint time, an issued
+grant access to sibling files. File access is checked when the URL is minted
+(`filesystem:read`, or `orchestration:read` for a verified assistant-linked file). An issued
 URL remains valid until it expires even if the session or grant is revoked.

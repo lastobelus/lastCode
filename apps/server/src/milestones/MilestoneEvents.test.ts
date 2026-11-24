@@ -41,7 +41,7 @@ const environmentId = EnvironmentId.make("environment-milestone-events-test");
 const clientToken = "clientTokenWithoutDots";
 const threadToken = "threadTokenWithoutDots";
 const hostToken = "hostTokenWithoutDots";
-const scopes: Record<string, McpInvocationContext.McpInvocationScope> = {
+const scopes = {
   [clientToken]: {
     environmentId,
     requestNamespace: "client-session",
@@ -59,19 +59,20 @@ const scopes: Record<string, McpInvocationContext.McpInvocationScope> = {
       providerInstanceId: ProviderInstanceId.make("codex"),
     },
     client: undefined,
-    capabilities: new Set(["orchestration"]),
+    // Use a thread credential that can reach the full MCP endpoint's event listing.
+    capabilities: new Set(["orchestration", "preview"]),
     issuedAt: 1,
   },
-  // A script on the host: signed in as no outside client.
   [hostToken]: {
     environmentId,
     requestNamespace: "host",
     thread: undefined,
     client: undefined,
-    capabilities: new Set(["orchestration"]),
+    // Admit this synthetic host caller to /mcp so the webhook principal check runs.
+    capabilities: new Set(["orchestration", "preview"]),
     issuedAt: 1,
   },
-};
+} satisfies Record<string, McpInvocationContext.McpInvocationScope>;
 
 // The Standard Webhooks example secret: base64 of 24 bytes.
 const secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
@@ -176,7 +177,21 @@ const serveWith = Effect.fnUntraced(function* (settings: { readonly workflowsEna
       Layer.provide(
         Layer.mock(McpSessionRegistry.McpSessionRegistry)({
           resolve: (presented) =>
-            Effect.succeed(scopes[presented] as McpInvocationContext.McpThreadInvocationScope),
+            Effect.succeed(presented === threadToken ? scopes[threadToken] : undefined),
+        }),
+      ),
+      Layer.provide(
+        Layer.succeed(McpHttpServer.McpClientAuthenticator, {
+          authenticate: (request) => {
+            const authorization = request.headers.authorization;
+            if (authorization === `Bearer ${clientToken}`) {
+              return Effect.succeed(scopes[clientToken]);
+            }
+            if (authorization === `Bearer ${hostToken}`) {
+              return Effect.succeed(scopes[hostToken]);
+            }
+            return Effect.undefined;
+          },
         }),
       ),
     ),

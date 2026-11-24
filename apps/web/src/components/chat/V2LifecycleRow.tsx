@@ -8,6 +8,7 @@ import type { SideThreadOpenIntent } from "@t3tools/client-runtime/side-thread";
 import { SideThreadsOpenContext, useSideThreadTrigger } from "../../hooks/useSideThreadTrigger";
 import { useLinkedThreadOpener } from "../../state/linkedThreadView";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
+import { ChildActionWait } from "./ChildActionWait";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { environmentThreadDetails } from "../../state/threads";
@@ -477,6 +478,12 @@ function SubagentTimelineLink(props: {
       : (remoteOpener?.open ?? null);
   // A task on a connected linked environment opens there, on the main screen only.
   const panel = threadId !== null || remoteOpener?.mode === "linked";
+  const childRef =
+    threadId !== null
+      ? scopeThreadRef(props.parentRef.environmentId, threadId)
+      : remote !== undefined && remoteOpener?.mode === "direct"
+        ? scopeThreadRef(remote.environmentId, remote.threadId)
+        : null;
   const liveStatus = agent?.status ?? props.status;
   const status = props.event ? props.event.status : liveStatus;
   const statusLabel = props.event?.label ?? m(subagentStatusVisual(liveStatus).label);
@@ -525,6 +532,9 @@ function SubagentTimelineLink(props: {
             <span className="block truncate">{detail}</span>
           )}
         </span>
+        {props.origin === "app_owned" && childRef !== null ? (
+          <ChildActionWait threadRef={childRef} />
+        ) : null}
       </span>
       {detail !== null && (props.event !== undefined || status !== "completed") ? (
         <span

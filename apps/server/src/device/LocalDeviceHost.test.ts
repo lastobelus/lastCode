@@ -13,12 +13,18 @@ import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as FileSystem from "effect/FileSystem";
 
+import {
+  agentDeviceStateDir,
+  DEVICE_HUB_VERSION,
+  AGENT_DEVICE_VERSION,
+} from "./DeviceToolchain.ts";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 import {
   agentDeviceConfigPath,
   retireLegacyAgentDeviceConfig,
   writeAgentDeviceConfig,
 } from "./AgentDeviceTarget.ts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -26,11 +32,6 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as NetService from "@t3tools/shared/Net";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import {
-  AGENT_DEVICE_VERSION,
-  DEVICE_HUB_VERSION,
-  agentDeviceStateDir,
-} from "./DeviceToolchain.ts";
 
 const processOutput = (code: number, stdout = "", stderr = "", timedOut = false) => ({
   code: ChildProcessSpawner.ExitCode(code),
@@ -225,19 +226,17 @@ describe("AgentDevice startup", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const previous = { httpPort: 12345, token: "previous-token", version: "0.21.36" };
-      const { host, runs } = yield* ownedAgentFixture(
-        previous,
-        (stateDir) =>
-          fs
-            .writeFileString(
-              `${stateDir}/daemon.json`,
-              JSON.stringify({
-                httpPort: 23456,
-                token: "next-token",
-                version: AGENT_DEVICE_VERSION,
-              }),
-            )
-            .pipe(Effect.orDie, Effect.as(processOutput(0))),
+      const { host, runs } = yield* ownedAgentFixture(previous, (stateDir) =>
+        fs
+          .writeFileString(
+            `${stateDir}/daemon.json`,
+            JSON.stringify({
+              httpPort: 23456,
+              token: "next-token",
+              version: AGENT_DEVICE_VERSION,
+            }),
+          )
+          .pipe(Effect.orDie, Effect.as(processOutput(0))),
       );
       const ready = yield* host.ensureAgentReady(() => Effect.void);
       expect(runs.filter((run) => run.args.includes("devices"))).toHaveLength(1);
@@ -251,9 +250,8 @@ describe("AgentDevice startup", () => {
   it.effect("keeps a busy daemon from another version that the pinned client leaves running", () =>
     Effect.gen(function* () {
       const previous = { httpPort: 12345, token: "previous-token", version: "0.21.36" };
-      const { host, runs } = yield* ownedAgentFixture(
-        previous,
-        () => Effect.succeed(processOutput(1)),
+      const { host, runs } = yield* ownedAgentFixture(previous, () =>
+        Effect.succeed(processOutput(1)),
       );
       const ready = yield* host.ensureAgentReady(() => Effect.void);
       expect(runs.filter((run) => run.args.includes("devices"))).toHaveLength(1);
@@ -275,9 +273,8 @@ describe("AgentDevice startup", () => {
         pid: process.pid,
         version: "0.21.36",
       };
-      const { host, stateDir, runs, daemonHealthy } = yield* ownedAgentFixture(
-        previous,
-        () => (health ? Ref.set(health, false) : Effect.void).pipe(Effect.as(processOutput(1))),
+      const { host, stateDir, runs, daemonHealthy } = yield* ownedAgentFixture(previous, () =>
+        (health ? Ref.set(health, false) : Effect.void).pipe(Effect.as(processOutput(1))),
       );
       health = daemonHealthy;
       const error = yield* host.ensureAgentReady(() => Effect.void).pipe(Effect.flip);
@@ -1035,9 +1032,7 @@ it.effect.each([true, false, "activation"] as const)(
             pid: ChildProcessSpawner.ProcessId(123),
             stdout: Stream.empty,
             stderr: Stream.empty,
-            all: Stream.encodeText(
-              Stream.make("  Local:   http://localhost:1/?token=hub-token\n"),
-            ),
+            all: Stream.encodeText(Stream.make("  Local:   http://localhost:1/?token=hub-token\n")),
             exitCode: Effect.never,
             isRunning: Effect.succeed(true),
             kill: () => Effect.void,
@@ -1079,7 +1074,8 @@ it.effect.each([true, false, "activation"] as const)(
       const first = yield* host.ensureAgentReady(() => Effect.void);
       const reused = yield* host.ensureAgentReady(() => Effect.void);
       expect(rawCredentialAccepted).toBe(false);
-      expect(first.agentDevice.token).toBe("current-raw-token");
+      expect(first.agentDevice).not.toBeNull();
+      expect(first.agentDevice?.token).toBe("current-raw-token");
       expect(reused.agentDevice).toEqual(first.agentDevice);
       expect(commands).toEqual(["stop", "devices"]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -1207,7 +1203,6 @@ it.effect.each([
       yield* writeAgentDeviceConfig(legacyFile, {
         baseUrl: "http://127.0.0.1:1234",
         token: "recovered-raw-token",
-        entryPath: "unused",
       });
       const result = yield* retireLegacyAgentDeviceConfig(config.stateDir, host).pipe(
         Effect.result,
@@ -1225,5 +1220,5 @@ it.effect.each([
       ).toBe(false);
       if (!launcher) expect(yield* fs.exists(path.join(config.baseDir, "tools"))).toBe(false);
       expect(yield* host.current).toBeNull();
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );

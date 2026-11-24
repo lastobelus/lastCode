@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { makeWorkspaceFileDropHandlers } from "../chat/workspaceFileDrop";
 import type { useLastCodeThreadNavigation } from "./useLastCodeThreadNavigation";
@@ -95,8 +97,8 @@ async function showRowMenu(show: () => Promise<void>) {
   toastManager.add(
     stackedThreadToast({
       type: "error",
-      title: "Thread action failed",
-      description: error instanceof Error ? error.message : "An error occurred.",
+      title: m(msg("Thread action failed")),
+      description: error instanceof Error ? error.message : m(msg("An error occurred.")),
     }),
   );
 }
@@ -188,6 +190,7 @@ export function useLastCodeThreadFileDrop(
     addFiles: (files) => onDrop(threadRef, files),
     addFolders: () => {},
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- listens for the browser dragend event while a file drag is active so cancelled drags clear the row highlight
   useEffect(() => {
     if (!isFileDragOver) return;
     const clearFileDrag = () => setIsFileDragOver(false);

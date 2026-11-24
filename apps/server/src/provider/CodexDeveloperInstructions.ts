@@ -1,11 +1,12 @@
 import type { AgentFeedbackMode } from "@t3tools/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
-import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { buildRuntimeInstructionSections } from "@t3tools/provider-core/server/runtimeInstructions";
+import { codexBackgroundWaitInstructions } from "./LastCodeBackgroundWait.ts";
 
 import {
   T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
-  T3_CODE_ORCHESTRATION_SECTIONS,
+  t3CodeOrchestrationSections,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 
 /** Codex silently truncates additionalContext values over 1,000 tokens, counted as UTF-8 bytes / 4. */
@@ -14,6 +15,8 @@ export const CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES = 4_000;
 export interface T3CodeToolAvailability {
   readonly browser: boolean;
   readonly device: boolean;
+  readonly backgroundWait?: boolean;
+  readonly projectActionLaunchDisabled?: boolean | undefined;
 }
 
 const normalizeAvailability = (
@@ -25,8 +28,7 @@ const normalizeAvailability = (
  * Codex retains omitted keys, so unavailable tools need a replacement value
  * that supersedes earlier guidance without steering away from alternatives.
  */
-const toolInstructions = (availability: boolean | T3CodeToolAvailability) => {
-  const tools = normalizeAvailability(availability);
+const toolInstructions = (tools: T3CodeToolAvailability) => {
   // LastCode's browser guidance plus device guidance exceeds the per-entry cap.
   return {
     t3_code_tools_browser: {
@@ -56,19 +58,28 @@ export function buildCodexAdditionalContext(
   runtime: CodexRuntimeInfo,
   toolsAvailable: boolean | T3CodeToolAvailability = true,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
-  const tools = toolInstructions(toolsAvailable);
+  const availability = normalizeAvailability(toolsAvailable);
+  const [runtimeInstructions, previewHandoffs] = buildRuntimeInstructionSections({
+    harness: "Codex",
+    projectActionLaunchDisabled: availability.projectActionLaunchDisabled,
+    ...runtime,
+  });
   // Split values to fit per-entry caps; number keys because Codex emits them in key order.
   return {
     ...Object.fromEntries(
-      T3_CODE_ORCHESTRATION_SECTIONS.map((section, index) => [
-        `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
-        { kind: "application" as const, value: section },
-      ]),
+      t3CodeOrchestrationSections(availability.projectActionLaunchDisabled).map(
+        (section, index) => [
+          `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
+          { kind: "application" as const, value: section },
+        ],
+      ),
     ),
     t3_code_runtime: {
       kind: "application",
-      value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
+      value:
+        runtimeInstructions + codexBackgroundWaitInstructions(availability.backgroundWait === true),
     },
-    ...tools,
+    t3_code_runtime_preview_handoffs: { kind: "application", value: previewHandoffs },
+    ...toolInstructions(availability),
   };
 }

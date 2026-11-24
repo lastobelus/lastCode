@@ -75,6 +75,14 @@
         "scripts/browser-surface.fixture.mjs",
         "scripts/browser-surface.preload.mjs",
         "scripts/browser-surface.renderer.mjs",
+        "scripts/browser-open-link.fixture.mjs",
+        "scripts/browser-open-link.preload.mjs",
+        "scripts/browser-open-link.renderer.mjs",
+        "scripts/browser-open-link.state.fixture.mjs",
+        "scripts/browser-surface.react-state.fixture.mjs",
+        "scripts/browser-surface.react.fixture.mjs",
+        "scripts/browser-surface.react.preload.mjs",
+        "scripts/browser-surface.react.renderer.mjs",
       ],
       // The injected runtime resolves Playwright by string; release tooling runs
       // electron-builder from this workspace, outside its package scripts.
@@ -101,8 +109,10 @@
         "fixtures/lastcode-docs-install.mjs",
         "fixtures/lastcode-docs-local-update.mjs",
         "lastcode-packaged-server-supervisor.mjs!",
+        "lastcode-run.ts",
         "lib/lastcode-ci-worker.mjs!",
         "lastcode-local-update.d.mts",
+        "lastcode-checkpoint-effort.d.mts",
         "lastcode-lock.d.mts",
       ],
       // esbuild bundles the Windows verifier; electron-builder loads the signer and Linux afterPack hook by path.

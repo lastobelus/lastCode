@@ -1,3 +1,4 @@
+import { T } from "gt-react";
 import { useState } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { scopedThreadKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -30,7 +31,7 @@ function EmptyProjects() {
       data-lastcode-sidebar-scale={scale}
       style={style}
     >
-      No projects yet
+      <T>No projects yet</T>
     </div>
   );
 }
@@ -38,10 +39,15 @@ function EmptyProjects() {
 /** Collection composition owns expansion once, shared by rendered rows and root navigation. */
 export function LastCodeSidebarContent() {
   const { grouping, presentation } = useLastCodeSidebarEnvironments();
-  const { sortedProjects, orderedProjectKeys, resolveProjectKey, index } =
+  const { sortedProjects, threadOnlyProjects, orderedProjectKeys, resolveProjectKey, index } =
     useLastCodeSidebarProjects(grouping);
   const [expandedLists, setExpandedLists] = useState<ReadonlySet<string>>(() => new Set());
-  const navigation = useLastCodeSidebarNavigation(sortedProjects, index, expandedLists);
+  const navigation = useLastCodeSidebarNavigation(
+    sortedProjects,
+    threadOnlyProjects,
+    index,
+    expandedLists,
+  );
   const thread = navigation.routeThreadKey
     ? index.byThreadKey.get(navigation.routeThreadKey)
     : null;
@@ -86,6 +92,8 @@ export function LastCodeSidebarContent() {
             <LastCodeSidebarProjectToolbar />
             <LastCodeSidebarProjectList
               projects={sortedProjects}
+              threadIndex={index}
+              threadOnlyProjects={threadOnlyProjects}
               orderedProjectKeys={orderedProjectKeys}
               activeRoute={activeRoute}
               expandedLists={expandedLists}
@@ -93,7 +101,7 @@ export function LastCodeSidebarContent() {
               jumpLabels={navigation.visibleThreadJumpLabelByKey}
               newThread={newThread}
             />
-            {sortedProjects.length === 0 && <EmptyProjects />}
+            {sortedProjects.length === 0 && threadOnlyProjects.length === 0 && <EmptyProjects />}
           </SidebarGroup>
         </SidebarContent>
       </LastCodeSidebarPresentationProvider>

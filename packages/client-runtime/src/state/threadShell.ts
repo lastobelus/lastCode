@@ -10,13 +10,17 @@ import type {
 } from "@t3tools/contracts";
 import {
   isListedThreadLineage,
+  isOwnedSubagentThread,
   isProviderNativeSubagentThread,
   OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
+import { scopedThreadKey } from "../environment/scoped.ts";
+import { createLastCodeAnnotationVisibilityAtom } from "./lastCodeAnnotationVisibility.ts";
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
+import { getArchiveRecoveryRows } from "./threadArchive.ts";
 import {
   presentThreadShell,
   threadRuntimeIsActive,
@@ -73,7 +77,11 @@ export function isShownUnderParent(
   lineage: OrchestrationV2ThreadShell["lineage"],
   delegatedUnderParent: ReadonlySet<string>,
 ): boolean {
-  return !isListedThreadLineage(lineage) || delegatedUnderParent.has(threadKey(ref));
+  return (
+    lineage.sideChat === true ||
+    (lineage.independent !== true && !isListedThreadLineage(lineage)) ||
+    delegatedUnderParent.has(threadKey(ref))
+  );
 }
 
 // Subagents, side chats and tasks delegated from a listed parent have no list row,
@@ -85,6 +93,7 @@ export function resolveListedAncestorThreadRef(
     EnvironmentThreadShell,
     "id" | "environmentId" | "lineage" | "delegatedFrom" | "archivedAt"
   >[],
+  pendingChildThreadKeys?: ReadonlySet<string>,
 ): ScopedThreadRef {
   const findThread = (target: ScopedThreadRef) =>
     threads.find(
@@ -94,11 +103,12 @@ export function resolveListedAncestorThreadRef(
   let current = ref;
   let thread = findThread(current);
   while (thread !== undefined) {
+    if (pendingChildThreadKeys?.has(scopedThreadKey(current))) return current;
     let parent: ScopedThreadRef;
     if (!isListedThreadLineage(thread.lineage)) {
       if (thread.lineage.parentThreadId === null) return ref;
       parent = { environmentId: thread.environmentId, threadId: thread.lineage.parentThreadId };
-    } else if (thread.delegatedFrom != null) {
+    } else if (thread.lineage.independent !== true && thread.delegatedFrom != null) {
       parent = {
         environmentId: thread.delegatedFrom.environmentId,
         threadId: thread.delegatedFrom.threadId,
@@ -123,6 +133,7 @@ function subagentRequest(thread: OrchestrationV2ThreadShell): PendingSubagentReq
   if (
     kind === undefined ||
     kind === "auth_refresh" ||
+    thread.lineage.independent === true ||
     (thread.lineage.relationshipToParent !== "subagent" && thread.delegatedFrom === undefined) ||
     isProviderNativeSubagentThread(thread) ||
     !isChildRunLive(thread)
@@ -180,7 +191,7 @@ function pendingSubagentRequestsByThread(
       if (requests.get(parentId) !== "approval") requests.set(parentId, request);
       const parent = byId.get(parentId);
       parentId =
-        parent?.lineage.relationshipToParent === "subagent" || parent?.lineage.sideChat === true
+        parent && (isOwnedSubagentThread(parent) || parent.lineage.sideChat === true)
           ? parent.lineage.parentThreadId
           : null;
     }
@@ -194,7 +205,7 @@ function pendingSubagentRequestsByThread(
       }
       continue;
     }
-    if (child.lineage.relationshipToParent !== "subagent") continue;
+    if (!isOwnedSubagentThread(child)) continue;
     const request = rolledUpRequest(child, subagentRequest(child));
     if (request !== null) flag(parentId, request, new Set([child.id]));
   }
@@ -367,7 +378,12 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const runsIn of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       for (const thread of get(environmentThreadsAtom(runsIn))) {
         const from = thread.delegatedFrom;
-        if (from === undefined || from.environmentId === runsIn) continue;
+        if (
+          from === undefined ||
+          from.environmentId === runsIn ||
+          thread.lineage.independent === true
+        )
+          continue;
         const task = { runsIn, thread, parentThreadId: from.threadId };
         const tasks = tasksByDelegator.get(from.environmentId);
         if (tasks === undefined) tasksByDelegator.set(from.environmentId, [task]);
@@ -539,10 +555,10 @@ export function createEnvironmentThreadShellAtoms(input: {
           const parent = thread.lineage.parentThreadId;
           if (
             parent !== null &&
-            (thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true)
+            (isOwnedSubagentThread(thread) || thread.lineage.sideChat === true)
           ) {
             addChild({ environmentId, threadId: parent }, environmentId, thread);
-          } else if (thread.delegatedFrom !== undefined) {
+          } else if (thread.lineage.independent !== true && thread.delegatedFrom !== undefined) {
             addChild(thread.delegatedFrom, environmentId, thread);
           }
         }
@@ -754,6 +770,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const environmentId of environmentIds) {
       for (const thread of get(environmentThreadsAtom(environmentId))) {
         const parent = thread.delegatedFrom;
+        if (thread.lineage.independent === true) continue;
         const parentThread =
           parent !== undefined && environmentIds.has(parent.environmentId)
             ? get(environmentThreadIndexAtom(parent.environmentId)).get(parent.threadId)
@@ -774,19 +791,34 @@ export function createEnvironmentThreadShellAtoms(input: {
     return next;
   }).pipe(Atom.withLabel("environment-delegated-under-parent"));
 
+  const annotationVisibilityAtom = createLastCodeAnnotationVisibilityAtom(threadShellsAtom);
+  const annotationHiddenThreadKeysAtom = Atom.map(
+    annotationVisibilityAtom,
+    (visibility) => visibility.hiddenThreadKeys,
+  );
+  const annotationPendingChildThreadKeysAtom = Atom.map(
+    annotationVisibilityAtom,
+    (visibility) => visibility.pendingChildThreadKeys,
+  );
   let previousNavigationShells: ReadonlyArray<EnvironmentThreadShell> = [];
   const navigationThreadShellsAtom = Atom.make((get) => {
     const next: EnvironmentThreadShell[] = [];
     const underParent = get(delegatedUnderParentAtom);
     const hidden = get(hiddenThreadKeysAtom);
+    const pendingChildRows = get(annotationPendingChildThreadKeysAtom);
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const subagentRequests = get(pendingSubagentRequestsAtom(environmentId));
-      for (const thread of get(environmentThreadsAtom(environmentId))) {
+      const environmentThreads = get(environmentThreadsAtom(environmentId));
+      const archiveRecoveryRows = getArchiveRecoveryRows(environmentThreads);
+      for (const thread of environmentThreads) {
+        const ref = { environmentId, threadId: thread.id };
         if (
           !threadShellIsVisible(thread) ||
           (!threadShellIsCleanupRecovery(thread) &&
-            isShownUnderParent({ environmentId, threadId: thread.id }, thread.lineage, underParent)) ||
-          hidden.has(threadKey({ environmentId, threadId: thread.id }))
+            !archiveRecoveryRows.has(thread) &&
+            !pendingChildRows.has(scopedThreadKey(ref)) &&
+            isShownUnderParent(ref, thread.lineage, underParent)) ||
+          hidden.has(threadKey(ref))
         ) {
           continue;
         }
@@ -807,6 +839,8 @@ export function createEnvironmentThreadShellAtoms(input: {
     threadShellsAtom,
     visibleThreadShellsAtom,
     hiddenThreadKeysAtom,
+    annotationHiddenThreadKeysAtom,
+    annotationPendingChildThreadKeysAtom,
     anyEnvironmentHidingAtom,
     quietThreadShellsAtom,
     navigationThreadShellsAtom,

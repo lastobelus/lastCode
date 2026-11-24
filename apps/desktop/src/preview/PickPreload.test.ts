@@ -171,6 +171,9 @@ it("keeps only the well-typed fields of what the page reports about an element",
     stack: [{ functionName: "Checkout", fileName: ["x"], lineNumber: "12", columnNumber: 4 }, 3],
   });
   const card = document.body.appendChild(document.createElement("div"));
+  using _rect = vi
+    .spyOn(card, "getBoundingClientRect")
+    .mockReturnValue(new DOMRect(40, 60, 200, 120));
   document.elementsFromPoint = () => [card];
   using listeners = vi.spyOn(HTMLButtonElement.prototype, "addEventListener");
   const shadowRoot = startAnnotation();

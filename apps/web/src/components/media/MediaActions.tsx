@@ -8,10 +8,11 @@ import {
   mediaReferenceFileName,
   type MediaReference,
 } from "@t3tools/client-runtime/media-reference";
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { fileAssetResourceForAccess, resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   type AssetResource,
   type ContextMenuItem,
   type EnvironmentId,
@@ -21,6 +22,7 @@ import {
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { msg } from "gt-react";
+import * as Option from "effect/Option";
 import { useRef, useState, type ReactElement } from "react";
 
 import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
@@ -51,7 +53,11 @@ function mediaFileName(source: MediaActionSource): string {
 }
 
 function allowsHostMedia(session: SessionGrantInput | null) {
-  return session === null || sessionGrantsScope(session, AuthFilesystemReadScope);
+  return (
+    session === null ||
+    sessionGrantsScope(session, AuthFilesystemReadScope) ||
+    sessionGrantsScope(session, AuthOrchestrationReadScope)
+  );
 }
 
 function canReadHostMedia(environmentId: EnvironmentId | null): boolean {
@@ -92,7 +98,20 @@ export function useMediaActions(source: MediaActionSource) {
     const { environmentId, resource } = source.asset;
     const connection = readPreparedConnection(environmentId);
     if (!connection) throw new Error(m(msg("Reconnect to this environment and try again.")));
-    const result = await createAssetUrl({ environmentId, input: { resource } });
+    const sessionResult = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
+    const session = Option.getOrNull(AsyncResult.value(sessionResult));
+    const result = await createAssetUrl({
+      environmentId,
+      input: {
+        resource:
+          session !== null && sessionGrantsScope(session, AuthOrchestrationReadScope)
+            ? fileAssetResourceForAccess(
+                resource,
+                sessionGrantsScope(session, AuthFilesystemReadScope),
+              )
+            : resource,
+      },
+    });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     assertCanReadMedia();
     const url = resolveAssetUrl(connection.httpBaseUrl, result.value.relativeUrl);

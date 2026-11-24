@@ -614,7 +614,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
         ),
         Effect.mapError(fail),
       );
-      if (Option.isNone(raw)) return raw;
+      if (Option.isNone(raw)) return Option.none();
       return yield* decodeDaemonFile(raw.value).pipe(Effect.asSome, Effect.mapError(fail));
     },
   );
@@ -796,10 +796,9 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       ) {
         // A daemon from a previous pin needs its recorded launcher when that install is available.
         const installed = yield* installedAgentDevice(config.baseDir, version).pipe(
-          Effect.flatMap((recorded) =>
-            recorded !== null
-              ? Effect.succeed(recorded)
-              : installedAgentDevice(config.baseDir, AGENT_DEVICE_VERSION),
+          Effect.filterOrElse(
+            (recorded) => recorded !== null,
+            () => installedAgentDevice(config.baseDir, AGENT_DEVICE_VERSION),
           ),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),

@@ -1,3 +1,4 @@
+import { useGT } from "gt-react";
 import { useLastCodeSidebarPresentation } from "./LastCodeSidebarPresentation";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -18,6 +19,7 @@ export function LastCodeThreadSourceControl({
   isActive: boolean;
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
 }) {
+  const gt = useGT();
   const { pr, prStatus, currentLinkedPr } = sourceControl;
   const cleanup = thread.worktreeCleanup ?? null;
   const handlePrClick = useThreadPullRequestClick(
@@ -58,7 +60,7 @@ export function LastCodeThreadSourceControl({
           onPointerDown={(event) => event.stopPropagation()}
           onClick={handlePrClick}
           className="text-muted-foreground"
-          aria-label={`PR #${currentLinkedPr.number}, status pending`}
+          aria-label={gt("PR #{number}, status pending", { number: currentLinkedPr.number })}
         >
           <PullRequestGlyph.pullRequest className="size-3" />
         </a>
@@ -68,7 +70,7 @@ export function LastCodeThreadSourceControl({
 }
 
 /** Opening a PR retains the exact thread destination when the right panel is used. */
-function useThreadPullRequestClick(
+export function useThreadPullRequestClick(
   thread: SidebarThreadSummary,
   sourceControl: LastCodeThreadSourceControlSnapshot,
   isActive: boolean,
@@ -77,16 +79,13 @@ function useThreadPullRequestClick(
   const { openPullRequestsInRightPanel, openPrLink } = useLastCodeSidebarPresentation();
   const { prStatus, currentLinkedPr } = sourceControl;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-  return (event: React.MouseEvent<HTMLAnchorElement>) => {
-    const url = prStatus?.url ?? currentLinkedPr?.url;
+  return (event: React.MouseEvent<HTMLAnchorElement>, targetUrl?: string) => {
+    const url = targetUrl ?? prStatus?.url ?? currentLinkedPr?.url;
     if (!url) return;
-    const openedInRightPanel = openPrLink(
-      event,
-      url,
-      openPullRequestsInRightPanel ? threadRef : undefined,
-    );
+    const showInRightPanel = targetUrl !== undefined || openPullRequestsInRightPanel;
+    const openedInRightPanel = openPrLink(event, url, showInRightPanel ? threadRef : undefined);
     if (!openedInRightPanel) return;
-    if (!openPullRequestsInRightPanel) return;
+    if (!showInRightPanel) return;
     if (!isActive) navigateToThread(threadRef);
   };
 }

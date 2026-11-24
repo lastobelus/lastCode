@@ -9,6 +9,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import * as Electron from "electron";
 
@@ -73,10 +74,23 @@ export const parseWebExternalUrl = (rawUrl: unknown): Option.Option<string> =>
     SAFE_WEB_PROTOCOLS.has(new URL(url).protocol),
   );
 
+export class ElectronShellOpenPathError extends Schema.TaggedError<ElectronShellOpenPathError>()(
+  "ElectronShellOpenPathError",
+  {
+    filePath: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to open local document ${JSON.stringify(this.filePath)}.`;
+  }
+}
+
 export class ElectronShell extends Context.Service<
   ElectronShell,
   {
     readonly openExternal: (rawUrl: unknown) => Effect.Effect<boolean>;
+    readonly openPath: (filePath: string) => Effect.Effect<void, ElectronShellOpenPathError>;
     readonly openSystemSettings: (pane: SystemSettingsPane) => Effect.Effect<boolean>;
     readonly copyText: (text: string) => Effect.Effect<void>;
   }
@@ -84,6 +98,15 @@ export class ElectronShell extends Context.Service<
 
 /** @public */
 export const make = ElectronShell.of({
+  openPath: Effect.fn("ElectronShell.openPath")(function* (filePath) {
+    const error = yield* Effect.tryPromise({
+      try: () => Electron.shell.openPath(filePath),
+      catch: (cause) => new ElectronShellOpenPathError({ filePath, cause }),
+    });
+    if (error.length > 0) {
+      return yield* new ElectronShellOpenPathError({ filePath, cause: error });
+    }
+  }),
   openExternal: Effect.fn("ElectronShell.openExternal")(function (rawUrl) {
     return Option.match(parseSafeExternalUrl(rawUrl), {
       onNone: () => Effect.succeed(false),

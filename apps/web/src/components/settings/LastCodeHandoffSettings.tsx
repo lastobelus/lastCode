@@ -1,18 +1,21 @@
+import { useGT } from "gt-react";
 import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { SettingsRow } from "./settingsLayout";
 import { MAX_HANDOFFS_MENU_LIMIT, MIN_HANDOFFS_MENU_LIMIT } from "@t3tools/contracts/settings";
 
 export function LastCodeHandoffSettings() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
   const clientSettings = usePrimarySettings();
   return (
     <>
       <SettingsRow
         {...searchableSetting("handoffs-menu-limit")}
-        description="Choose how many recently opened handoffs appear in thread menus."
+        description={gt("Choose how many recently opened handoffs appear in thread menus.")}
         control={
           <input
-            aria-label="Handoffs shown in menus"
+            aria-label={gt("Handoffs shown in menus")}
             className="w-16 rounded-md border bg-background px-2 py-1 text-center"
             max={MAX_HANDOFFS_MENU_LIMIT}
             min={MIN_HANDOFFS_MENU_LIMIT}

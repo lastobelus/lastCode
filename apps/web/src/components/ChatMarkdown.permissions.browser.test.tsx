@@ -308,6 +308,7 @@ it("preserves keyboard activation of a file-options button", async () => {
       href="readme.md"
       targetPath="readme.md"
       iconPath="readme.md"
+      isBareFilename
       workspaceRelativePath="readme.md"
       panelPath={null}
       label="Readme"

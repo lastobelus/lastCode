@@ -1,4 +1,15 @@
+import { CapacityMode, CapacityModeSetting } from "./capacity.ts";
 import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
+import {
+  DEFAULT_LASTCODE_ANNOTATION_PR_CHECK_MINUTES,
+  DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES,
+  LastCodeAnnotationPrCheckMinutes,
+  LastCodePullRequestWatchQuietMinutes,
+} from "./lastcodePullRequestWatchSettings.ts";
+import {
+  StorageCleanupSchedule,
+  StorageCleanupSchedulePatch,
+} from "./lastcodeStorageCleanupSchedule.ts";
 import {
   AuthOrchestrationOperateScope,
   AuthAccessWriteScope,
@@ -6,6 +17,7 @@ import {
   AuthProvidersManageScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
+import { SAVED_WORKSPACE_DISCARD_SCOPES } from "./workspaceLifecycle.ts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Duration from "effect/Duration";
@@ -345,6 +357,10 @@ export const NotificationMode = Schema.Literals([
 ]);
 export type NotificationMode = typeof NotificationMode.Type;
 
+/** Which threads alert when they finish; "mine" leaves agent-run threads to their parent's report. */
+export const FinishedThreadAlerts = Schema.Literals(["mine", "all"]);
+export type FinishedThreadAlerts = typeof FinishedThreadAlerts.Type;
+
 export const QuitConfirmationMode = Schema.Literals(["direct", "hold", "double-click"]);
 export type QuitConfirmationMode = typeof QuitConfirmationMode.Type;
 const DEFAULT_QUIT_CONFIRMATION_MODE: QuitConfirmationMode = "hold";
@@ -508,6 +524,9 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
   inAppNotificationsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  finishedThreadAlerts: FinishedThreadAlerts.pipe(
+    Schema.withDecodingDefault(Effect.succeed("mine" as const)),
+  ),
   diffColorScheme: DiffColorScheme.pipe(
     Schema.withDecodingDefault(Effect.succeed("red-green" as const)),
   ),
@@ -516,6 +535,7 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("chat" as const)),
   ),
   effortDisplay: EffortDisplay.pipe(Schema.withDecodingDefault(Effect.succeed("label" as const))),
+  expandThreadAnnotations: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   incomingMessageStyle: IncomingMessageStyle.pipe(
     Schema.withDecodingDefault(Effect.succeed("neutral" as const)),
   ),
@@ -680,6 +700,7 @@ export const ClientSettingsSchema = Schema.Struct({
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
   ),
+  pageScrollOverlapEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   largerScrollbarsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   scrollbarWidth: ScrollbarWidth.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_WIDTH)),
@@ -1333,8 +1354,37 @@ export const WorktreeCleanup = Schema.NullOr(
 );
 export type WorktreeCleanup = typeof WorktreeCleanup.Type;
 
+export const MIN_WORKTREE_SUSPENSION_AFTER_DAYS = 1;
+export const MAX_WORKTREE_SUSPENSION_AFTER_DAYS = 3650;
+export const WorktreeSuspensionAfterDays = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_WORKTREE_SUSPENSION_AFTER_DAYS,
+    maximum: MAX_WORKTREE_SUSPENSION_AFTER_DAYS,
+  }),
+);
+export type WorktreeSuspensionAfterDays = typeof WorktreeSuspensionAfterDays.Type;
+
+export const WorktreeSuspensionScopes = Schema.Struct({
+  subagents: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  untouchedChildren: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  otherThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type WorktreeSuspensionScopes = typeof WorktreeSuspensionScopes.Type;
+
+export const WorktreeSuspensionPolicy = Schema.Union([
+  Schema.Struct({ mode: Schema.Literal("off") }),
+  Schema.Struct({
+    mode: Schema.Literal("custom"),
+    afterDays: WorktreeSuspensionAfterDays,
+    scopes: WorktreeSuspensionScopes.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  }),
+]);
+export type WorktreeSuspensionPolicy = typeof WorktreeSuspensionPolicy.Type;
+const DEFAULT_WORKTREE_SUSPENSION_POLICY: WorktreeSuspensionPolicy = { mode: "off" };
+
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "worktreeCleanup",
+  "worktreeSuspension",
   "defaultModelSelection",
   "defaultRuntimeMode",
   "defaultThreadEnvMode",
@@ -1373,6 +1423,7 @@ export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOver
  * providerInstances overrides fields per instance; other keys replace the whole setting. */
 export const ProjectSettingsOverrides = Schema.Struct({
   worktreeCleanup: Schema.optionalKey(WorktreeCleanup),
+  worktreeSuspension: Schema.optionalKey(WorktreeSuspensionPolicy),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
@@ -1556,12 +1607,28 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Enables LastCode background waits, currently for Codex. Applies to new provider sessions. */
+  lastcodeBackgroundWaitEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  lastcodePullRequestWatchQuietMinutes: LastCodePullRequestWatchQuietMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES)),
+  ),
+  lastcodeAnnotationPrCheckMinutes: LastCodeAnnotationPrCheckMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_ANNOTATION_PR_CHECK_MINUTES)),
+  ),
   lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
   ),
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  worktreeSuspension: WorktreeSuspensionPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKTREE_SUSPENSION_POLICY)),
+  ),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
+  ),
+  storageCleanupSchedule: StorageCleanupSchedule.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSchedule)({}))),
   ),
 
   worktreesDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1685,6 +1752,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  capacityMode: CapacityModeSetting,
   backgroundActivity: BackgroundActivitySettings,
 
   automaticGitFetchInterval: Schema.DurationFromMillis.pipe(
@@ -2018,6 +2086,9 @@ export const ServerSettingsPatch = Schema.Struct({
     }),
   ),
   environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeBackgroundWaitEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodePullRequestWatchQuietMinutes: Schema.optionalKey(LastCodePullRequestWatchQuietMinutes),
+  lastcodeAnnotationPrCheckMinutes: Schema.optionalKey(LastCodeAnnotationPrCheckMinutes),
   lastcodeLocalCi: Schema.optionalKey(
     Schema.Struct({
       quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),
@@ -2046,6 +2117,7 @@ export const ServerSettingsPatch = Schema.Struct({
       ]),
     ),
   ),
+  worktreeSuspension: Schema.optionalKey(WorktreeSuspensionPolicy),
   storageCleanup: Schema.optionalKey(
     Schema.Struct({
       worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
@@ -2059,6 +2131,7 @@ export const ServerSettingsPatch = Schema.Struct({
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
     }),
   ),
+  storageCleanupSchedule: Schema.optionalKey(StorageCleanupSchedulePatch),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   fastWorktreeCheckout: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
@@ -2130,6 +2203,7 @@ export const ServerSettingsPatch = Schema.Struct({
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   workflowsEnabled: Schema.optionalKey(Schema.Boolean),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
+  capacityMode: Schema.optionalKey(CapacityMode),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
       schemaVersion: Schema.optionalKey(Schema.Literal(1)),
@@ -2249,6 +2323,9 @@ export function requiredScopesForServerSettingsPatch(
 export function requiredScopesForProjectMutation(
   mutation: ProjectMutation,
 ): ReadonlyArray<AuthEnvironmentScope> {
+  if (mutation.type === "project.delete" && mutation.savedWorkspace?.mode === "discard") {
+    return SAVED_WORKSPACE_DISCARD_SCOPES;
+  }
   if (mutation.type === "project.delete" || mutation.scripts === undefined) {
     return [AuthOrchestrationOperateScope];
   }
@@ -2261,10 +2338,12 @@ export function requiredScopesForProjectMutation(
 export const ClientSettingsPatch = Schema.Struct({
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
+  finishedThreadAlerts: Schema.optionalKey(FinishedThreadAlerts),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
   htmlPreviewWidth: Schema.optionalKey(HtmlPreviewWidth),
   effortDisplay: Schema.optionalKey(EffortDisplay),
+  expandThreadAnnotations: Schema.optionalKey(Schema.Boolean),
   incomingMessageStyle: Schema.optionalKey(IncomingMessageStyle),
   incomingMessageFillColor: Schema.optionalKey(IncomingMessageFillColor),
   loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),
@@ -2334,6 +2413,7 @@ export const ClientSettingsPatch = Schema.Struct({
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  pageScrollOverlapEnabled: Schema.optionalKey(Schema.Boolean),
   largerScrollbarsEnabled: Schema.optionalKey(Schema.Boolean),
   scrollbarWidth: Schema.optionalKey(ScrollbarWidth),
   scrollbarMargin: Schema.optionalKey(ScrollbarMargin),

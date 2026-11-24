@@ -62,6 +62,7 @@ const withEnvironmentThemes = <A, E>(
     /** Receives each theme and appearance the service makes the environment default. */
     selected?: Array<{ readonly theme?: string; readonly appearance?: string }>;
     wrapFileSystem?: (fs: FileSystem.FileSystem) => FileSystem.FileSystem;
+    linkedDirectory?: string;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -69,9 +70,14 @@ const withEnvironmentThemes = <A, E>(
     const path = yield* Path.Path;
     const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-environment-theme-" });
     const themesDir = path.join(baseDir, "userdata", "themes");
-    yield* fs.makeDirectory(themesDir, { recursive: true });
+    const seedDir = options.linkedDirectory ?? themesDir;
+    yield* fs.makeDirectory(seedDir, { recursive: true });
     for (const [filename, contents] of Object.entries(seeds)) {
-      yield* fs.writeFileString(path.join(themesDir, filename), contents);
+      yield* fs.writeFileString(path.join(seedDir, filename), contents);
+    }
+    if (options.linkedDirectory !== undefined) {
+      yield* fs.makeDirectory(path.dirname(themesDir), { recursive: true });
+      yield* fs.symlink(seedDir, themesDir);
     }
 
     return yield* body.pipe(
@@ -298,58 +304,73 @@ describe("environment theme", () => {
   it.live.skipIf(!symlinksSupported)(
     "publishes later edits after a linked theme directory's grandparent is restored",
     () =>
-      withEnvironmentThemes(
-        { "nightfall.json": encodeThemeFile(NIGHTFALL_THEME) },
-        Effect.gen(function* () {
-          const service = yield* EnvironmentTheme.EnvironmentThemeService;
-          const { environmentThemesDir } = yield* ServerConfig.ServerConfig;
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-linked-themes-" });
-          const active = path.join(fixture, "active");
-          const restored = path.join(fixture, "restored");
-          const target = path.join(active, "shared", "themes");
-          const restoredTarget = path.join(restored, "shared", "themes");
-          for (const directory of [target, restoredTarget]) {
-            yield* fs.makeDirectory(directory, { recursive: true });
-            yield* fs.writeFileString(
-              path.join(directory, "shared-light.json"),
-              encodeThemeFile(SHARED_THEME),
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-linked-themes-" });
+        const active = path.join(fixture, "active");
+        const previous = path.join(fixture, "previous");
+        const restored = path.join(fixture, "restored");
+        const target = path.join(active, "shared", "themes");
+        const restoredTarget = path.join(restored, "shared", "themes");
+        yield* fs.makeDirectory(restoredTarget, { recursive: true });
+        yield* fs.writeFileString(
+          path.join(restoredTarget, "shared-light.json"),
+          encodeThemeFile(SHARED_THEME),
+        );
+
+        const originalWatchReady = yield* Deferred.make<void>();
+        const restoredWatchReady = yield* Deferred.make<void>();
+        let restoring = false;
+        yield* withEnvironmentThemes(
+          { "nightfall.json": encodeThemeFile(NIGHTFALL_THEME) },
+          Effect.gen(function* () {
+            const service = yield* EnvironmentTheme.EnvironmentThemeService;
+            const snapshots = yield* service.streamChanges.pipe(
+              Stream.map((themes) => themes.map((theme) => theme.name)),
+              Stream.toQueue({ capacity: "unbounded" }),
             );
-          }
+            assert.deepEqual(yield* Queue.take(snapshots), ["Nightfall"]);
+            yield* Deferred.await(originalWatchReady);
 
-          const snapshots = yield* service.streamChanges.pipe(
-            Stream.map((themes) => themes.map((theme) => theme.name)),
-            Stream.toQueue({ capacity: "unbounded" }),
-          );
-          assert.deepEqual(yield* Queue.take(snapshots), ["Nightfall"]);
-          yield* fs.rename(environmentThemesDir, path.join(fixture, "original"));
-          yield* fs.symlink(target, environmentThemesDir);
-          assert.deepEqual(
-            yield* Stream.fromQueue(snapshots).pipe(
-              Stream.filter((names) => names.length > 0),
-              Stream.runHead,
-              Effect.map((names) => names.valueOrUndefined),
-            ),
-            ["Shared Light"],
-          );
+            yield* fs.rename(active, previous);
+            assert.deepEqual(yield* service.current, []);
+            assert.deepEqual(yield* Queue.take(snapshots), []);
+            restoring = true;
+            yield* fs.rename(restored, active);
+            assert.deepEqual(yield* Queue.take(snapshots), ["Shared Light"]);
+            yield* Deferred.await(restoredWatchReady);
 
-          yield* fs.rename(active, path.join(fixture, "active-previous"));
-          assert.deepEqual(yield* Queue.take(snapshots), []);
-          yield* fs.rename(restored, active);
-          assert.deepEqual(yield* Queue.take(snapshots), ["Shared Light"]);
-
-          yield* fs.writeFileString(
-            path.join(fixture, "active-previous", "shared", "themes", "nightfall.json"),
-            encodeThemeFile(NIGHTFALL_THEME),
-          );
-          yield* fs.writeFileString(
-            path.join(target, "shared-light.json"),
-            encodeThemeFile({ ...SHARED_THEME, name: "Edited Shared Light" }),
-          );
-          assert.deepEqual(yield* Queue.take(snapshots), ["Edited Shared Light"]);
-        }),
-      ),
+            yield* fs.writeFileString(
+              path.join(previous, "shared", "themes", "nightfall.json"),
+              encodeThemeFile({ ...NIGHTFALL_THEME, name: "Stale Nightfall" }),
+            );
+            yield* fs.writeFileString(
+              path.join(target, "shared-light.json"),
+              encodeThemeFile({ ...SHARED_THEME, name: "Edited Shared Light" }),
+            );
+            assert.deepEqual(yield* Queue.take(snapshots), ["Edited Shared Light"]);
+          }),
+          {
+            linkedDirectory: target,
+            wrapFileSystem: (fs) =>
+              FileSystem.FileSystem.of({
+                ...fs,
+                watch: (file, options) =>
+                  fs.watch(file, {
+                    ...options,
+                    onReady: () => {
+                      Deferred.doneUnsafe(
+                        restoring ? restoredWatchReady : originalWatchReady,
+                        Effect.void,
+                      );
+                      options?.onReady?.();
+                    },
+                  }),
+              }),
+          },
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.live.skipIf(!symlinksSupported)(
@@ -476,6 +497,8 @@ describe("environment theme", () => {
               path.join(previous, "shared", "themes", "nightfall.json"),
               encodeThemeFile(NIGHTFALL_THEME),
             );
+            // Ancestor renames need not emit an event on a watch of the linked directory.
+            assert.deepEqual(yield* service.current, []);
             assert.deepEqual(yield* Queue.take(snapshots), []);
             yield* fs.rename(previous, active);
             yield* Deferred.succeed(resumeProbes, undefined);

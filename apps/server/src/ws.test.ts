@@ -4,6 +4,7 @@ import { WebSocket } from "@effect/platform-node/NodeWS";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Bind an isolated WebSocket negotiation fixture.
 import * as NodeHttp from "node:http";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as PromptSnippets from "./promptSnippets/PromptSnippets.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -19,18 +20,24 @@ import {
   AuthSourceControlWriteScope,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+  MessageId,
+  CommandId,
+  RunId,
+  ThreadReadRequest,
+  ThreadReadResponse,
+  OrchestratorMcpFailure,
+  OrchestratorMcpThreadReadResult,
+  type OrchestrationV2ThreadProjection,
   EnvironmentId,
   EventId,
   GitManagerError,
   VcsProcessSpawnError,
-  MessageId,
   ProjectId,
   ThreadId,
   TurnItemId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
-  RunId,
   SourceControlRepositoryError,
   WS_METHODS,
   WsRpcGroup,
@@ -47,12 +54,13 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { SOCKET_FRAME_PARTS_QUERY_PARAM } from "@t3tools/shared/socketFrameParts";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
 import * as Deferred from "effect/Deferred";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
-import * as Cause from "effect/Cause";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -67,7 +75,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as ProviderInstallationGate from "./provider/ProviderInstallationGate.ts";
 import * as Ws from "./ws.ts";
-import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
+import { Rpc, RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
 import * as RpcTest from "effect/rpc/RpcTest";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
@@ -75,7 +83,25 @@ import { vi } from "vite-plus/test";
 
 import * as AssetSigner from "./assets/AssetSigner.ts";
 import * as WorkspacePreviewRevisions from "./assets/WorkspacePreviewRevisions.ts";
+import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import * as ProviderAdapterRegistry from "./orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ActionResume from "./actionResume/ActionResume.ts";
+import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
+import * as PeerForwarding from "./peer/PeerForwarding.ts";
+import { liveThreadShell, idleThreadProjection } from "./mcp/McpToolAccess.testkit.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
+import { admitAcceptedInput } from "./threadReadAuthority/Admission.ts";
+import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
+import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
+import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
+import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
+import * as SuspensionRegistry from "./workspace/WorktreeSuspensionRegistry.ts";
+import * as ThreadLinkedFiles from "./workspace/ThreadLinkedFiles.ts";
+import * as ThreadRecoveryService from "./orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepairService from "./orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
@@ -150,6 +176,9 @@ import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as WorktreeSuspension from "./workspace/WorktreeSuspension.ts";
+import * as WorkspaceAcquisitionTestkit from "./workspace/WorkspaceAcquisition.testkit.ts";
+import { WorkspaceLifecycle } from "./workspace/WorkspaceLifecycle.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
@@ -420,6 +449,34 @@ const resumeSkipsUnknownTypes = (scope: "thread" | "shell") =>
 
 it.effect("thread resume skips unknown types, synchronizes, and receives the live tail", () =>
   resumeSkipsUnknownTypes("thread"),
+);
+
+it.effect(
+  "thread resume refreshes the local creator for clients that cannot apply a repair event",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:creator-repaired");
+      yield* sql`
+      INSERT INTO orchestration_events (
+        event_id, aggregate_kind, stream_id, stream_version, event_type,
+        occurred_at, actor_kind, payload_json, metadata_json, application_event_version
+      ) VALUES (
+        'creator-replay:1', 'thread', ${threadId}, 1, 'thread.creator-repaired',
+        '2026-10-13T00:00:00.000Z', 'server',
+        '{"kind":"local","creatorThreadId":"creator","origin":{"kind":"thread_launch","environmentId":"local","threadId":"creator"}}',
+        '{}', 2
+      )
+    `;
+      const exit = yield* subscribeOrchestrationV2Thread({ threadId, afterSequence: 0 }).pipe(
+        Effect.provideService(ThreadManagement.ThreadManagementService, {
+          ensureLegacyTranscript: () => Effect.void,
+          getThreadSnapshot: () => Effect.die("snapshot"),
+        } as unknown as ThreadManagement.ThreadManagementService["Service"]),
+        Effect.exit,
+      );
+      assert.equal(Exit.isFailure(exit) ? Cause.squash(exit.cause) : null, "snapshot");
+    }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
 );
 
 // Shell updates batch through `Stream.groupedWithin`, whose window needs real time to close.
@@ -828,7 +885,15 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(PromptSnippets.PromptSnippets)({}),
   Layer.mock(DocumentText.DocumentText)({}),
+  Layer.mock(EnvironmentPause.EnvironmentPause)({}),
+  Layer.mock(PreviewHosting.PreviewHosting)({}),
+  Layer.mock(NativeAppIconResolver.NativeAppIconResolver)({}),
+  Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({}),
+  Layer.mock(ThreadRecoveryService.ThreadRecoveryService)({}),
+  Layer.mock(ThreadRecoveryRepairService.ThreadRecoveryRepairService)({}),
+  Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(SecretCheck.SecretCheck)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
@@ -905,6 +970,9 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
   Layer.mock(SourceControlSignIn.SourceControlSignIn)({}),
   Layer.mock(StorageCleanup.StorageCleanup)({}),
+  Layer.mock(WorktreeSuspension.WorktreeSuspension)({}),
+  WorkspaceAcquisitionTestkit.layer,
+  Layer.mock(WorkspaceLifecycle)({}),
   Layer.mock(DatabaseStorage.DatabaseStorage)({}),
   Layer.mock(TerminalManager.TerminalManager)({}),
   Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
@@ -949,6 +1017,17 @@ it.live.each([
     Effect.gen(function* () {
       const services = Layer.mergeAll(
         layerUnusedConfigRpcServices,
+        Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+          available: false,
+          isShown: () => false,
+          loadFailure: () => undefined,
+          isPresented: () => false,
+          isRendering: () => false,
+        }),
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+        }),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({
           profileReporter: Effect.succeed(() => Effect.void),
         }),
@@ -978,7 +1057,9 @@ it.live.each([
         Layer.mock(ExternalLauncher.ExternalLauncher)({}),
         Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
         Layer.mock(DirectEndpoints.DirectEndpoints)({}),
-        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("compression-test")),
+        }),
         Layer.mock(VcsProcess.VcsProcess)({
           run: (input) =>
             Effect.fail(
@@ -1117,6 +1198,7 @@ it.effect.each([
         }),
         Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
         Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("config-test")),
           getDescriptor: Effect.succeed({
             environmentId: EnvironmentId.make("config-test"),
             label: "Config test",
@@ -1168,6 +1250,9 @@ it.effect.each([
               scopes: [],
             },
             {},
+            yield* DesktopBrowserChannel.DesktopBrowserChannel,
+            yield* ThreadReadBroker.ThreadReadBroker,
+            yield* OrchestratorMcpService.OrchestratorMcpService,
             yield* ServerBrowser.ServerBrowser,
             () => Effect.void,
             { secretReferences: true },
@@ -1281,6 +1366,17 @@ it.effect.each([
         Layer.mergeAll(
           Layer.fresh(layerConfigSources),
           Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+            available: false,
+            isShown: () => false,
+            loadFailure: () => undefined,
+            isPresented: () => false,
+            isRendering: () => false,
+          }),
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+          }),
+          Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
           Layer.mock(ServerBrowser.ServerBrowser)({}),
         ),
       ),
@@ -1323,6 +1419,9 @@ it.effect("access changes made while the snapshot loads reach the client after i
             scopes: [],
           },
           {},
+          yield* DesktopBrowserChannel.DesktopBrowserChannel,
+          yield* ThreadReadBroker.ThreadReadBroker,
+          yield* OrchestratorMcpService.OrchestratorMcpService,
           yield* ServerBrowser.ServerBrowser,
           () => Effect.void,
           { secretReferences: true },
@@ -1340,7 +1439,9 @@ it.effect("access changes made while the snapshot loads reach the client after i
                 namedProjectsRoot: "/unused",
               }),
               Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-              Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+              Layer.mock(ServerEnvironment.ServerEnvironment)({
+                getEnvironmentId: Effect.succeed(EnvironmentId.make("access-test")),
+              }),
               Layer.mock(EnvironmentAuth.EnvironmentAuth)({
                 listPairingLinks: () => Effect.succeed([]),
                 listConnectDevices: () => Effect.succeed([]),
@@ -1405,6 +1506,17 @@ it.effect("access changes made while the snapshot loads reach the client after i
       Layer.mergeAll(
         Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+          available: false,
+          isShown: () => false,
+          loadFailure: () => undefined,
+          isPresented: () => false,
+          isRendering: () => false,
+        }),
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+        }),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
@@ -1498,6 +1610,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
       Layer.mock(ServerEnvironment.ServerEnvironment)({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("config-test")),
         getDescriptor: Effect.succeed({
           environmentId: EnvironmentId.make("config-test"),
           label: "Config test",
@@ -1539,6 +1652,9 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
             scopes: [],
           },
           {},
+          yield* DesktopBrowserChannel.DesktopBrowserChannel,
+          yield* ThreadReadBroker.ThreadReadBroker,
+          yield* OrchestratorMcpService.OrchestratorMcpService,
           yield* ServerBrowser.ServerBrowser,
           () => Effect.void,
           { secretReferences: true },
@@ -1759,6 +1875,17 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       Layer.mergeAll(
         Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+          available: false,
+          isShown: () => false,
+          loadFailure: () => undefined,
+          isPresented: () => false,
+          isRendering: () => false,
+        }),
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+        }),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
@@ -1864,6 +1991,8 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
             IdAllocator.layer,
             Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({}),
             Layer.mock(ThreadCommandExecutor.ThreadCommandExecutor)({}),
+            Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({}),
+            Layer.mock(SuspensionRegistry.WorktreeSuspensionRegistry)({ root: workspaceRoot }),
           ),
         ),
       ),
@@ -1876,7 +2005,9 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
         namedProjectsRoot: process.cwd(),
       }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("worktree-skills-test")),
+      }),
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     );
     const server = yield* RpcServer.makeNoSerialization(
@@ -1900,6 +2031,9 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
             scopes: [],
           },
           {},
+          yield* DesktopBrowserChannel.DesktopBrowserChannel,
+          yield* ThreadReadBroker.ThreadReadBroker,
+          yield* OrchestratorMcpService.OrchestratorMcpService,
           yield* ServerBrowser.ServerBrowser,
           () => Effect.void,
           { secretReferences: true },
@@ -1930,6 +2064,17 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
       Layer.mergeAll(
         Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+          available: false,
+          isShown: () => false,
+          loadFailure: () => undefined,
+          isPresented: () => false,
+          isRendering: () => false,
+        }),
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+        }),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
@@ -1962,7 +2107,9 @@ it.effect("a git action that fails partway still refreshes the repository status
       Layer.mock(DirectEndpoints.DirectEndpoints)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("rpc-test")),
+      }),
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     );
     const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
@@ -1979,6 +2126,9 @@ it.effect("a git action that fails partway still refreshes the repository status
             scopes: [AuthSourceControlWriteScope],
           },
           {},
+          yield* DesktopBrowserChannel.DesktopBrowserChannel,
+          yield* ThreadReadBroker.ThreadReadBroker,
+          yield* OrchestratorMcpService.OrchestratorMcpService,
           yield* ServerBrowser.ServerBrowser,
           () => Effect.void,
           { secretReferences: true },
@@ -2003,6 +2153,17 @@ it.effect("a git action that fails partway still refreshes the repository status
       Layer.mergeAll(
         Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+          available: false,
+          isShown: () => false,
+          loadFailure: () => undefined,
+          isPresented: () => false,
+          isRendering: () => false,
+        }),
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+        }),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
@@ -2042,7 +2203,9 @@ it.effect("a publish whose push fails still refreshes the new remote", () =>
       Layer.mock(DirectEndpoints.DirectEndpoints)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("publish-test-environment")),
+      }),
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     );
     const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
@@ -2059,6 +2222,9 @@ it.effect("a publish whose push fails still refreshes the new remote", () =>
             scopes: [AuthSourceControlWriteScope],
           },
           {},
+          yield* DesktopBrowserChannel.DesktopBrowserChannel,
+          yield* ThreadReadBroker.ThreadReadBroker,
+          yield* OrchestratorMcpService.OrchestratorMcpService,
           yield* ServerBrowser.ServerBrowser,
           () => Effect.void,
           { secretReferences: true },
@@ -2090,6 +2256,17 @@ it.effect("a publish whose push fails still refreshes the new remote", () =>
       Layer.mergeAll(
         Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+          available: false,
+          isShown: () => false,
+          loadFailure: () => undefined,
+          isPresented: () => false,
+          isRendering: () => false,
+        }),
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+        }),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
@@ -2600,7 +2777,9 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       Layer.mock(DirectEndpoints.DirectEndpoints)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("rpc-test")),
+      }),
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
       Layer.mock(ProjectService.ProjectService)({
         getById: () =>
@@ -2650,6 +2829,9 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
             scopes: [],
           },
           {},
+          yield* DesktopBrowserChannel.DesktopBrowserChannel,
+          yield* ThreadReadBroker.ThreadReadBroker,
+          yield* OrchestratorMcpService.OrchestratorMcpService,
           yield* ServerBrowser.ServerBrowser,
           () => Effect.void,
           { secretReferences: true },
@@ -2707,6 +2889,17 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       Layer.mergeAll(
         EventSink.layer.pipe(Layer.provideMerge(acpStores)),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+          available: false,
+          isShown: () => false,
+          loadFailure: () => undefined,
+          isPresented: () => false,
+          isRendering: () => false,
+        }),
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+        }),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
@@ -2774,7 +2967,9 @@ const makeWorkflowClient = Effect.fn("test.makeWorkflowClient")(function* (
     Layer.mock(DirectEndpoints.DirectEndpoints)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
     Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-    Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+    Layer.mock(ServerEnvironment.ServerEnvironment)({
+      getEnvironmentId: Effect.succeed(EnvironmentId.make("workflow-test")),
+    }),
     Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     Layer.mock(Workflows.Workflows)({
       get: (runId) =>
@@ -2797,6 +2992,9 @@ const makeWorkflowClient = Effect.fn("test.makeWorkflowClient")(function* (
           scopes: [...scopes],
         },
         {},
+        yield* DesktopBrowserChannel.DesktopBrowserChannel,
+        yield* ThreadReadBroker.ThreadReadBroker,
+        yield* OrchestratorMcpService.OrchestratorMcpService,
         yield* ServerBrowser.ServerBrowser,
         () => Effect.void,
         { secretReferences: true },
@@ -2807,6 +3005,17 @@ const makeWorkflowClient = Effect.fn("test.makeWorkflowClient")(function* (
 const layerWorkflowRpcTest = Layer.mergeAll(
   Layer.fresh(layerConfigSources),
   Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+  Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+    available: false,
+    isShown: () => false,
+    loadFailure: () => undefined,
+    isPresented: () => false,
+    isRendering: () => false,
+  }),
+  Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+    forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+  }),
+  Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
   Layer.mock(ServerBrowser.ServerBrowser)({}),
 );
 
@@ -2832,7 +3041,9 @@ const makeAcpRegistryClient = Effect.fn("test.makeAcpRegistryClient")(function* 
     Layer.mock(DirectEndpoints.DirectEndpoints)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
     Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-    Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+    Layer.mock(ServerEnvironment.ServerEnvironment)({
+      getEnvironmentId: Effect.succeed(EnvironmentId.make("acp-test")),
+    }),
     Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     ServerSettings.layerTest({}, options.managedPolicy),
     Layer.mock(AcpRegistrySupport.AcpRegistryCatalog)({
@@ -2865,6 +3076,9 @@ const makeAcpRegistryClient = Effect.fn("test.makeAcpRegistryClient")(function* 
           scopes,
         },
         {},
+        yield* DesktopBrowserChannel.DesktopBrowserChannel,
+        yield* ThreadReadBroker.ThreadReadBroker,
+        yield* OrchestratorMcpService.OrchestratorMcpService,
         yield* ServerBrowser.ServerBrowser,
         () => Effect.void,
         { secretReferences: true },
@@ -2990,4 +3204,314 @@ it.effect("a session that can only read sees a workflow run but cannot steer it"
     );
     assert.deepEqual(calls, []);
   }).pipe(Effect.provide(layerWorkflowRpcTest), Effect.scoped),
+);
+
+it.effect("disconnects a pending remote read through the public RPC transport and recovers", () =>
+  Effect.gen(function* () {
+    const sourceId = ThreadId.make("pending-read-source");
+    const messageId = MessageId.make("pending-read-message");
+    const runId = RunId.make("pending-read-run");
+    const destinationId = EnvironmentId.make("remote-example");
+    const remoteId = ThreadId.make("remote-thread");
+    const projection = idleThreadProjection(liveThreadShell(sourceId));
+    const runs: Array<OrchestrationV2ThreadProjection["runs"][number]> = [];
+    const threadRecords = Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadRecords: () => Effect.succeed({ ...projection, runs }),
+      hasThreadReadAuthorization: (_id, authorizationId) =>
+        Effect.succeed(runs.some((run) => run.userMessageId === authorizationId)),
+    });
+    const dependencies = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      threadRecords,
+      Layer.fresh(layerConfigSources),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: process.cwd() }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("local-example")),
+      }),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(ScheduledTasks.ScheduledTaskService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({}),
+      Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+      Layer.mock(PeerForwarding.PeerForwarding)({}),
+      Layer.mock(ActionResume.ActionResume)({}),
+    );
+    // The returned broker retains SQL services, so its database shares the test's outer scope.
+    const context = yield* Layer.build(
+      ThreadReadBroker.layer.pipe(Layer.provideMerge(dependencies)),
+    );
+    const broker = Context.get(context, ThreadReadBroker.ThreadReadBroker);
+    const sql = Context.get(context, SqlClient.SqlClient);
+    const reads = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+      Effect.provide(
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(Layer.succeed(ThreadReadBroker.ThreadReadBroker, broker)),
+          Layer.provide(Layer.succeedContext(context)),
+        ),
+      ),
+    );
+    const now = yield* DateTime.now;
+    yield* sql`INSERT INTO auth_sessions
+      (session_id, subject, method, scopes, issued_at, expires_at)
+      VALUES ('origin', 'origin', 'browser-session-cookie', '["orchestration:read"]',
+        ${DateTime.formatIso(now)}, ${DateTime.formatIso(DateTime.add(now, { days: 1 }))})`;
+    const intent = yield* broker.forSession("origin").authorize(sourceId, messageId);
+    assert.isDefined(intent);
+    const acceptedRun: OrchestrationV2ThreadProjection["runs"][number] = {
+      id: runId,
+      threadId: sourceId,
+      userMessageId: messageId,
+      status: "running",
+      ordinal: 1,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
+      providerThreadId: null,
+      rootNodeId: null,
+      activeAttemptId: null,
+      requestedAt: now,
+      startedAt: now,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    yield* admitAcceptedInput({
+      threadId: sourceId,
+      commandId: CommandId.make("accepted-remote-read-input"),
+      commandType: "message.dispatch",
+      ...(intent === undefined ? {} : { threadReadIntent: intent }),
+      events: [
+        {
+          id: EventId.make("remote-read-message"),
+          type: "message.updated",
+          threadId: sourceId,
+          occurredAt: now,
+          payload: {
+            id: messageId,
+            threadId: sourceId,
+            runId,
+            nodeId: null,
+            role: "user",
+            text: "Read the remote thread.",
+            attachments: [],
+            streaming: false,
+            createdBy: "user",
+            creationSource: "web",
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        {
+          id: EventId.make("remote-read-run"),
+          type: "run.created",
+          threadId: sourceId,
+          occurredAt: now,
+          payload: acceptedRun,
+        },
+      ],
+    }).pipe(sql.withTransaction, Effect.provideContext(context));
+    runs.push(acceptedRun);
+    const read = reads.readThread(
+      {
+        environmentId: EnvironmentId.make("local-example"),
+        requestNamespace: "pending-read-native-caller",
+        thread: {
+          threadId: sourceId,
+          providerSessionId: "provider-example",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 0,
+      },
+      { threadId: remoteId, environmentId: destinationId, via: "client" },
+    );
+
+    // The authenticated session is injected like the other no-serialization RPC fixtures.
+    const group = RpcGroup.make(
+      Rpc.make(WS_METHODS.threadReadConnect, {
+        payload: {},
+        success: ThreadReadRequest,
+        stream: true,
+      }),
+      Rpc.make(WS_METHODS.threadReadRespond, {
+        payload: ThreadReadResponse,
+        error: OrchestratorMcpFailure,
+      }),
+    );
+    const transport = (sessionId: string) =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.make();
+        yield* Effect.addFinalizer((exit) => Scope.close(scope, exit));
+        const connected = yield* Deferred.make<void>();
+        const disconnected = yield* Deferred.make<void>();
+        const requests = yield* Queue.unbounded<ThreadReadRequest>();
+        const replies = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+        const server = yield* RpcServer.makeNoSerialization(group, {
+          ...WS_RPC_SERVER_OPTIONS,
+          onFromServer: (response) =>
+            response._tag === "Chunk"
+              ? Effect.forEach(response.values, (request) => Queue.offer(requests, request), {
+                  discard: true,
+                })
+              : response._tag === "Exit"
+                ? Queue.offer(replies, response.exit).pipe(Effect.asVoid)
+                : Effect.void,
+        }).pipe(
+          Effect.provide(
+            layerWsRpc(
+              {
+                sessionId: AuthSessionId.make(sessionId),
+                subject: sessionId,
+                method: "browser-session-cookie",
+                scopes: [],
+              },
+              {},
+              DesktopBrowserChannel.DesktopBrowserChannel.of(
+                {} as DesktopBrowserChannel.DesktopBrowserChannel["Service"],
+              ),
+              {
+                ...broker,
+                connect: (id) =>
+                  Effect.addFinalizer(() => Deferred.succeed(disconnected, undefined)).pipe(
+                    Effect.andThen(broker.connect(id)),
+                    Effect.tap(() => Deferred.succeed(connected, undefined)),
+                  ),
+              },
+              reads,
+              ServerBrowser.ServerBrowser.of({} as ServerBrowser.ServerBrowser["Service"]),
+              () => Effect.void,
+              { secretReferences: true },
+            ).pipe(Layer.provide(Layer.succeedContext(context))),
+          ),
+          Effect.provideService(Scope.Scope, scope),
+        );
+        yield* server.write(0, {
+          _tag: "Request",
+          id: RpcMessage.RequestId("connect"),
+          tag: WS_METHODS.threadReadConnect,
+          payload: {},
+          headers: Headers.empty,
+        });
+        yield* Deferred.await(connected);
+        let responseOrdinal = 0;
+        const respond = (
+          request: ThreadReadRequest,
+          result: OrchestratorMcpThreadReadResult | null = null,
+        ) =>
+          Effect.gen(function* () {
+            yield* server.write(0, {
+              _tag: "Request",
+              id: RpcMessage.RequestId(`response-${++responseOrdinal}`),
+              tag: WS_METHODS.threadReadRespond,
+              payload: { ...request, result, unavailableEnvironmentIds: [] },
+              headers: Headers.empty,
+            });
+            return yield* Queue.take(replies);
+          });
+        const disconnect = server.disconnect(0).pipe(Effect.andThen(Deferred.await(disconnected)));
+        return { requests, respond, disconnect };
+      });
+    const first = yield* transport("origin");
+    const last = yield* transport("origin");
+    const foreign = yield* transport("foreign");
+    const completed = yield* Deferred.make<void>();
+    const reading = yield* read.pipe(
+      Effect.onExit(() => Deferred.succeed(completed, undefined)),
+      Effect.flip,
+      Effect.forkScoped,
+    );
+    const firstRequest = yield* Queue.take(first.requests);
+    const lastRequest = yield* Queue.take(last.requests);
+    assert.equal(firstRequest.requestId, lastRequest.requestId);
+    assert.isFalse(yield* Deferred.isDone(completed));
+    const denied = yield* foreign.respond(lastRequest);
+    assert.isTrue(Exit.isFailure(denied));
+    if (Exit.isFailure(denied))
+      assert.equal(
+        (Cause.squash(denied.cause) as OrchestratorMcpFailure).code,
+        "capability_denied",
+      );
+    assert.equal(yield* Queue.size(foreign.requests), 0);
+    assert.isFalse(yield* Deferred.isDone(completed));
+    yield* first.disconnect;
+    assert.isFalse(yield* Deferred.isDone(completed));
+    yield* last.disconnect;
+    const disconnected = yield* Fiber.join(reading);
+    assert.equal(disconnected.code, "environment_unavailable");
+    assert.equal((yield* read.pipe(Effect.flip)).code, "environment_unavailable");
+    assert.isTrue(Exit.isSuccess(yield* foreign.respond(lastRequest)));
+    assert.isTrue(Exit.isSuccess(yield* foreign.respond(firstRequest)));
+
+    const remoteResult: OrchestratorMcpThreadReadResult = {
+      readVia: "client",
+      thread: {
+        threadId: remoteId,
+        environmentId: destinationId,
+        link: "[Example](t3-thread://v2/remote-environment/thread-remote-example)",
+        projectId: ProjectId.make("example-project"),
+        title: "Example",
+        createdBy: "user",
+        creationSource: "web",
+        status: "idle",
+        latestRunId: null,
+        activeRunId: null,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        model: "example-model",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        linkedPullRequest: null,
+        titleRegeneration: null,
+        branch: null,
+        worktreePath: null,
+        parentThreadId: null,
+        relationshipToParent: null,
+        runCount: 0,
+        itemCount: 0,
+        pendingRequestCount: 0,
+        archived: true,
+        settled: false,
+        settledAt: null,
+        snoozed: false,
+        snoozedUntil: null,
+        createdAt: "2026-10-08T12:00:00Z",
+        updatedAt: "2026-10-08T12:00:00Z",
+      },
+      recentRuns: [],
+      items: [],
+      nextPosition: 42,
+      hasMore: true,
+    };
+
+    const reconnected = yield* transport("origin");
+    const recoveryCompleted = yield* Deferred.make<void>();
+    const recovering = yield* read.pipe(
+      Effect.onExit(() => Deferred.succeed(recoveryCompleted, undefined)),
+      Effect.forkScoped,
+    );
+    const fresh = yield* Queue.take(reconnected.requests);
+    assert.notEqual(fresh.requestId, lastRequest.requestId);
+    assert.notEqual(fresh.connectionId, lastRequest.connectionId);
+    assert.isTrue(Exit.isSuccess(yield* reconnected.respond(lastRequest)));
+    assert.isFalse(yield* Deferred.isDone(recoveryCompleted));
+    const staleConnection = yield* reconnected.respond({
+      ...fresh,
+      connectionId: lastRequest.connectionId,
+    });
+    assert.isTrue(Exit.isFailure(staleConnection));
+    if (Exit.isFailure(staleConnection))
+      assert.equal(
+        (Cause.squash(staleConnection.cause) as OrchestratorMcpFailure).code,
+        "capability_denied",
+      );
+    assert.isFalse(yield* Deferred.isDone(recoveryCompleted));
+    assert.isTrue(Exit.isSuccess(yield* reconnected.respond(fresh, remoteResult)));
+    assert.deepEqual(yield* Fiber.join(recovering), remoteResult);
+  }).pipe(Effect.scoped),
 );

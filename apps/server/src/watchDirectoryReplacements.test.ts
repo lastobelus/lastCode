@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - the probe test controls native directory watch callbacks.
+import * as NodeEvents from "node:events";
+import * as NodeFS from "node:fs";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { assert, it } from "@effect/vitest";
@@ -6,10 +10,14 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import { vi } from "vite-plus/test";
 
 import { watchDirectoryPath } from "./watchDirectoryReplacements.ts";
 
-it.live.skipIf(!symlinksSupported)(
+vi.mock("node:fs", { spy: true });
+
+it.effect.skipIf(!symlinksSupported)(
   "backs off stopped watches for an unchanged linked directory",
   () =>
     Effect.gen(function* () {
@@ -27,6 +35,12 @@ it.live.skipIf(!symlinksSupported)(
       let identity = firstIdentity;
       const events = yield* Queue.unbounded<"probe" | "refresh">();
 
+      // Only the periodic probe drives this test. Native changes have their own cases.
+      using _watch = vi
+        .spyOn(NodeFS, "watch")
+        .mockImplementation(
+          () => Object.assign(new NodeEvents.EventEmitter(), { close() {} }) as NodeFS.FSWatcher,
+        );
       // An ended child emits a final refresh, as it does when registration fails.
       yield* watchDirectoryPath(entry, Stream.succeed(undefined), Effect.succeed(false)).pipe(
         Stream.runForEach(() => Queue.offer(events, "refresh")),
@@ -42,24 +56,20 @@ it.live.skipIf(!symlinksSupported)(
         ),
         Effect.forkScoped,
       );
-      assert.deepEqual(
-        yield* Queue.takeN(events, 10),
-        // Each acquire stats too: the first, a retry after 1 tick, then after 2 more.
-        [
-          "probe",
-          "probe",
-          "refresh",
-          "probe",
-          "probe",
-          "refresh",
-          "probe",
-          "probe",
-          "probe",
-          "refresh",
-        ],
-      );
+      assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
+
+      yield* TestClock.adjust("1 second");
+      assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
+
+      yield* TestClock.adjust("1 second");
+      assert.equal(yield* Queue.take(events), "probe");
+      assert.equal(yield* Queue.size(events), 0);
+
+      yield* TestClock.adjust("1 second");
+      assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
 
       identity = secondIdentity;
+      yield* TestClock.adjust("1 second");
       assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );

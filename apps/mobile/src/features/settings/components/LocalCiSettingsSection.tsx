@@ -3,38 +3,61 @@ import {
   LastCodeQuickCiMode,
   type LastCodeLocalCiSettings,
 } from "@t3tools/contracts/settings";
+import { msg, useGT, useMessages } from "gt-react-native";
 import { View } from "react-native";
 
-import { AppText } from "../../../components/AppText";
-import { MaterialIconButton } from "../../../components/MaterialIconButton";
-import { SettingsControlRow } from "./SettingsControlRow";
+import { AppText } from "../../../components/ui/AppText";
+import { IconButton } from "../../../components/ui/IconButton";
+import { ListRowLayout } from "../../../components/ui/ListRowLayout";
 import { ListChoiceRow } from "../../../components/ui/ListChoiceRow";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsSwitchRow } from "./SettingsSwitchRow";
 
 const QUICK_CI_MODES = {
-  auto: { label: "Automatic", description: "Use free local capacity, otherwise defer to GitHub." },
-  local: { label: "Always local", description: "Wait for local capacity before running Quick CI." },
-  github: { label: "GitHub only", description: "Skip local Quick CI and use GitHub checks." },
+  auto: {
+    label: msg("Automatic", { $context: "Quick CI mode" }),
+    description: msg("Use free local capacity, otherwise defer to {host}.", { host: "GitHub" }),
+  },
+  local: {
+    label: msg("Always local", { $context: "Quick CI mode" }),
+    description: msg("Wait for local capacity before running {check}.", { check: "Quick CI" }),
+  },
+  github: {
+    label: msg("{host} only", { $context: "Quick CI mode", host: "GitHub" }),
+    description: msg("Skip local {check} and use {host} checks.", {
+      check: "Quick CI",
+      host: "GitHub",
+    }),
+  },
 } satisfies Record<LastCodeQuickCiMode, { label: string; description: string }>;
 
 const LIMIT_ROWS = [
   {
     key: "maxConcurrentRuns",
-    label: "Concurrent CI runs",
-    subtitle: "Automatic defers to GitHub when busy; explicit local runs wait.",
+    label: msg("Concurrent CI runs"),
+    subtitle: msg("Automatic defers to {host} when busy; explicit local runs wait.", {
+      host: "GitHub",
+    }),
+    decreaseLabel: msg("Decrease concurrent CI runs"),
+    increaseLabel: msg("Increase concurrent CI runs"),
     max: 4,
   },
   {
     key: "packageConcurrency",
-    label: "Packages checked at once",
-    subtitle: "Packages checked in parallel within each run.",
+    label: msg("Packages checked at once"),
+    subtitle: msg("Packages checked in parallel within each run."),
+    decreaseLabel: msg("Decrease packages checked at once"),
+    increaseLabel: msg("Increase packages checked at once"),
     max: 8,
   },
   {
     key: "compilerThreads",
-    label: "TypeScript compiler CPU limit",
-    subtitle: "Native TypeScript compiler CPU parallelism within each run.",
+    label: msg("{language} compiler CPU limit", { language: "TypeScript" }),
+    subtitle: msg("Native {language} compiler CPU parallelism within each run.", {
+      language: "TypeScript",
+    }),
+    decreaseLabel: msg("Decrease {language} compiler cpu limit", { language: "typescript" }),
+    increaseLabel: msg("Increase {language} compiler cpu limit", { language: "typescript" }),
     max: 16,
   },
 ] as const;
@@ -44,6 +67,8 @@ export function LocalCiSettingsSection(props: {
   readonly disabled: boolean;
   readonly onChange: (patch: Partial<LastCodeLocalCiSettings>) => void;
 }) {
+  const gt = useGT();
+  const resolve = useMessages();
   const uniform = <K extends keyof LastCodeLocalCiSettings>(key: K) => {
     const first = props.settings[0];
     return first && props.settings.every((settings) => settings[key] === first[key])
@@ -52,19 +77,22 @@ export function LocalCiSettingsSection(props: {
   };
   const quickCiMode = uniform("quickCiMode");
   return (
-    <SettingsSection title="Local CI">
+    <SettingsSection title={gt("Local CI")}>
       <View className="gap-1 px-4 py-3">
         <AppText className="text-base text-foreground">
-          Quick CI mode{quickCiMode === null ? " · Mixed" : ""}
+          {quickCiMode === null
+            ? gt("{check} mode · Mixed", { check: "Quick CI" })
+            : gt("{check} mode", { check: "Quick CI" })}
         </AppText>
         <AppText className="text-sm text-foreground-muted">
-          GitHub checks remain required to merge.
+          {gt("{host} checks remain required to merge.", { host: "GitHub" })}
         </AppText>
       </View>
       {LastCodeQuickCiMode.literals.map((mode) => (
         <ListChoiceRow
           key={mode}
-          {...QUICK_CI_MODES[mode]}
+          label={resolve(QUICK_CI_MODES[mode].label)}
+          description={resolve(QUICK_CI_MODES[mode].description)}
           selected={quickCiMode === mode}
           separated
           disabled={props.disabled}
@@ -73,6 +101,9 @@ export function LocalCiSettingsSection(props: {
       ))}
       {LIMIT_ROWS.map((row) => {
         const value = uniform(row.key);
+        const label = resolve(row.label);
+        const displayValue =
+          value ?? gt("Mixed", { $context: "selected Local CI settings differ" });
         const adjust = (amount: number) => {
           const next = Math.max(
             1,
@@ -82,42 +113,43 @@ export function LocalCiSettingsSection(props: {
         };
         return (
           <View key={row.key} className="border-t border-border-subtle">
-            <SettingsControlRow
+            <ListRowLayout
               icon="slider.horizontal.3"
-              label={row.label}
-              subtitle={row.subtitle}
+              label={label}
+              description={resolve(row.subtitle)}
               disabled={props.disabled}
-            >
-              <View className="shrink-0 flex-row items-center">
-                <MaterialIconButton
-                  icon="minus"
-                  accessibilityLabel={`Decrease ${row.label.toLowerCase()}`}
-                  disabled={props.disabled || value === 1}
-                  onPress={() => adjust(-1)}
-                />
-                <AppText
-                  className="min-w-8 text-center text-base"
-                  accessibilityLabel={`${row.label}: ${value ?? "Mixed"}`}
-                  accessibilityLiveRegion="polite"
-                >
-                  {value ?? "Mixed"}
-                </AppText>
-                <MaterialIconButton
-                  icon="plus"
-                  accessibilityLabel={`Increase ${row.label.toLowerCase()}`}
-                  disabled={props.disabled || value === row.max}
-                  onPress={() => adjust(1)}
-                />
-              </View>
-            </SettingsControlRow>
+              accessory={
+                <View className="shrink-0 flex-row items-center">
+                  <IconButton
+                    icon="minus"
+                    accessibilityLabel={resolve(row.decreaseLabel)}
+                    disabled={props.disabled || value === 1}
+                    onPress={() => adjust(-1)}
+                  />
+                  <AppText
+                    className="min-w-8 text-center text-base"
+                    accessibilityLabel={gt("{label}: {value}", { label, value: displayValue })}
+                    accessibilityLiveRegion="polite"
+                  >
+                    {displayValue}
+                  </AppText>
+                  <IconButton
+                    icon="plus"
+                    accessibilityLabel={resolve(row.increaseLabel)}
+                    disabled={props.disabled || value === row.max}
+                    onPress={() => adjust(1)}
+                  />
+                </View>
+              }
+            />
           </View>
         );
       })}
       <View className="border-t border-border-subtle">
         <SettingsSwitchRow
           icon="slider.horizontal.3"
-          label="Background CI priority"
-          subtitle="Use a lower CPU priority to keep the app responsive. Applies to new runs."
+          label={gt("Background CI priority")}
+          subtitle={gt("Use a lower CPU priority to keep the app responsive. Applies to new runs.")}
           value={uniform("backgroundPriority")}
           disabled={props.disabled}
           onValueChange={(backgroundPriority) => props.onChange({ backgroundPriority })}

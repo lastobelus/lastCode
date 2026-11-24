@@ -35,6 +35,7 @@ import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScroll
 import { KeyboardController, KeyboardStickyView } from "react-native-keyboard-controller";
 
 import {
+  AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -55,7 +56,7 @@ import {
 
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
-import { threadContextsOutsideEnvironment } from "@t3tools/shared/composerContextReferences";
+import { threadContextsUnavailableForDestination } from "@t3tools/shared/composerContextReferences";
 
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 
@@ -100,7 +101,12 @@ import { ConnectionStatusDot } from "../connection/ConnectionStatusDot";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { mobilePreferencesAtom } from "../../state/preferences";
 
-import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
+import {
+  readEnvironmentScope,
+  useEnvironmentScope,
+  useEnvironmentsWithScope,
+} from "../../state/session";
+import { useEnvironments } from "../../state/environments";
 
 // Below this (keyboard up on iPad, phone landscape) the hero cannot fit above the composer,
 // so the project and environment pickers move into the composer controls instead.
@@ -168,6 +174,11 @@ export function NewTaskDraftScreen(props: {
   const [creationMetadata] = useState(makeTurnCommandMetadata);
   const projects = useProjects();
   const flow = useNewTaskFlow();
+  const { environments: connectedEnvironmentCatalog } = useEnvironments();
+  const canReadReferenceEnvironment = useEnvironmentsWithScope(
+    connectedEnvironmentCatalog,
+    AuthOrchestrationReadScope,
+  );
   const navigation = useNavigation();
   const isFocused = useIsFocused();
   const goBack = useWorkspaceBackNavigation();
@@ -654,27 +665,51 @@ export function NewTaskDraftScreen(props: {
       Dialog.alert(gt("Too much context"), contextBlockReason);
       return null;
     }
-    const strandedThread = threadContextsOutsideEnvironment({
+    const referenceEnvironments = new Map(
+      connectedEnvironmentCatalog.map(
+        (environment) =>
+          [
+            environment.environmentId,
+            {
+              connected: environment.connection.phase === "connected",
+              canRead: canReadReferenceEnvironment.has(environment.environmentId),
+              supportsUniversalThreadReferences:
+                environment.serverConfig?.environment.capabilities.universalThreadReferences ===
+                true,
+            },
+          ] as const,
+      ),
+    );
+    const unavailableThread = threadContextsUnavailableForDestination({
       text: draft.text,
       records: draft.context?.records ?? [],
-      environmentId: selectedProject.environmentId,
-      linkedEnvironments: flow.linkedEnvironments,
+      destinationEnvironmentId: selectedProject.environmentId,
+      environments: referenceEnvironments,
     })[0];
-    if (strandedThread) {
-      const owner = flow.environments.find(
-        (environment) => environment.environmentId === strandedThread.environmentId,
-      )?.environmentLabel;
+    if (unavailableThread) {
+      const { record: strandedThread, reason } = unavailableThread;
+      const owner =
+        flow.environments.find(
+          (environment) => environment.environmentId === strandedThread.environmentId,
+        )?.environmentLabel ?? gt("its machine");
+      const recovery =
+        reason === "permission-denied"
+          ? gt("Check that you have read access to {owner} and to the machine you're sending to.", {
+              owner,
+            })
+          : reason === "unsupported"
+            ? gt("Check for server updates on {owner} and the machine you're sending to.", {
+                owner,
+              })
+            : gt(
+                "Check the connections to {owner} and the machine you're sending to before sending.",
+                {
+                  owner,
+                },
+              );
       Dialog.alert(
         gt("Attached thread unavailable"),
-        owner === undefined
-          ? gt(
-              '"{title}" is on another machine. Switch back to its machine or remove it from the draft.',
-              { title: strandedThread.title },
-            )
-          : gt(
-              '"{title}" is on another machine. Switch back to {owner} or remove it from the draft.',
-              { title: strandedThread.title, owner },
-            ),
+        `${recovery} ${gt("The reference is still in your draft.")}`,
       );
       return null;
     }
@@ -1105,6 +1140,7 @@ export function NewTaskDraftScreen(props: {
         composerDraftKey={flow.draftKey}
         followUpBehavior="queue"
         canSteerActiveTurn={false}
+        forceQueue={false}
         isSavingQueuedEdit={false}
         onCancelQueuedRunEdit={() => {}}
         onRemoveQueuedEditAttachment={() => {}}

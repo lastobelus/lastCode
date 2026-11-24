@@ -335,6 +335,7 @@ describe("lastcode-local-ci", () => {
       prePush: false,
       requireLocal: true,
     });
+    expect(parseLocalCiOptions(["--full", "--quick"]).mode).toBe("quick");
     expect(() => parseLocalCiOptions(["--require-local"])).toThrow("only supported with --quick");
     expect(() => parseLocalCiOptions(["--full", "--pre-push"])).toThrow(
       "only supported with --quick",

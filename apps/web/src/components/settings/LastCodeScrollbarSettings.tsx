@@ -1,5 +1,6 @@
+import { useGT } from "gt-react";
 import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
 import {
   DEFAULT_SCROLLBAR_MARGIN,
@@ -13,32 +14,39 @@ import { Switch } from "../ui/switch";
 import { LastCodeSettingsSlider as SettingsSlider } from "./LastCodeSettingsSlider";
 
 export function LastCodeScrollbarSettings() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
   const clientSettings = usePrimarySettings();
   return (
     <>
       <SettingsRow
         {...searchableSetting("larger-scrollbars")}
-        description="Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles."
-        status="Exact native scrollbar width and margin require LastCode desktop or a Chromium-based browser. Firefox uses its larger system scrollbar; styled app scroll areas still follow both sliders."
+        description={gt(
+          "Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles.",
+        )}
+        status={gt(
+          "Exact native scrollbar width and margin require {lastCode} desktop or a {chromium}-based browser. {firefox} uses its larger system scrollbar; styled app scroll areas still follow both sliders.",
+          { lastCode: "LastCode", chromium: "Chromium", firefox: "Firefox" },
+        )}
         control={
           <Switch
             checked={clientSettings.largerScrollbarsEnabled}
             onCheckedChange={(checked) =>
               updateClientSettings({ largerScrollbarsEnabled: Boolean(checked) })
             }
-            aria-label="Larger scrollbars"
+            aria-label={gt("Larger scrollbars")}
           />
         }
       />
       {clientSettings.largerScrollbarsEnabled ? (
         <>
           <SettingsRow
-            title="Scrollbar width"
-            description="Set the visible scrollbar thumb width in one-pixel increments."
+            title={gt("Scrollbar width")}
+            description={gt("Set the visible scrollbar thumb width in one-pixel increments.")}
             resetAction={
               clientSettings.scrollbarWidth !== DEFAULT_SCROLLBAR_WIDTH ? (
                 <SettingResetButton
-                  label="scrollbar width"
+                  ariaLabel={gt("Reset scrollbar width to default")}
                   onClick={() => updateClientSettings({ scrollbarWidth: DEFAULT_SCROLLBAR_WIDTH })}
                 />
               ) : null
@@ -46,7 +54,7 @@ export function LastCodeScrollbarSettings() {
             control={
               <SettingsSlider
                 id="scrollbar-width"
-                label="Scrollbar width"
+                label={gt("Scrollbar width")}
                 min={MIN_SCROLLBAR_WIDTH}
                 max={MAX_SCROLLBAR_WIDTH}
                 value={clientSettings.scrollbarWidth}
@@ -55,12 +63,12 @@ export function LastCodeScrollbarSettings() {
             }
           />
           <SettingsRow
-            title="Scrollbar margin"
-            description="Set the clear space between a scrollbar thumb and the pane edge."
+            title={gt("Scrollbar margin")}
+            description={gt("Set the clear space between a scrollbar thumb and the pane edge.")}
             resetAction={
               clientSettings.scrollbarMargin !== DEFAULT_SCROLLBAR_MARGIN ? (
                 <SettingResetButton
-                  label="scrollbar margin"
+                  ariaLabel={gt("Reset scrollbar margin to default")}
                   onClick={() =>
                     updateClientSettings({ scrollbarMargin: DEFAULT_SCROLLBAR_MARGIN })
                   }
@@ -70,7 +78,7 @@ export function LastCodeScrollbarSettings() {
             control={
               <SettingsSlider
                 id="scrollbar-margin"
-                label="Scrollbar margin"
+                label={gt("Scrollbar margin")}
                 min={MIN_SCROLLBAR_MARGIN}
                 max={MAX_SCROLLBAR_MARGIN}
                 value={clientSettings.scrollbarMargin}

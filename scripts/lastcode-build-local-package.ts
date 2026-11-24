@@ -294,14 +294,18 @@ async function main(argv: ReadonlyArray<string>): Promise<void> {
     });
     return;
   }
-  if (command !== "run" || argv.length !== 1)
+  const explicitTag = argv.length === 3 && argv[1] === "--tag" ? argv[2] : undefined;
+  if (command !== "run" || (argv.length !== 1 && explicitTag === undefined))
     throw new Error(
-      "Usage: lastcode-build-local-package.ts select --tag <exact-tag> | lastcode-build-local-package.ts run",
+      "Usage: lastcode-build-local-package.ts select --tag <exact-tag> | run [--tag <exact-tag>]",
     );
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone build Action has no Effect runtime.
   if (NodeOS.platform() !== "darwin" || NodeOS.arch() !== "arm64")
     throw new Error("Build Local Package requires an Apple Silicon macOS host.");
-  const request = consumeSelection(requestPath(repoRoot));
+  const request =
+    explicitTag === undefined
+      ? consumeSelection(requestPath(repoRoot))
+      : selectLocalBuild(repoRoot, explicitTag, { git: defaultGit, writeRequest: () => {} });
   const canonicalRoot = NodePath.resolve(import.meta.dirname, "..");
   const controller = new AbortController();
   const interrupt = () => {

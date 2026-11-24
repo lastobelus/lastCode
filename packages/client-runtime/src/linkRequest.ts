@@ -4,8 +4,9 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type OrchestrationV2TurnItem,
-  type PeerLinkRequestAnswerInput,
   type PeerLinkName,
+  type PeerLinkPreflightInput,
+  type PeerLinkRequestAnswerInput,
   type PeerLinkSummary,
   resolveEnvironmentMachineKind,
   type ServerConfig,
@@ -48,10 +49,10 @@ export function linkedEnvironmentNames(input: {
   );
 }
 
-/** The access a request opens with: the agent's suggestion, else supervised. */
+/** The access a request opens with: the agent's suggestion, else full access. */
 export const linkRequestDefaultAccess = (
   item: Pick<LinkRequestItem, "requestedAccess">,
-): AuthMcpClientAccess => item.requestedAccess ?? "approval-required";
+): AuthMcpClientAccess => item.requestedAccess ?? "full-access";
 
 const parsedUrl = (url: string) => {
   try {
@@ -95,10 +96,10 @@ export interface LinkableMachine {
   readonly urls: ReadonlyArray<string>;
 }
 
-/** A loopback address names whichever machine opens it: the linking server, not this one. */
-const isLoopbackUrl = (url: string) => {
-  const hostname = parsedUrl(url)?.hostname;
-  return hostname !== undefined && isLocalLoopbackHost(hostname);
+// These addresses leave the client and are resolved by the thread's server.
+const isPeerAddress = (url: string): boolean => {
+  const parsed = parsedUrl(url);
+  return parsed !== undefined && !isLocalLoopbackHost(parsed.hostname);
 };
 
 /**
@@ -143,7 +144,7 @@ export function linkableMachines(input: {
             ...routes,
             ...(connect === undefined ? [] : [connect.httpBaseUrl]),
           ]),
-        ].filter((url) => !isLoopbackUrl(url)),
+        ].filter(isPeerAddress),
       };
     });
   const savedIds = new Set<string>(saved.map((machine) => machine.environmentId));
@@ -164,7 +165,7 @@ export function linkableMachines(input: {
         connected: false,
         connectOnly: true,
         linked: linkedIds.has(environment.environmentId),
-        urls: [environment.endpoint.httpBaseUrl].filter((url) => !isLoopbackUrl(url)),
+        urls: [environment.endpoint.httpBaseUrl].filter(isPeerAddress),
       };
     });
   return [...saved, ...connectOnly];
@@ -381,11 +382,26 @@ export function linkRequestAnswerInput(
   };
 }
 
+export function linkRequestPreflightInput(
+  target: Pick<LinkableMachine, "environmentId" | "label" | "urls"> | { readonly url: string },
+): PeerLinkPreflightInput | null {
+  const [url, ...alternateUrls] = "url" in target ? [target.url.trim()] : target.urls;
+  if (!url) return null;
+  return {
+    url,
+    ...(alternateUrls.length === 0 ? {} : { alternateUrls }),
+    ...("url" in target
+      ? {}
+      : { expectedEnvironmentId: target.environmentId, expectedLabel: target.label }),
+  };
+}
+
 /** Failures whose message is written for the user and never echoes the request payload. */
 const USER_FACING_FAILURE_TAGS = new Set([
   "PeerLinkRequestError",
   "EnvironmentAuthorizationError",
   "PeerPairingCodeError",
+  "PeerLinkError",
 ]);
 
 /**

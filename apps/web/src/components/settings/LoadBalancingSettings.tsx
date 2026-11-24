@@ -1,5 +1,6 @@
 import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import { msg, T, useGT, useMessages } from "gt-react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import {
   useClientSettings,
@@ -8,6 +9,9 @@ import {
 } from "~/hooks/useSettings";
 import type { MessageResolver } from "~/i18n/messages";
 import type { EnvironmentPresentation } from "~/state/environments";
+import { loadBalancingDecisionLog } from "~/lib/loadBalancingDiagnostics";
+import { Button } from "../ui/button";
+import { toastManager } from "../ui/toast";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { EnvironmentRow, EnvironmentTransportLabel } from "./EnvironmentRow";
@@ -63,6 +67,42 @@ export function LoadBalancingSettings({
   const gt = useGT();
   const m = useMessages();
   const items = preferences.map((entry) => ({ ...entry, label: m(entry.label) }));
+  const decisionLog = useSyncExternalStore(
+    loadBalancingDecisionLog.subscribe,
+    loadBalancingDecisionLog.getSnapshot,
+  );
+  const [now, setNow] = useState(Date.now);
+  const logging = decisionLog.expiresAt > now;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns a browser timeout to update the logging indicator when the external decision-log session expires
+  useEffect(() => {
+    if (decisionLog.expiresAt === 0) return;
+    const timeout = window.setTimeout(
+      () => setNow(Date.now()),
+      Math.max(0, decisionLog.expiresAt - Date.now()),
+    );
+    return () => window.clearTimeout(timeout);
+  }, [decisionLog.expiresAt]);
+  const changeLogging = () => {
+    try {
+      if (logging) loadBalancingDecisionLog.stop();
+      else loadBalancingDecisionLog.start();
+    } catch {
+      toastManager.add({
+        type: "error",
+        title: gt("Could not save Auto balance logging settings"),
+      });
+    }
+  };
+  const downloadDecisions = () => {
+    const url = URL.createObjectURL(
+      new Blob([loadBalancingDecisionLog.export()], { type: "application/json" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "auto-balance-decisions.json";
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  };
 
   if (environments.length < 2) return null;
 
@@ -87,8 +127,9 @@ export function LoadBalancingSettings({
     >
       <p className="px-3 py-2.5 text-xs text-muted-foreground sm:px-4">
         <T>
-          New threads in shared projects start on the machine with the most free CPU and memory,
-          weighted by each machine's preference.
+          New threads in shared projects go to the highest score: spare CPU capacity ×
+          available-memory percentage × preference. Prefer gives a machine twice the weight of
+          Normal. CPU capacity includes logical core count. Existing threads stay on their machine.
         </T>
       </p>
       {environments.map((environment) => (
@@ -131,6 +172,30 @@ export function LoadBalancingSettings({
           </Select>
         </EnvironmentRow>
       ))}
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
+        <Button variant="outline" size="sm" onClick={changeLogging}>
+          {logging ? gt("Stop logging") : gt("Log decisions for 24 hours")}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={downloadDecisions}
+          disabled={decisionLog.records.length === 0}
+        >
+          <T>Download decision logs</T>
+        </Button>
+        <p className="w-full text-xs text-muted-foreground">
+          {logging
+            ? `${gt("Logging until {time}.", {
+                time: new Date(decisionLog.expiresAt).toLocaleString(),
+              })} `
+            : ""}
+          {gt(
+            "{count} decisions saved on this device. Keeps the latest 200, including scores and excluded machines.",
+            { count: decisionLog.records.length },
+          )}
+        </p>
+      </div>
     </FoldedSettingsSection>
   );
 }

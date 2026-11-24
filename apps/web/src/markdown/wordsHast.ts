@@ -13,7 +13,7 @@ import type { ReferenceAutolink } from "@t3tools/client-runtime/source-control-c
 import { expandGithubEmojiAliases } from "@t3tools/client-runtime/pull-request-markdown";
 import { resolveChangeRequestMediaUrl } from "@t3tools/client-runtime/pull-request-references";
 import { GITHUB_ALERT_MARKER } from "@t3tools/shared/markdownGithubAlerts";
-import { absoluteFilePathMatches } from "@t3tools/shared/markdownLinks";
+import { absoluteFilePathMatches, parseMarkdownFileLink } from "@t3tools/shared/markdownLinks";
 import {
   rehypeNormalizeLocalEditorLinks,
   rehypePreserveImageSourceMeta,
@@ -669,7 +669,17 @@ function transform(node: Root | Element, walk: Walk, inLink: boolean, inCode: bo
     } else if (tagName === "a" && typeof props.href === "string") {
       // remarkNormalizeLinksAndTagInlineCode: a Windows drive path links as a file URL.
       const path = windowsPath(props.href);
-      props.href = path ? `file:///${path.replaceAll("\\", "/")}` : normalizeUri(props.href);
+      if (path) {
+        props.href = `file:///${path.replaceAll("\\", "/")}`;
+      } else {
+        const href = props.href;
+        // The sanitizer treats the first colon in a filename position as a URL scheme.
+        const target =
+          child.position && /^[^/\\?#]*:/.test(href) ? parseMarkdownFileLink(href) : null;
+        props.href = normalizeUri(
+          target && !/[\\/]/.test(target.path) ? href.replaceAll(":", "%3A") : href,
+        );
+      }
     } else if (tagName === "img" && typeof props.src === "string") {
       const changeRequest = walk.options.extensions.changeRequest;
       const src = changeRequest

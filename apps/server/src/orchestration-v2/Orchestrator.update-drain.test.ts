@@ -1,13 +1,18 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  CheckpointScopeId,
+  EnvironmentId,
   EventId,
+  MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
+  TurnItemId,
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
 } from "@t3tools/contracts";
@@ -20,6 +25,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
 import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
@@ -66,6 +72,9 @@ const makeHarness = Effect.gen(function* () {
   const database = SqlitePersistence.layerMemory;
   const projections = ProjectionStore.layer.pipe(Layer.provide(database));
   const archiveRequested = yield* Deferred.make<void>();
+  const turnRequested = yield* Deferred.make<void>();
+  const watchWakeRequested = yield* Deferred.make<void>();
+  const watchWakeStartedWhileClosed = yield* Deferred.make<boolean>();
   const admissionRequests = yield* Queue.unbounded<void>();
   const drainRequests = yield* Queue.unbounded<void>();
   const control = { archiveGate: null as Gate | null, snapshotGate: null as Gate | null };
@@ -73,35 +82,54 @@ const makeHarness = Effect.gen(function* () {
     UpdateDrainAdmission.UpdateDrainAdmission,
     Effect.gen(function* () {
       const delegate = yield* ProjectionStore.ProjectionStoreV2;
+      const durableDrain = yield* UpdateDrain.UpdateDrain;
+      const pauseAfterSnapshot = Effect.suspend(() => {
+        const gate = control.snapshotGate;
+        control.snapshotGate = null;
+        return gate === null
+          ? Effect.void
+          : Deferred.succeed(gate.entered, undefined).pipe(
+              Effect.andThen(Deferred.await(gate.release)),
+            );
+      });
       const admission = yield* UpdateDrainAdmission.makeUpdateDrainAdmission().pipe(
         Effect.provideService(ProjectionStore.ProjectionStoreV2, {
           ...delegate,
           getShellSnapshot: (options) =>
-            delegate.getShellSnapshot(options).pipe(
-              Effect.tap(() =>
-                Effect.suspend(() => {
-                  const gate = control.snapshotGate;
-                  control.snapshotGate = null;
-                  return gate === null
-                    ? Effect.void
-                    : Deferred.succeed(gate.entered, undefined).pipe(
-                        Effect.andThen(Deferred.await(gate.release)),
-                      );
-                }),
-              ),
-            ),
+            delegate.getShellSnapshot(options).pipe(Effect.tap(() => pauseAfterSnapshot)),
+          getToolMaintenanceSnapshot: delegate.getToolMaintenanceSnapshot.pipe(
+            Effect.tap(() => pauseAfterSnapshot),
+          ),
         }),
       );
       return UpdateDrainAdmission.UpdateDrainAdmission.of({
         ...admission,
         dispatch: (command) =>
           Queue.offer(drainRequests, undefined).pipe(Effect.andThen(admission.dispatch(command))),
+        admitPullRequestWatchWake: (effect) =>
+          Deferred.succeed(watchWakeRequested, undefined).pipe(
+            Effect.andThen(
+              admission.admitPullRequestWatchWake(
+                durableDrain.status.pipe(
+                  Effect.flatMap(({ intent }) =>
+                    Deferred.succeed(
+                      watchWakeStartedWhileClosed,
+                      intent !== null && intent.status !== "cancelled",
+                    ),
+                  ),
+                  Effect.andThen(effect),
+                ),
+              ),
+            ),
+          ),
         admit: (kind, effect) =>
           (kind === "thread-archive" || kind === "thread-delete"
             ? Deferred.succeed(archiveRequested, undefined).pipe(
                 Effect.andThen(Queue.offer(admissionRequests, undefined)),
               )
-            : Effect.void
+            : kind === "thread-turn"
+              ? Deferred.succeed(turnRequested, undefined)
+              : Effect.void
           ).pipe(
             Effect.andThen(
               admission.admit(
@@ -154,6 +182,9 @@ const makeHarness = Effect.gen(function* () {
   return {
     control,
     archiveRequested,
+    turnRequested,
+    watchWakeRequested,
+    watchWakeStartedWhileClosed,
     admissionRequests,
     drainRequests,
     layer: Layer.mergeAll(
@@ -162,6 +193,7 @@ const makeHarness = Effect.gen(function* () {
       projections,
       CommandReceipts.layer.pipe(Layer.provide(database)),
       EffectOutbox.layer.pipe(Layer.provide(database)),
+      ActionRunStore.layer.pipe(Layer.provide(database)),
     ),
   };
 });
@@ -242,6 +274,526 @@ const startDrain = Effect.gen(function* () {
   });
 });
 
+const registerWatch = Effect.gen(function* () {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make("maintenance-watch:create"),
+    threadId,
+    projectId: ProjectId.make("maintenance-watch:project"),
+    title: "Maintenance watch",
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: process.cwd(),
+    createdBy: "user",
+    creationSource: "web",
+  });
+  const key = { host: "github.com", repository: "example/maintenance", number: 1 };
+  yield* orchestrator.dispatch({
+    type: "thread.pull-request.watch",
+    commandId: CommandId.make("maintenance-watch:register"),
+    threadId,
+    ...key,
+    watching: true,
+    link: { url: "https://github.com/example/maintenance/pull/1", source: "agent" },
+  });
+  const watch = (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch;
+  assert.isDefined(watch);
+  return { key, watch };
+});
+
+it.effect.each([false, true])(
+  "blocks on a registered watch only for an update (maintenance=%s)",
+  (maintenance) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      yield* Effect.gen(function* () {
+        const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+        yield* registerWatch;
+        yield* admission.dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("maintenance-watch:start-drain"),
+          requestId,
+          targetVersion: UpdateDrainTargetVersion.make(maintenance ? "tool-maintenance" : "1.2.3"),
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        const status = yield* admission.status;
+        assert.equal(status.admission, "closed");
+        assert.deepEqual(
+          status.blockers,
+          maintenance ? [] : [{ type: "thread-background", threadId, status: "monitoring" }],
+        );
+        const claim = yield* Effect.result(admission.claimActivation({ requestId }));
+        assert.equal(claim._tag, maintenance ? "Success" : "Failure");
+        if (claim._tag === "Failure") assert.equal(claim.failure.reason, "not_quiescent");
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
+
+it.effect("holds a watch wake until maintenance releases admission", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness;
+    yield* Effect.gen(function* () {
+      const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { key, watch } = yield* registerWatch;
+      const createdAt = DateTime.formatIso(yield* DateTime.now);
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("maintenance-watch:start-drain"),
+        requestId,
+        targetVersion: UpdateDrainTargetVersion.make("tool-maintenance"),
+        createdAt,
+      });
+      const messageId = MessageId.make("maintenance-watch:wake-message");
+      const delivery = yield* orchestrator
+        .dispatch({
+          type: "thread.pull-request-watch.sync",
+          commandId: CommandId.make("maintenance-watch:deliver"),
+          threadId,
+          ...key,
+          startedAt: watch.startedAt,
+          watch: { ...watch, checksPending: false, wakes: 1 },
+          wake: {
+            messageId,
+            text: "Checks passed",
+            notification: {
+              source: { kind: "monitor" },
+              outcome: "completed",
+              summary: "Checks passed",
+            },
+          },
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(harness.watchWakeRequested);
+      assert.isEmpty((yield* admission.status).blockers);
+      assert.isEmpty(
+        (yield* orchestrator.getThreadRecords(threadId, ["runs", "messages"])).messages,
+      );
+
+      yield* admission.dispatch({
+        type: "update-drain.cancel",
+        commandId: CommandId.make("maintenance-watch:release"),
+        requestId,
+        createdAt,
+      });
+      yield* Fiber.join(delivery);
+      assert.isFalse(yield* Deferred.await(harness.watchWakeStartedWhileClosed));
+      const { runs, messages } = yield* orchestrator.getThreadRecords(threadId, [
+        "runs",
+        "messages",
+      ]);
+      assert.deepEqual(
+        messages.map((message) => message.id),
+        [messageId],
+      );
+      assert.deepEqual(
+        runs.map((run) => [run.userMessageId, run.status]),
+        [[messageId, "starting"]],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect.each(["starting", "completed"] as const)(
+  "blocks maintenance when a held turn advances to %s",
+  (status) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      yield* Effect.gen(function* () {
+        const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        yield* registerWatch;
+        const resume = {
+          type: "queue.resume",
+          commandId: CommandId.make("maintenance-watch:queue-resume"),
+          threadId,
+        } as const;
+        yield* orchestrator.dispatch(resume);
+        for (const index of [0, 1])
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`maintenance-watch:turn:${index}`),
+            threadId,
+            messageId: MessageId.make(`maintenance-watch:turn:${index}`),
+            text: "Test turn",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        const { runs } = yield* orchestrator.getThreadRecords(threadId, ["runs"]);
+        const [started, queued] = runs;
+        assert.isDefined(started);
+        assert.isDefined(queued);
+        assert.equal(queued.status, "queued");
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              type: "run.updated",
+              id: EventId.make("maintenance-watch:turn-ended"),
+              occurredAt: now,
+              threadId,
+              runId: started.id,
+              payload: { ...started, status: "completed", completedAt: now },
+            },
+            {
+              type: "run.updated",
+              id: EventId.make("maintenance-watch:turn-held"),
+              occurredAt: now,
+              threadId,
+              runId: queued.id,
+              payload: { ...queued, queueHeld: true },
+            },
+          ],
+        });
+        assert.equal((yield* orchestrator.getThreadShell(threadId))?.status, "completed");
+        yield* outbox.cancelUnsettled({
+          threadId,
+          effectTypes: ["provider-turn.start"],
+          reason: "Test run already ended",
+        });
+        yield* admission.dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("maintenance-watch:start-held-drain"),
+          requestId,
+          targetVersion: UpdateDrainTargetVersion.make("tool-maintenance"),
+          createdAt: DateTime.formatIso(now),
+        });
+        const blocked = yield* Effect.flip(admission.claimActivation({ requestId }));
+        assert.equal(blocked.reason, "not_quiescent");
+        for (const command of [
+          resume,
+          { ...resume, commandId: CommandId.make("maintenance-watch:new-queue-resume") },
+          {
+            type: "queued-run.start",
+            commandId: CommandId.make("maintenance-watch:queue-start"),
+            threadId,
+            runId: queued.id,
+          },
+        ] as const) {
+          const refused = yield* Effect.flip(orchestrator.dispatch(command));
+          assert.equal(refused._tag, "OrchestratorDispatchError");
+          if (refused._tag === "OrchestratorDispatchError")
+            assert.propertyVal(refused.cause as object, "_tag", "UpdateDrainAdmissionError");
+        }
+        const after = yield* orchestrator.getThreadRecords(threadId, ["runs"]);
+        assert.deepInclude(
+          after.runs.find((run) => run.id === queued.id),
+          { status: "queued", queueHeld: true },
+        );
+
+        const shellRead = yield* makeGate;
+        harness.control.snapshotGate = shellRead;
+        const claim = yield* admission
+          .claimActivation({ requestId })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(shellRead.entered);
+        // Advancing previously accepted work can commit before its provider start effect runs.
+        yield* sink.write({
+          events: [
+            {
+              type: "run.updated",
+              id: EventId.make("maintenance-watch:held-turn-advanced"),
+              occurredAt: now,
+              threadId,
+              runId: queued.id,
+              payload: {
+                ...queued,
+                status,
+                queueHeld: false,
+                ...(status === "completed" ? { completedAt: now } : {}),
+              },
+            },
+            ...(status === "completed"
+              ? [
+                  {
+                    type: "turn-item.updated" as const,
+                    id: EventId.make("maintenance-watch:command-monitor"),
+                    occurredAt: now,
+                    threadId,
+                    runId: queued.id,
+                    payload: {
+                      id: TurnItemId.make("maintenance-watch:command-monitor"),
+                      type: "command_execution" as const,
+                      status: "running" as const,
+                      threadId,
+                      runId: queued.id,
+                      nodeId: queued.rootNodeId,
+                      providerThreadId: queued.providerThreadId,
+                      providerTurnId: null,
+                      nativeItemRef: null,
+                      parentItemId: null,
+                      ordinal: 100,
+                      input: "check-service",
+                      monitor: true,
+                      title: "Check service",
+                      startedAt: now,
+                      completedAt: null,
+                      updatedAt: now,
+                    },
+                  },
+                ]
+              : []),
+          ],
+        });
+        yield* Deferred.succeed(shellRead.release, undefined);
+        const afterAdvance = yield* Fiber.join(claim);
+        assert.equal(afterAdvance._tag, "Failure");
+        if (afterAdvance._tag === "Failure")
+          assert.equal(afterAdvance.failure.reason, "not_quiescent");
+        if (status === "completed") {
+          const blockers = (yield* admission.status).blockers;
+          assert.deepEqual(blockers, [
+            { threadId, type: "thread-background", status: "monitoring" },
+          ]);
+        }
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
+
+it.effect("blocks maintenance on a saved finalization effect after its turn ends", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness;
+    yield* Effect.gen(function* () {
+      const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      yield* registerWatch;
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("maintenance-watch:finalization-turn"),
+        threadId,
+        messageId: MessageId.make("maintenance-watch:finalization-turn"),
+        text: "Test turn",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const {
+        runs: [run],
+      } = yield* orchestrator.getThreadRecords(threadId, ["runs"]);
+      assert.isDefined(run);
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            type: "run.updated",
+            id: EventId.make("maintenance-watch:interrupted-before-finalization"),
+            threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "interrupted", completedAt: now },
+          },
+        ],
+      });
+      yield* outbox.cancelUnsettled({
+        threadId,
+        effectTypes: ["provider-turn.start"],
+        reason: "Test run already ended",
+      });
+      const effectId = "maintenance-watch:checkpoint-capture";
+      yield* outbox.enqueue([
+        {
+          id: effectId,
+          commandId: CommandId.make(effectId),
+          threadId,
+          request: {
+            type: "checkpoint.capture",
+            runId: run.id,
+            scopeId: CheckpointScopeId.make("maintenance-watch:scope"),
+          },
+        },
+      ]);
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("maintenance-watch:start-finalization-drain"),
+        requestId,
+        targetVersion: UpdateDrainTargetVersion.make("tool-maintenance"),
+        createdAt: DateTime.formatIso(now),
+      });
+      assert.equal(
+        (yield* Effect.flip(admission.claimActivation({ requestId }))).reason,
+        "not_quiescent",
+      );
+      const claimed = yield* outbox.claimNext({ workerId: "maintenance-test" });
+      assert.equal(Option.getOrUndefined(claimed)?.id, effectId);
+      assert.equal(
+        (yield* Effect.flip(admission.claimActivation({ requestId }))).reason,
+        "not_quiescent",
+      );
+      yield* outbox.succeed({ effectId, workerId: "maintenance-test" });
+      assert.isEmpty((yield* admission.status).blockers);
+      yield* admission.claimActivation({ requestId });
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect("uses the Action ledger for a finished Action with a pending follow-up", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness;
+    yield* Effect.gen(function* () {
+      const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+      const actions = yield* ActionRunStore.ActionRunStore;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      yield* registerWatch;
+      const { projectId } = yield* projections.getThread(threadId);
+      const timestamp = DateTime.formatIso(yield* DateTime.now);
+      const result = {
+        runId: "saved-action",
+        threadId,
+        projectId,
+        actionId: "example-action",
+        actionName: "Example Action",
+        terminalId: "action-terminal",
+        outcome: "succeeded",
+        delivery: "pending",
+        startedAt: timestamp,
+        finishedAt: timestamp,
+        exitCode: 0,
+        exitSignal: null,
+      } as const;
+      yield* actions.save(result);
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("maintenance-watch:start-action-drain"),
+        requestId,
+        targetVersion: UpdateDrainTargetVersion.make("tool-maintenance"),
+        createdAt: timestamp,
+      });
+      assert.deepEqual((yield* admission.status).blockers, [
+        { type: "thread-background", threadId, status: "working" },
+      ]);
+      const blocked = yield* Effect.flip(admission.claimActivation({ requestId }));
+      assert.equal(blocked.reason, "not_quiescent");
+      yield* actions.save({ ...result, delivery: "disposed", revision: 1 });
+      assert.isEmpty((yield* admission.status).blockers);
+      yield* admission.claimActivation({ requestId });
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect.each([false, true])(
+  "refuses remote activation during drain without side effects (claim race=%s)",
+  (claimRace) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const gate = yield* makeGate;
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+        const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sink = yield* EventSink.EventSinkV2;
+        yield* seedFamily;
+        const thread = yield* projections.getThread(threadId);
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("remote-drain:link-origin"),
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...thread, linkOrigin: { sessionId: "peer-session", label: "Peer" } },
+            },
+          ],
+        });
+        const delegation = {
+          parentEnvironmentId: EnvironmentId.make("environment:parent"),
+          parentThreadId: ThreadId.make("remote-parent"),
+          sourceTaskId: NodeId.make("remote-task"),
+          delegationId: "remote-drain-delegation",
+        };
+        yield* orchestrator.dispatch({
+          type: "remote_delegation.prepare",
+          commandId: CommandId.make("remote-drain:prepare"),
+          threadId,
+          association: { ...delegation, linkSessionId: "peer-session", stage: "prepared" },
+        });
+        const command = {
+          type: "remote_delegation.activate" as const,
+          commandId: CommandId.make("remote-drain:activate"),
+          threadId,
+          delegation,
+          linkSessionId: "peer-session",
+          messageId: MessageId.make("remote-drain:message"),
+          text: "Do the delegated work.",
+        };
+        const before = yield* projections.getThreadProjection(threadId);
+        const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+        yield* startDrain;
+        if (claimRace) harness.control.snapshotGate = gate;
+        const claiming = claimRace
+          ? yield* admission.claimActivation({ requestId }).pipe(Effect.forkChild)
+          : undefined;
+        if (claiming !== undefined) yield* Deferred.await(gate.entered);
+        const activating = yield* orchestrator
+          .dispatch(command)
+          .pipe(Effect.result, Effect.forkChild);
+        if (claiming !== undefined) {
+          assert.isTrue(
+            yield* Effect.race(
+              Deferred.await(harness.turnRequested).pipe(Effect.as(true)),
+              Fiber.await(activating).pipe(Effect.as(false)),
+            ),
+          );
+          yield* Deferred.succeed(gate.release, undefined);
+          assert.equal((yield* Fiber.join(claiming)).commandType, "update-drain.claim");
+        }
+        const rejected = yield* Fiber.join(activating);
+        assert.equal(rejected._tag, "Failure");
+        if (rejected._tag === "Failure") {
+          assert.equal(rejected.failure._tag, "OrchestratorDispatchError");
+          if (rejected.failure._tag === "OrchestratorDispatchError")
+            assert.equal(
+              (rejected.failure.cause as { _tag: string })._tag,
+              "UpdateDrainAdmissionError",
+            );
+        }
+        assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+        assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+        assert.isTrue(Option.isNone(yield* receipts.getByCommandId(command.commandId)));
+        assert.isEmpty(yield* outbox.listByCommandId(command.commandId));
+        if (!claimRace) {
+          yield* admission.dispatch({
+            type: "update-drain.cancel",
+            commandId: CommandId.make("remote-drain:cancel"),
+            requestId,
+            createdAt: DateTime.formatIso(now),
+          });
+          yield* orchestrator.dispatch(command);
+          const accepted = yield* projections.getThreadProjection(threadId);
+          assert.lengthOf(accepted.runs, 1);
+          assert.deepEqual(accepted.runs[0]?.remoteDelegation, delegation);
+          assert.equal(accepted.thread.remoteDelegations?.[0]?.stage, "active");
+          yield* admission.dispatch({
+            type: "update-drain.start",
+            commandId: CommandId.make("remote-drain:start-again"),
+            requestId: UpdateDrainRequestId.make("remote-drain:second-request"),
+            targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+            createdAt: DateTime.formatIso(now),
+          });
+          const acceptedSequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+          yield* orchestrator.dispatch(command);
+          assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, acceptedSequence);
+          assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 1);
+        }
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(gate.release, undefined)),
+        Effect.provide(harness.layer),
+      );
+    }),
+);
+
 it.effect("commits an admitted archive before drain and prevents activation until it settles", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness;
@@ -302,9 +854,7 @@ it.effect("commits an admitted archive before drain and prevents activation unti
         ...(yield* outbox.listByCommandId(CommandId.make("archive-update:complete"))),
       ];
       for (const _effect of durableEffects) {
-        const next = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "test-cleanup", leaseDurationMs: 60000 }),
-        );
+        const next = Option.getOrThrow(yield* outbox.claimNext({ workerId: "test-cleanup" }));
         yield* outbox.succeed({ effectId: next.id, workerId: "test-cleanup" });
       }
       yield* admission.claimActivation({ requestId });
@@ -475,9 +1025,7 @@ it.effect("keeps an accepted idle deletion blocked through pending and running c
       );
       const pending = yield* outbox.listByCommandId(command.commandId);
       for (let count = 0; count < pending.length; count += 1) {
-        const running = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "delete-cleanup", leaseDurationMs: 60000 }),
-        );
+        const running = Option.getOrThrow(yield* outbox.claimNext({ workerId: "delete-cleanup" }));
         assert.equal(
           (yield* admission.claimActivation({ requestId }).pipe(Effect.result))._tag,
           "Failure",
@@ -512,9 +1060,7 @@ it.effect(
         yield* orchestrator.dispatch(settle);
         const pending = yield* outbox.listByCommandId(settle.commandId);
         for (let count = 0; count < pending.length; count += 1) {
-          const effect = Option.getOrThrow(
-            yield* outbox.claimNext({ workerId: "settle-cleanup", leaseDurationMs: 60000 }),
-          );
+          const effect = Option.getOrThrow(yield* outbox.claimNext({ workerId: "settle-cleanup" }));
           yield* outbox.succeed({ effectId: effect.id, workerId: "settle-cleanup" });
         }
         yield* admission.claimActivation({ requestId });
@@ -744,9 +1290,7 @@ it.effect("refuses an accepted workspace cleanup after claim when it would detac
       };
       const acceptedBinding = yield* orchestrator.dispatch(binding);
       for (const _effect of yield* outbox.listByCommandId(binding.commandId)) {
-        const next = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "workspace-cleanup", leaseDurationMs: 60000 }),
-        );
+        const next = Option.getOrThrow(yield* outbox.claimNext({ workerId: "workspace-cleanup" }));
         yield* outbox.succeed({ effectId: next.id, workerId: "workspace-cleanup" });
       }
       const { providerThreads } = yield* projections.getThreadRecords(threadId, [
