@@ -13081,9 +13081,8 @@
   "faeaebeb47c9f587": "Restore family",
   "3d625b42a8ab4135": "No connected environments",
   "0c21ab66eac80f26": "Connect an environment in this scope to view archived threads.",
-  "ec3330e695a9ff51": [
-    "Archived",
-    " ",
+  "5d3ed45f43611ff4": [
+    "Archived ",
     { "i": 1, "k": "_gt_time_1", "v": "rt" },
     " · Created ",
     { "i": 2, "k": "_gt_time_2", "v": "rt" }
