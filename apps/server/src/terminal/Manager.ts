@@ -1803,6 +1803,12 @@ interface TerminalManagerOptions {
   ptyAdapter: PtyAdapter.PtyAdapter["Service"];
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
+  localCiSettingsPath?: string;
+  /**
+   * Catalog cache and tool directories for managed ACP Registry installs. Their
+   * install directories are appended to the terminal PATH so users can run
+   * managed agents by name (e.g. `kimi login`).
+   */
   managedBinaryCacheDir?: string;
   managedBinaryToolsDir?: string;
   subprocessInspector?: TerminalSubprocessInspector;
@@ -1878,7 +1884,7 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
 export const make = Effect.fn("TerminalManager.make")(function* (
   deriveConfigMap: typeof deriveProviderInstanceConfigMap,
 ) {
-  const { terminalLogsDir, providerStatusCacheDir, baseDir } = yield* ServerConfig.ServerConfig;
+  const { terminalLogsDir, providerStatusCacheDir, baseDir, settingsPath } = yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
@@ -1897,6 +1903,7 @@ export const make = Effect.fn("TerminalManager.make")(function* (
   );
   return yield* makeWithOptions({
     logsDir: terminalLogsDir,
+    localCiSettingsPath: settingsPath,
     ptyAdapter,
     processTable: nativeTelemetry.processTable.pipe(
       Effect.mapError(
@@ -3099,6 +3106,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               yield* HostProcess.HomeDirectory,
               session.threadId,
             );
+            if (options.localCiSettingsPath !== undefined) {
+              terminalEnv.T3CODE_LOCAL_CI_SETTINGS_PATH = options.localCiSettingsPath;
+            }
             // Append managed install directories so agent commands resolve without shadowing user/system tools.
             if (
               options.managedBinaryCacheDir !== undefined &&
