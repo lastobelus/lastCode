@@ -32,16 +32,16 @@ import {
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as McpWebhookTransport from "../mcp/McpWebhookTransport.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { layerMcpEventTestAuth } from "../testUtils/mcpEventAuth.lastcode.ts";
 import * as MilestoneHub from "./MilestoneHub.ts";
 
 const environmentId = EnvironmentId.make("environment-milestone-events-test");
 const clientToken = "clientTokenWithoutDots";
 const threadToken = "threadTokenWithoutDots";
 const hostToken = "hostTokenWithoutDots";
-const scopes = {
+const scopes: Record<string, McpInvocationContext.McpInvocationScope> = {
   [clientToken]: {
     environmentId,
     requestNamespace: "client-session",
@@ -59,20 +59,19 @@ const scopes = {
       providerInstanceId: ProviderInstanceId.make("codex"),
     },
     client: undefined,
-    // Use a thread credential that can reach the full MCP endpoint's event listing.
-    capabilities: new Set(["orchestration", "preview"]),
+    capabilities: new Set(["orchestration"]),
     issuedAt: 1,
   },
+  // A script on the host: signed in as no outside client.
   [hostToken]: {
     environmentId,
     requestNamespace: "host",
     thread: undefined,
     client: undefined,
-    // Admit this synthetic host caller to /mcp so the webhook principal check runs.
-    capabilities: new Set(["orchestration", "preview"]),
+    capabilities: new Set(["orchestration"]),
     issuedAt: 1,
   },
-} satisfies Record<string, McpInvocationContext.McpInvocationScope>;
+};
 
 // The Standard Webhooks example secret: base64 of 24 bytes.
 const secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
@@ -174,26 +173,7 @@ const serveWith = Effect.fnUntraced(function* (settings: { readonly workflowsEna
             sessionId === "client-session" ? Deferred.await(revoked) : Effect.never,
         }),
       ),
-      Layer.provide(
-        Layer.mock(McpSessionRegistry.McpSessionRegistry)({
-          resolve: (presented) =>
-            Effect.succeed(presented === threadToken ? scopes[threadToken] : undefined),
-        }),
-      ),
-      Layer.provide(
-        Layer.succeed(McpHttpServer.McpClientAuthenticator, {
-          authenticate: (request) => {
-            const authorization = request.headers.authorization;
-            if (authorization === `Bearer ${clientToken}`) {
-              return Effect.succeed(scopes[clientToken]);
-            }
-            if (authorization === `Bearer ${hostToken}`) {
-              return Effect.succeed(scopes[hostToken]);
-            }
-            return Effect.undefined;
-          },
-        }),
-      ),
+      Layer.provide(layerMcpEventTestAuth(scopes)),
     ),
     { disableListenLog: true, disableLogger: true },
   ).pipe(Layer.build);
