@@ -1,6 +1,7 @@
 import type { AgentFeedbackMode } from "@t3tools/contracts";
 
 import type { ProviderAdapterV2RuntimePolicy } from "./ProviderAdapter.ts";
+import { projectActionHandoffInstructions } from "./lastcodeProjectActions.ts";
 
 /** None while agent feedback is off, so users who never opt in pay no context for it. */
 export const AGENT_FEEDBACK_INSTRUCTIONS = {
@@ -10,12 +11,14 @@ export const AGENT_FEEDBACK_INSTRUCTIONS = {
 } satisfies Record<AgentFeedbackMode, string>;
 
 /** Session-invariant; harnesses with a native system-prompt append can carry it once per session. */
-export const PULL_REQUEST_LINKING_INSTRUCTIONS = `<pull_request_linking>
+export const pullRequestLinkingInstructions = (
+  actionLaunchDisabled = false,
+) => `<pull_request_linking>
 Link each PR you create, take over, or push to: link_pull_request, or link_pull_requests for several, full URL, every stack layer, as your next call. Host tools don't link for you. If linking fails, say so. Skip PRs you only read or review and PRs named only as background. Call watch_pull_request when asked to monitor or babysit, or when work you were asked to do, such as a merge, still waits on checks or reviews, even after an earlier unwatch. Finish any needed branch update and push first, then watch, run any required project gate check once, and end your turn while gates are pending. Otherwise act now or hand back. An app-owned delegated child owns a PR watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance of that destination's installed checkpoint, or authorized an isolated acceptance scenario; Action ownership, the flag in source, or a newer-looking version does not count. Otherwise, or if the watch is refused, the child ends with an unfinished handoff asking its parent to own the watch. An owning child ends each turn unfinished while waiting and continues only on its own watch wakes; its parent does not poll, read, or relay those events. After PR work, a child's last line is: PR <full URL>, head <SHA>, checks and reviews <state>. Links and watches persist across pushes. For PR waits, no sleep, loops, gh --watch, Monitor or ScheduleWakeup. Before handback, call unwatch_pull_request on any PR you watch. When pull_request_* tools are listed, use them, not gh or cafe, to read, list, open, edit, review, reply on, close, or merge PRs, and ci_logs and ci_rerun for their checks. pull_request_create links for you.
-If available, call link_issue for each issue you take on or file, even via CLI; skip issues you only read.
-
-A delegated child owns resumable Project Actions only when its brief says the parent verified features.appOwnedActionContinuationVersion and installed acceptance, or authorized an isolated acceptance scenario. Then launch the eligible saved Action yourself and end your turn, saying the task is unfinished and what it waits on: the Action, or a Pause, pending input, or recovery that needs attention. Your task continues when the result arrives. Otherwise, or if the launch is refused, leave the Action to your parent, even when run_project_action_and_resume is available: end your turn with a final response that marks the work unfinished and requests the Action, giving your thread, project, environment, exact checkout and head SHA, the eligible Action, the result you expect, and your next step. That response is the handoff; send no separate parent message.
+If available, call link_issue for each issue you take on or file, even via CLI; skip issues you only read.${projectActionHandoffInstructions(actionLaunchDisabled)}
 </pull_request_linking>`;
+
+export const PULL_REQUEST_LINKING_INSTRUCTIONS = pullRequestLinkingInstructions();
 
 const PREVIEW_HANDOFF_INSTRUCTIONS = `<preview_handoffs>
 When the t3-code MCP server exposes preview_host, launch temporary QA dev servers and HTML servers through that tool before handing the user a link. Supply the exact command, absolute working directory, local URL, required environment overrides, and source worktree path. Keep HTML and its supporting files in the workspace. The tool retains the handoff recipe and source until explicit stop, thread archive or deletion, or automatic workspace suspension. Its process sleeps after 24 hours; opening the in-thread link or retained Browser panel restores it without another agent turn and starts a fresh run window. Process expiry is not handoff expiry. Do not stop its terminal or delete its files at turn end or while waiting for acceptance. Prepare requested manual QA without asking the user to start a QA window: leave the scenario ready and emit a clean integrated-browser link. For T3 dev QA, retain a fixed T3CODE_DEV_AUTH_TOKEN in the launch environment and set browserAuth:"t3-dev" so opening the link renews authentication; never emit the credential. If a browser fault repeats after a corrected diagnostic attempt, coordinate one investigation with a clear owner; do not repeatedly ask another blocked thread to perform the same QA or ask the user to reconnect an unspecified host. Ordinary QA explicitly selects Default or a dedicated QA profile. GitHub uploads and other authenticated GitHub work explicitly select Logged in Developer in a separate tab after preview_profiles; never change the default profile to obtain a login. Do not substitute a provider background shell, nohup, tmux, a longer timeout, or an external daemon. A link produced without preview_host has no managed server lifetime guarantee. Persistent LastCode-hosted HTML assets can use the existing file-preview path without a temporary server.
@@ -30,6 +33,7 @@ export function buildRuntimeInstructionSections(runtime: {
   readonly reasoningEffort?: string | undefined;
   /** False when the session's system prompt already carries the linking instructions. */
   readonly pullRequestLinking?: boolean;
+  readonly projectActionLaunchDisabled?: boolean | undefined;
 }): readonly [string, string] {
   const harness = toSingleLine(runtime.harness);
   const model = toSingleLine(runtime.model ?? "");
@@ -43,7 +47,9 @@ export function buildRuntimeInstructionSections(runtime: {
   const feedbackLine = AGENT_FEEDBACK_INSTRUCTIONS[runtime.agentFeedback ?? "off"];
   const feedback = feedbackLine ? `\n${feedbackLine}` : "";
   const linkingInstructions =
-    runtime.pullRequestLinking === false ? "" : `\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`;
+    runtime.pullRequestLinking === false
+      ? ""
+      : `\n\n${pullRequestLinkingInstructions(runtime.projectActionLaunchDisabled)}`;
   return [`${runtimeInfo}${linkingInstructions}${feedback}`, PREVIEW_HANDOFF_INSTRUCTIONS];
 }
 

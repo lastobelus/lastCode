@@ -30,6 +30,7 @@ import {
   callerLinkOrigin,
 } from "./linkOrigin.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { visibleWithProjectActionLaunch } from "./toolkits/actionResume/LastCodeActionToolAccess.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import {
   assertFullAccess,
@@ -427,6 +428,7 @@ const linksUnavailable = new OrchestratorMcpFailure({
 const THREAD_ONLY = new Set<unknown>([
   McpInvocationContext.hiddenFromOutsideClients,
   McpInvocationContext.hiddenWithoutBackgroundWait,
+  visibleWithProjectActionLaunch,
 ]);
 
 const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record<string, Tool.Any>>(

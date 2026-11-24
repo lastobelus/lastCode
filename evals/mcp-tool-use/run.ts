@@ -52,10 +52,11 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import { THEME_GUIDE } from "@t3tools/shared/themeCss";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../../apps/server/src/provider/CodexDeveloperInstructions.ts";
-import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
+import { pullRequestLinkingInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import { makeSideChatContext } from "../../apps/server/src/orchestration-v2/ContextHandoffService.ts";
 import { withInlineContext } from "../../apps/server/src/orchestration-v2/ContextHandoffDelivery.ts";
 import { ActionResumeToolkit } from "../../apps/server/src/mcp/toolkits/actionResume/tools.ts";
+import { visibleWithProjectActionLaunch } from "../../apps/server/src/mcp/toolkits/actionResume/LastCodeActionToolAccess.ts";
 import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment/tools.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import { FeedbackToolkit } from "../../apps/server/src/mcp/toolkits/feedback/tools.ts";
@@ -597,6 +598,7 @@ const hiddenWhileLinksOff = enabledWhen(McpInvocationContext.hiddenWhileLinksOff
 const hiddenWhileFeedbackOff = enabledWhen(McpInvocationContext.hiddenWhileFeedbackOff);
 // T3 lists PR and CI tools only to a thread whose project is on a forge it reads.
 const hiddenWithoutForge = enabledWhen(McpInvocationContext.hiddenWithoutForge);
+const hiddenWithProjectActionLaunchDisabled = enabledWhen(visibleWithProjectActionLaunch);
 /**
  * `tools` is T3 as shipped. `raw` takes away T3's PR, CI and issue tools and their instructions,
  * so the agent works the forge with CLIs alone, to measure what the tools save.
@@ -609,8 +611,10 @@ const forgeToolNames = new Set(
   ),
 );
 /** T3's text for an arm: `raw` drops the PR linking block that names T3's PR tools. */
-const forArm = (value: string, arm: Arm | undefined) =>
-  arm === "raw" ? value.replace(`\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`, "") : value;
+const forArm = (value: string, arm: Arm | undefined, actionLaunchDisabled = false) =>
+  arm === "raw"
+    ? value.replace(`\n\n${pullRequestLinkingInstructions(actionLaunchDisabled)}`, "")
+    : value;
 const visibleT3Tools = (options: {
   readonly subagent?: boolean;
   readonly links?: boolean;
@@ -618,10 +622,12 @@ const visibleT3Tools = (options: {
   readonly agentFeedback?: Contracts.AgentFeedbackMode;
   readonly arm?: Arm;
   readonly ownedPullRequestWatch?: boolean;
+  readonly codexBackgroundWait?: boolean;
 }) =>
   t3Tools.filter(
     (tool) =>
       !(options.arm === "raw" && forgeToolNames.has(tool.name)) &&
+      !(options.codexBackgroundWait && hiddenWithProjectActionLaunchDisabled.has(tool.name)) &&
       (options.links === true || !hiddenWhileLinksOff.has(tool.name)) &&
       ((options.agentFeedback ?? "off") !== "off" || !hiddenWhileFeedbackOff.has(tool.name)) &&
       (options.forge !== false || !hiddenWithoutForge.has(tool.name)) &&
@@ -711,17 +717,29 @@ export const t3SubagentContext = async (model: Model, device = true, browser = t
  */
 const t3ContextReport = (model: Model, backgroundWait: boolean) => {
   const size = (chars: number) => `${chars} chars (~${Math.round(chars / 4)} tokens)`;
-  const descriptions = t3Tools.reduce((sum, tool) => sum + valueText(tool.description).length, 0);
-  const schemas = JSON.stringify(t3Tools).length;
+  const actionLaunchDisabled = isCodex(model) && backgroundWait;
+  const tools = actionLaunchDisabled
+    ? t3Tools.filter((tool) => !hiddenWithProjectActionLaunchDisabled.has(tool.name))
+    : t3Tools;
+  const descriptions = tools.reduce((sum, tool) => sum + valueText(tool.description).length, 0);
+  const schemas = JSON.stringify(tools).length;
   const systemText = isCodex(model)
     ? JSON.stringify(
-        buildCodexAdditionalContext({ model }, { browser: true, device: true, backgroundWait }),
+        buildCodexAdditionalContext(
+          { model },
+          {
+            browser: true,
+            device: true,
+            backgroundWait,
+            projectActionLaunchDisabled: actionLaunchDisabled,
+          },
+        ),
       )
     : t3SystemAppend(model);
   return [
     `- T3 context: system text ${size(systemText.length)}`,
     `tool descriptions ${size(descriptions)}`,
-    `full tool schemas ${size(schemas)} across ${t3Tools.length} tools.`,
+    `full tool schemas ${size(schemas)} across ${tools.length} tools.`,
   ].join(", ");
 };
 
@@ -913,11 +931,12 @@ const buildCodexBase = (
       browser: options.browserAccess ?? true,
       device: options.deviceAccess ?? true,
       backgroundWait: options.codexBackgroundWait === true,
+      projectActionLaunchDisabled: options.codexBackgroundWait === true,
     },
   );
   input.push(
     ...Object.entries(context).map(([key, entry]) =>
-      message(`<${key}>${forArm(entry.value, options.arm)}</${key}>`),
+      message(`<${key}>${forArm(entry.value, options.arm, options.codexBackgroundWait)}</${key}>`),
     ),
   );
   const nativeTools = input

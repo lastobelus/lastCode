@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   actionResumeStatus,
+  actionFollowUpWithoutRelaunchHint,
   actionWaitPresentation,
   environmentPausePresentation,
   actionResumeSummary,
@@ -102,6 +103,12 @@ describe("Action resume follow-up presentation", () => {
       last,
     ]);
     expect(parseActionResumeFollowUp(text)?.runId).toBe("run-checkout");
+    const withoutRelaunch = actionFollowUpWithoutRelaunchHint(text);
+    expect(parseActionResumeFollowUp(withoutRelaunch)).toEqual(parseActionResumeFollowUp(text));
+    expect(withoutRelaunch.split("\n").slice(-3)).toEqual([
+      ...text.split("\n").slice(-3, -1),
+      last.split(" Relaunch on ")[0],
+    ]);
   });
 
   it("round-trips action identities containing the legacy delimiter", () => {

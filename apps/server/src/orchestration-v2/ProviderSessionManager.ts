@@ -59,7 +59,15 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
-import { codexBackgroundWaitForAttachedSession } from "../provider/LastCodeBackgroundWait.ts";
+import {
+  codexBackgroundWaitForAttachedSession,
+  readLastCodeBackgroundWaitEnabled,
+  projectActionFollowUpForProvider,
+} from "../provider/LastCodeBackgroundWait.ts";
+import {
+  PROJECT_ACTION_LAUNCH_DISABLED,
+  projectActionLaunchDisabled,
+} from "@t3tools/provider-core/server/lastcodeProjectActions";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import {
@@ -356,6 +364,7 @@ interface LiveSessionEntry {
   readonly linkedEnvironmentsByThread: ReadonlyMap<ThreadId, boolean | null>;
   /** Scope revocation to recorded credential ids so superseded sessions cannot revoke replacements opened before detach. */
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
+  readonly projectActionLaunchDisabled: boolean;
   readonly supportsMultipleProviderThreads: boolean;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -504,6 +513,9 @@ export const layerWithOptions = (
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+      const readProjectActionLaunchDisabled = readLastCodeBackgroundWaitEnabled(
+        Option.getOrUndefined(serverSettings)?.getSettings,
+      );
       // Access only needs project existence; ProjectService depends on update
       // admission, which constructs this manager before the rest of the runtime.
       const projectStore = yield* Effect.serviceOption(ProjectStore.ProjectStoreV2);
@@ -663,6 +675,7 @@ export const layerWithOptions = (
       const prepareMcpSession = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
+        actionLaunchDisabled: boolean,
         attachedBackgroundWait?: boolean,
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
@@ -680,14 +693,18 @@ export const layerWithOptions = (
                 >(["orchestration", "worktree", "pull-requests", "issues"]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
+                if (actionLaunchDisabled) capabilities.add(PROJECT_ACTION_LAUNCH_DISABLED);
+                const adapter = yield* registry.get(providerInstanceId).pipe(Effect.orDie);
+                const driver = adapter.driver;
                 const backgroundWait =
-                  attachedBackgroundWait === undefined
-                    ? yield* registry.get(providerInstanceId).pipe(
-                        Effect.flatMap((adapter) => adapter.getCapabilities()),
-                        Effect.map((adapter) => adapter.tools.supportsBackgroundWait === true),
-                        Effect.option,
-                      )
-                    : Option.some(attachedBackgroundWait);
+                  attachedBackgroundWait !== undefined
+                    ? Option.some(attachedBackgroundWait)
+                    : driver === "codex" && Option.isSome(serverSettings)
+                      ? Option.some(actionLaunchDisabled)
+                      : yield* adapter.getCapabilities().pipe(
+                          Effect.map((adapter) => adapter.tools.supportsBackgroundWait === true),
+                          Effect.option,
+                        );
                 if (Option.getOrElse(backgroundWait, () => false)) {
                   capabilities.add("background-wait");
                 }
@@ -711,7 +728,6 @@ export const layerWithOptions = (
                     }),
                     Effect.orElseSucceed(() => ({ subagent: false, appOwnedSubagent: false })),
                   );
-                const driver = (yield* registry.get(providerInstanceId).pipe(Effect.orDie)).driver;
                 const nativeExecutionAttribution = driver === "codex" || driver === "claudeAgent";
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
@@ -735,6 +751,7 @@ export const layerWithOptions = (
                     resolved.thread.nativeExecutionAttribution === nativeExecutionAttribution &&
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
                     resolved.capabilities.has("device") === deviceToolsAvailable &&
+                    projectActionLaunchDisabled(resolved.capabilities) === actionLaunchDisabled &&
                     // A failed capability read cannot tell that the live credential is wrong.
                     (Option.isNone(backgroundWait) ||
                       resolved.capabilities.has("background-wait") === backgroundWait.value) &&
@@ -2050,9 +2067,13 @@ export const layerWithOptions = (
               Effect.uninterruptible,
             );
             if (attached !== undefined) {
+              const owningSession = (yield* Ref.get(sessions)).get(
+                sessionKey(input.providerSessionId),
+              );
               const prepared = yield* prepareMcpSession(
                 input.threadId,
                 input.providerInstanceId,
+                owningSession?.projectActionLaunchDisabled ?? false,
                 codexBackgroundWaitForAttachedSession(attached),
               );
               preparedForCleanup = prepared;
@@ -2681,6 +2702,7 @@ export const layerWithOptions = (
         eventSubscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        actionLaunchDisabled: boolean,
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(
@@ -2915,7 +2937,14 @@ export const layerWithOptions = (
                   () =>
                     agentFeedbackMode.pipe(
                       Effect.flatMap((agentFeedback) =>
-                        runtime.startTurn({ ...input, agentFeedback }),
+                        runtime.startTurn({
+                          ...input,
+                          agentFeedback,
+                          message: projectActionFollowUpForProvider(
+                            input.message,
+                            actionLaunchDisabled,
+                          ),
+                        }),
                       ),
                       turnMetrics("send", input.modelSelection.model),
                     ),
@@ -3742,9 +3771,11 @@ export const layerWithOptions = (
                   ),
                 );
                 const openedWithLinkedEnvironments = yield* readLinkedEnvironments;
+                const actionLaunchDisabled = yield* readProjectActionLaunchDisabled;
                 const prepared = yield* prepareMcpSession(
                   input.threadId,
                   input.modelSelection.instanceId,
+                  actionLaunchDisabled,
                 );
                 const mcpCredentialId = prepared.mcpCredentialId;
                 let reservationDropped = mcpCredentialId === undefined;
@@ -3816,12 +3847,17 @@ export const layerWithOptions = (
                 const eventSubscribers = yield* Ref.make<
                   ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
                 >(new Map());
-                const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+                const exposedRuntime = decorateRuntime(
+                  runtime,
+                  eventSubscribers,
+                  actionLaunchDisabled,
+                );
                 const entry: LiveSessionEntry = {
                   attachedThreadIds: new Set([input.threadId]),
                   loadedProviderThreadKeyByThread: new Map(),
                   openedWithLinkedEnvironments,
                   linkedEnvironmentsByThread: new Map(),
+                  projectActionLaunchDisabled: actionLaunchDisabled,
                   mcpCredentialIdByThread:
                     mcpCredentialId === undefined
                       ? new Map()

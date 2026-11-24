@@ -1,11 +1,12 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
-import { T3_CODE_MCP_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
-import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
+import { t3CodeMcpInstructions } from "@t3tools/provider-core/server/orchestrationInstructions";
+import { pullRequestLinkingInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
 export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
+export const T3_PI_ACTION_LAUNCH_DISABLED_ENV = "T3_PI_ACTION_LAUNCH_DISABLED";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
 export const PI_T3_SERVICE_TIER_COMMAND = "t3-service-tier";
@@ -24,8 +25,12 @@ const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
-const T3_INSTRUCTIONS = ${JSON.stringify(T3_CODE_MCP_INSTRUCTIONS)};
-const PULL_REQUEST_LINKING_INSTRUCTIONS = ${JSON.stringify(PULL_REQUEST_LINKING_INSTRUCTIONS)};
+const ACTION_LAUNCH_DISABLED_ENV = ${JSON.stringify(T3_PI_ACTION_LAUNCH_DISABLED_ENV)};
+const T3_INSTRUCTIONS = ${JSON.stringify(
+  [false, true].map((disabled) =>
+    [t3CodeMcpInstructions(disabled), pullRequestLinkingInstructions(disabled)].join("\n\n"),
+  ),
+)};
 const SERVICE_TIER_COMMAND = ${JSON.stringify(PI_T3_SERVICE_TIER_COMMAND)};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -529,7 +534,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // Keep guidance in the system prompt so leading slash commands still expand.
   pi.on("before_agent_start", (event, ctx) => {
     reconcileDiscovery(ctx);
-    const instructions = T3_INSTRUCTIONS + "\\n\\n" + PULL_REQUEST_LINKING_INSTRUCTIONS;
+    const instructions = T3_INSTRUCTIONS[env(ACTION_LAUNCH_DISABLED_ENV) === "1" ? 1 : 0];
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
       // A full prompt override bypasses Pi's later section rendering.

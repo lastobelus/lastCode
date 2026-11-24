@@ -11,6 +11,7 @@ import { McpSchema, Tool, Toolkit } from "effect/ai";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { visibleWithProjectActionLaunch } from "./LastCodeActionToolAccess.ts";
 
 const dependencies = [McpInvocationContext.McpInvocationContext];
 const ActionResumeToolError = Schema.Union([
@@ -38,7 +39,7 @@ const ListProjectActionsTool = Tool.make("list_project_actions", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
-  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+  .annotate(McpSchema.EnabledWhen, visibleWithProjectActionLaunch);
 
 const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume", {
   description:
@@ -55,7 +56,7 @@ const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume",
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, true)
   .annotate(Tool.Idempotent, false)
-  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+  .annotate(McpSchema.EnabledWhen, visibleWithProjectActionLaunch);
 
 const InspectActionRunTool = Tool.make("inspect_action_run", {
   description:
@@ -97,7 +98,7 @@ const DiscardInterruptedActionTool = Tool.make("discard_interrupted_action", {
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, true)
   .annotate(Tool.Idempotent, false)
-  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+  .annotate(McpSchema.EnabledWhen, visibleWithProjectActionLaunch);
 
 export const ActionResumeToolkit = Toolkit.make(
   ListProjectActionsTool,

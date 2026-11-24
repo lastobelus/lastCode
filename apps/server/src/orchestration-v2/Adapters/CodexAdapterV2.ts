@@ -117,6 +117,7 @@ import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { buildCodexAdditionalContext } from "../../provider/CodexDeveloperInstructions.ts";
+import { projectActionLaunchDisabled } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import {
   codexBackgroundCommandNeedsWake,
   codexBackgroundResultRequest,
@@ -907,6 +908,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly browserToolsAvailable?: boolean;
     readonly deviceToolsAvailable?: boolean;
     readonly backgroundWaitAvailable?: boolean;
+    readonly projectActionLaunchDisabled?: boolean | undefined;
     /** ChatGPT token sharing does not accept service tiers. */
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
@@ -970,6 +972,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
               backgroundWait: input.backgroundWaitAvailable === true,
+              projectActionLaunchDisabled: input.projectActionLaunchDisabled,
             },
           )
         : undefined;
@@ -8071,6 +8074,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               agentFeedback: turnInput.agentFeedback ?? "off",
               browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+              projectActionLaunchDisabled: projectActionLaunchDisabled(mcpSession?.capabilities),
               backgroundWaitAvailable: backgroundWaitEnabled,
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
