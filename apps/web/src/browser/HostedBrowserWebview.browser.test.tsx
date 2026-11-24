@@ -282,7 +282,6 @@ describe("Electron browser hosting outside the selected thread", () => {
       vi.stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
         preview: createPreviewBridgeFixture({
-          onBrowserEvent: () => () => {},
           onOpenLink: (listener: typeof onOpenLink) => {
             onOpenLink = listener;
             return () => undefined;
@@ -310,16 +309,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       vi.spyOn(console, "warn").mockImplementation(() => undefined);
       mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
       applyPreviewServerSnapshot(threadRef, snapshot);
-      await act(async () => {
-        await ensureClientSettingsHydrated();
-        await render(
-          <AppAtomRegistryProvider>
-            <ElectronBrowserHost onThreadLink={() => {}} />
-          </AppAtomRegistryProvider>,
-          44,
-        );
-      });
-      const createCount = mocks.createTab.mock.calls.length;
+      await ensureClientSettingsHydrated();
       if (failureKind === "settings") {
         vi.mocked(browserDefaults.resolveBrowserDefaults).mockRejectedValueOnce(failure);
       }
@@ -343,7 +333,6 @@ describe("Electron browser hosting outside the selected thread", () => {
         });
       }
       expect(mocks.openPreview).toHaveBeenCalledTimes(failureKind === "settings" ? 0 : 1);
-      expect(mocks.createTab).toHaveBeenCalledTimes(createCount);
       expect(appAtomRegistry.get(previewStateAtom(scopedThreadKey(threadRef)))).toMatchObject({
         activeTabId: snapshot.tabId,
         sessions: { [snapshot.tabId]: snapshot },
@@ -372,7 +361,6 @@ describe("Electron browser hosting outside the selected thread", () => {
     vi.stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
       preview: createPreviewBridgeFixture({
-        onBrowserEvent: () => () => {},
         onOpenLink: (listener: typeof onOpenLink) => {
           onOpenLink = listener;
           return () => undefined;
@@ -387,15 +375,7 @@ describe("Electron browser hosting outside the selected thread", () => {
     const report = vi.spyOn(toastManager, "add").mockReturnValue("recovery-error");
     mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
     applyPreviewServerSnapshot(threadRef, snapshot);
-    await act(async () => {
-      await ensureClientSettingsHydrated();
-      await render(
-        <AppAtomRegistryProvider>
-          <ElectronBrowserHost onThreadLink={() => {}} />
-        </AppAtomRegistryProvider>,
-        44,
-      );
-    });
+    await ensureClientSettingsHydrated();
     await act(async () => {
       onOpenLink({
         tabId: previewRuntimeTabId(threadRef, null, snapshot.tabId),

@@ -2,71 +2,35 @@ import type { previewBridge } from "~/components/preview/previewBridge";
 
 type PreviewBridge = NonNullable<typeof previewBridge>;
 
-export function createPreviewBridgeFixture(overrides: Partial<PreviewBridge>): PreviewBridge {
-  const unexpected = (): never => {
-    throw new Error("Unexpected preview bridge call; provide an explicit test implementation.");
-  };
-  // Keep this exhaustive so bridge additions fail typechecking instead of a late browser run.
-  return {
-    bindBrowserEnvironment: unexpected,
-    onBrowserSurfaceRequest: unexpected,
-    onBrowserRendererRequest: () => () => undefined,
-    browserSurfaceResponse: unexpected,
-    browserPresentation: unexpected,
-    browserCommand: unexpected,
-    onBrowserEvent: unexpected,
-    setForwardedShortcuts: unexpected,
-    createTab: unexpected,
-    closeTab: unexpected,
-    registerWebview: unexpected,
-    navigate: unexpected,
-    goBack: unexpected,
-    goForward: unexpected,
-    refresh: unexpected,
-    stopLoading: unexpected,
-    zoomIn: unexpected,
-    zoomOut: unexpected,
-    resetZoom: unexpected,
-    setZoomFactor: unexpected,
-    hardReload: unexpected,
-    findInPage: unexpected,
-    stopFindInPage: unexpected,
-    onFindResult: unexpected,
-    setColorScheme: unexpected,
-    setAudioMuted: unexpected,
-    setShown: unexpected,
-    setCaptureDrawn: unexpected,
-    openDevTools: unexpected,
-    clearCookies: unexpected,
-    clearCache: unexpected,
-    getPreviewConfig: unexpected,
-    onTunnelAccessRequest: () => () => undefined,
-    resolveTunnelAccess: unexpected,
-    forwardPort: unexpected,
-    stopPortForward: unexpected,
-    listPortForwards: unexpected,
-    sharesLoopback: unexpected,
-    onPortForwards: unexpected,
-    listBrowserImportSources: unexpected,
-    importBrowserCookies: unexpected,
-    annotationVoice: { onEvent: unexpected, update: unexpected },
-    setAnnotationTheme: unexpected,
-    setAnnotationSendEnabled: unexpected,
-    pickElement: unexpected,
-    cancelPickElement: unexpected,
-    captureScreenshot: unexpected,
-    revealArtifact: unexpected,
-    copyArtifactToClipboard: unexpected,
-    pictureInPicture: { open: unexpected, close: unexpected },
-    recording: {
-      onInput: unexpected,
-      startScreencast: unexpected,
-      stopScreencast: unexpected,
-      save: unexpected,
+function unexpectedCall(path: string): object {
+  return new Proxy(
+    () => {
+      throw new Error(
+        `Unexpected preview bridge call: ${path}; provide an explicit test implementation.`,
+      );
     },
-    onStateChange: unexpected,
-    onPointerEvent: unexpected,
-    onOpenLink: unexpected,
+    {
+      get: (_target, property) =>
+        typeof property === "string" && property !== "then"
+          ? unexpectedCall(`${path}.${property}`)
+          : undefined,
+    },
+  );
+}
+
+export function createPreviewBridgeFixture(overrides: Partial<PreviewBridge>): PreviewBridge {
+  const implementations = {
+    onBrowserRendererRequest: () => () => undefined,
+    onTunnelAccessRequest: () => () => undefined,
     ...overrides,
-  };
+  } satisfies Partial<PreviewBridge>;
+  // Only implemented members need maintaining. A bridge addition can stay unused;
+  // invoking it fails by name, including methods inside recording/pictureInPicture.
+  return new Proxy(implementations, {
+    get: (target, property, receiver) => {
+      if (Reflect.has(target, property)) return Reflect.get(target, property, receiver);
+      if (typeof property !== "string" || property === "then") return undefined;
+      return unexpectedCall(`preview.${property}`);
+    },
+  }) as PreviewBridge;
 }
