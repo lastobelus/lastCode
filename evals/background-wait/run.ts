@@ -7,14 +7,16 @@ import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeUtil from "node:util";
 
 import { codexBackgroundWaitInstructions } from "../../apps/server/src/provider/LastCodeBackgroundWait.ts";
-import { checkActionCatalog, standingActionPolicy } from "./actionPolicy.ts";
+import { checkActionCatalog, codexCatalogProbe, standingActionPolicy } from "./actionPolicy.ts";
 import { cases, taskPrompt, type Arm, type Scenario } from "./cases.ts";
 import {
   gradeSample,
   printCases,
+  requireCompleteSamples,
   type Results,
   type Sample,
   type SampleResult,
+  type ThreadLaunch,
   type WorkEvent,
 } from "./metrics.ts";
 import {
@@ -335,6 +337,36 @@ function readWork(base: string, workspace: string): WorkEvent[] {
     : [];
 }
 
+function readThreadEvidence(
+  base: string,
+  thread: Snapshot["thread"],
+  provider: Results["config"]["provider"],
+) {
+  const file = NodePath.join(base, "userdata/logs/provider", nativeLogName(thread.threadId));
+  const native = readNative(
+    NodeFS.existsSync(file) ? NodeFS.readFileSync(existingFile(base, file), "utf8") : "",
+    provider,
+  );
+  if (provider === "claudeAgent") {
+    return { native, trace: native.turns === thread.runCount ? native.trace : undefined };
+  }
+  // The app-server's item stream omits write_stdin; read the actual model-facing tool transcript.
+  const rolloutHome = NodePath.join(base, "codex-home");
+  const rollouts = new Set(
+    native.rolloutPaths
+      .filter((path) => isInside(rolloutHome, path) && NodeFS.existsSync(path))
+      .map((path) => existingFile(rolloutHome, path)),
+  );
+  const traces = [...rollouts].map((path) => readCodexRollout(NodeFS.readFileSync(path, "utf8")));
+  return {
+    native,
+    trace:
+      traces.length > 0 && traces.reduce((sum, trace) => sum + trace.turns, 0) === thread.runCount
+        ? traces.flatMap((trace) => trace.trace)
+        : undefined,
+  };
+}
+
 function sampleMetrics(input: {
   base: string;
   sample: Sample;
@@ -348,36 +380,7 @@ function sampleMetrics(input: {
   const { latest, finished, endedAt } = observations;
   const parent = latest[0]!;
   const worker = latest.at(-1)!;
-  const evidence = latest.map(({ thread }) => {
-    const file = NodePath.join(base, "userdata/logs/provider", nativeLogName(thread.threadId));
-    const native = readNative(
-      NodeFS.existsSync(file) ? NodeFS.readFileSync(existingFile(base, file), "utf8") : "",
-      config.provider,
-    );
-    if (config.provider === "claudeAgent") {
-      return {
-        native,
-        catalog: native.toolCatalog,
-        trace: native.turns === thread.runCount ? native.trace : undefined,
-      };
-    }
-    // The app-server's item stream omits write_stdin; read the actual model-facing tool transcript.
-    const rolloutHome = NodePath.join(base, "codex-home");
-    const rollouts = new Set(
-      native.rolloutPaths
-        .filter((path) => isInside(rolloutHome, path) && NodeFS.existsSync(path))
-        .map((path) => existingFile(rolloutHome, path)),
-    );
-    const traces = [...rollouts].map((path) => readCodexRollout(NodeFS.readFileSync(path, "utf8")));
-    return {
-      native,
-      catalog: readCodexActionCatalog(traces.flatMap(({ trace }) => trace)),
-      trace:
-        traces.length > 0 && traces.reduce((sum, trace) => sum + trace.turns, 0) === thread.runCount
-          ? traces.flatMap((trace) => trace.trace)
-          : undefined,
-    };
-  });
+  const evidence = latest.map(({ thread }) => readThreadEvidence(base, thread, config.provider));
   const finalMessage = (snapshot: Snapshot) =>
     snapshot.messages.findLast((message) => message.role === "assistant")?.text ?? "";
   const workspace = scenario.delegated ? (worker.thread.worktreePath ?? "") : sample.workspace!;
@@ -402,7 +405,6 @@ function sampleMetrics(input: {
     holds: sample.holds,
     wrapperWakeIds: observations.wrapperWakeIds,
     actionWakes: observations.actionWakes,
-    actionCatalogs: evidence.map(({ catalog }) => checkActionCatalog(catalog, config.arm === "b")),
     actionRunObserved: latest.some(({ thread }) => thread.actionResume != null),
     workerMessage: finalMessage(worker),
     finalMessage: finalMessage(parent),
@@ -486,7 +488,7 @@ async function main() {
             delegated: "delegated" in scenario,
             guidanceBytes: Buffer.byteLength(guidance(arm)),
             standing: standingByCase.get(scenario.id)!,
-            prompt: taskPrompt(scenario, arm, model, flags.effort, provider),
+            prompt: taskPrompt(scenario, arm, model, flags.effort),
           })),
         },
         null,
@@ -505,7 +507,9 @@ async function main() {
   const lock = contained(base, NodePath.join(output, "running.lock"));
   NodeFS.mkdirSync(output, { recursive: true, mode: 0o700 });
   NodeFS.writeFileSync(lock, String(process.pid) + "\n", { flag: "wx", mode: 0o600 });
-  const onSignal = () => {
+  let signal: NodeJS.Signals | undefined;
+  const onSignal = (received: NodeJS.Signals) => {
+    signal ??= received;
     stopping = true;
   };
   let stopping = false;
@@ -531,9 +535,11 @@ async function main() {
       };
       const data: Results = NodeFS.existsSync(resultsPath)
         ? (JSON.parse(NodeFS.readFileSync(resultsPath, "utf8")) as Results)
-        : { version: 1, config, samples: [] };
-      if (data.version !== 1 || JSON.stringify(data.config) !== JSON.stringify(config)) {
-        throw new Error("Results have different configuration. Choose a new --out name.");
+        : { version: 2, config, samples: [] };
+      if (data.version !== 2 || JSON.stringify(data.config) !== JSON.stringify(config)) {
+        throw new Error(
+          "Results have a different revision or run protocol. Choose a new --out name or resume from the recorded revision.",
+        );
       }
       const save = () => {
         const temporary = resultsPath + "." + NodeCrypto.randomUUID();
@@ -563,7 +569,7 @@ async function main() {
       const findLaunched = db.prepare(
         "SELECT thread_id FROM orchestration_v2_projection_threads WHERE project_id = ? AND title = ?",
       );
-      async function runSample(scenario: Scenario, sample: Sample) {
+      async function ensureProject(scenario: Scenario, sample: Sample) {
         if (sample.workspace === undefined) {
           const directory = NodeFS.mkdtempSync(NodePath.join(output, "sample-"));
           const workspace = NodePath.join(directory, "project");
@@ -575,43 +581,110 @@ async function main() {
           sample.projectId = await registerProject(base, sample.workspace, scenario);
           save();
         }
-        if (sample.threadId === undefined && sample.launchedAt !== undefined) {
-          const found = findLaunched.all(sample.projectId, sample.title);
+        return sample.projectId;
+      }
+
+      async function ensureThread(entry: ThreadLaunch, projectId: string, prompt: string) {
+        if (entry.threadId !== undefined) return entry.threadId;
+        if (entry.launchedAt !== undefined) {
+          const found = findLaunched.all(projectId, entry.title);
           if (found.length !== 1) {
             throw new Error(
-              `Cannot reconcile the earlier start for ${sample.title}; refusing to launch a duplicate.`,
+              `Cannot reconcile the earlier start for ${entry.title}; refusing to launch a duplicate.`,
             );
           }
-          sample.threadId = String(found[0]!.thread_id);
+          entry.threadId = String(found[0]!.thread_id);
+          save();
+          return entry.threadId;
+        }
+        entry.launchedAt = Date.now();
+        save();
+        const started = JSON.parse(
+          await cli(
+            base,
+            ["thread", "start"],
+            [
+              "--provider",
+              config.provider,
+              "--model",
+              config.model,
+              ...(config.effort ? ["--option", `effort=${config.effort}`] : []),
+              "--title",
+              entry.title,
+              "--json",
+              projectId,
+              prompt,
+            ],
+          ),
+        ) as { threadId?: string };
+        if (!started.threadId) throw new Error(`No thread receipt for ${entry.title}.`);
+        entry.threadId = started.threadId;
+        save();
+        return entry.threadId;
+      }
+
+      async function verifyCatalog(scenario: Scenario, sample: Sample) {
+        if (data.catalogProbe === undefined) {
+          const projectId = await ensureProject(scenario, sample);
+          if (stopping) return;
+          data.catalogProbe = {
+            title: `bw-catalog-${NodeCrypto.randomUUID().slice(0, 12)}`,
+            projectId,
+          };
           save();
         }
-        if (sample.threadId === undefined) {
+        const probe = data.catalogProbe;
+        if (probe.tools === undefined) {
+          const threadId = await ensureThread(
+            probe,
+            probe.projectId!,
+            config.provider === "codex" ? codexCatalogProbe : "Reply OK and end your turn.",
+          );
+          const deadline = Date.now() + timeoutMs;
+          let snapshot = await show(base, threadId);
+          while (!isQuiescent(snapshot) && Date.now() < deadline) {
+            await NodeTimersPromises.setTimeout(2_000);
+            snapshot = await show(base, threadId);
+          }
+          const { thread } = snapshot;
+          if (
+            thread.status !== "completed" ||
+            thread.providerInstanceId !== config.provider ||
+            thread.model !== config.model
+          ) {
+            throw new Error(
+              `Catalog probe ${probe.title} did not complete on ${config.model}. Repeat the same command to resume.`,
+            );
+          }
+          const { native, trace } = readThreadEvidence(base, thread, config.provider);
+          const tools =
+            config.provider === "codex" ? readCodexActionCatalog(trace ?? []) : native.toolCatalog;
+          if (tools !== undefined) {
+            probe.tools = tools;
+            save();
+          }
+        }
+        const catalog = checkActionCatalog(probe.tools, arm === "b");
+        if (catalog !== "verified") {
+          throw new Error(
+            `Run incomplete: separate Action catalog probe ${catalog}. Inspect ${probe.title} and the eval arm's server settings.`,
+          );
+        }
+        console.log(`Action catalog verified in separate probe ${probe.title}.`);
+      }
+
+      async function runSample(scenario: Scenario, sample: Sample) {
+        const projectId = await ensureProject(scenario, sample);
+        if (sample.launchedAt === undefined) {
           const origin = checkHome(base, arm, config.provider);
-          await configureFixtureAction(base, origin, db, sample.projectId, scenario.actionId);
-          sample.launchedAt = Date.now();
-          save();
-          const started = JSON.parse(
-            await cli(
-              base,
-              ["thread", "start"],
-              [
-                "--provider",
-                config.provider,
-                "--model",
-                config.model,
-                ...(config.effort ? ["--option", `effort=${config.effort}`] : []),
-                "--title",
-                sample.title,
-                "--json",
-                sample.projectId,
-                taskPrompt(scenario, arm, config.model, config.effort, config.provider),
-              ],
-            ),
-          ) as { threadId?: string };
-          if (!started.threadId) throw new Error(`No thread receipt for ${sample.title}.`);
-          sample.threadId = started.threadId;
-          save();
+          await configureFixtureAction(base, origin, db, projectId, scenario.actionId);
+          if (stopping) return;
         }
+        await ensureThread(
+          sample,
+          projectId,
+          taskPrompt(scenario, arm, config.model, config.effort),
+        );
         const observations = await observeFamily({
           base,
           sample,
@@ -641,32 +714,28 @@ async function main() {
         );
       }
 
-      const queue = work.filter(
-        ({ scenario, index }) =>
-          !data.samples.find((sample) => sample.caseId === scenario.id && sample.index === index)
-            ?.result,
-      );
-      const inFlight = queue.filter(({ scenario, index }) =>
-        data.samples.some(
-          (sample) =>
-            sample.caseId === scenario.id &&
-            sample.index === index &&
-            sample.launchedAt !== undefined,
-        ),
-      );
+      const scheduled = work.map(({ scenario, index }) => ({
+        scenario,
+        sample: data.samples.find(
+          (sample) => sample.caseId === scenario.id && sample.index === index,
+        )!,
+      }));
+      const queue = scheduled.filter(({ sample }) => sample.result === undefined);
+      const inFlight = queue.filter(({ sample }) => sample.launchedAt !== undefined);
       if (inFlight.length > concurrency)
         throw new Error(
           "Resume with concurrency at least as high as the number of in-flight samples.",
         );
       const pending = [...inFlight, ...queue.filter((item) => !inFlight.includes(item))];
+      if (pending.length > 0 && !stopping) {
+        const { scenario, sample } = pending[0]!;
+        await verifyCatalog(scenario, sample);
+      }
       const errors: string[] = [];
       const workers = await Promise.allSettled(
         Array.from({ length: Math.min(concurrency, pending.length) }, async () => {
           while (!stopping && pending.length > 0) {
-            const { scenario, index } = pending.shift()!;
-            const sample = data.samples.find(
-              (row) => row.caseId === scenario.id && row.index === index,
-            )!;
+            const { scenario, sample } = pending.shift()!;
             try {
               await runSample(scenario, sample);
             } catch (error) {
@@ -683,6 +752,10 @@ async function main() {
       printCases(data);
       console.log(resultsPath);
       if (errors.length > 0) throw new Error(errors.join("\n"));
+      requireCompleteSamples(
+        scheduled.map(({ sample }) => sample),
+        signal,
+      );
     } finally {
       db.close();
     }

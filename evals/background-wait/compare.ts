@@ -1,17 +1,23 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off
 import * as NodeFS from "node:fs";
 import * as NodeUtil from "node:util";
+import { checkActionCatalog } from "./actionPolicy.ts";
 import { cases } from "./cases.ts";
 import { median, type Results, type SampleResult } from "./metrics.ts";
 
 function load(path: string): Results {
   const data = JSON.parse(NodeFS.readFileSync(path, "utf8")) as Results;
-  if (data.version !== 1 || !Array.isArray(data.samples))
+  if ((data.version !== 1 && data.version !== 2) || !Array.isArray(data.samples))
     throw new Error(`Invalid eval results: ${path}`);
   return data;
 }
 
 function paired(a: Results, b: Results, baselineHead?: string) {
+  if (a.version !== b.version) {
+    throw new Error(
+      "Cannot compare runs with different catalog probe protocols. Run both arms with the same task prompts.",
+    );
+  }
   const { provider, model, effort, head, scale } = a.config;
   if (baselineHead !== undefined && baselineHead !== head) {
     throw new Error(`--baseline-head does not match arm A's recorded head ${head}.`);
@@ -113,6 +119,9 @@ export function compare(a: Results, b: Results, subsequentTurns: number, baselin
   const full = cases.length === 6 && cases.every((row) => row.a.length === 20);
   const sufficient =
     full &&
+    (a.version === 1 ||
+      (checkActionCatalog(a.catalogProbe?.tools, false) === "verified" &&
+        checkActionCatalog(b.catalogProbe?.tools, true) === "verified")) &&
     [...aResults, ...bResults].every((row) => row?.setupFault !== true) &&
     summaries.every(
       ({ a, b }) =>

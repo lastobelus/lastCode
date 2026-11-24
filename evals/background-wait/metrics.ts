@@ -7,14 +7,12 @@ import {
   sumUsage,
 } from "./observe.ts";
 import type { Arm, Scenario } from "./cases.ts";
-import type { ActionCatalogCheck } from "./actionPolicy.ts";
 
 export interface SampleResult {
   finished: boolean;
   correct: boolean;
   problems: string[];
   setupFault?: boolean;
-  actionCatalogs?: readonly ActionCatalogCheck[];
   turns: number;
   requests: number | null;
   tokens: Usage | null;
@@ -56,7 +54,6 @@ interface GradeInput {
   holds: readonly string[];
   wrapperWakeIds: readonly string[];
   actionWakes: number;
-  actionCatalogs?: readonly ActionCatalogCheck[];
   actionRunObserved?: boolean;
   workerMessage: string;
   finalMessage: string;
@@ -110,19 +107,12 @@ export function gradeSample(input: GradeInput): SampleResult {
   const observed = traces?.map((trace) => gradeTrace(trace, input.waitInstruction, arm === "b"));
   const forbiddenAction =
     arm === "b" &&
-    input.actionCatalogs !== undefined &&
     (input.actionRunObserved === true ||
       input.actionWakes > 0 ||
       starts.some((row) => row.arm === "a") ||
       observed?.some((trace) => trace.actionWaits > 0));
   if (forbiddenAction)
     problems.push("Harness or product fault: a Project Action launched in the wrapper arm.");
-  if (input.actionCatalogs?.includes("mismatch"))
-    problems.push(
-      "Harness or product fault: the provider's Action tool catalog did not match the eval arm.",
-    );
-  if (input.actionCatalogs?.includes("unverified"))
-    problems.push("The provider's Action tool catalog could not be verified.");
   const worker = observed?.at(-1);
   const polls = observed?.reduce((sum, trace) => sum + trace.polls, 0) ?? null;
   const redundantMarks = observed?.reduce((sum, trace) => sum + trace.redundantMarks, 0) ?? null;
@@ -173,14 +163,7 @@ export function gradeSample(input: GradeInput): SampleResult {
     finished,
     correct: problems.length === 0,
     problems,
-    ...(input.actionCatalogs === undefined
-      ? {}
-      : {
-          actionCatalogs: input.actionCatalogs,
-          setupFault: Boolean(
-            forbiddenAction || input.actionCatalogs.some((check) => check !== "verified"),
-          ),
-        }),
+    ...(forbiddenAction ? { setupFault: true } : {}),
     turns: input.turns,
     requests,
     tokens,
@@ -206,20 +189,23 @@ export function gradeSample(input: GradeInput): SampleResult {
   };
 }
 
-export interface Sample {
-  caseId: string;
-  index: number;
+export interface ThreadLaunch {
   title: string;
-  workspace?: string;
   projectId?: string;
   threadId?: string;
   launchedAt?: number;
+}
+
+export interface Sample extends ThreadLaunch {
+  caseId: string;
+  index: number;
+  workspace?: string;
   holds: string[];
   result?: SampleResult;
 }
 
 export interface Results {
-  version: 1;
+  version: 1 | 2;
   config: {
     arm: Arm;
     provider: "codex" | "claudeAgent";
@@ -230,7 +216,19 @@ export interface Results {
     scale: number;
     base: string;
   };
+  catalogProbe?: ThreadLaunch & { tools?: readonly string[] };
   samples: Sample[];
+}
+
+export function requireCompleteSamples(samples: readonly Sample[], signal?: string) {
+  const missing = samples.filter((sample) => sample.result === undefined);
+  if (missing.length === 0) return;
+  const awaitingGrade = missing.filter((sample) => sample.launchedAt !== undefined).length;
+  throw new Error(
+    `Run incomplete${signal === undefined ? "" : ` after ${signal}`}. ` +
+      `Graded ${samples.length - missing.length}/${samples.length}; ${awaitingGrade} started and awaiting a grade, ` +
+      `${missing.length - awaitingGrade} not started. Repeat the same command to resume ${missing.length} samples.`,
+  );
 }
 
 export function median(numbers: number[]): number {

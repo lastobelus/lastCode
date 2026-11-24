@@ -32,7 +32,7 @@ vp run dev:server --home-dir "$b" --no-seed --host 127.0.0.1 --port 44192 --dev-
 
 Use `--dry-run` to print the plan. Inspect `problems` in the results if a sample fails.
 
-Run paired arms at the same concurrency. The default is 20 fresh threads per case and two active samples at once. Before launching each sample, the runner saves its opted-in Action in that project's settings through the running server and checks the effective Action. This also works in homes that have migrated their legacy project settings. Codex records the relevant names from its own tool catalog in one read-only call at the start of each thread. Its cost is included in raw usage for both arms. Claude uses its SDK initialization catalog. A catalog mismatch, missing catalog evidence, or Action launch in arm B makes the comparison incomplete.
+Run paired arms at the same concurrency. The default is 20 fresh threads per case and two active samples at once. Before launching each sample, the runner saves its opted-in Action in that project's settings through the running server and checks the effective Action. This also works in homes that have migrated their legacy project settings. Each arm verifies its live tool catalog in a separate probe thread before the samples start. The probe uses Codex's tool catalog or Claude's SDK initialization catalog. Its requests stay outside the sample costs and its instructions stay out of the task prompts. A catalog mismatch, missing catalog evidence, or Action launch in arm B makes the comparison incomplete.
 
 ```sh
 node evals/background-wait/run.ts --base-dir "$a" --arm a --model gpt-6-luna --out luna
@@ -56,7 +56,7 @@ The comparison reports one model and effort at a time. The codified pass bar is 
 
 To compare runs from different revisions, use results scored by the same rubric and pass arm A's exact recorded head. The comparison reads the saved grades as written. Earlier runs that rejected Markdown formatting around exit codes need an offline regrade before comparison with the corrected rubric.
 
-Use paired runs with the same fixtures and catalog probe for the token and reliability gates. Runs made before the catalog check do not include its cost. The standing-watch fixture now puts its recipe first so Codex's instruction file limit preserves it in both arms.
+Use paired runs with the same fixtures and prompts for the token and reliability gates. Runs that put the catalog check in the task prompt include its costs and any effect it had on agent behavior. Keep those results as historical evidence and use fresh outputs in both arms for the separate-probe comparison. The standing-watch fixture puts its recipe first so Codex's instruction file limit preserves it in both arms.
 
 ```sh
 node evals/background-wait/compare.ts "$a_results" "$b_results" --baseline-head "$a_head"
@@ -85,7 +85,7 @@ node evals/background-wait/compare.ts "$ca/background-wait-eval/haiku/results.js
 
 ## Resume
 
-Repeat the same command with the same `--out` name. The runner saves launch intents, accepted thread IDs, observed holds and finished grades as it goes. It reattaches to earlier threads and skips graded samples. If the server never confirms an ambiguous start, the runner stops with that sample's title and preserves the record for inspection. A timeout leaves the thread running and the run resumable. One Ctrl-C lets currently observed samples reach completion or their timeout and stops new launches. After an ungraceful kill, remove only that run's `running.lock` once you confirm the recorded PID has exited, then rerun the same command.
+Repeat the same command with the same `--out` name and source revision. The runner saves launch intents, accepted thread IDs, observed holds and finished grades as it goes. It reuses the verified catalog probe, reattaches to earlier threads and skips graded samples. If the server never confirms an ambiguous start, the runner stops with that sample's title and preserves the record for inspection. A timeout leaves the thread running and the run resumable. Ctrl-C or SIGTERM stops new launches and drains samples already being observed. The runner exits nonzero if any requested samples still lack a grade and reports how many to resume. After an ungraceful kill, remove only that run's `running.lock` once you confirm the recorded PID has exited, then rerun the same command.
 
 ## Cases and evidence
 

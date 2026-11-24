@@ -31,11 +31,11 @@ const recoveryToolNames = actionTools
 
 export const catalogMarker = "bw-action-catalog ";
 export const codexCatalogProbe =
-  "Before the task, record the current T3 tool catalog for the eval. In functions.exec run exactly " +
+  "Record this thread's T3 Action tool catalog. In functions.exec run exactly " +
   "`text('" +
   catalogMarker +
   "' + JSON.stringify(ALL_TOOLS.map(t => t.name).filter(n => /^mcp__t3[-_]code__.*action/.test(n))))`. " +
-  "Then continue with the task.";
+  "Then end your turn.";
 
 export type ActionCatalogCheck = "verified" | "mismatch" | "unverified";
 

@@ -4,9 +4,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { parseLastCodeWrappedAction } from "../../packages/shared/src/lastcodeWrappedCommands.ts";
 import { catalogMarker, checkActionCatalog, standingActionPolicy } from "./actionPolicy.ts";
-import { cases } from "./cases.ts";
+import { cases, taskPrompt } from "./cases.ts";
 import { compare } from "./compare.ts";
-import { gradeSample, type Results } from "./metrics.ts";
+import { gradeSample, requireCompleteSamples, type Results } from "./metrics.ts";
 import {
   awaitedWrapperIds,
   gradeTrace,
@@ -70,6 +70,23 @@ describe("real-session evidence", () => {
       checkActionCatalog([...recovery, "mcp__t3_code__discard_interrupted_action"], true),
     ).toBe("mismatch");
   });
+
+  it("keeps catalog instructions out of the Quick CI parent and worker prompt", () => {
+    const scenario = cases.find((entry) => entry.id === "quick-ci")!;
+    for (const arm of ["a", "b"] as const) {
+      const prompt = taskPrompt(scenario, arm, "gpt-6-luna");
+      expect(prompt).toContain("Do the work yourself in your own checkout. " + scenario.request);
+      expect(prompt).not.toMatch(/catalog|ALL_TOOLS/u);
+    }
+  });
+
+  it("reports unfinished samples after a stop and distinguishes starts from pending work", () => {
+    const sample = { caseId: "quick-ci", index: 1, title: "fixture", holds: [] };
+    expect(() => requireCompleteSamples([{ ...sample, launchedAt: 1 }, sample], "SIGTERM")).toThrow(
+      "Run incomplete after SIGTERM. Graded 0/2; 1 started and awaiting a grade, 1 not started. Repeat the same command to resume 2 samples.",
+    );
+    expect(() => requireCompleteSamples([], "SIGINT")).not.toThrow();
+  });
   it("requires an exact opt-in to reuse a baseline recorded at another head", () => {
     const a: Results = {
       version: 1,
@@ -89,6 +106,9 @@ describe("real-session evidence", () => {
     };
     expect(() => compare(a, b, 5)).toThrow("same source revision");
     expect(() => compare(a, b, 5, "wrong")).toThrow("does not match arm A");
+    expect(() => compare(a, { ...b, version: 2 }, 5, "earlier")).toThrow(
+      "different catalog probe protocols",
+    );
     expect(compare(a, b, 5, "earlier")).toMatchObject({
       outcome: "incomplete",
       heads: { a: "earlier", b: "later" },
@@ -520,7 +540,6 @@ describe("real-session evidence", () => {
         ...input,
         traces: [[], [...trace]],
         wrapperWakeIds: ["worker-command"],
-        actionCatalogs: ["verified", "verified"],
         actionRunObserved: true,
       }),
     ).toMatchObject({
