@@ -321,7 +321,9 @@ describe("environment theme", () => {
 
         const originalWatchReady = yield* Deferred.make<void>();
         const restoredWatchReady = yield* Deferred.make<void>();
+        const editedWatchEvent = yield* Deferred.make<void>();
         let restoring = false;
+        let editing = false;
         yield* withEnvironmentThemes(
           { "nightfall.json": encodeThemeFile(NIGHTFALL_THEME) },
           Effect.gen(function* () {
@@ -341,14 +343,12 @@ describe("environment theme", () => {
             assert.deepEqual(yield* Queue.take(snapshots), ["Shared Light"]);
             yield* Deferred.await(restoredWatchReady);
 
-            yield* fs.writeFileString(
-              path.join(previous, "shared", "themes", "nightfall.json"),
-              encodeThemeFile({ ...NIGHTFALL_THEME, name: "Stale Nightfall" }),
-            );
+            editing = true;
             yield* fs.writeFileString(
               path.join(target, "shared-light.json"),
               encodeThemeFile({ ...SHARED_THEME, name: "Edited Shared Light" }),
             );
+            yield* Deferred.await(editedWatchEvent);
             assert.deepEqual(yield* Queue.take(snapshots), ["Edited Shared Light"]);
           }),
           {
@@ -357,16 +357,26 @@ describe("environment theme", () => {
               FileSystem.FileSystem.of({
                 ...fs,
                 watch: (file, options) =>
-                  fs.watch(file, {
-                    ...options,
-                    onReady: () => {
-                      Deferred.doneUnsafe(
-                        restoring ? restoredWatchReady : originalWatchReady,
-                        Effect.void,
-                      );
-                      options?.onReady?.();
-                    },
-                  }),
+                  fs
+                    .watch(file, {
+                      ...options,
+                      onReady: () => {
+                        Deferred.doneUnsafe(
+                          restoring ? restoredWatchReady : originalWatchReady,
+                          Effect.void,
+                        );
+                        options?.onReady?.();
+                      },
+                    })
+                    .pipe(
+                      Stream.tap((event) =>
+                        editing &&
+                        event._tag === "Update" &&
+                        path.basename(event.path) === "shared-light.json"
+                          ? Deferred.succeed(editedWatchEvent, undefined)
+                          : Effect.void,
+                      ),
+                    ),
               }),
           },
         );
