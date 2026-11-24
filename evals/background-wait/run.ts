@@ -608,7 +608,12 @@ async function main() {
               config.provider,
               "--model",
               config.model,
-              ...(config.effort ? ["--option", `effort=${config.effort}`] : []),
+              ...(config.effort
+                ? [
+                    "--option",
+                    `${config.provider === "codex" ? "reasoningEffort" : "effort"}=${config.effort}`,
+                  ]
+                : []),
               "--title",
               entry.title,
               "--json",
