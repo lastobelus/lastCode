@@ -1,5 +1,7 @@
 import { pipe } from "effect/Function";
 import { changeRequestTermKind, type ChangeRequestTermKind } from "./pullRequest/changeRequestTerm";
+import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
+import { ThreadStatusGlyph } from "./ThreadStatusGlyph";
 import {
   scopeProjectRef,
   scopedThreadKey,
@@ -19,7 +21,7 @@ import {
   type VcsStatusResult,
 } from "@t3tools/contracts";
 import { msg, T, useGT, useMessages } from "gt-react";
-import { TerminalIcon } from "lucide-react";
+import { FolderGit2Icon, TerminalIcon } from "lucide-react";
 import { m, type MessageResolver } from "../i18n/messages";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
@@ -53,6 +55,7 @@ import {
 } from "./Sidebar.logic";
 
 import type { SidebarThreadSummary } from "../types";
+import { formatWorktreePathForDisplay } from "../worktreeCleanup";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   PULL_REQUEST_STATE_PRESENTATION,
@@ -708,7 +711,7 @@ export function terminalStatusFromRunningIds(
   };
 }
 
-function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
+export function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
   if (event.animationName !== "status-pulse") return;
 
   for (const animation of event.currentTarget.getAnimations()) {
@@ -769,15 +772,53 @@ export function ThreadTerminalStatusButton({
   );
 }
 
-function ThreadStatusLabel({
+export function ThreadWorktreeIndicator({
+  thread,
+}: {
+  thread: Pick<SidebarThreadSummary, "id" | "branch" | "worktreePath">;
+}) {
+  const gt = useGT();
+  const worktreePath = thread.worktreePath?.trim();
+  if (!worktreePath) {
+    return null;
+  }
+
+  const displayPath = formatWorktreePathForDisplay(worktreePath);
+  const tooltip = thread.branch
+    ? gt("Worktree: {path} ({branch})", { path: displayPath, branch: thread.branch })
+    : gt("Worktree: {path}", { path: displayPath });
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            role="img"
+            aria-label={tooltip}
+            data-testid={`thread-worktree-${thread.id}`}
+            className="inline-flex items-center justify-center"
+          />
+        }
+      >
+        <FolderGit2Icon className="size-3.5 shrink-0 text-icon-muted" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">{tooltip}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
+export function ThreadStatusLabel({
   status,
   compact = false,
+  icon,
 }: {
   status: ThreadStatusPill;
   compact?: boolean;
+  icon?: LastCodeStatusIcon | undefined;
 }) {
   const m = useMessages();
   const label = m(status.label);
+  const accessibleLabel = status.description ? `${label}. ${status.description}` : label;
   if (compact) {
     return (
       <Tooltip>
@@ -785,18 +826,31 @@ function ThreadStatusLabel({
           render={
             <span
               role="img"
-              aria-label={label}
+              aria-label={accessibleLabel}
               className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
             />
           }
         >
-          <span
-            className={`size-[9px] rounded-full ${status.dotClass} ${
-              status.pulse ? "motion-safe:animate-status-pulse" : ""
-            }`}
-          />
+          {status.marker ? (
+            <span
+              aria-hidden
+              data-lastcode-sidebar-unscaled-content
+              className="shrink-0 font-semibold leading-none"
+            >
+              {status.marker}
+            </span>
+          ) : icon ? (
+            <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+          ) : (
+            <span
+              data-lastcode-sidebar-unscaled-content
+              className={`size-1.5 rounded-full ${status.dotClass} ${
+                status.pulse ? "motion-safe:animate-status-pulse" : ""
+              }`}
+            />
+          )}
         </TooltipTrigger>
-        <TooltipPopup side="top">{label}</TooltipPopup>
+        <TooltipPopup side="top">{status.description ?? label}</TooltipPopup>
       </Tooltip>
     );
   }
@@ -807,19 +861,34 @@ function ThreadStatusLabel({
         render={
           <span
             role="img"
-            aria-label={label}
-            className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
+            aria-label={accessibleLabel}
+            className={`inline-flex items-center gap-1 text-3xs ${icon ? "min-w-0 max-w-full" : ""} ${status.colorClass}`}
           />
         }
       >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
-            status.pulse ? "motion-safe:animate-status-pulse" : ""
-          }`}
-        />
-        <span className="hidden md:inline">{label}</span>
+        {status.marker ? (
+          <span
+            aria-hidden
+            data-lastcode-sidebar-unscaled-content
+            className="shrink-0 font-semibold leading-none"
+          >
+            {status.marker}
+          </span>
+        ) : icon ? (
+          <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+        ) : (
+          <span
+            data-lastcode-sidebar-unscaled-content
+            className={`size-1.5 rounded-full ${status.dotClass} ${
+              status.pulse ? "motion-safe:animate-status-pulse" : ""
+            }`}
+          />
+        )}
+        <span className={icon ? "hidden min-w-0 truncate md:inline" : "hidden md:inline"}>
+          {label}
+        </span>
       </TooltipTrigger>
-      <TooltipPopup side="top">{label}</TooltipPopup>
+      <TooltipPopup side="top">{status.description ?? label}</TooltipPopup>
     </Tooltip>
   );
 }
