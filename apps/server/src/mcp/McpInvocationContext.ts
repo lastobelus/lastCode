@@ -1,4 +1,5 @@
 import type { McpExecutionOrigin } from "@t3tools/provider-core/server/McpProviderSessions";
+import { PROJECT_ACTION_LAUNCH_DISABLED } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import {
   type AgentFeedbackMode,
   type AuthMcpClientAccess,
@@ -30,6 +31,7 @@ const ALL_MCP_CAPABILITIES = [
   "issues",
   "background-wait",
   "action-resume",
+  PROJECT_ACTION_LAUNCH_DISABLED,
 ] as const;
 export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 

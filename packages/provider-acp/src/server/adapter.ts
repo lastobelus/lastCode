@@ -120,6 +120,7 @@ import {
   type T3AcpInstructionState,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { projectActionLaunchDisabled } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import {
@@ -213,6 +214,7 @@ const ACP_PROMPT_ACTIVITY_UPDATES: ReadonlySet<string> = new Set([
 ]);
 
 export interface AcpAdapterV2RuntimeInput {
+  readonly projectActionLaunchDisabled?: boolean | undefined;
   readonly cwd: string;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly extraRoots?: ReadonlyArray<string>;
@@ -1007,6 +1009,7 @@ function negotiatedCapabilities(
 }
 
 interface AcpMcpContext {
+  readonly projectActionLaunchDisabled?: boolean | undefined;
   readonly servers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
@@ -1060,6 +1063,7 @@ function acpMcpContext(
   }
   // codex-acp 1.2.0 and pi-acp drop injected HTTP servers, so HTTP is opt-in per flavor.
   return {
+    projectActionLaunchDisabled: projectActionLaunchDisabled(session.capabilities),
     servers: [
       {
         name: "t3-code",
@@ -2857,6 +2861,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               ? {}
               : { extraRoots: input.runtimePolicy.workspace.extraRoots }),
             mcpServers: mcpContext.servers,
+            projectActionLaunchDisabled: mcpContext.projectActionLaunchDisabled,
             acpMcpServers: mcpContext.acpServers,
             httpMcpServers: mcpContext.httpServers,
             ...(mcpContext.processEnvironment === undefined
@@ -9056,6 +9061,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             interactionMode: turnInput.runtimePolicy.interactionMode,
             hasT3Mcp: mcpSession !== undefined,
             hasDeviceTools: mcpSession?.capabilities?.has("device") === true,
+            projectActionLaunchDisabled: projectActionLaunchDisabled(mcpSession?.capabilities),
           } satisfies T3AcpInstructionState;
           const userText =
             flavor.rewriteUserText === undefined
@@ -9094,6 +9100,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const runtimeInstructions = buildRuntimeInstructions({
             agentFeedback: instructionState.hasT3Mcp ? (turnInput.agentFeedback ?? "off") : "off",
             harness: flavor.runtimeHarness ?? driver,
+            projectActionLaunchDisabled: instructionState.projectActionLaunchDisabled,
             model: turnInput.modelSelection.model,
             runtimePolicy: turnInput.runtimePolicy,
             pullRequestLinking:

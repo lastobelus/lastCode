@@ -275,6 +275,16 @@ export interface ActionResumeFollowUp {
   readonly detailedOutputAvailable: boolean;
 }
 
+const ACTION_RESULT_STALE = "This result may not describe the current head.";
+const ACTION_RESULT_RELAUNCH = `${ACTION_RESULT_STALE} Relaunch on the current head before relying on it.`;
+
+export function actionFollowUpWithoutRelaunchHint(text: string): string {
+  const suffix = `\n${ACTION_RESULT_RELAUNCH}`;
+  return text.endsWith(suffix) && parseActionResumeFollowUp(text) !== null
+    ? `${text.slice(0, -suffix.length)}\n${ACTION_RESULT_STALE}`
+    : text;
+}
+
 export function formatActionResumeFollowUp(input: {
   readonly actionName: string;
   readonly actionId: string;
@@ -303,9 +313,7 @@ export function formatActionResumeFollowUp(input: {
     `${ACTION_INSPECTION_PREFIX}${JSON.stringify({ tool: "inspect_action_run", runId: input.runId })}`,
     // Parsers read the fixed lines above by position; checkout lines must stay after them.
     ...(checkout === undefined ? [] : checkoutLines(checkout.launched, checkout.current)),
-    moved
-      ? "This result may not describe the current head. Relaunch on the current head before relying on it."
-      : "Continue the originating task using this result.",
+    moved ? ACTION_RESULT_RELAUNCH : "Continue the originating task using this result.",
   ].join("\n");
 }
 

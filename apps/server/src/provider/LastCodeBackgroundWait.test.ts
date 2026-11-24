@@ -24,6 +24,7 @@ import {
   CODEX_DEFAULT_INSTANCE_ID,
   makeCodexAdapterV2,
 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import { makeClaudeQueryOptions } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { makeReplayServerConfig } from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES } from "./CodexDeveloperInstructions.ts";
@@ -141,9 +142,32 @@ it.effect("advertises background wait only to opted-in Codex sessions", () =>
         runtimePolicy,
         hasT3Mcp: true,
         backgroundWaitAvailable: enabled,
+        projectActionLaunchDisabled: enabled,
       });
       const instructions = params.additionalContext?.t3_code_runtime?.value ?? "";
       NodeAssert.equal(instructions.includes("t3_background_wait"), enabled);
+      const codexText = Object.values(params.additionalContext ?? {})
+        .map(({ value }) => value)
+        .join("\n");
+      const claude = makeClaudeQueryOptions({
+        modelSelection: { ...modelSelection, model: "claude-haiku-5-5" },
+        nativeThreadId: "native-background-wait",
+        cwd: "/workspace",
+        resume: false,
+        mcpServers: {},
+        projectActionLaunchDisabled: enabled,
+      });
+      const prompt = claude.systemPrompt;
+      NodeAssert.ok(
+        prompt && typeof prompt === "object" && "type" in prompt && prompt.type === "preset",
+      );
+      const claudeText = prompt.append ?? "";
+      for (const text of [codexText, claudeText]) {
+        NodeAssert.equal(text.includes("appOwnedActionContinuationVersion"), !enabled);
+        NodeAssert.equal(text.includes("run_project_action_and_resume"), !enabled);
+        NodeAssert.equal(text.includes("Project Action launch tools are unavailable"), enabled);
+        NodeAssert.ok(text.includes("watch_pull_request"));
+      }
       NodeAssert.ok(
         Buffer.byteLength(instructions, "utf8") <= CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES,
       );

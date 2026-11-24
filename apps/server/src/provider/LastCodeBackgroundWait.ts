@@ -5,8 +5,13 @@ import type {
   RunId,
 } from "@t3tools/contracts";
 import type { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
-import type { ProviderAdapterV2SessionRuntime } from "@t3tools/provider-core/server/ProviderAdapter";
+import type {
+  ProviderAdapterV2SessionRuntime,
+  ProviderAdapterV2TurnMessage,
+} from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderContinuationRequest } from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import { projectActionLaunchDisabled } from "@t3tools/provider-core/server/lastcodeProjectActions";
+import { actionFollowUpWithoutRelaunchHint } from "@t3tools/shared/actionResume";
 import * as Effect from "effect/Effect";
 
 export function readLastCodeBackgroundWaitEnabled(
@@ -18,6 +23,22 @@ export function readLastCodeBackgroundWaitEnabled(
       Effect.orElseSucceed(() => false),
     ) ?? Effect.succeed(false)
   );
+}
+
+export function projectActionFollowUpForProvider(
+  message: ProviderAdapterV2TurnMessage,
+  disabled: boolean,
+): ProviderAdapterV2TurnMessage {
+  if (
+    !disabled ||
+    message.createdBy !== "system" ||
+    message.creationSource !== "server" ||
+    !message.messageId.startsWith("action-resume:")
+  ) {
+    return message;
+  }
+  const text = actionFollowUpWithoutRelaunchHint(message.text);
+  return text === message.text ? message : { ...message, text };
 }
 
 export function withCodexBackgroundWaitCapability(
@@ -37,6 +58,15 @@ export function codexBackgroundWaitForNewSession(
   return capabilities === undefined
     ? readSetting
     : Effect.succeed(capabilities.has("background-wait"));
+}
+
+export function claudeBackgroundWaitForNewSession(
+  capabilities: ReadonlySet<string> | undefined,
+  readSetting: Effect.Effect<boolean>,
+) {
+  return capabilities === undefined
+    ? readSetting
+    : Effect.succeed(projectActionLaunchDisabled(capabilities));
 }
 
 export function codexBackgroundWaitForAttachedSession(runtime: ProviderAdapterV2SessionRuntime) {

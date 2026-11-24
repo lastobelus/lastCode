@@ -6,7 +6,7 @@ import { codexBackgroundWaitInstructions } from "./LastCodeBackgroundWait.ts";
 import {
   T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
-  T3_CODE_ORCHESTRATION_SECTIONS,
+  t3CodeOrchestrationSections,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 
 /** Codex silently truncates additionalContext values over 1,000 tokens, counted as UTF-8 bytes / 4. */
@@ -16,6 +16,7 @@ export interface T3CodeToolAvailability {
   readonly browser: boolean;
   readonly device: boolean;
   readonly backgroundWait?: boolean;
+  readonly projectActionLaunchDisabled?: boolean | undefined;
 }
 
 const normalizeAvailability = (
@@ -60,15 +61,18 @@ export function buildCodexAdditionalContext(
   const availability = normalizeAvailability(toolsAvailable);
   const [runtimeInstructions, previewHandoffs] = buildRuntimeInstructionSections({
     harness: "Codex",
+    projectActionLaunchDisabled: availability.projectActionLaunchDisabled,
     ...runtime,
   });
   // Split values to fit per-entry caps; number keys because Codex emits them in key order.
   return {
     ...Object.fromEntries(
-      T3_CODE_ORCHESTRATION_SECTIONS.map((section, index) => [
-        `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
-        { kind: "application" as const, value: section },
-      ]),
+      t3CodeOrchestrationSections(availability.projectActionLaunchDisabled).map(
+        (section, index) => [
+          `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
+          { kind: "application" as const, value: section },
+        ],
+      ),
     ),
     t3_code_runtime: {
       kind: "application",

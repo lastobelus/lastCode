@@ -62,6 +62,7 @@ import {
 import { cursorWorkspaceMcpServers } from "./workspaceMcpServers.ts";
 import { t3OrchestrationPrompt } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { projectActionLaunchDisabled } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
@@ -2834,6 +2835,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
           mcpServers: Record<string, McpServerConfig> | undefined,
           hasDeviceTools: boolean,
+          actionLaunchDisabled: boolean,
           delivered: {
             readonly orchestration: boolean;
             readonly device: boolean;
@@ -2859,6 +2861,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             hasT3Mcp: mcpServers !== undefined,
             hasDeviceTools,
             orchestrationDelivered: delivered.orchestration,
+            projectActionLaunchDisabled: actionLaunchDisabled,
             deviceInstructionsDelivered: delivered.device,
             providerInstructions: CURSOR_BACKGROUND_WAIT_INSTRUCTIONS,
             providerInstructionsDelivered: delivered.backgroundWait,
@@ -2904,6 +2907,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           }
           const runtimeInstructions = buildRuntimeInstructions({
             agentFeedback: mcpServers === undefined ? "off" : (turnInput.agentFeedback ?? "off"),
+            projectActionLaunchDisabled: actionLaunchDisabled,
             harness: "Cursor",
             model: turnInput.modelSelection.model,
             runtimePolicy: turnInput.runtimePolicy,
@@ -2945,13 +2949,16 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             const mcpServers = cursorMcpServers(mcpSession);
             const hasDeviceTools =
               mcpServers !== undefined && mcpSession?.capabilities?.has("device") === true;
+            const actionLaunchDisabled = projectActionLaunchDisabled(mcpSession?.capabilities);
             const known = yield* Ref.get(told);
             // A conversation this process has not sent to was told on its first run.
             const delivered =
               known?.agent === agent.nativeThreadId
                 ? known
                 : {
-                    orchestration: turnInput.nativeThreadHasTurns ?? turnInput.runOrdinal > 1,
+                    orchestration:
+                      !actionLaunchDisabled &&
+                      (turnInput.nativeThreadHasTurns ?? turnInput.runOrdinal > 1),
                     device: false,
                     backgroundWait: false,
                     runtime: undefined,
@@ -3002,6 +3009,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                       turnInput,
                       mcpServers,
                       hasDeviceTools,
+                      actionLaunchDisabled,
                       delivered,
                       dropped?.text,
                     );

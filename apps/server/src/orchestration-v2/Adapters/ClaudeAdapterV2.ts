@@ -193,7 +193,11 @@ import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import * as ServerConfig from "../../config.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import * as ProcessRunner from "../../processRunner.ts";
-import { readLastCodeBackgroundWaitEnabled } from "../../provider/LastCodeBackgroundWait.ts";
+import {
+  claudeBackgroundWaitForNewSession,
+  readLastCodeBackgroundWaitEnabled,
+} from "../../provider/LastCodeBackgroundWait.ts";
+import { projectActionLaunchDisabled } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import {
   makeLastCodeClaudeWrappedTaskMarker,
   withLastCodeClaudeBackgroundLimit,
@@ -230,8 +234,7 @@ import {
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import {
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
-  T3_CODE_MCP_INSTRUCTIONS,
-  T3_CODE_ORCHESTRATION_SECTIONS,
+  t3CodeMcpInstructions,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import {
@@ -2348,6 +2351,7 @@ export function makeClaudeQueryOptions(input: {
   /** The thread's T3 MCP session holds the `device` capability. */
   readonly deviceToolsAvailable?: boolean;
   readonly browserToolsAvailable?: boolean;
+  readonly projectActionLaunchDisabled?: boolean | undefined;
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
   readonly disallowedTools?: ReadonlyArray<string>;
@@ -2451,10 +2455,10 @@ export function makeClaudeQueryOptions(input: {
               : { ENABLE_TOOL_SEARCH: input.toolSearchOverride }),
           },
         } as ClaudeSdkSettings);
-  const mcpInstructions =
-    input.browserToolsAvailable === false
-      ? T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n").trim()
-      : T3_CODE_MCP_INSTRUCTIONS;
+  const mcpInstructions = t3CodeMcpInstructions(
+    input.projectActionLaunchDisabled,
+    input.browserToolsAvailable,
+  );
   const deviceInstructions = input.mcpServers !== undefined && input.deviceToolsAvailable === true;
   const agentFeedback = input.mcpServers === undefined ? "off" : (input.agentFeedback ?? "off");
   const options: ClaudeAgentSdkQueryOptions = {
@@ -2513,6 +2517,7 @@ export function makeClaudeQueryOptions(input: {
         buildRuntimeInstructions({
           harness: "Claude Code",
           agentFeedback,
+          projectActionLaunchDisabled: input.projectActionLaunchDisabled,
           runtimePolicy: { cwd: input.cwd, workspace: input.workspace },
         }) +
           (input.mcpServers === undefined
@@ -6087,7 +6092,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     }),
     openSession: Effect.fn("ClaudeAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
-        const backgroundWaitEnabled = yield* readBackgroundWait;
+        const backgroundWaitEnabled = yield* claudeBackgroundWaitForNewSession(
+          (yield* mcpSessions.read(input.threadId))?.capabilities,
+          readBackgroundWait,
+        );
         const markWrappedBackgroundTasks = makeLastCodeClaudeWrappedTaskMarker(
           backgroundWaitEnabled,
           input.threadId,
@@ -14242,6 +14250,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               : { mcpServers: mcpOverrides.mcpServers }),
             deviceToolsAvailable: mcpSession?.capabilities?.has("device") === true,
             browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
+            projectActionLaunchDisabled: projectActionLaunchDisabled(mcpSession?.capabilities),
             permissionMode: queryPolicy.permissionMode,
             ...(queryPolicy.allowDangerouslySkipPermissions === undefined
               ? {}
