@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import type * as NodeSqlite from "node:sqlite";
 
+import { catalogMarker } from "./actionPolicy.ts";
 import { wrapperWaitInstruction } from "./project.ts";
 
 type Data = Record<string, unknown>;
@@ -80,6 +81,7 @@ export interface NativeEvidence {
   usage: Usage;
   contexts: number[];
   trace: TraceEvent[];
+  toolCatalog?: readonly string[];
   rolloutPaths: string[];
   complete: boolean;
 }
@@ -155,6 +157,30 @@ export function readCodexRollout(input: string): { trace: TraceEvent[]; turns: n
   return { trace, turns };
 }
 
+export function readCodexActionCatalog(trace: readonly TraceEvent[]): string[] | undefined {
+  const probes = new Set<string>();
+  for (const event of trace) {
+    if (
+      event.kind === "call" &&
+      event.name === "exec" &&
+      event.args.includes("ALL_TOOLS") &&
+      event.args.includes(catalogMarker)
+    ) {
+      probes.add(event.id);
+    }
+    if (event.kind !== "output" || !probes.has(event.id)) continue;
+    const line = event.body.split("\n").find((line) => line.startsWith(catalogMarker));
+    if (line === undefined) continue;
+    try {
+      const names: unknown = JSON.parse(line.slice(catalogMarker.length));
+      if (Array.isArray(names) && names.every((name) => typeof name === "string")) return names;
+    } catch {
+      // An incomplete catalog is not evidence of tool visibility.
+    }
+  }
+  return undefined;
+}
+
 export function readNative(input: string, provider: "codex" | "claudeAgent"): NativeEvidence {
   const usage: Usage[] = [];
   const contexts = new Map<string, number>();
@@ -164,6 +190,7 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
   const accounted = new Set<string>();
   const requestIds = new Set<string>();
   const reportedClaudeRequestIds = new Set<string>();
+  let toolCatalog: string[] | undefined;
 
   for (const row of readLines(input, true)) {
     const frame = record(record(row.event).payload);
@@ -194,6 +221,9 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
       continue;
     }
 
+    if (frame.type === "system" && frame.subtype === "init" && Array.isArray(frame.tools)) {
+      toolCatalog = frame.tools.filter((tool): tool is string => typeof tool === "string");
+    }
     const msg = record(frame.message);
     if (frame.type === "assistant" && typeof msg.id === "string") {
       const id = msg.id;
@@ -253,6 +283,7 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
     usage: sumUsage(usage),
     contexts: [...contexts.values()],
     trace,
+    ...(toolCatalog === undefined ? {} : { toolCatalog }),
     rolloutPaths: [...rolloutPaths],
     complete:
       turns.size > 0 &&

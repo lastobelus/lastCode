@@ -1,6 +1,6 @@
 # Background waits versus Project Actions
 
-This eval compares real LastCode threads for [issue #824](https://github.com/lastobelus/lastCode/issues/824). Both arms run the same fixture workloads on the same server revision. Arm A loads the Action guidance from the landed wrapper commit on `lastcode/main`, opts the fixture Action in, and leaves `lastcodeBackgroundWaitEnabled` off. Arm B loads this branch's `AGENTS.md` and turns the flag on. Agent-facing Project Actions still exist in both arms.
+This eval compares real LastCode threads for [issue #824](https://github.com/lastobelus/lastCode/issues/824). Both arms run the same fixture workloads with the same saved Actions on the same server revision. Arm A loads the Action guidance from the landed wrapper commit on `lastcode/main` and leaves `lastcodeBackgroundWaitEnabled` off. Arm B loads this branch's `AGENTS.md` and turns the flag on. The flag hides agent-facing Action launch tools and their launch and mediation guidance. Action recovery tools remain available.
 
 ## Run on Codex
 
@@ -32,7 +32,7 @@ vp run dev:server --home-dir "$b" --no-seed --host 127.0.0.1 --port 44192 --dev-
 
 Use `--dry-run` to print the plan. Inspect `problems` in the results if a sample fails.
 
-Run one arm at a time at the same concurrency. The default is 20 fresh threads per case and two active samples at once. Before launching each sample, the runner saves its opted-in Action in that project's settings through the running server and checks the effective Action. This also works in homes that have migrated their legacy project settings.
+Run paired arms at the same concurrency. The default is 20 fresh threads per case and two active samples at once. Before launching each sample, the runner saves its opted-in Action in that project's settings through the running server and checks the effective Action. This also works in homes that have migrated their legacy project settings. Codex records the relevant names from its own tool catalog in one read-only call at the start of each thread. Its cost is included in raw usage for both arms. Claude uses its SDK initialization catalog. A catalog mismatch, missing catalog evidence, or Action launch in arm B makes the comparison incomplete.
 
 ```sh
 node evals/background-wait/run.ts --base-dir "$a" --arm a --model gpt-6-luna --out luna
@@ -55,6 +55,8 @@ done
 The comparison reports one model and effort at a time. The codified pass bar is 20 complete samples per arm in each of the six cases, a majority of correct wrapper samples and at least as many correct samples as Actions **in each case**, zero post-instruction wrapper polls, and lower mean raw tokens per task across the six cases. The report includes per-case raw costs to expose any regressions hidden by the aggregate. A missing trace or missing usage makes the decision incomplete. A valid failure counts, including its measured tokens. The live break tests and soak in #824 remain separate gates.
 
 To compare runs from different revisions, use results scored by the same rubric and pass arm A's exact recorded head. The comparison reads the saved grades as written. Earlier runs that rejected Markdown formatting around exit codes need an offline regrade before comparison with the corrected rubric.
+
+Use paired runs with the same fixtures and catalog probe for the token and reliability gates. Runs made before the catalog check do not include its cost. The standing-watch fixture now puts its recipe first so Codex's instruction file limit preserves it in both arms.
 
 ```sh
 node evals/background-wait/compare.ts "$a_results" "$b_results" --baseline-head "$a_head"
@@ -105,7 +107,7 @@ When a LastCode thread's main agent backgrounds a wrapper command, the grader re
 ## Cost
 
 - **Primary** is raw input plus output tokens per sample. Input includes cache reads and cache writes. Cached input is a subset, reported separately. Codex uses per-request `last` usage events, deduplicated by provider thread, turn, and cumulative tokens. Claude uses per-result SDK usage totals and distinct begun message IDs, checked against observed assistant request IDs.
-- **Standing** is a source-size estimate at four UTF-8 bytes per token. It includes the project guidance, unchanged Action mediation instructions, the relevant tool descriptions and parameter declarations, and the flag-gated Codex background-wait instruction. Claude has the background-wait tool in both arms. The result records each estimate per request and their total across requests. Providers may truncate project guidance or defer tool definitions, so this is an inventory estimate. Do not add it to raw usage. Both arms still include the Action tools and the server's Action instructions. Their deletion savings are outside this experiment.
+- **Standing** is a source-size estimate at four UTF-8 bytes per token. It includes project guidance, the server's Action-related launch, handoff or availability text, the visible Action and wait tool descriptions and advertised input schemas, and the flag-gated Codex background-wait instruction. The estimate uses the server's instruction builders and tool visibility predicates. The result records each estimate per request and its total across requests. Providers may truncate project guidance or defer tool definitions, so this is an inventory estimate. Do not add it to raw usage.
 - **Projected** is the owner's formula, `turns × typical context size when called + increased context × typical subsequent turns`. Turns are mean observed thread-family turns. Context size is the median first request input tokens in arm A for the same model and effort. Increased context is the median change from first to last request input in the initiating thread. This is a proxy that includes task dialogue as well as wait overhead. `--subsequent-turns` defaults to a scenario value of **5** and the report shows 0, 1, 5 and 10. Historical subsequent-turn counts were unavailable. Supply a measured value if available.
 - LastCode's 30-day sample had **1,388** agent-launched Actions, **84%** from Codex. The four short operations had medians of **0.3–2.6 minutes** and checkpoint waits had a **43-minute** median. The default fixtures deliberately compress the longest wait and sample the six workloads equally. They cannot support a production-weighted monthly estimate without counts by operation, a measured subsequent-turn distribution, and representative thread depths.
 

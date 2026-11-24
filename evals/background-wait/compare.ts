@@ -113,6 +113,7 @@ export function compare(a: Results, b: Results, subsequentTurns: number, baselin
   const full = cases.length === 6 && cases.every((row) => row.a.length === 20);
   const sufficient =
     full &&
+    [...aResults, ...bResults].every((row) => row?.setupFault !== true) &&
     summaries.every(
       ({ a, b }) =>
         a.counted === a.scheduled &&

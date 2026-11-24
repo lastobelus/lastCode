@@ -71,6 +71,13 @@ export function guidance(arm: Arm) {
     : NodeFS.readFileSync(NodePath.join(root, "AGENTS.md"), "utf8");
 }
 
+export function fixtureGuidance(scenario: Scenario, arm: Arm) {
+  const general = guidance(arm);
+  const notes = "## This project\n\n" + projectNotes(scenario, arm) + "\n";
+  // The watch recipe needs to survive Codex's project instruction byte limit.
+  return scenario.stages === undefined ? `${general}\n${notes}` : `${notes}\n${general}`;
+}
+
 export function repositoryFile(relativePath: string) {
   return NodeFS.readFileSync(NodePath.join(root, relativePath), "utf8");
 }
@@ -114,10 +121,7 @@ export function makeProject(workspace: string, arm: Arm, scenario: Scenario, sec
     `#!/bin/sh\nexec ${shellArg(process.execPath)} "$(dirname "$0")/lastcode-run.ts" "$@"\n`,
   );
   NodeFS.chmodSync(NodePath.join(scripts, "lc-run"), 0o755);
-  NodeFS.writeFileSync(
-    NodePath.join(workspace, "AGENTS.md"),
-    guidance(arm) + "\n## This project\n\n" + projectNotes(scenario, arm) + "\n",
-  );
+  NodeFS.writeFileSync(NodePath.join(workspace, "AGENTS.md"), fixtureGuidance(scenario, arm));
 
   const config: FixtureConfig = {
     workspace,

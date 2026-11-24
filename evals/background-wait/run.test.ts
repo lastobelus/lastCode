@@ -3,6 +3,7 @@ import * as NodeSqlite from "node:sqlite";
 import { describe, expect, it } from "vite-plus/test";
 
 import { parseLastCodeWrappedAction } from "../../packages/shared/src/lastcodeWrappedCommands.ts";
+import { catalogMarker, checkActionCatalog, standingActionPolicy } from "./actionPolicy.ts";
 import { cases } from "./cases.ts";
 import { compare } from "./compare.ts";
 import { gradeSample, type Results } from "./metrics.ts";
@@ -10,11 +11,12 @@ import {
   awaitedWrapperIds,
   gradeTrace,
   ownedWorkerLookup,
+  readCodexActionCatalog,
   readCodexRollout,
   readNative,
   wrapperWakeIds,
 } from "./observe.ts";
-import { wrapperWaitInstruction } from "./project.ts";
+import { fixtureGuidance, wrapperWaitInstruction } from "./project.ts";
 
 const native = (...rows: object[]) =>
   rows
@@ -27,6 +29,47 @@ const native = (...rows: object[]) =>
 const wait = wrapperWaitInstruction();
 
 describe("real-session evidence", () => {
+  it("measures the flag-selected Action guidance and advertised tool schemas", () => {
+    const enabled = standingActionPolicy(false, "codex");
+    const disabled = standingActionPolicy(true, "codex");
+    expect(enabled.instructions).toContain("Mediate each request");
+    expect(disabled.instructions).toBe(
+      "Project Action launch tools are unavailable in this session.",
+    );
+    expect(JSON.parse(enabled.toolDefinitions).map((tool: { name: string }) => tool.name)).toEqual([
+      "list_project_actions",
+      "run_project_action_and_resume",
+      "inspect_action_run",
+      "resume_interrupted_action",
+      "discard_interrupted_action",
+    ]);
+    expect(JSON.parse(disabled.toolDefinitions).map((tool: { name: string }) => tool.name)).toEqual(
+      ["inspect_action_run", "resume_interrupted_action", "t3_background_wait"],
+    );
+  });
+
+  it("uses the executed Codex catalog probe, with recovery tools as a positive control", () => {
+    const recovery = [
+      "mcp__t3_code__inspect_action_run",
+      "mcp__t3_code__resume_interrupted_action",
+    ];
+    const output = {
+      kind: "output",
+      id: "probe",
+      body: "Output:\n" + catalogMarker + JSON.stringify(recovery),
+    } as const;
+    expect(readCodexActionCatalog([output])).toBeUndefined();
+    const catalog = readCodexActionCatalog([
+      { kind: "call", id: "probe", name: "exec", args: "ALL_TOOLS " + catalogMarker },
+      output,
+    ]);
+    expect(checkActionCatalog(catalog, true)).toBe("verified");
+    expect(checkActionCatalog(catalog, false)).toBe("mismatch");
+    expect(checkActionCatalog([], true)).toBe("mismatch");
+    expect(
+      checkActionCatalog([...recovery, "mcp__t3_code__discard_interrupted_action"], true),
+    ).toBe("mismatch");
+  });
   it("requires an exact opt-in to reuse a baseline recorded at another head", () => {
     const a: Results = {
       version: 1,
@@ -55,6 +98,17 @@ describe("real-session evidence", () => {
   it("passes real wrapper syntax for every fixture", () => {
     for (const scenario of cases)
       expect(parseLastCodeWrappedAction(scenario.wrapper)).toBeDefined();
+  });
+
+  it("puts the watch recipe within Codex's default project instruction read limit", () => {
+    const scenario = cases.find((scenario) => scenario.id === "standing-watch")!;
+    for (const arm of ["a", "b"] as const) {
+      const read = Buffer.from(fixtureGuidance(scenario, arm)).subarray(0, 32768).toString();
+      expect(read).toContain("A drained queue ends the task.");
+      expect(read).toContain(
+        arm === "a" ? "saved **Watch for Milestones**" : "Milestone watch: run `./scripts/lc-run",
+      );
+    }
   });
 
   it("gates zero polls only on arm B's polls", () => {
@@ -461,6 +515,19 @@ describe("real-session evidence", () => {
         finalMessage: "Quick CI's exit code was **3**. Result ID `result-example`.",
       }),
     ).toMatchObject({ correct: true, holds: 0, holdExpected: 1, holdEngaged: false });
+    expect(
+      gradeSample({
+        ...input,
+        traces: [[], [...trace]],
+        wrapperWakeIds: ["worker-command"],
+        actionCatalogs: ["verified", "verified"],
+        actionRunObserved: true,
+      }),
+    ).toMatchObject({
+      correct: false,
+      setupFault: true,
+      problems: ["Harness or product fault: a Project Action launched in the wrapper arm."],
+    });
     const holds = awaitedWrapperIds(
       [
         { taskId: "native-child", kind: "subagent", awaited: true },

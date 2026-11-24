@@ -7,7 +7,8 @@ import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeUtil from "node:util";
 
 import { codexBackgroundWaitInstructions } from "../../apps/server/src/provider/LastCodeBackgroundWait.ts";
-import { cases, projectNotes, taskPrompt, type Arm, type Scenario } from "./cases.ts";
+import { checkActionCatalog, standingActionPolicy } from "./actionPolicy.ts";
+import { cases, taskPrompt, type Arm, type Scenario } from "./cases.ts";
 import {
   gradeSample,
   printCases,
@@ -20,6 +21,7 @@ import {
   awaitedWrapperIds,
   nativeLogName,
   ownedWorkerLookup,
+  readCodexActionCatalog,
   readCodexRollout,
   readLines,
   readNative,
@@ -30,6 +32,7 @@ import {
 import {
   cli,
   configureFixtureAction,
+  fixtureGuidance,
   git,
   guidance,
   makeProject,
@@ -238,39 +241,7 @@ function holdIds({ thread }: Snapshot, arm: Arm, scenario: Scenario): string[] {
 function standing(arm: Arm, scenario: Scenario, provider: Results["config"]["provider"]) {
   // Estimate only the portions relevant to this comparison. Deferred tool presentation differs by provider.
   const approx = (value: string) => Math.ceil(Buffer.byteLength(value) / 4);
-  const definitions = (file: string, names: string[]) => {
-    const source = repositoryFile(file);
-    return names
-      .map((name) => {
-        const [def, boundary] =
-          source.split(`Tool.make("${name}", {`)[1]?.split("\n  success:", 2) ?? [];
-        if (def === undefined || boundary === undefined)
-          throw new Error(
-            `${file}: expected the Tool.make definition for ${name} through its success field.`,
-          );
-        return name + def;
-      })
-      .join("\n");
-  };
-  const actions = definitions("apps/server/src/mcp/toolkits/actionResume/tools.ts", [
-    "list_project_actions",
-    "run_project_action_and_resume",
-    "inspect_action_run",
-    "resume_interrupted_action",
-    "discard_interrupted_action",
-  ]);
-  const background = definitions("apps/server/src/mcp/toolkits/orchestrator/tools.ts", [
-    "t3_background_wait",
-  ]);
-  const orchestrationSource = "packages/provider-core/src/server/orchestrationInstructions.ts";
-  const [serverInstructions, boundary] =
-    repositoryFile(orchestrationSource)
-      .split("  `- A delegated child owns its resumable Project Actions")[1]
-      ?.split("`,\n  `### Find mentioned threads", 2) ?? [];
-  if (!serverInstructions || boundary === undefined)
-    throw new Error(
-      `${orchestrationSource}: expected the delegated Project Actions section before Find mentioned threads.`,
-    );
+  const policy = standingActionPolicy(arm === "b", provider);
   const isClaude = provider === "claudeAgent";
   const needsCodexWait = arm === "b" && !isClaude;
   const backgroundInstruction = needsCodexWait ? codexBackgroundWaitInstructions(true).trim() : "";
@@ -278,15 +249,10 @@ function standing(arm: Arm, scenario: Scenario, provider: Results["config"]["pro
     throw new Error(
       "apps/server/src/provider/LastCodeBackgroundWait.ts: codexBackgroundWaitInstructions(true) returned no guidance.",
     );
-  const project =
-    guidance(arm) +
-    "\n## This project\n\n" +
-    projectNotes(scenario, arm) +
-    "\n" +
-    (isClaude ? repositoryFile("CLAUDE.md") : "");
+  const project = fixtureGuidance(scenario, arm) + (isClaude ? repositoryFile("CLAUDE.md") : "");
   return {
-    guidance: approx(project + serverInstructions),
-    toolDefinitions: approx(actions + (arm === "b" || isClaude ? background : "")),
+    guidance: approx(project + policy.instructions),
+    toolDefinitions: approx(policy.toolDefinitions),
     backgroundWaitInstruction: approx(backgroundInstruction),
   };
 }
@@ -389,7 +355,11 @@ function sampleMetrics(input: {
       config.provider,
     );
     if (config.provider === "claudeAgent") {
-      return { native, trace: native.turns === thread.runCount ? native.trace : undefined };
+      return {
+        native,
+        catalog: native.toolCatalog,
+        trace: native.turns === thread.runCount ? native.trace : undefined,
+      };
     }
     // The app-server's item stream omits write_stdin; read the actual model-facing tool transcript.
     const rolloutHome = NodePath.join(base, "codex-home");
@@ -401,6 +371,7 @@ function sampleMetrics(input: {
     const traces = [...rollouts].map((path) => readCodexRollout(NodeFS.readFileSync(path, "utf8")));
     return {
       native,
+      catalog: readCodexActionCatalog(traces.flatMap(({ trace }) => trace)),
       trace:
         traces.length > 0 && traces.reduce((sum, trace) => sum + trace.turns, 0) === thread.runCount
           ? traces.flatMap((trace) => trace.trace)
@@ -431,6 +402,8 @@ function sampleMetrics(input: {
     holds: sample.holds,
     wrapperWakeIds: observations.wrapperWakeIds,
     actionWakes: observations.actionWakes,
+    actionCatalogs: evidence.map(({ catalog }) => checkActionCatalog(catalog, config.arm === "b")),
+    actionRunObserved: latest.some(({ thread }) => thread.actionResume != null),
     workerMessage: finalMessage(worker),
     finalMessage: finalMessage(parent),
     work,
@@ -513,7 +486,7 @@ async function main() {
             delegated: "delegated" in scenario,
             guidanceBytes: Buffer.byteLength(guidance(arm)),
             standing: standingByCase.get(scenario.id)!,
-            prompt: taskPrompt(scenario, arm, model, flags.effort),
+            prompt: taskPrompt(scenario, arm, model, flags.effort, provider),
           })),
         },
         null,
@@ -631,7 +604,7 @@ async function main() {
                 sample.title,
                 "--json",
                 sample.projectId,
-                taskPrompt(scenario, arm, config.model, config.effort),
+                taskPrompt(scenario, arm, config.model, config.effort, config.provider),
               ],
             ),
           ) as { threadId?: string };

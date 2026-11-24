@@ -1,3 +1,5 @@
+import { codexCatalogProbe } from "./actionPolicy.ts";
+
 export type Arm = "a" | "b";
 
 const upstream = "0123456789abcdef0123456789abcdef01234567";
@@ -108,12 +110,19 @@ export function projectNotes(scenario: Scenario, arm: Arm): string {
   return [operation, watch].filter(Boolean).join("\n");
 }
 
-export function taskPrompt(scenario: Scenario, arm: Arm, model: string, effort?: string): string {
+export function taskPrompt(
+  scenario: Scenario,
+  arm: Arm,
+  model: string,
+  effort?: string,
+  provider: "codex" | "claudeAgent" = "codex",
+): string {
+  const probe = provider === "codex" ? codexCatalogProbe + "\n\n" : "";
   const task = `${scenario.request} In your final answer include “Result ID <id>” and “exit code <code>” from the result.`;
-  if (!scenario.delegated) return task;
+  if (!scenario.delegated) return probe + task;
   const ownership =
     arm === "a"
       ? " Verify appOwnedActionContinuationVersion with orchestrator_capabilities. This isolated acceptance scenario authorizes the child to own its opted-in Action. State that authorization and the verified feature in its brief."
       : "";
-  return `Delegate exactly one owned task using delegate_task in async mode with worktree isolation and the same provider and model (${model}${effort ? `, effort=${effort}` : ""}).${ownership} In the brief say: "You are the main agent of this LastCode worker thread. Do the work yourself in your own checkout. ${task}" Let the worker finish and report its final result to me.`;
+  return `${probe}Delegate exactly one owned task using delegate_task in async mode with worktree isolation and the same provider and model (${model}${effort ? `, effort=${effort}` : ""}).${ownership} In the brief say: "You are the main agent of this LastCode worker thread. Do the work yourself in your own checkout. ${probe}${task}" Let the worker finish and report its final result to me.`;
 }
