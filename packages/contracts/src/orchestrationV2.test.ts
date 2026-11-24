@@ -14,7 +14,7 @@ import {
 import {
   latestProviderTurnForAttempt,
   OrchestrationV2CheckpointFileSummary,
-  repositoryRewindCheckpoint,
+  OrchestrationV2Command,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
@@ -25,6 +25,7 @@ import {
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
+  repositoryRewindCheckpoint,
   withMessageSenderNote,
 } from "./orchestrationV2.ts";
 
@@ -744,4 +745,40 @@ describe("withMessageSenderNote", () => {
   ] as const)("labels %j's message %j for the provider", (message, text, expected) => {
     expect(withMessageSenderNote(message, text)).toBe(expected);
   });
+});
+
+const decodeOrchestrationV2Command = Schema.decodeUnknownSync(OrchestrationV2Command);
+
+it("preserves native-only steering as a distinct wire command", () => {
+  const command = decodeOrchestrationV2Command({
+    type: "message.dispatch",
+    createdBy: "user",
+    creationSource: "server",
+    commandId: "cooperative-pause",
+    threadId: "thread-1",
+    messageId: "pause-message",
+    text: "Pause after the current tool finishes.",
+    attachments: [],
+    dispatchMode: { type: "steer_active_native", targetRunId: "run-1" },
+  });
+  expect(command.type).toBe("message.dispatch");
+  if (command.type === "message.dispatch") {
+    expect(command.dispatchMode).toEqual({ type: "steer_active_native", targetRunId: "run-1" });
+  }
+});
+
+const decodeClientWorkspaceCompletion = Schema.decodeUnknownExit(OrchestrationV2Command);
+
+it("keeps accepted workspace completions outside client dispatch commands", () => {
+  const completion = {
+    type: "thread.workspace.complete",
+    commandId: "workspace-completion",
+    threadId: "workspace-thread",
+    requestId: "accepted-preparation",
+    runId: "preparing-run",
+    expectedWorktreePath: null,
+    worktreePath: "/repo-worktree",
+    branch: "feature/workspace",
+  };
+  expect(decodeClientWorkspaceCompletion(completion)._tag).toBe("Failure");
 });
