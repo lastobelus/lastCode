@@ -71,6 +71,7 @@ interface OpenUrlInPreviewInput<E> {
   readonly onOpened?: (tabId: string) => void;
   /** Preserve the source tab's profile when opening a link from a page. */
   readonly profileId?: PreviewOpenInput["profileId"];
+  readonly sourceTabId?: string;
   readonly background?: boolean;
   readonly reuse?: PreviewTabReuse;
 }
@@ -107,6 +108,7 @@ export async function openPreparedUrlInPreview<E>(
     authoredUrl: input.url,
     target,
     profileId,
+    sourceTabId: input.sourceTabId,
     background: input.background,
     restarted: prepared.restarted,
     reuse: input.reuse,

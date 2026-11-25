@@ -157,6 +157,7 @@ function openLinkInPreview({ tabId, url, background }: DesktopPreviewOpenLinkEve
     url,
     openPreview: (input) => runAtomCommand(appAtomRegistry, previewEnvironment.open, input),
     profileId: source.snapshot.profileId,
+    sourceTabId: source.snapshot.tabId,
     background,
   })
     .then((result) => {

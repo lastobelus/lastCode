@@ -121,6 +121,24 @@ describe("link clicks reuse an open tab", () => {
     });
   });
 
+  it("reveals another matching tab for a link from the active source tab", async () => {
+    const source = tab("source", `${HUB}/d/a?view=1`);
+    const other = tab("other", `${HUB}/d/a?view=3`);
+    seed(source, other);
+    setActivePreviewTab(threadRef, source.tabId);
+
+    await openUrlInPreview({
+      threadRef,
+      url: `${HUB}/d/a?view=2`,
+      openPreview,
+      sourceTabId: source.tabId,
+    });
+
+    expect(openPreview).not.toHaveBeenCalled();
+    expect(activeSurfaceId()).toBe(`browser:${other.tabId}`);
+    expect(readThreadPreviewState(threadRef).sessions.other?.navStatus).toEqual(other.navStatus);
+  });
+
   it("opens a new tab for a background (Cmd-click) open", async () => {
     seed(tab("hub", `${HUB}/`));
     await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, background: true });

@@ -104,11 +104,13 @@ export function findReusablePreviewTab(
     readonly urls: ReadonlyArray<string>;
     readonly placement: PreviewTabPlacement;
     readonly reuse: PreviewTabReuse;
+    readonly sourceTabId?: string | undefined;
   },
 ): string | null {
   const targets = request.urls.flatMap((url) => parseUrl(url) ?? []);
   let best: PreviewSessionSnapshot | null = null;
   for (const tab of Object.values(state.sessions)) {
+    if (tab.tabId === request.sourceTabId) continue;
     if (tab.automationOwner !== undefined || tab.reveal === false) continue;
     if (state.suppressedTabIds.has(tab.tabId)) continue;
     // A desktop-rendered tab reports navigation to the server after the fact.
@@ -145,6 +147,7 @@ export function reuseOpenPreviewTab(input: {
   readonly authoredUrl: string;
   readonly target: { readonly url: string } & Omit<PreviewTabPlacement, "profileId">;
   readonly profileId: string | undefined;
+  readonly sourceTabId?: string | undefined;
   readonly background: boolean | undefined;
   /** Preparation restarted a managed preview; an open tab shows its previous run. */
   readonly restarted: boolean | undefined;
@@ -165,6 +168,7 @@ export function reuseOpenPreviewTab(input: {
     urls: [input.target.url, input.authoredUrl],
     placement,
     reuse: input.reuse ?? "address",
+    sourceTabId: input.sourceTabId,
   });
   if (tabId === null) return null;
   rememberPreviewUrl(input.threadRef, input.authoredUrl);

@@ -262,6 +262,62 @@ describe("Electron browser hosting outside the selected thread", () => {
     expect(mocks.registerWebview).not.toHaveBeenCalled();
   });
 
+  it("opens a new tab for a desktop link whose address only matches its source", async () => {
+    await using _fixture = setup();
+    const threadRef = scopeThreadRef(
+      EnvironmentId.make("desktop-primary"),
+      ThreadId.make("self-link-source"),
+    );
+    const page = "http://dashboard.localhost:5173/status";
+    const snapshot = {
+      threadId: threadRef.threadId,
+      tabId: "source-tab",
+      navStatus: { _tag: "Success" as const, url: `${page}?view=1`, title: "Dashboard" },
+      canGoBack: false,
+      canGoForward: false,
+      updatedAt: "2026-10-07T00:00:00.000Z",
+    };
+    const target = {
+      ...snapshot,
+      tabId: "target-tab",
+      navStatus: { ...snapshot.navStatus, url: `${page}?view=2` },
+    };
+    let onOpenLink!: Parameters<DesktopPreviewBridge["onOpenLink"]>[0];
+    vi.stubGlobal("desktopBridge", {
+      preview: createPreviewBridgeFixture({
+        onOpenLink: (listener: typeof onOpenLink) => {
+          onOpenLink = listener;
+          return () => undefined;
+        },
+        onPointerEvent: () => () => undefined,
+        setAnnotationTheme: async () => undefined,
+      }),
+    });
+    using _host = { [Symbol.dispose]: startElectronBrowserHost() };
+    mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+    mocks.openPreview.mockReturnValue(Effect.succeed(target));
+    vi.mocked(hostingRecovery.prepareHostedPreview).mockResolvedValue({
+      url: target.navStatus.url,
+      managed: false,
+      restored: false,
+    });
+    applyPreviewServerSnapshot(threadRef, snapshot);
+
+    await act(async () => {
+      onOpenLink({
+        tabId: previewRuntimeTabId(threadRef, null, snapshot.tabId),
+        url: target.navStatus.url,
+        background: false,
+      });
+    });
+
+    expect(mocks.openPreview).toHaveBeenCalledOnce();
+    expect(appAtomRegistry.get(previewStateAtom(scopedThreadKey(threadRef)))).toMatchObject({
+      activeTabId: target.tabId,
+      sessions: { [snapshot.tabId]: snapshot, [target.tabId]: target },
+    });
+  });
+
   it.each(["settings", "rpc", "defect", "interruption"] as const)(
     "handles a settled %s result without replacing the source tab",
     async (failureKind) => {
