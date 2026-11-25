@@ -196,6 +196,7 @@ export class TerminalManager extends Context.Service<
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
       registerCleanup?: (stop: () => void) => void,
       viewerId?: string,
+      startIfNeeded?: boolean,
     ) => Effect.Effect<() => void, TerminalError>;
 
     /**
@@ -205,6 +206,7 @@ export class TerminalManager extends Context.Service<
     readonly attachOutputStream: (
       input: TerminalAttachInput,
       viewerId: string,
+      startIfNeeded?: boolean,
     ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>;
 
     readonly observeStream: (
@@ -256,6 +258,10 @@ export class TerminalManager extends Context.Service<
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
 
+    /** Read current terminal metadata without subscribing to runtime events. */
+    readonly metadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
+
+    /** Refresh subprocess activity, then read current terminal metadata. */
     readonly refreshMetadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
   }
 >()("t3/terminal/Manager/TerminalManager") {}
@@ -398,6 +404,7 @@ type DrainProcessEventAction =
 interface TerminalManagerState {
   sessions: Map<string, TerminalSessionState>;
   killFibers: Map<PtyAdapter.PtyProcess, Fiber.Fiber<void, never>>;
+  terminatingProcesses: Map<PtyAdapter.PtyProcess, TerminalSummary>;
 }
 
 function truncateTerminalWireLabel(value: string): string {
@@ -2124,6 +2131,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const managerStateRef = yield* SynchronizedRef.make<TerminalManagerState>({
     sessions: new Map(),
     killFibers: new Map(),
+    terminatingProcesses: new Map(),
   });
   // Keep close markers in memory so unknown IDs recover after a server restart.
   const closedSessionKeys = new Set<string>();
@@ -2355,7 +2363,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const unsubscribeExit = process.onExit(() => {
       Deferred.doneUnsafe(exited, Effect.void);
     });
-    yield* Effect.gen(function* () {
+    return yield* Effect.gen(function* () {
       // Interactive shells ignore SIGTERM but pass SIGHUP to their background jobs, skipping nohup'd and disowned ones.
       // Windows ignores the signal and node-pty kills the whole tree there.
       if (platform !== "win32") {
@@ -2387,7 +2395,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         ),
       );
       if (!terminated) {
-        return;
+        return false;
       }
 
       const exitedBeforeGrace = yield* Deferred.await(exited).pipe(
@@ -2398,10 +2406,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         }),
       );
       if (exitedBeforeGrace) {
-        return;
+        return true;
       }
 
-      yield* Effect.try({
+      return yield* Effect.try({
         try: () => process.kill("SIGKILL"),
         catch: (cause) =>
           new TerminalProcessSignalError({
@@ -2410,13 +2418,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             terminalPid: process.pid,
           }),
       }).pipe(
+        Effect.as(true),
         Effect.catch((error) =>
           Effect.logWarning("failed to force-kill terminal process", {
             threadId,
             terminalId,
             signal: "SIGKILL",
             cause: error,
-          }),
+          }).pipe(Effect.as(false)),
         ),
       );
     }).pipe(Effect.ensuring(Effect.sync(unsubscribeExit)));
@@ -2428,6 +2437,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     terminalId: string,
   ) {
     const fiber = yield* runKillEscalation(process, threadId, terminalId).pipe(
+      Effect.tap((completed) =>
+        completed
+          ? modifyManagerState((state) => {
+              if (!state.terminatingProcesses.has(process)) {
+                return [undefined, state] as const;
+              }
+              const terminatingProcesses = new Map(state.terminatingProcesses);
+              terminatingProcesses.delete(process);
+              return [undefined, { ...state, terminatingProcesses }] as const;
+            })
+          : Effect.void,
+      ),
+      Effect.asVoid,
       Effect.ensuring(
         modifyManagerState((state) => {
           if (!state.killFibers.has(process)) {
@@ -2891,6 +2913,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
     const updatedAt = yield* nowIso;
     yield* modifyManagerState((state) => {
+      const terminatingProcesses = new Map(state.terminatingProcesses);
+      terminatingProcesses.set(process, {
+        ...summary(session),
+        status: "running",
+        hasRunningSubprocess: true,
+      });
       cleanupProcessHandles(session);
       session.process = null;
       session.pid = null;
@@ -2902,7 +2930,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session.pendingProcessEventIndex = 0;
       session.processEventDrainRunning = false;
       session.updatedAt = updatedAt;
-      return [undefined, state] as const;
+      return [undefined, { ...state, terminatingProcesses }] as const;
     });
 
     yield* clearKillFiber(process);
@@ -3581,13 +3609,20 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   yield* Effect.addFinalizer(() =>
     Effect.gen(function* () {
-      const [sessions, pendingKills] = yield* modifyManagerState(
+      const { sessions, pendingKills, terminatingProcesses } = yield* modifyManagerState(
         (state) =>
           [
-            [[...state.sessions.values()], [...state.killFibers.values()]],
+            {
+              sessions: [...state.sessions.values()],
+              pendingKills: [...state.killFibers.values()],
+              terminatingProcesses: [...state.terminatingProcesses.entries()].filter(
+                ([process]) => !state.killFibers.has(process),
+              ),
+            },
             {
               ...state,
               sessions: new Map(),
+              terminatingProcesses: new Map(),
             },
           ] as const,
       );
@@ -3606,6 +3641,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         [
           Effect.forEach(sessions, cleanupSession, { concurrency: "unbounded", discard: true }),
           Fiber.awaitAll(pendingKills),
+          Effect.forEach(
+            terminatingProcesses,
+            ([process, terminal]) =>
+              clearKillFiber(process).pipe(
+                Effect.andThen(runKillEscalation(process, terminal.threadId, terminal.terminalId)),
+              ),
+            { concurrency: "unbounded", discard: true },
+          ),
         ],
         { concurrency: "unbounded", discard: true },
       );
@@ -3775,7 +3818,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return session.shell;
   });
 
-  const openOrAttachForStream = Effect.fnUntraced(function* (requestedInput: TerminalAttachInput) {
+  const openOrAttachForStream = Effect.fnUntraced(function* (
+    requestedInput: TerminalAttachInput,
+    startIfNeeded = true,
+  ) {
     const terminalId = requestedInput.terminalId;
     const input = withSharedGrid(toSessionKey(requestedInput.threadId, terminalId), requestedInput);
     const existing = yield* getSession(input.threadId, terminalId);
@@ -3784,7 +3830,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       if (input.resume && closedSessionKeys.has(toSessionKey(input.threadId, terminalId))) {
         return null;
       }
-      if (!input.cwd) {
+      if (!input.cwd || !startIfNeeded) {
         return yield* new TerminalSessionLookupError({
           threadId: input.threadId,
           terminalId,
@@ -3803,7 +3849,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const targetCols = input.cols ?? session.cols;
     const targetRows = input.rows ?? session.rows;
 
-    if (!input.resume && !session.process && input.cwd && input.restartIfNotRunning === true) {
+    if (
+      !input.resume &&
+      !session.process &&
+      input.cwd &&
+      input.restartIfNotRunning === true &&
+      startIfNeeded
+    ) {
       const resolvedInput = yield* resolveLaunchInputEnvironment({
         ...input,
         terminalId,
@@ -3836,6 +3888,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               left.terminalId.localeCompare(right.terminalId),
           ),
       ),
+    );
+
+  const readDrainTerminalMetadata = () =>
+    readManagerState.pipe(
+      Effect.map((state) => {
+        const terminals = new Map(
+          [...state.sessions.values()].map((session) => [
+            toSessionKey(session.threadId, session.terminalId),
+            summary(session),
+          ]),
+        );
+        for (const terminal of state.terminatingProcesses.values()) {
+          terminals.set(toSessionKey(terminal.threadId, terminal.terminalId), terminal);
+        }
+        return [...terminals.values()].sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            left.threadId.localeCompare(right.threadId) ||
+            left.terminalId.localeCompare(right.terminalId),
+        );
+      }),
     );
 
   const readTerminalMetadata = (input: {
@@ -3962,6 +4035,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     listener,
     registerCleanup,
     viewerId,
+    startIfNeeded,
   ) => {
     const viewer = viewerId ?? `stream:${++anonymousViewerCount}`;
     let detach = () => {};
@@ -3973,7 +4047,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           ? { cols: input.cols, rows: input.rows }
           : null,
       );
-      return openOrAttachForStream(input);
+      return openOrAttachForStream(input, startIfNeeded);
     });
     return streamSession(
       input,
@@ -4023,6 +4097,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const attachOutputStream: TerminalManager["Service"]["attachOutputStream"] = (
     input,
     viewerId,
+    startIfNeeded,
   ) => {
     const { maxHistoryBytes } = input;
     const retained = (listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>) =>
@@ -4048,7 +4123,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.as(
           terminalOutputStream(
             (listener, registerCleanup) =>
-              attachStream(input, retained(listener), registerCleanup, viewerId),
+              attachStream(input, retained(listener), registerCleanup, viewerId, startIfNeeded),
             (listener, registerCleanup) => resyncStream(input, retained(listener), registerCleanup),
           ),
         ),
@@ -4470,7 +4545,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     hasActiveSubprocess,
     subscribe,
     subscribeMetadata,
-    refreshMetadata: pollSubprocessActivity(true).pipe(Effect.andThen(readAllTerminalMetadata())),
+    metadata: readAllTerminalMetadata(),
+    refreshMetadata: pollSubprocessActivity(true).pipe(Effect.andThen(readDrainTerminalMetadata())),
   });
 });
 

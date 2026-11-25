@@ -290,13 +290,14 @@ function AboutVersionSection() {
     void bridge
       .checkForUpdate()
       .then((result) => {
-        if (!result.checked) {
+        if (!result.checked || result.error) {
           toastManager.add(
             stackedThreadToast({
               type: "error",
               title: gt("Could not check for updates"),
               description:
                 updatesDenial ??
+                result.error ??
                 result.state.message ??
                 gt("Automatic updates are not available in this build."),
             }),

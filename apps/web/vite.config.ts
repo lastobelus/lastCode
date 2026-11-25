@@ -1,6 +1,8 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Vite config runs before any Effect runtime.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeZlib from "node:zlib";
+import * as NodeURL from "node:url";
+import { createGeneratedBuildStage } from "@t3tools/shared/generatedBuildOwnership";
 
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -21,6 +23,8 @@ import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses
 import { tailwindPlugins } from "./vite/tailwind";
 import { warmBundledDevPlugin } from "./vite/warmBundledDev";
 import { formatAppDisplayName, resolveWebAppStageLabel } from "./src/branding.logic";
+import { previewSettingsPlugin } from "./vite/previewSettings";
+import { createBuildOwnershipPlugin, resolveHostedWebAssetBrand } from "./vite/buildOwnership.ts";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -109,6 +113,7 @@ const browserTestProject = {
   optimizeDeps: {
     include: [
       "vite-plus/test/browser",
+      "@effect/vitest",
       "@base-ui/react/autocomplete",
       "@effect/vitest",
       "@pierre/diffs/ssr",
@@ -319,6 +324,10 @@ export default defineConfig(({ command }) => {
     (command === "build" && !builtDev
       ? resolveTaggedSourceVersion(`${import.meta.dirname}/../..`, pkg.version)
       : pkg.version);
+  const repoRoot = NodeURL.fileURLToPath(new URL("../..", import.meta.url));
+  const brand = command === "build" ? resolveHostedWebAssetBrand(configuredHostedAppChannel) : null;
+  const stage = command === "build" ? createGeneratedBuildStage(repoRoot, "apps/web/dist") : null;
+  const provenancePlugin = createBuildOwnershipPlugin(repoRoot, stage, Date.now, brand);
   return {
     run: {
       tasks: {
@@ -334,6 +343,8 @@ export default defineConfig(({ command }) => {
       bootstrapTitlePlugin(),
       devCompressionPlugin(),
       chunkCycleGuardPlugin(),
+      previewSettingsPlugin(process.env.T3CODE_HOME, process.env.T3CODE_PREVIEW_SETTINGS_SOURCE),
+      provenancePlugin,
       builtDev
         ? undefined
         : thirdPartyLicensesPlugin({
@@ -438,7 +449,7 @@ export default defineConfig(({ command }) => {
       devSourcemap: buildSourcemap !== false,
     },
     build: {
-      outDir: "dist",
+      outDir: stage?.directory ?? "dist",
       emptyOutDir: true,
       manifest: true,
       sourcemap: buildSourcemap,

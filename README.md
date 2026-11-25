@@ -1,3 +1,52 @@
+# LastCode
+
+LastCode is a personal fork of [T3 Code](https://github.com/pingdotgg/t3code). Thank you to T3 Code's creators and maintainers for building it in the open and making this fork possible.
+
+LastCode:
+
+- Tracks T3 Code nightly.
+- Takes over the update UI and installs a daemon that checkpoints T3 Code nightly, then rebases LastCode's changes on top.
+- Favors the legacy sidebar. We do not QA LastCode changes against the inbox sidebar, although fix pull requests are welcome.
+- Adds experimental features that increase both the security-sensitive surface area and the risk that agents could delete or mangle data on your machine. These changes have not been exhaustively reviewed for those risks. They include letting tools wake up threads, planned support for threads talking to each other, URL schemes that make emitted links clickable, and integrations with personal tools used by the maintainer, such as Markover.
+
+Use LastCode with that additional risk in mind. For the smaller upstream surface and its supported release path, use [T3 Code](https://github.com/pingdotgg/t3code).
+
+## Install LastCode alongside T3 Code
+
+LastCode is currently a personal source-build workflow for Apple Silicon macOS, not a public binary distribution. It installs as `/Applications/LastCode.app` and keeps its bundle identity, application state (`~/.lastcode`), Electron profile, single-instance lock, and URL schemes separate from T3 Code. Both apps can therefore remain installed and run on the same Mac.
+
+The setup provisions a checkpoint/release coordinator for a writable GitHub
+fork, including a dedicated automation worktree and a managed macOS service.
+Deployment configuration supplies the service cadence. The coordinator pushes
+checkpoint and revision tags, promotes `lastcode/main` when no LastCode pull
+request is open, and mirrors upstream `main`, so do not install it against an
+`origin` you do not intend to update.
+
+After installing Git, [GitHub CLI](https://cli.github.com/), [mise](https://mise.jdx.dev/), [Vite+](https://viteplus.dev/guide/), and [fzf](https://github.com/junegunn/fzf), fork this repository and run:
+
+```bash
+git clone git@github.com:YOUR_GITHUB_USER/LastCode.git ~/projects/lastCode
+cd ~/projects/lastCode
+git switch lastcode/main
+git remote add upstream https://github.com/pingdotgg/t3code.git
+mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
+  --enable-nightly-writes \
+  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+```
+
+Deployment configuration must set `LASTCODE_CHECKPOINT_INTERVAL_SECONDS` to a
+positive integer before running the setup command.
+
+When `lastcode-checkpoints --verbose` shows a ready installable, build and install the first app:
+
+```bash
+lastcode-build
+lastcode-install
+```
+
+The full setup guide explains the remote-write boundary, initial ad-hoc-signed build, settings import, runtime isolation, updater opt-in, and uninstall commands: [Set up LastCode alongside T3 Code](./docs/lastcode/setup.md).
+
+## About T3 Code
 <p align="center">
   <a href="https://t3.codes">
     <img src="./assets/prod/t3-black-web-icon-192x192.png" width="80" height="80" alt="T3 Code logo" />
@@ -26,6 +75,8 @@
 T3 Code runs the coding agents on your machine and gives them one fast interface. Start a thread at your desk, then approve the next step from your phone.
 
 It works with Claude Code, Codex, Cursor, OpenCode, Grok Build, Antigravity, Kiro, Pi, Muse Code, fx, and any [ACP](./docs/user/providers-acp.md) agent. If an agent is set up on your computer, T3 Code can control it.
+
+## Install T3 Code
 
 ## What you get
 
