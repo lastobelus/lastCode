@@ -38,6 +38,7 @@ vi.mock("./browserDefaults", () => ({
 import { findReusablePreviewTab } from "./lastcodePreviewTabReuse";
 import { openUrlInPreview } from "./openFileInPreview";
 import {
+  applyPreviewDesktopState,
   applyPreviewServerSnapshot,
   readThreadPreviewState,
   resetPreviewStateForTests,
@@ -194,6 +195,26 @@ describe("findReusablePreviewTab", () => {
     expect(find(`${HUB}/d/a?x=2`)).toBe("hub");
     expect(find(`${HUB}/d/b`)).toBeNull();
     expect(find("http://other.localhost:4000/d/a")).toBeNull();
+  });
+
+  it("uses a desktop tab's live address over its last server report", () => {
+    seed(tab("hub", `${HUB}/d/a`));
+    applyPreviewDesktopState(threadRef, "hub", {
+      hasWebContents: true,
+      navStatus: { _tag: "Success", url: "https://example.com/", title: "" },
+      canGoBack: true,
+      canGoForward: false,
+      loading: false,
+      zoomFactor: 1,
+      pictureInPicture: false,
+      colorScheme: "light",
+      audioMuted: false,
+      audible: false,
+      controller: "human",
+      favicon: null,
+    });
+    expect(find(`${HUB}/d/a`)).toBeNull();
+    expect(find("https://example.com/")).toBe("hub");
   });
 
   it("matches a public address only exactly", () => {
