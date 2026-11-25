@@ -77,6 +77,8 @@ export function followPreviewSessions(threadRef: ScopedThreadRef, state: ThreadP
         .filter((session) => session.runtime === "server" && session.reveal === false)
         .map((session) => session.tabId),
     ),
+    undefined,
+    state.suppressedTabIds,
   );
   const miniPlayer = usePreviewMiniPlayerStore.getState();
   const source = miniPlayer.byThreadKey[scopedThreadKey(threadRef)]?.source;
@@ -139,7 +141,11 @@ function followThread(threadKey: string, threadRef: ScopedThreadRef): () => void
         autoShowFloatingPreview: getClientSettings().browserAutoShowFloatingPreview,
       });
     }
-    if (before.sessions !== next.sessions || before.listLoaded !== next.listLoaded) {
+    if (
+      before.sessions !== next.sessions ||
+      before.listLoaded !== next.listLoaded ||
+      before.suppressedTabIds !== next.suppressedTabIds
+    ) {
       followPreviewSessions(threadRef, next);
     }
   });

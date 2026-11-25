@@ -45,6 +45,8 @@ import { previewRuntimeTabId } from "./previewRuntimeTabId";
 import {
   applyPreviewDesktopState,
   applyPreviewServerSnapshot,
+  beginPreviewSessionClose,
+  cancelPreviewSessionClose,
   readThreadPreviewState,
   resetPreviewStateForTests,
   setActivePreviewTab,
@@ -265,6 +267,40 @@ describe("link clicks reuse an open tab", () => {
     expect(readThreadPreviewState(threadRef).sessions.a?.navStatus).toMatchObject({
       url: `${HUB}/d/a`,
     });
+  });
+
+  it("keeps a dashboard's place in the selection order when its close fails", async () => {
+    const a = tab("a", `${HUB}/d/a`);
+    seed(a, tab("b", `${HUB}/d/b`), tab("other", "https://example.com/"));
+    const panels = useRightPanelStore.getState();
+    panels.reconcileBrowserSurfaces(threadRef, ["a", "b", "other"]);
+    for (const tabId of ["b", "a", "other"]) {
+      panels.activateSurface(threadRef, `browser:${tabId}`);
+      setActivePreviewTab(threadRef, tabId);
+    }
+
+    panels.closeSurface(threadRef, "browser:a");
+    beginPreviewSessionClose(threadRef, "a");
+    panels.reconcileBrowserSurfaces(
+      threadRef,
+      ["b", "other"],
+      undefined,
+      undefined,
+      readThreadPreviewState(threadRef).suppressedTabIds,
+    );
+    cancelPreviewSessionClose(threadRef, a, "a");
+    panels.reconcileBrowserSurfaces(
+      threadRef,
+      ["b", "other", "a"],
+      undefined,
+      undefined,
+      readThreadPreviewState(threadRef).suppressedTabIds,
+    );
+
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, reuse: "origin" });
+
+    expect(activeSurfaceId()).toBe("browser:a");
+    expect(openPreview).not.toHaveBeenCalled();
   });
 });
 

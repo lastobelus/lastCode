@@ -8,7 +8,10 @@ import { msg } from "gt-react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
-import { recordBrowserTabSelection } from "./browser/lastcodePreviewTabSelection";
+import {
+  reconcileBrowserTabSelection,
+  recordBrowserTabSelection,
+} from "./browser/lastcodePreviewTabSelection";
 import { useClosedViewStore } from "./closedViewStore";
 import { m } from "./i18n/messages";
 import { resolveStorage } from "./lib/storage";
@@ -47,12 +50,7 @@ export interface DeviceTabTarget {
 }
 
 export type RightPanelSurface =
-  | {
-      id: `browser:${string}`;
-      kind: "preview";
-      resourceId: string;
-      lastcodeSelectionOrder?: number;
-    }
+  | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
   | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
   | {
@@ -162,6 +160,7 @@ export interface ThreadRightPanelState {
   isOpen: boolean;
   activeSurfaceId: string | null;
   surfaces: RightPanelSurface[];
+  lastcodeSelectedBrowserTabIds?: readonly string[];
   dismissedDeviceSurfaceIds?: string[];
   maximized?: true;
   proactiveDiffTurnId?: RunId;
@@ -263,6 +262,7 @@ interface RightPanelStoreState {
     hiddenTabIds?: ReadonlySet<string>,
     /** One consumed foreground creation intent, not the current preview selection. */
     focusTabId?: string,
+    suppressedTabIds?: ReadonlySet<string>,
   ) => void;
   reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   show: (ref: ScopedThreadRef) => void;
@@ -451,6 +451,7 @@ const updateThreadStateMap = (
     !next.isOpen &&
     next.activeSurfaceId === null &&
     next.surfaces.length === 0 &&
+    !next.lastcodeSelectedBrowserTabIds?.length &&
     !next.dismissedDeviceSurfaceIds?.length &&
     next.proactiveDiffTurnId === undefined
   ) {
@@ -1253,7 +1254,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             return { ...current, surfaces };
           }),
         ),
-      reconcileBrowserSurfaces: (ref, tabIds, hiddenTabIds, focusTabId) =>
+      reconcileBrowserSurfaces: (ref, tabIds, hiddenTabIds, focusTabId, suppressedTabIds) =>
         set((state) =>
           automaticUpdate(state, scopedThreadKey(ref), (current) => {
             const validIds = new Set(tabIds.map((tabId) => `browser:${tabId}`));
@@ -1293,7 +1294,10 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
                   ? current.activeSurfaceId
                   : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null)),
             };
-            return recordBrowserTabSelection(next, focusedSurface?.id);
+            return recordBrowserTabSelection(
+              reconcileBrowserTabSelection(next, tabIds, suppressedTabIds),
+              focusedSurface?.id,
+            );
           }),
         ),
       reconcileFileSurfaces: (ref, workspaceAvailable) =>

@@ -74,7 +74,6 @@ describe("rightPanelStore", () => {
       id: "browser:destination",
       kind: "preview",
       resourceId: "destination",
-      lastcodeSelectionOrder: 2,
     });
     expect(store.getUserActionRevision(refA)).toBe(initialRevision + 2);
   });
@@ -1345,9 +1344,8 @@ describe("rightPanelStore", () => {
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: true,
       activeSurfaceId: "browser:tab-a",
-      surfaces: [
-        { id: "browser:tab-a", kind: "preview", resourceId: "tab-a", lastcodeSelectionOrder: 1 },
-      ],
+      surfaces: [{ id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
+      lastcodeSelectedBrowserTabIds: ["tab-a"],
     });
   });
 
