@@ -410,6 +410,7 @@ function launcherFixture(nativeLauncher = false) {
   for (const file of [
     "scripts/check-changed.ts",
     "scripts/check-changed-command.ts",
+    "scripts/check-changed-output.ts",
     ".github/scripts/ci-changes.cjs",
   ]) {
     write(file, NodeFS.readFileSync(NodePath.join(import.meta.dirname, "..", file), "utf8"));
@@ -441,9 +442,10 @@ function launcherFixture(nativeLauncher = false) {
     const args = process.argv.slice(2);
     fs.writeFileSync(path.join(process.env.RECORDS, process.pid + '.json'), JSON.stringify({ args, cwd: process.cwd() }));
     if (process.env.FAIL_STEP === 'mutate' && args[0] === 'lint') fs.appendFileSync(args[1], '// concurrent edit\\n');
+    if (args[0] === process.env.FAIL_STEP) console.log('schema suggestion\\n'.repeat(4000) + 'error TS2322: fixture type mismatch');
     console.log('fixture stdout: ' + args[0]);
     console.error('fixture stderr: ' + args[0]);
-    process.exit(args[0] === process.env.FAIL_STEP ? 23 : 0);
+    process.exitCode = args[0] === process.env.FAIL_STEP ? 23 : 0;
   `,
   );
   // Select the Windows launcher without changing the Effect runtime's host platform.
@@ -627,9 +629,19 @@ it.each(["install", "lint"])("reports a failing %s step with its output", (step)
     "--ignore-scripts",
   ]);
   expect(install?.cwd).not.toBe(project.root);
-  expect(result.stdout + result.stderr).toContain(`fixture stdout: ${step}`);
-  expect(result.stdout + result.stderr).toContain(`fixture stderr: ${step}`);
   expect(result.stdout).toContain(step === "install" ? "FAIL  unused patches" : "FAIL  lint");
+  const summary = result.stdout.slice(result.stdout.indexOf("check:changed summary"));
+  const logPath = /Full log: (.+)/.exec(summary)?.[1];
+  expect(logPath, summary).toBeDefined();
+  const fullLog = NodeFS.readFileSync(logPath!, "utf8");
+  expect(fullLog).toContain(`fixture stdout: ${step}`);
+  expect(fullLog).toContain(`fixture stderr: ${step}`);
+  expect(fullLog.replace(`fixture stderr: ${step}\n`, "")).toContain(
+    "schema suggestion\n".repeat(4000),
+  );
+  expect(fullLog).toContain("error TS2322: fixture type mismatch");
+  expect(result.stdout).toContain("error TS2322: fixture type mismatch");
+  expect(result.stdout.length).toBeLessThan(16000);
   if (step === "lint") expect(result.stdout).toContain("pass  unused patches");
   expect(
     NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),

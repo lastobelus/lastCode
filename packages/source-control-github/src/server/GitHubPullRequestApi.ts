@@ -780,6 +780,8 @@ export class GitHubPullRequestApi extends Context.Service<
       readonly host: string;
       readonly repository: string;
       readonly checks: ReadonlyArray<ProviderCheckReference>;
+      readonly runId?: number;
+      readonly jobId?: number;
     }) => Effect.Effect<ReadonlyArray<ProviderCheckRerun>, GitHubPullRequestApiError>;
     readonly runPullRequestAction: (input: {
       readonly cwd: string;
@@ -3084,6 +3086,23 @@ export const make = Effect.gen(function* () {
     rerunChecks: Effect.fn("GitHubPullRequestApi.rerunChecks")(function* (input) {
       const { owner, name } = parseRepositorySelector(input.repository);
       const root = `repos/${owner}/${name}/actions`;
+      if (input.runId !== undefined || input.jobId !== undefined) {
+        const path =
+          input.runId !== undefined
+            ? `${root}/runs/${input.runId}/rerun-failed-jobs`
+            : `${root}/jobs/${input.jobId}/rerun`;
+        return yield* api
+          .rest({ host: input.host, operation: "rerunChecks", method: "POST", path })
+          .pipe(
+            Effect.as([
+              {
+                name: input.runId !== undefined ? `Run ${input.runId}` : `Job ${input.jobId}`,
+                rerun: true,
+                detail: null,
+              },
+            ]),
+          );
+      }
       const located = yield* Effect.forEach(
         input.checks,
         (check): Effect.Effect<LocatedCheckJob, GitHubPullRequestApiError> => {

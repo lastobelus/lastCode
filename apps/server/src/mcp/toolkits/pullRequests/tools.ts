@@ -884,6 +884,14 @@ const RerunChecksTool = Tool.make("ci_rerun", {
   parameters: Schema.Struct({
     ...ThreadPullRequestInput.fields,
     check: Schema.optional(TrimmedNonEmptyString),
+    runId: Schema.optional(PositiveInt).annotate({
+      description:
+        "GitHub Actions run ID. Re-runs that run's failed jobs. Pass only one of check, runId or jobId.",
+    }),
+    jobId: Schema.optional(PositiveInt).annotate({
+      description:
+        "GitHub Actions job ID. Re-runs only that job. Pass only one of check, runId or jobId.",
+    }),
   }),
   success: RerunChecksResult,
   failure: PullRequestToolError,
