@@ -58,8 +58,9 @@ picker.
 
 ## User flow
 
-1. The desktop checks the local repository at startup, every four minutes, and
-   when the sidebar update button is clicked. A manual check from the sidebar,
+1. The desktop checks the local repository at startup, every four hours, when
+   a local package build finishes, and when the sidebar update button is
+   clicked. A manual check from the sidebar,
    Settings, or application menu also requests an immediate checkpoint when the
    checkpoint service is installed on this Mac, including on a daily schedule.
    If an interval run is already active, the request waits for a follow-up run

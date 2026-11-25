@@ -1,5 +1,7 @@
 // LastCode managed module: local-build-progress
 
+export const LOCAL_PACKAGE_READY_FILE = "package-ready";
+
 export interface LocalBuildPhase {
   readonly label: string;
   readonly marker: string;

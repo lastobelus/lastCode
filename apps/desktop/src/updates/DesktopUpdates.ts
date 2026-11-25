@@ -16,6 +16,7 @@ import { errorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -811,7 +812,11 @@ export const make = Effect.gen(function* () {
           state.availableVersion === inspection.availableVersion &&
           (state.errorContext === "install" || !build)
         ) {
-          return setState(recordSuccessfulDesktopUpdateCheck(state, checkedAt)).pipe(
+          const replaceBuild = build
+            ? Ref.set(localBuildRef, Option.some({ build, version: inspection.availableVersion }))
+            : Effect.void;
+          return replaceBuild.pipe(
+            Effect.andThen(setState(recordSuccessfulDesktopUpdateCheck(state, checkedAt))),
             Effect.as(result),
           );
         }
@@ -870,6 +875,8 @@ export const make = Effect.gen(function* () {
 
     const state = yield* Ref.get(updateStateRef);
     if (state.status === "disabled")
+      return { checked: false, checkpointRequested: false, error: null };
+    if (reason === "local-package-ready" && state.source !== "lastcode-local")
       return { checked: false, checkpointRequested: false, error: null };
     if (state.status === "downloading") {
       yield* logUpdaterInfo("skipping update check while update is active", {
@@ -934,6 +941,23 @@ export const make = Effect.gen(function* () {
         checkForUpdatesUnlocked(reason, actionReservation, allowDowngrade),
       ),
   );
+
+  const refreshLocalPackage = Effect.fn("desktop.updates.refreshLocalPackage")(function* () {
+    const completions = yield* PubSub.subscribe(finishedUpdateActions);
+    const refresh = checkTransitionMutex.withPermit(
+      Effect.acquireUseRelease(
+        tryStartUpdateAction("check"),
+        (acquired) =>
+          acquired
+            ? checkForUpdatesUnlocked("local-package-ready", "held").pipe(Effect.as(true))
+            : Effect.succeed(false),
+        (acquired) => (acquired ? finishUpdateAction("check") : Effect.void),
+      ),
+    );
+    while (!(yield* refresh)) {
+      yield* PubSub.take(completions);
+    }
+  }, Effect.scoped);
 
   // Install refreshes before downloading, and a second check could pick a stale, older release.
   const downloadAvailableUpdate = Effect.fn("desktop.updates.downloadAvailableUpdate")(function* (
@@ -1221,7 +1245,6 @@ export const make = Effect.gen(function* () {
 
   const resetInstallAction = Effect.all(
     [
-      finishUpdateAction("install"),
       Ref.set(desktopState.quitting, false),
       Ref.set(installRunningBackendsRef, []),
       removeUpdateRestartMarker,
@@ -1433,6 +1456,7 @@ export const make = Effect.gen(function* () {
                 });
                 return { accepted: true, completed: false, failed: true };
               },
+              Effect.ensuring(finishUpdateAction("install")),
             ),
             ElectronUpdaterQuitAndInstallError: Effect.fn("desktop.updates.handleInstallFailure")(
               function* (error) {
@@ -1448,7 +1472,9 @@ export const make = Effect.gen(function* () {
               },
             ),
           }),
-          Effect.onInterrupt(() => resetInstallAction),
+          Effect.onInterrupt(() =>
+            resetInstallAction.pipe(Effect.ensuring(finishUpdateAction("install"))),
+          ),
           Effect.catchCause((cause) =>
             Effect.gen(function* () {
               if (Cause.hasInterruptsOnly(cause)) {
@@ -1944,8 +1970,21 @@ export const make = Effect.gen(function* () {
       });
 
       yield* startUpdatePollers;
-      if (localEnabled) {
-        yield* checkForUpdates("local-nightlies-enabled");
+      if (localNightliesSupported) {
+        const watching = yield* Deferred.make<void>();
+        yield* localUpdates
+          .packageReady(() => {
+            Deferred.doneUnsafe(watching, Effect.void);
+          })
+          .pipe(
+            Stream.runForEach(refreshLocalPackage),
+            Effect.ensuring(Deferred.succeed(watching, undefined)),
+            Effect.forkScoped({ startImmediately: true }),
+          );
+        if (localEnabled) {
+          yield* Deferred.await(watching);
+          yield* checkForUpdates("local-nightlies-enabled");
+        }
       }
     }).pipe(Effect.withSpan("desktop.updates.configure")),
     setChannel: Effect.fn("desktop.updates.setChannel")(function* (
