@@ -36,6 +36,7 @@ import { rightPanelHostRef, useRightPanelStore } from "~/rightPanelStore";
 import { rememberHandoffBrowser } from "~/handoffs/handoffsStore";
 
 import { resolveBrowserDefaults } from "./browserDefaults";
+import { type PreviewTabReuse, reuseOpenPreviewTab } from "./lastcodePreviewTabReuse";
 import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 
@@ -71,6 +72,7 @@ interface OpenUrlInPreviewInput<E> {
   /** Preserve the source tab's profile when opening a link from a page. */
   readonly profileId?: PreviewOpenInput["profileId"];
   readonly background?: boolean;
+  readonly reuse?: PreviewTabReuse;
 }
 
 export async function openUrlInPreview<E>(
@@ -100,6 +102,19 @@ export async function openPreparedUrlInPreview<E>(
   }
   const profileId = preparedPreviewOpenProfileId(prepared, defaults.profileId, input.profileId);
   const target = preparedPreviewOpenTarget(threadRef.environmentId, prepared, input.url, profileId);
+  const reusedTabId = reuseOpenPreviewTab({
+    threadRef,
+    authoredUrl: input.url,
+    target,
+    profileId,
+    background: input.background,
+    reuse: input.reuse,
+    panelRevision,
+  });
+  if (reusedTabId !== null) {
+    input.onOpened?.(reusedTabId);
+    return AsyncResult.success(undefined);
+  }
   const result = await input.openPreview({
     environmentId: threadRef.environmentId,
     input: {

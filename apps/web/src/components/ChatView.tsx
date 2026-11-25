@@ -226,6 +226,7 @@ import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { toastManager } from "./ui/toast";
 import { projectScriptIdFromCommand } from "~/projectScripts";
+import { useDashboardsEntry } from "./lastcodeDashboardsEntry";
 import { newMessageId } from "~/lib/utils";
 import {
   isInSideChatPane,
@@ -1264,6 +1265,7 @@ export default function ChatView(props: ChatViewProps) {
     activeProject ?? undefined,
   );
   const activeProjectScripts = activeProject ? resolveProjectScripts(settings, activeProject) : [];
+  const addDashboardsSurface = useDashboardsEntry(activeThreadRef, activeProjectScripts);
   const { projectCloneBannerItem, projectCloneSendBlockReason } =
     useProjectCloneBanner(activeProjectRef);
   const activeProjectDefaultModelSelection =
@@ -4418,6 +4420,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
           onAddHandoffs={addHandoffsSurfaceStable}
+          onAddDashboards={addDashboardsSurface}
           threadRef={activeThreadRef ?? undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
