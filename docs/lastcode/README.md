@@ -25,6 +25,8 @@ directories.
 - [Documentation-site research archive](documentation-site-research/README.md):
   preserved design proposals, prototypes, delivery history, and issue ownership
   for the unfinished public site release.
+- [Message timestamp research](message-timestamp-research.md): delivery probes and
+  cache measurements for Codex and Claude Code.
 - [Glossary](glossary.md): preferred LastCode fork-maintenance terms and their
   relationship to the current workflow.
 - [Set up alongside T3 Code](setup.md): prerequisites, guarded bootstrap,
