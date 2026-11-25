@@ -40,6 +40,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { vitePlusCommand } from "./check-changed-command.ts";
+import { preserveCheckOutput } from "./check-changed-output.ts";
 
 const GiB = 1024 ** 3;
 
@@ -52,7 +53,11 @@ export type Outcome = "pass" | "FAIL" | "TIMEOUT";
 
 export interface Step<R> {
   readonly name: string;
-  readonly run: Effect.Effect<{ readonly ok: boolean; readonly output: string }, never, R>;
+  readonly run: Effect.Effect<
+    { readonly ok: boolean; readonly output: string; readonly logPath?: string | null },
+    never,
+    R
+  >;
   // Budget slots the step holds: one per worker it runs in parallel.
   readonly weight?: number;
   // Vitest runs started together race to rebuild node_modules/.vitest-cache (ENOTEMPTY).
@@ -88,7 +93,7 @@ export const runSteps = Effect.fn("checkChanged.runSteps")(function* <R>(
         yield* Console.log(`\n> vp ${step.name}  ${outcome}  ${time}`);
         const output = Option.getOrUndefined(result)?.output.trimEnd();
         if (output) yield* Console.log(output);
-        return { name: step.name, outcome, time };
+        return { name: step.name, outcome, time, logPath: Option.getOrUndefined(result)?.logPath };
       });
       const slots = Math.min(step.weight ?? 1, options.concurrency);
       const limited = Effect.acquireUseRelease(
@@ -719,11 +724,21 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   ).filter((dir) => files.some((file) => file.startsWith(`${dir}/`)));
   const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
   const typecheckWorkers = Math.min(concurrency, affected.length);
-  const command = (name: string, args: ReadonlyArray<string>) => ({ name, run: vp(args) });
+  const command = (name: string, args: ReadonlyArray<string>) => ({
+    name,
+    run: vp(args).pipe(Effect.flatMap((result) => preserveCheckOutput(root, result))),
+  });
   const compilerFiles = compilerApps.reduce((count, app) => count + app.names.length, 0);
 
-  const steps: Array<Step<never>> = [
-    ...(runPatchCheck ? [{ name: "unused patches", run: checkPatches }] : []),
+  const steps: Array<Step<FileSystem.FileSystem | Path.Path>> = [
+    ...(runPatchCheck
+      ? [
+          {
+            name: "unused patches",
+            run: checkPatches.pipe(Effect.flatMap((result) => preserveCheckOutput(root, result))),
+          },
+        ]
+      : []),
     ...(present.length > 0
       ? [command("format", ["fmt", "--check", "--no-error-on-unmatched-pattern", ...present])]
       : []),
@@ -799,6 +814,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const summary = ["check:changed summary"];
   for (const result of results) {
     summary.push(`  ${result.outcome}  ${result.name}  ${result.time}`);
+    if (result.logPath) summary.push(`    Full log: ${result.logPath}`);
   }
   if (results.some((result) => result.outcome === "TIMEOUT")) {
     summary.push(
