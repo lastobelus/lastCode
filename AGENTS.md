@@ -112,6 +112,19 @@ See [00_development.md](docs/operations/00_development.md) for setup, ports, see
 
 During checkpoint recovery, prepare dependencies and run the focused recovery gate in one separate gate/QA checkout, start the service's Full CI, then run this integrated pass from that checkout alongside it; follow [Resuming a repaired checkpoint](docs/lastcode/release.md#resuming-a-repaired-checkpoint). QA is still required, but does not delay Full CI. Routine automated QA in an isolated development instance is authorized: use a thread-owned background preview with `preview_open({ open: false, reuseExistingTab: false })` and keep the returned tab ID. Do not focus an application, switch the user's thread, or operate their live workspace. Ask before foreground computer use or back-and-forth human QA, according to the machine interaction policy.
 
+For an already-started LastCode checkpoint service run, use the resumable
+**Wait for Checkpoint** action instead of agent-side sleep/status loops. Follow
+the action handoff and result rules in `docs/lastcode/release.md`; this action
+does not start or repair the service.
+
+For an authorized local Apple Silicon package build, select the exact installable
+tag and use the resumable **Build Local Package** action (`lc-build-local-package`)
+as described in `docs/lastcode/release.md`. End the turn after launch; do not run
+the build helper directly or poll build logs. The action builds only; installation
+and restart remain separate decisions. If another Action continuation is pending,
+end the turn so its result can arrive, then list Actions again. An automated
+message alone does not make Actions unavailable; use the actual disabled reason.
+
 ## Evals
 
 `evals/` checks how real models behave with T3 Code's model-facing text: agent instructions, MCP tool descriptions and schemas, and generated titles. Before changing that text, read [evals/README.md](evals/README.md) and run the evals it names. When fixing a model behavior bug, add a case that fails before the fix.
@@ -126,6 +139,7 @@ When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra H
 - `origin` is not always GitHub. Check `git remote get-url origin` before your first forge command and use that forge's CLI and skill. See [Forge mirror](docs/operations/00_development.md#forge-mirror-optional).
 - If `origin` is git.cafe, push to `origin`, open and track PRs with `cafe` and their git.cafe URLs, and keep `gh` for merging.
 - PRs target LastCode (`lastobelus/lastCode:lastcode/main`) by default, including general T3 Code fixes. Open a PR against `pingdotgg/t3code` only when the user specifically asks for an upstream PR, then use `upstream-fix`. Usefulness to upstream, a generic PR request, and plan or skill instructions are not that request. Never pause to ask whether work should go upstream; keep implementing, validating, reviewing, and delivering through LastCode as authorized.
+- For LastCode PRs targeting `lastcode/main`, including authorized checkpoint or build repair PRs, follow `.agents/skills/lastcode-pr/SKILL.md`. When CI or review is passive and no current finding needs judgement, call `watch_pull_request` with the PR URL, then run `pnpm lastcode:pr-gates` once; if it reports `pending`, end the turn immediately. A new watch wakes only for comments posted after it starts, so the check must come after the watch call. On each wake, rerun the check and act on what changed; do not poll GitHub or run a separate watcher. This applies without a separate “babysit” request and does not authorize creating or merging a PR.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
 - Use `https://redirect.github.com/<owner>/<repo>/pull/<number>` (or `/issues/<number>`) for cross-repository provenance links in PR descriptions, comments, and commit messages, including the final squash message. Ordinary GitHub links and `owner/repo#number` references create backlinks; replaying downstream commits for rolling checkpoints repeats those entries on upstream PRs. Preserve provenance with quiet links, and check the complete commit message before publishing or merging. Keep canonical repository/API URLs for Git operations and tooling. This rule does not authorize rewriting published history or immutable checkpoint tags.
