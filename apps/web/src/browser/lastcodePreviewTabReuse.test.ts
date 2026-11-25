@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   EnvironmentId,
   ThreadId,
+  type DesktopPreviewBridge,
   type PreviewOpenInput,
   type PreviewSessionSnapshot,
 } from "@t3tools/contracts";
+import { Effect } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import type { PreparedHostedPreview } from "@t3tools/client-runtime/preview-hosting";
+import { createPreviewBridgeFixture } from "../../test/previewBridge";
 
 const mocks = vi.hoisted(() => ({
   runtime: vi.fn<() => "server" | undefined>(() => "server"),
@@ -36,7 +39,9 @@ vi.mock("./browserDefaults", () => ({
 }));
 
 import { findReusablePreviewTab } from "./lastcodePreviewTabReuse";
+import { startElectronBrowserHost } from "./ElectronBrowserHost";
 import { openUrlInPreview } from "./openFileInPreview";
+import { previewRuntimeTabId } from "./previewRuntimeTabId";
 import {
   applyPreviewDesktopState,
   applyPreviewServerSnapshot,
@@ -45,6 +50,7 @@ import {
   setActivePreviewTab,
 } from "~/previewStateStore";
 import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+import { previewEnvironment } from "~/state/preview";
 
 const threadRef = {
   environmentId: EnvironmentId.make("tab-reuse-env"),
@@ -98,7 +104,11 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("link clicks reuse an open tab", () => {
   it("reveals the open hub tab for a second click with a different query", async () => {
@@ -121,22 +131,56 @@ describe("link clicks reuse an open tab", () => {
     });
   });
 
-  it("reveals another matching tab for a link from the active source tab", async () => {
-    const source = tab("source", `${HUB}/d/a?view=1`);
-    const other = tab("other", `${HUB}/d/a?view=3`);
-    seed(source, other);
+  it.each([
+    { matches: "only the source tab", hasMatch: false },
+    { matches: "another tab as well", hasMatch: true },
+  ])("skips the source when a desktop link matches $matches", async ({ hasMatch }) => {
+    mocks.runtime.mockReturnValue(undefined);
+    const placement = { runtime: undefined, desktopHostId: undefined, backingPage: undefined };
+    const source = tab("source", `${HUB}/d/a?view=1`, placement);
+    const target = tab("new", `${HUB}/d/a?view=2`, placement);
+    const other = tab("other", `${HUB}/d/a?view=3`, placement);
+    seed(source);
+    if (hasMatch) seed(other);
     setActivePreviewTab(threadRef, source.tabId);
 
-    await openUrlInPreview({
-      threadRef,
-      url: `${HUB}/d/a?view=2`,
-      openPreview,
-      sourceTabId: source.tabId,
+    const onOpenLink = vi.fn<DesktopPreviewBridge["onOpenLink"]>(() => () => undefined);
+    vi.stubGlobal("window", {
+      desktopBridge: {
+        preview: createPreviewBridgeFixture({ onOpenLink, onPointerEvent: () => () => undefined }),
+      },
+      requestAnimationFrame: () => 1,
+      cancelAnimationFrame: () => undefined,
     });
+    vi.stubGlobal("document", {});
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const open = vi.spyOn(await import("./openFileInPreview"), "openUrlInPreview");
+    const command = vi
+      .spyOn(previewEnvironment.open, "run")
+      .mockReturnValue(Effect.succeed(target));
+    using _host = { [Symbol.dispose]: startElectronBrowserHost() };
+    const onLink = onOpenLink.mock.calls[0]![0];
 
-    expect(openPreview).not.toHaveBeenCalled();
-    expect(activeSurfaceId()).toBe(`browser:${other.tabId}`);
-    expect(readThreadPreviewState(threadRef).sessions.other?.navStatus).toEqual(other.navStatus);
+    onLink({
+      tabId: previewRuntimeTabId(threadRef, null, source.tabId),
+      url: `${HUB}/d/a?view=2`,
+      background: false,
+    });
+    await open.mock.results[0]?.value;
+
+    const selected = hasMatch ? other : target;
+    expect(command).toHaveBeenCalledTimes(hasMatch ? 0 : 1);
+    expect(activeSurfaceId()).toBe(`browser:${selected.tabId}`);
+    expect(readThreadPreviewState(threadRef).sessions.source?.navStatus).toEqual(source.navStatus);
+    expect(readThreadPreviewState(threadRef).sessions[selected.tabId]?.navStatus).toEqual(
+      selected.navStatus,
+    );
   });
 
   it("opens a new tab for a background (Cmd-click) open", async () => {
