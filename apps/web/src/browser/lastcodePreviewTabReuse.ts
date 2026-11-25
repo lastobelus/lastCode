@@ -108,8 +108,8 @@ export function findReusablePreviewTab(
   for (const tab of Object.values(state.sessions)) {
     if (tab.automationOwner !== undefined || tab.reveal === false) continue;
     if (state.suppressedTabIds.has(tab.tabId)) continue;
-    // A failed page may have recovered since; a fresh open retries it.
-    if (tab.navStatus._tag === "Idle" || tab.navStatus._tag === "LoadFailed") continue;
+    // Only a page that finished loading; a failed one may have recovered since.
+    if (tab.navStatus._tag !== "Success") continue;
     if (!samePlacement(tab, request.placement)) continue;
     const tabUrl = parseUrl(tab.navStatus.url);
     if (!tabUrl || !targets.some((target) => addressMatches(tabUrl, target, request.reuse))) {
