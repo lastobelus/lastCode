@@ -1517,7 +1517,7 @@ it.effect("reruns only the failed namesake and refuses an ambiguous selection", 
     const urls = [
       "https://github.com/acme/web/actions/runs/10/job/11",
       "https://github.com/acme/web/actions/runs/20/job/21",
-    ];
+    ] as const;
     let bothFail = false;
     const selected: Array<string | null> = [];
     const service = yield* makeService({
