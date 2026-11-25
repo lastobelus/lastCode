@@ -1,0 +1,63 @@
+import { T } from "gt-react";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { useClientSettings } from "~/hooks/useSettings";
+import { useThreadHandoffs, handoffTitle, type HandoffEntry } from "~/handoffs/handoffsStore";
+import { useOpenHandoff } from "~/handoffs/useOpenHandoff";
+import { MenuItem, MenuSeparator } from "~/components/ui/menu";
+
+function handoffFilename({ target }: HandoffEntry): string {
+  switch (target.kind) {
+    case "file":
+      return target.path.split(/[\\/]/).at(-1) ?? "";
+    case "attachment":
+      return target.attachment.name;
+    case "url": {
+      const url = new URL(target.url);
+      return url.pathname.replace(/\/+$/, "").split("/").at(-1) || url.hostname;
+    }
+    case "pull-request":
+      return `${target.repository}#${target.number}`;
+  }
+}
+
+export function HandoffsMenu({
+  threadRef,
+  onShowAll,
+}: {
+  threadRef: ScopedThreadRef;
+  onShowAll: () => void;
+}) {
+  const entries = useThreadHandoffs(threadRef);
+  const limit = useClientSettings((settings) => settings.handoffsMenuLimit);
+  const openHandoff = useOpenHandoff();
+  const visible = entries.slice(0, limit);
+  return (
+    <>
+      <MenuSeparator />
+      <MenuItem disabled>
+        <T>Handoffs</T>
+      </MenuItem>
+      {visible.length === 0 ? (
+        <MenuItem disabled>
+          <T>No handoffs yet</T>
+        </MenuItem>
+      ) : (
+        visible.map((entry) => (
+          <MenuItem key={entry.id} onClick={() => void openHandoff(threadRef, entry)}>
+            <span className="min-w-0 truncate">
+              {handoffTitle(entry)}
+              {handoffFilename(entry) !== handoffTitle(entry) ? (
+                <span className="text-muted-foreground">: {handoffFilename(entry)}</span>
+              ) : null}
+            </span>
+          </MenuItem>
+        ))
+      )}
+      {entries.length > limit ? (
+        <MenuItem onClick={onShowAll}>
+          <T>Show all…</T>
+        </MenuItem>
+      ) : null}
+    </>
+  );
+}

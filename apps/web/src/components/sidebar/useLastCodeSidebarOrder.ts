@@ -4,6 +4,7 @@ import { useClientSetting } from "../../hooks/useSettings";
 import { resolveProjectExpanded, useUiStateStore } from "../../uiStateStore";
 import { useLastCodeSidebarFamiliesStore } from "../lastcodeSidebarFamilies.store";
 import { lastCodeProjectExpansionPreferenceKeys } from "./useLastCodeProjectHeaderGestures";
+import type { indexLastCodeSidebarThreads } from "./lastcodeSidebarProjects";
 import { projectLastCodeProjectThreads } from "./lastcodeProjectThreads";
 /** Root navigation uses the same pure projection inputs as project-local rendering. */
 export function useLastCodeSidebarOrder(
@@ -11,6 +12,8 @@ export function useLastCodeSidebarOrder(
   threadsByProjectKey: ReadonlyMap<string, readonly SidebarThreadSummary[]>,
   routeThreadKey: string | null,
   expandedThreadListsByProject: ReadonlySet<string>,
+  threadIndex?: ReturnType<typeof indexLastCodeSidebarThreads>,
+  threadOnlyProjects: readonly SidebarProjectSnapshot[] = [],
 ) {
   const collapsedFamiliesByKey = useLastCodeSidebarFamiliesStore((state) => state.collapsedByKey);
   const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
@@ -18,13 +21,16 @@ export function useLastCodeSidebarOrder(
   const groupingStyle = useClientSetting("legacySidebarThreadGroupingStyle");
   const showFamilyStatusSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
   const sidebarThreadPreviewCount = useClientSetting("sidebarThreadPreviewCount");
-  return sortedProjects.flatMap((project) => {
+  const orderProjectThreads = (project: SidebarProjectSnapshot, projectExpanded: boolean) => {
     const projectThreads = threadsByProjectKey.get(project.projectKey) ?? [];
-    const projectExpanded = resolveProjectExpanded(
-      projectExpandedById,
-      lastCodeProjectExpansionPreferenceKeys(project),
-    );
     return projectLastCodeProjectThreads(projectThreads, sidebarThreadSortOrder, {
+      ownership: threadIndex
+        ? {
+            projectKey: project.projectKey,
+            byThreadKey: threadIndex.byThreadKey,
+            hiddenThreadKeys: threadIndex.hiddenThreadKeys,
+          }
+        : undefined,
       collapsedByKey: collapsedFamiliesByKey,
       activeThreadKey: routeThreadKey,
       projectExpanded,
@@ -33,5 +39,17 @@ export function useLastCodeSidebarOrder(
       groupingStyle,
       showFamilyStatusSubheaders,
     }).familyProjection.orderedThreadKeys;
-  });
+  };
+  return [
+    ...sortedProjects.flatMap((project) =>
+      orderProjectThreads(
+        project,
+        resolveProjectExpanded(
+          projectExpandedById,
+          lastCodeProjectExpansionPreferenceKeys(project),
+        ),
+      ),
+    ),
+    ...threadOnlyProjects.flatMap((project) => orderProjectThreads(project, true)),
+  ];
 }

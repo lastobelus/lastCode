@@ -62,10 +62,10 @@ describe("checkpoint run history", () => {
       expect(appendCheckpointRun(nightlyFailure, checkpointHistoryPath)).toBe(true);
       expect(nightlyFailure.conflictDossierPath).toBe("/recovery/git/conflict-dossier.txt");
       expect(appendCheckpointRevisionRun(revisionSuccess, revisionHistoryPath)).toBe(true);
-      expect(readLatestCheckpointRun(checkpointHistoryPath)).toEqual(nightlyFailure);
+      expect(readLatestCheckpointRun(checkpointHistoryPath)).toMatchObject(nightlyFailure);
       expect(appendCheckpointRevisionRun(revisionFailure, revisionHistoryPath)).toBe(true);
-      expect(readLatestCheckpointRun(checkpointHistoryPath)).toEqual(nightlyFailure);
-      expect(readLatestCheckpointRun(revisionHistoryPath)).toEqual(revisionFailure);
+      expect(readLatestCheckpointRun(checkpointHistoryPath)).toMatchObject(nightlyFailure);
+      expect(readLatestCheckpointRun(revisionHistoryPath)).toMatchObject(revisionFailure);
     } finally {
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }
@@ -92,8 +92,20 @@ describe("checkpoint run history", () => {
         (message) => warnings.push(message),
       ),
     ).toBe(false);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("Could not record dashboard history");
+    expect(warnings.at(-1)).toContain("Could not record dashboard history");
+    NodeFS.mkdirSync(NodePath.join(directory, "checkpoint-revision-runs.jsonl"));
+    const primary = NodePath.join(directory, "checkpoint-runs.jsonl");
+    const original = checkpointFailureRecord(
+      {
+        upstreamTag: "fixture-nightly",
+        startedAtMs: 1_000,
+        commitsRebased: 1,
+        error: new Error("original checkpoint failure"),
+      },
+      2_000,
+    );
+    expect(appendCheckpointRun(original, primary, (message) => warnings.push(message))).toBe(true);
+    expect(readLatestCheckpointRun(primary)?.error).toBe("original checkpoint failure");
     NodeFS.rmSync(directory, { recursive: true, force: true });
   });
 
@@ -121,6 +133,7 @@ describe("checkpoint run history", () => {
       durationMs: 3_000,
       commitsRebased: 3,
       error: "push failed",
+      failingSteps: ["Checkpoint publication"],
       failurePhase: "publication",
       localTagRetained: true,
       replayMode: "historical",

@@ -72,8 +72,7 @@ describe("loadBalancingSendWarning", () => {
     expect(
       loadBalancingSendWarning({
         pending: true,
-        threadContexts: [localThread, remoteThread],
-        candidateEnvironmentIds: [],
+        hasReadableReferenceDestination: false,
       }).title,
     ).toBe("Checking machine resources");
   });
@@ -82,18 +81,16 @@ describe("loadBalancingSendWarning", () => {
     expect(
       loadBalancingSendWarning({
         pending: false,
-        threadContexts: [localThread, remoteThread],
-        candidateEnvironmentIds: [local, remote],
+        hasReadableReferenceDestination: false,
       }).description,
-    ).toMatch(/No machine can read every attached thread/);
+    ).toMatch(/No available machine can read every attached thread/);
   });
 
   it("blames resources when one machine can read every attached thread", () => {
     expect(
       loadBalancingSendWarning({
         pending: false,
-        threadContexts: [localThread],
-        candidateEnvironmentIds: [remote, local],
+        hasReadableReferenceDestination: true,
       }).description,
     ).toMatch(/No eligible machine has available resources/);
   });

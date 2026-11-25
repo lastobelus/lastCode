@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import type { EnvironmentId, LocalApi, ScopedThreadRef } from "@t3tools/contracts";
 import type { SidebarThreadSummary } from "../../types";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
@@ -25,8 +27,12 @@ export async function deleteLastCodeThread(
     dependencies.confirmDeletion &&
     !(await dependencies.confirm(
       [
-        `Delete thread "${thread.title}"?`,
-        "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
+        m(msg('Delete thread "{title}"?', { title: thread.title })),
+        m(
+          msg(
+            "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
+          ),
+        ),
       ].join("\n"),
       { variant: "destructive" },
     ))
@@ -39,15 +45,15 @@ export async function deleteLastCodeThread(
   }
   reportThreadOperationFailure(
     await dependencies.deleteThread(threadRef),
-    "Failed to delete thread",
+    msg("Failed to delete thread"),
   );
 }
 function warnPersistentThreadDeletion() {
   toastManager.add(
     stackedThreadToast({
       type: "warning",
-      title: "Persistent thread not deleted",
-      description: "Disable persistence or move it to another thread first.",
+      title: m(msg("Persistent thread not deleted")),
+      description: m(msg("Disable persistence or move it to another thread first.")),
     }),
   );
 }

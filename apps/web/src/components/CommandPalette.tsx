@@ -2,6 +2,7 @@ import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { decodeMsg, msg, T, useGT, useMessages, Var } from "gt-react";
 import { m, type MessageResolver } from "../i18n/messages";
 import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
+import { promptSnippetActions } from "~/lastcode/prompts/commandPaletteActions";
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
@@ -75,6 +76,7 @@ import {
   MessageSquareIcon,
   PaletteIcon,
   RotateCcwIcon,
+  ScaleIcon,
   SettingsIcon,
   MonitorIcon,
   PinIcon,
@@ -134,6 +136,7 @@ import { useScratchProject } from "../hooks/useScratchProject";
 import { useWorkflowEnvironmentIds } from "./workflows/useWorkflowEnvironmentIds";
 import { useStartTriage } from "../hooks/useStartTriage";
 import { pickTriageEnvironment } from "../lib/triageTarget";
+import { TemporaryProjectsToggle } from "./TemporaryProjectsToggle";
 import { useNewProject } from "../hooks/useNewProject";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { reportProjectFailure, useProjectPin } from "../hooks/useProjectGroupUpdate";
@@ -288,7 +291,10 @@ import {
   isPickableProjectMember,
   pickableProjectGroups,
 } from "@t3tools/client-runtime/state/project-grouping";
-import { buildSidebarProjectPickerEntries } from "../sidebarProjectGrouping";
+import {
+  buildSidebarProjectPickerEntries,
+  orderProjectMembersForPicker,
+} from "../sidebarProjectGrouping";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "~/components/pullRequest/pullRequestListPreferences";
 import { readIssueListPreferences } from "~/components/issue/issueListPreferences";
@@ -400,6 +406,7 @@ function CommandPaletteDialog(props: {
       data-palette-mode={props.mode}
       data-testid="command-palette"
       finalFocus={() => {
+        if (document.querySelector("[data-prompt-snippets]")) return false;
         if (restoreWorkspaceFocusFromPalette()) return false;
         const returnFocus = getCommandPaletteReturnFocus();
         if (returnFocus === false) return false;
@@ -441,7 +448,14 @@ function OpenCommandPaletteDialog(props: {
 }) {
   const gt = useGT();
   const messages = useMessages();
+  const composerHandleRef = useComposerHandleContext();
   const navigate = useNavigate();
+  const [commonPromptsAvailable] = useState(
+    () =>
+      document.querySelector(
+        'button[data-composer-shortcut~="composer.promptSnippets"]:not(:disabled)',
+      ) !== null,
+  );
   const pathname = useLocation({ select: (location) => location.pathname });
   const { openChildSearch, setOpen } = props;
   // Keyed by palette session: the intent and restored search only seed this
@@ -480,6 +494,7 @@ function OpenCommandPaletteDialog(props: {
     setHighlightedItemValue(null);
   }
   const clientSettings = useClientSettings(selectCommandPaletteClientSettings);
+  const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -588,7 +603,7 @@ function OpenCommandPaletteDialog(props: {
   const [isRemoteProjectLookingUp, setIsRemoteProjectLookingUp] = useState(false);
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
   const { environmentLabelById, projectEnvironmentLocationById } = useEnvironmentLookups();
-  const projectGroups = useSortedProjectGroups(environmentLabelById);
+  const { projectGroups, pickerGroups } = useSortedProjectGroups(environmentLabelById);
   const contextualProjectRef = resolveThreadActionProjectRef({
     activeDraftThread,
     activeThread: activeThread ?? undefined,
@@ -596,9 +611,14 @@ function OpenCommandPaletteDialog(props: {
     handleNewThread,
   });
   const projectPickerEntries = buildSidebarProjectPickerEntries({
-    groups: pickableProjectGroups(projectGroups),
+    groups: pickableProjectGroups(pickerGroups),
     preferredProjectRef: contextualProjectRef,
   });
+  const isEnvironmentReachable = (environmentId: EnvironmentId) =>
+    environments.some(
+      (environment) =>
+        environment.environmentId === environmentId && environment.connection.phase === "connected",
+    );
   const pickerProjects = projectPickerEntries.map(({ group, targetProject }) => ({
     ...targetProject,
     displayName: group.displayName,
@@ -612,8 +632,9 @@ function OpenCommandPaletteDialog(props: {
   const { canPinProjectGroup, toggleProjectGroupPin } = useProjectPin();
   // A row's target record can change when another machine's copy loads, so the kept
   // order follows the project group instead.
-  const rowOrderKey = (prefix: string) => (item: CommandPaletteActionItem) =>
-    projectGroupByTargetKey.get(item.value.slice(prefix.length + 1))?.projectKey ?? item.value;
+  const rowOrderKey =
+    (prefix: string) => (item: CommandPaletteActionItem | CommandPaletteSubmenuItem) =>
+      projectGroupByTargetKey.get(item.value.slice(prefix.length + 1))?.projectKey ?? item.value;
   const projectPin = (project: CommandPaletteProject) => {
     const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
     return group && canPinProjectGroup(group)
@@ -906,8 +927,9 @@ function OpenCommandPaletteDialog(props: {
         currentProjectId === null
           ? undefined
           : projectPickerEntries.find((entry) => entry.isPreferred);
+      const ordinaryProjects = pickerProjects.filter((project) => !isScratch(project));
       const projectItems = buildNewThreadInProjectItems({
-        projects: pickerProjects.filter((project) => !isScratch(project)),
+        projects: ordinaryProjects,
         currentProjectKey: currentEntry
           ? `${currentEntry.targetProject.environmentId}:${currentEntry.targetProject.id}`
           : null,
@@ -928,8 +950,78 @@ function OpenCommandPaletteDialog(props: {
             contextualProjectIsEligible
               ? contextualProjectRef
               : scopeProjectRef(project.environmentId, project.id),
+            { environmentSelection: "manual" },
           );
         },
+      }).map((item, index) => {
+        const project = ordinaryProjects[index]!;
+        const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
+        const members = group?.memberProjects.filter(isPickableProjectMember) ?? [project];
+        const availableItem = {
+          ...item,
+          disabled: !members.some((member) => isEnvironmentReachable(member.environmentId)),
+        };
+        if (members.length <= 1) return availableItem;
+        const { run: _run, ...projectItem } = availableItem;
+        const canAutoBalance =
+          loadBalancingEnabled && new Set(members.map((member) => member.environmentId)).size > 1;
+        return {
+          ...projectItem,
+          kind: "submenu" as const,
+          addonIcon: <ChevronRightIcon className={ADDON_ICON_CLASS} />,
+          groups: [
+            {
+              value: `${item.value}:hosts`,
+              label: gt("Run on"),
+              items: [
+                ...(canAutoBalance
+                  ? [
+                      {
+                        kind: "action" as const,
+                        value: `${item.value}:auto`,
+                        title: gt("Auto balance"),
+                        searchTerms: ["auto balance", "automatic"],
+                        icon: <ScaleIcon className={ITEM_ICON_CLASS} />,
+                        run: async () => {
+                          await handleNewThread(
+                            scopeProjectRef(project.environmentId, project.id),
+                            {
+                              environmentSelection: "auto",
+                            },
+                          );
+                        },
+                      },
+                    ]
+                  : []),
+                ...orderProjectMembersForPicker(members, project).map((member) => {
+                  const location = projectEnvironmentLocationById.get(member.environmentId);
+                  const hostLabel = environmentLabelById.get(member.environmentId) ?? "Remote";
+                  return {
+                    kind: "action" as const,
+                    value: `${item.value}:${member.physicalProjectKey}`,
+                    title: hostLabel,
+                    description: isEnvironmentReachable(member.environmentId)
+                      ? member.workspaceRoot
+                      : gt("{path} · Unavailable", { path: member.workspaceRoot }),
+                    disabled: !isEnvironmentReachable(member.environmentId),
+                    searchTerms: [member.workspaceRoot, hostLabel],
+                    icon: (
+                      <EnvironmentMachineIcon
+                        kind={location?.machine ?? "server"}
+                        className={ITEM_ICON_CLASS}
+                      />
+                    ),
+                    run: async () => {
+                      await handleNewThread(scopeProjectRef(member.environmentId, member.id), {
+                        environmentSelection: "manual",
+                      });
+                    },
+                  };
+                }),
+              ],
+            },
+          ],
+        };
       });
       if (scratchTargetEnvironmentId === null) return projectItems;
 
@@ -1348,6 +1440,14 @@ function OpenCommandPaletteDialog(props: {
   };
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+
+  actionItems.push(
+    ...promptSnippetActions(
+      composerHandleRef,
+      Boolean((activeThread || activeDraftThread) && commonPromptsAvailable),
+      messages,
+    ),
+  );
 
   if (projects.length > 0) {
     const activeProjectTitle =
@@ -1841,7 +1941,7 @@ function OpenCommandPaletteDialog(props: {
       run: async () => toggleProjectGroupPin(currentProjectGroup),
     });
   }
-  const contextualProjectGroup = currentProjectGroup ?? projectGroups[0] ?? null;
+  const contextualProjectGroup = currentProjectGroup ?? pickerGroups[0] ?? null;
   if (contextualProjectGroup) {
     actionItems.push({
       kind: "action",
@@ -1981,10 +2081,8 @@ function OpenCommandPaletteDialog(props: {
     const jumpItems = new Map(
       enumerateCommandPaletteItems(
         group.items.filter(
-          (item): item is CommandPaletteActionItem =>
-            item.kind === "action" &&
-            item.value !== NEW_THREAD_NO_PROJECT_VALUE &&
-            item.value !== addProjectAction.value,
+          (item) =>
+            item.value !== NEW_THREAD_NO_PROJECT_VALUE && item.value !== addProjectAction.value,
         ),
       ).map((item) => [item.value, item] as const),
     );
@@ -3111,7 +3209,14 @@ function OpenCommandPaletteDialog(props: {
       aria-label={gt("Command palette")}
       autoHighlight={autoHighlightsFirstRow ? "always" : false}
       footerActionLabel={footerActionLabel}
-      footerTrailing={footerTrailing}
+      footerTrailing={
+        (currentView === null && !isActionsOnly) ||
+        currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP ? (
+          <TemporaryProjectsToggle>{footerTrailing}</TemporaryProjectsToggle>
+        ) : (
+          footerTrailing
+        )
+      }
       inputAccessory={inputAccessory}
       inputProps={{
         className: hasHighlightedNewProjectItem

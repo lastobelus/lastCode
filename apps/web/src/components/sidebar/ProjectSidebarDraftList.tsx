@@ -2,13 +2,13 @@ import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import { useNavigate, useParams } from "@tanstack/react-router";
 
 import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
-import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { namedClipboardTarget, useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { readLocalApi } from "../../localApi";
 import { useProjects } from "../../state/entities";
 import { resolveThreadRouteTarget } from "../../threadRoutes";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
-import { SidebarDraftBlock } from "./SidebarDraftBlock";
+import { SidebarDraftBlock, useDraftTerminalLabels, useSidebarDrafts } from "./SidebarDraftBlock";
 import { buildDraftActionMenuItems } from "../threadActionMenu.logic";
 import { SidebarMenu, useSidebar } from "../ui/sidebar";
 
@@ -16,7 +16,7 @@ import { SidebarMenu, useSidebar } from "../ui/sidebar";
 // subscriptions isolate composer updates from the project list.
 export function ProjectSidebarDraftList() {
   const projects = useProjects();
-  const { copyToClipboard } = useCopyToClipboard({ target: "draft details" });
+  const { copyToClipboard } = useCopyToClipboard({ target: namedClipboardTarget("draft details") });
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
@@ -25,6 +25,8 @@ export function ProjectSidebarDraftList() {
     select: (params) => resolveThreadRouteTarget(params),
   });
   const routeDraftId = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
+  const terminalLabels = useDraftTerminalLabels();
+  const { draftIds, routeDraftComposer } = useSidebarDrafts(null, routeDraftId, terminalLabels);
   // The legacy list has no grouped display names on draft rows; the
   // project's own title is what its header shows for local projects.
   const projectTitleByKey = new Map(
@@ -80,7 +82,10 @@ export function ProjectSidebarDraftList() {
       <SidebarDraftBlock
         projectByKey={projectByKey}
         projectDisplayNameByKey={projectTitleByKey}
-        scopedProjectKeys={null}
+        draftIds={draftIds}
+        routeDraftComposer={routeDraftComposer}
+        terminalLabels={terminalLabels}
+        jumpLabelByDraftId={null}
         routeDraftId={routeDraftId}
         onNavigateToDraft={navigateToDraft}
         onDraftContextMenu={handleDraftContextMenu}

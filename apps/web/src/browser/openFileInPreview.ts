@@ -1,3 +1,4 @@
+import type { PreparedHostedPreview } from "@t3tools/client-runtime/preview-hosting";
 import type {
   AssetCreateUrlResult,
   AssetResource,
@@ -7,6 +8,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
+import { fileAssetResourceForAccess } from "@t3tools/client-runtime/state/assets";
 import {
   type AtomCommandResult,
   mapAtomCommandResult,
@@ -15,8 +17,13 @@ import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/reactivity";
 
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { resolveAssetUrl } from "~/assets/assetUrls";
-import { isPreviewAvailableFor, previewRuntimeFor } from "~/browser/previewRuntime";
+import { isPreviewAvailableFor } from "~/browser/previewRuntime";
+import {
+  preparedPreviewOpenProfileId,
+  preparedPreviewOpenTarget,
+} from "./preparedPreviewOpenTarget";
 import {
   applyPreviewServerSnapshot,
   capturePreviewOpenFocus,
@@ -26,8 +33,10 @@ import {
   updatePreviewServerSnapshot,
 } from "~/previewStateStore";
 import { rightPanelHostRef, useRightPanelStore } from "~/rightPanelStore";
+import { rememberHandoffBrowser } from "~/handoffs/handoffsStore";
 
 import { resolveBrowserDefaults } from "./browserDefaults";
+import { type PreviewTabReuse, reuseOpenPreviewTab } from "./lastcodePreviewTabReuse";
 import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 
@@ -55,15 +64,30 @@ export type OpenPreviewMutation<E = unknown> = (input: {
   readonly input: PreviewOpenInput;
 }) => Promise<AtomCommandResult<PreviewSessionSnapshot, E>>;
 
+interface OpenUrlInPreviewInput<E> {
+  readonly threadRef: ScopedThreadRef;
+  readonly url: string;
+  readonly openPreview: OpenPreviewMutation<E>;
+  readonly onOpened?: (tabId: string) => void;
+  /** Preserve the source tab's profile when opening a link from a page. */
+  readonly profileId?: PreviewOpenInput["profileId"];
+  readonly background?: boolean;
+  readonly reuse?: PreviewTabReuse;
+}
+
 export async function openUrlInPreview<E>(
-  input: {
-    readonly threadRef: ScopedThreadRef;
-    readonly url: string;
-    readonly openPreview: OpenPreviewMutation<E>;
-    /** Preserve the source tab's profile when opening a link from a page. */
-    readonly profileId?: PreviewOpenInput["profileId"];
-    readonly background?: boolean;
-  },
+  input: OpenUrlInPreviewInput<E>,
+  focus = capturePreviewOpenFocus(rightPanelHostRef(input.threadRef), input.background),
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  const threadRef = rightPanelHostRef(input.threadRef);
+  const prepared = await prepareHostedPreview(threadRef, input.url);
+  return openPreparedUrlInPreview({ ...input, threadRef }, prepared, focus);
+}
+
+/** Open an already recovered destination while retaining the authored URL. */
+export async function openPreparedUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+  prepared: PreparedHostedPreview,
   focus = capturePreviewOpenFocus(rightPanelHostRef(input.threadRef), input.background),
 ): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   // Capture the panel host before an await can unmount the side chat.
@@ -76,17 +100,32 @@ export async function openUrlInPreview<E>(
   if (isBrowserSettingsReadError(defaults)) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
-  const runtime = previewRuntimeFor(threadRef.environmentId);
+  const profileId = preparedPreviewOpenProfileId(prepared, defaults.profileId, input.profileId);
+  const target = preparedPreviewOpenTarget(threadRef.environmentId, prepared, input.url, profileId);
+  const reusedTabId = reuseOpenPreviewTab({
+    threadRef,
+    authoredUrl: input.url,
+    target,
+    profileId,
+    background: input.background,
+    restarted: prepared.restarted,
+    reuse: input.reuse,
+    panelRevision,
+  });
+  if (reusedTabId !== null) {
+    input.onOpened?.(reusedTabId);
+    return AsyncResult.success(undefined);
+  }
   const result = await input.openPreview({
     environmentId: threadRef.environmentId,
     input: {
       threadId: threadRef.threadId,
-      url: input.url,
+      ...target,
       viewport: defaults.viewport,
-      profileId: input.profileId ?? defaults.profileId,
-      ...(runtime === undefined
+      profileId,
+      ...(target.runtime === undefined
         ? {}
-        : { runtime, zoomFactor: defaults.zoomFactor, colorScheme: defaults.appearance }),
+        : { zoomFactor: defaults.zoomFactor, colorScheme: defaults.appearance }),
       // Carry background intent through independently delivered/replayed events.
       ...(input.background ? { background: true } : {}),
       focus,
@@ -103,6 +142,7 @@ export async function openUrlInPreview<E>(
       // A reply is metadata once creation focus was consumed or superseded.
       // Consume pending focus too, so a later event cannot undo that choice.
       updatePreviewServerSnapshot(threadRef, snapshot, { consumeOpenFocus: true });
+      input.onOpened?.(snapshot.tabId);
       return;
     }
     const existing = readThreadPreviewState(threadRef).sessions[snapshot.tabId];
@@ -121,6 +161,7 @@ export async function openUrlInPreview<E>(
         hiddenPreviewTabIds(state.sessions),
         snapshot.tabId,
       );
+    input.onOpened?.(snapshot.tabId);
   });
 }
 
@@ -128,6 +169,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly workspaceRoot: string | undefined;
+  readonly canReadFiles: boolean;
   readonly httpBaseUrl: string;
   readonly createAssetUrl: (input: {
     readonly environmentId: EnvironmentId;
@@ -156,11 +198,14 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   const assetResult = await input.createAssetUrl({
     environmentId: input.threadRef.environmentId,
     input: {
-      resource: {
-        _tag: insideWorkspace ? "workspace-file" : "media-file",
-        threadId: input.threadRef.threadId,
-        path: input.filePath,
-      },
+      resource: fileAssetResourceForAccess(
+        {
+          _tag: insideWorkspace ? "workspace-file" : "media-file",
+          threadId: input.threadRef.threadId,
+          path: input.filePath,
+        },
+        input.canReadFiles,
+      ),
     },
   });
   if (assetResult._tag === "Failure") {
@@ -172,12 +217,21 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       Cause.die(new Error("The environment returned an invalid asset URL.")),
     );
   }
-  return openUrlInPreview(
+  const result = await openUrlInPreview(
     {
       threadRef: hostRef,
       url: assetUrl,
       openPreview: input.openPreview,
+      onOpened: (tabId) => {
+        rememberHandoffBrowser(
+          input.threadRef,
+          tabId,
+          { kind: "file", path: input.filePath },
+          assetUrl,
+        );
+      },
     },
     focus,
   );
+  return result;
 }

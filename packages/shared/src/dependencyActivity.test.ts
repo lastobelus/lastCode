@@ -4,7 +4,9 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import { assert, it, onTestFinished } from "vite-plus/test";
 import {
+  RECENT_DEPENDENCY_USAGE_SKIP_MS,
   observeDependencyActivity,
+  recentVerifiedDependencyActivity,
   recordDependencyUse,
   dependencyActivitySnapshot,
 } from "./dependencyActivity.ts";
@@ -113,4 +115,94 @@ it("final snapshots detect a rebound Git directory even without an activity reco
   NodeFS.writeFileSync(NodePath.join(cwd, ".git"), `gitdir: ${other}\n`);
   assert.notEqual(dependencyActivitySnapshot(cwd), before);
   assert.isFalse(NodeFS.existsSync(NodePath.join(other, "t3-dependency-activity.json")));
+});
+
+it("recentVerifiedDependencyActivity skips only within 24h of verified use for the same in-retention install", () => {
+  const { cwd, gitDir, deps } = fixture();
+  const base = 1_000_000_000;
+  const hour = 3_600_000;
+  const recordPath = NodePath.join(gitDir, "t3-dependency-activity.json");
+
+  assert.isNull(recentVerifiedDependencyActivity(gitDir, cwd, base, 7));
+
+  observeDependencyActivity(gitDir, cwd, base);
+  assert.isNull(recentVerifiedDependencyActivity(gitDir, cwd, base + hour, 7));
+
+  const legacyPayload = JSON.parse(NodeFS.readFileSync(recordPath, "utf8"));
+  assert.isUndefined(legacyPayload.verifiedUseAt);
+  assert.equal(observeDependencyActivity(gitDir, cwd, base + 2 * hour).lastUsedAt, base);
+
+  recordDependencyUse(NodePath.join(deps, "package"), base + 3 * hour);
+  const afterUseSnapshot = dependencyActivitySnapshot(cwd);
+  for (const checkAt of [
+    base + 3 * hour,
+    base + 4 * hour,
+    base + 3 * hour + RECENT_DEPENDENCY_USAGE_SKIP_MS - 1,
+  ]) {
+    assert.deepEqual(recentVerifiedDependencyActivity(gitDir, cwd, checkAt, 7), {
+      lastUsedAt: base + 3 * hour,
+      renewed: false,
+    });
+    assert.equal(dependencyActivitySnapshot(cwd), afterUseSnapshot);
+  }
+
+  assert.isNull(
+    recentVerifiedDependencyActivity(
+      gitDir,
+      cwd,
+      base + 3 * hour + RECENT_DEPENDENCY_USAGE_SKIP_MS,
+      7,
+    ),
+  );
+  assert.isNull(
+    recentVerifiedDependencyActivity(
+      gitDir,
+      cwd,
+      base + 3 * hour + RECENT_DEPENDENCY_USAGE_SKIP_MS + 1,
+      7,
+    ),
+  );
+  assert.isNull(recentVerifiedDependencyActivity(gitDir, cwd, base + 2 * hour, 7));
+
+  observeDependencyActivity(gitDir, cwd, base + 4 * hour, true);
+  assert.isNull(
+    recentVerifiedDependencyActivity(
+      gitDir,
+      cwd,
+      base + 4 * hour + RECENT_DEPENDENCY_USAGE_SKIP_MS,
+      7,
+    ),
+  );
+  // Retention cutoff still wins over <24h verified use (17h - 4h >= 12h, < 24h).
+  assert.isNull(recentVerifiedDependencyActivity(gitDir, cwd, base + 17 * hour, 0.5));
+  assert.isNull(recentVerifiedDependencyActivity(gitDir, cwd, base + 4 * hour + 7 * 24 * hour, 7));
+
+  assert.deepEqual(recentVerifiedDependencyActivity(gitDir, cwd, base + 5 * hour, 7), {
+    lastUsedAt: base + 4 * hour,
+    renewed: false,
+  });
+  NodeFS.writeFileSync(NodePath.join(deps, ".modules.yaml"), "updated installer metadata\n");
+  assert.isNull(recentVerifiedDependencyActivity(gitDir, cwd, base + 5 * hour, 7));
+  observeDependencyActivity(gitDir, cwd, base + 5 * hour, false);
+  assert.isNull(recentVerifiedDependencyActivity(gitDir, cwd, base + 6 * hour, 7));
+});
+
+it("recentVerifiedDependencyActivity fails closed on corrupt or symlinked records", () => {
+  const { cwd, gitDir, root } = fixture();
+  const base = 1_000_000_000;
+  observeDependencyActivity(gitDir, cwd, base, true);
+  const recordPath = NodePath.join(gitDir, "t3-dependency-activity.json");
+  const valid = JSON.parse(NodeFS.readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+
+  for (const badVerifiedUseAt of [null, -1, 1.5, "100", base + 1]) {
+    NodeFS.writeFileSync(recordPath, JSON.stringify({ ...valid, verifiedUseAt: badVerifiedUseAt }));
+    assert.throws(() => recentVerifiedDependencyActivity(gitDir, cwd, base + 10, 7));
+    assert.throws(() => observeDependencyActivity(gitDir, cwd, base + 10, false, false));
+  }
+
+  NodeFS.unlinkSync(recordPath);
+  const outside = NodePath.join(root, "outside.json");
+  NodeFS.writeFileSync(outside, JSON.stringify(valid));
+  NodeFS.symlinkSync(outside, recordPath);
+  assert.throws(() => recentVerifiedDependencyActivity(gitDir, cwd, base + 10, 7));
 });

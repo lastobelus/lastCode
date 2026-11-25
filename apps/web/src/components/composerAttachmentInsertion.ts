@@ -2,7 +2,7 @@ import type { Editor, EditorEvents } from "@tiptap/core";
 import {
   flatToMarkdown,
   flatToPm,
-  markdownToFlat,
+  expandedMarkdownToFlat,
   pmToFlat,
   serializeEditorDoc,
 } from "../composer-rich-text-doc";
@@ -68,7 +68,7 @@ export function captureComposerAttachmentInsertion(editor: Editor) {
           ])
         : [editor.schema.text(edit.text)];
       if (acceptsReference && edit.text.startsWith(" ")) content.unshift(editor.schema.text(" "));
-      const replaceEnd = flatToPm(map, markdownToFlat(map, edit.end));
+      const replaceEnd = flatToPm(map, expandedMarkdownToFlat(map, edit.end));
       const tr = editor.state.tr.replaceWith(from, replaceEnd, content);
       editor.view.dispatch(
         markAsClipboardEdit(tr, "paste").setMeta(INSERTION_ORDER_META, {

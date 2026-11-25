@@ -54,10 +54,7 @@ export function useStartTriage() {
           text: gt("Copy command"),
           onPress: () =>
             void Clipboard.setStringAsync(command).catch(() =>
-              Dialog.alert(
-                gt("Could not copy"),
-                gt("Type {command} instead.", { command }),
-              ),
+              Dialog.alert(gt("Could not copy"), gt("Type {command} instead.", { command })),
             ),
         },
         { text: gt("OK"), style: "cancel" },

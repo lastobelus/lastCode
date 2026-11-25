@@ -21,13 +21,16 @@ import * as TestConsole from "effect/testing/TestConsole";
 import { expect, vi } from "vite-plus/test";
 
 import { cli } from "../binCli.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { buildTriageLaunchPrompt } from "../triage/triagePrompt.ts";
 import { matchAgentAnswer, pickAgent } from "./triage.ts";
 
 const cliPath = NodeURL.fileURLToPath(new URL("../bin.ts", import.meta.url));
 
 async function fixture(commands: ReadonlyArray<string>) {
-  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-triage-"));
+  const root = await NodeFSP.realpath(
+    await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-triage-")),
+  );
   const bin = NodePath.join(root, "bin");
   const record = NodePath.join(root, "launch.json");
   await NodeFSP.mkdir(bin);
@@ -222,7 +225,13 @@ it.live("a failed agent launch points at the prompt it could not run", () =>
     assert.include(output, "set CODEX_HOME to a folder on another drive");
   }).pipe(
     Effect.provide(
-      Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer, TestConsole.layer),
+      Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        NetService.layer,
+        TestConsole.layer,
+        ManagedPolicy.layerTest(),
+      ),
     ),
   ),
 );

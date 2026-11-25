@@ -1,6 +1,7 @@
 import { startFileDrag } from "./methods/fileDrag.ts";
 import {
   browserCommand,
+  browserEnvironment,
   browserSurfaceResponse,
   browserPresentation,
   installBrowserEventForwarding,
@@ -110,6 +111,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* PreviewIpc.installPreviewEventForwarding();
   yield* installBrowserEventForwarding;
   yield* ipc.handle(browserCommand);
+  yield* ipc.handle(browserEnvironment);
   yield* ipc.handle(browserSurfaceResponse);
   yield* ipc.handle(browserPresentation);
 
@@ -210,6 +212,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
       Effect.Services<ReturnType<(typeof PreviewIpc.methods)[number]["handler"]>>
     >(previewMethod);
   }
+  yield* ipc.handle(PreviewIpc.clearCookies);
+  yield* ipc.handle(PreviewIpc.clearCache);
+  yield* ipc.handle(PreviewIpc.getPreviewConfig);
   yield* ipc.handle(PreviewIpc.listBrowserImportSources);
   yield* ipc.handle(PreviewIpc.importBrowserCookies);
 });

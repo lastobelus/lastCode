@@ -2,7 +2,7 @@
 // Runs CI's fast checks for this branch's changes: format and lint of the
 // changed files, knip, generated GraphQL operations, typecheck of the affected
 // packages and their dependents, the test files beside the changed files, and
-// the cross-file checks those miss (agent context budget, React Compiler
+// the cross-file checks those miss (MCP tool registration, React Compiler
 // coverage of the changed client files).
 // A dependency change also gets the unused-patch install check below. CI still
 // runs the full test suites and the jobs listed in the summary.
@@ -323,8 +323,22 @@ const override = Effect.fn("checkChanged.override")(function* (
   return value;
 });
 
-// Tests that read files without importing them directly.
+// Cross-file behavior that adjacent test discovery would otherwise miss.
 export const crossFileTests = (files: ReadonlyArray<string>) => [
+  ...(files.some(
+    (file) =>
+      file.startsWith("apps/server/src/threadReadAuthority/") ||
+      [
+        "apps/server/src/orchestration-v2/EventSink.ts",
+        "apps/server/src/orchestration-v2/ThreadMessageIntake.ts",
+        "packages/shared/src/composerContextReferences.ts",
+      ].includes(file),
+  )
+    ? [
+        "apps/server/src/orchestration-v2/runtimeLayer.test.ts",
+        "apps/server/src/mcp/ThreadCommunication.delegate-completion.lastcode.test.ts",
+      ]
+    : []),
   ...(files.includes("docs/user/t3-connect-troubleshooting.md")
     ? ["apps/server/src/cloud/ConnectReachability.test.ts"]
     : []),

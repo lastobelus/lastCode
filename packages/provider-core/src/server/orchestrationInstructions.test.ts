@@ -79,7 +79,7 @@ describe("T3 device instructions", () => {
         providerInstructionsDelivered,
       });
     assert.include(providerRun(false), "Mark awaited shells.");
-    assert.notInclude(providerRun(false), T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim());
+    assert.notInclude(providerRun(false), T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n").trim());
     assert.equal(providerRun(true), "Check the login screen.");
   });
 

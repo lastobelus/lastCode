@@ -29,6 +29,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import { msg } from "gt-i18n";
 
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
@@ -52,6 +53,7 @@ import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   createInitialDesktopUpdateState,
+  recordSuccessfulDesktopUpdateCheck,
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
   reduceDesktopUpdateStateOnDownloadComplete,
@@ -120,6 +122,7 @@ export function mapLastCodeLocalReleaseNotes(
     groups.push({
       version: inspection.availableVersion,
       heading: "LastCode changes",
+      release: { tag: inspection.checkpointTag },
       items: [],
       totalItems: 0,
       summaries: ["Couldn’t determine changes from this installed build."],
@@ -128,6 +131,7 @@ export function mapLastCodeLocalReleaseNotes(
     groups.push({
       version: inspection.availableVersion,
       heading: "LastCode changes",
+      release: { tag: inspection.checkpointTag },
       items: lastCode.items,
       totalItems: lastCode.items.length + lastCode.omittedItems,
       ...(lastCode.omittedItems > 0
@@ -144,6 +148,7 @@ export function mapLastCodeLocalReleaseNotes(
     (group): DesktopUpdateReleaseNote => ({
       version: group.version,
       heading: group.isTarget ? "Upstream changes" : `Upstream changes in ${group.version}`,
+      release: { upstream: true },
       items: group.items,
       totalItems: group.items.length + group.omittedItems,
       ...(group.omittedItems > 0
@@ -459,8 +464,9 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
   return runtimeInfo.hostArch === "arm64" && runtimeInfo.appArch === "x64";
 }
 
-export const checkpointRequestedMessage =
-  "Checkpoint requested. Check again later to pick up the result.";
+export const checkpointRequestedMessage = msg(
+  "Checkpoint requested. Check again later to pick up the result.",
+);
 
 /** @public */
 export const make = Effect.gen(function* () {
@@ -783,6 +789,7 @@ export const make = Effect.gen(function* () {
                   canRetry: false,
                 }
               : { ...state, checkedAt };
+          // Requesting a checkpoint inspects nothing, so the offer's freshness stays as it was.
           return setState(applyRequest(pending)).pipe(Effect.as(result));
         }
         if (inspection.status === "up-to-date") {
@@ -804,7 +811,9 @@ export const make = Effect.gen(function* () {
           state.availableVersion === inspection.availableVersion &&
           (state.errorContext === "install" || !build)
         ) {
-          return setState({ ...state, checkedAt }).pipe(Effect.as(result));
+          return setState(recordSuccessfulDesktopUpdateCheck(state, checkedAt)).pipe(
+            Effect.as(result),
+          );
         }
         const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
         const available = reduceDesktopUpdateStateOnUpdateAvailable(
@@ -835,15 +844,16 @@ export const make = Effect.gen(function* () {
           Effect.as(result),
         );
       }),
-      Effect.catchTag("LastCodeLocalUpdateError", (error) =>
-        setState(
-          state.status === "available" ||
-            state.downloadedVersion !== null ||
-            (state.status === "error" && state.errorContext === "download" && state.canRetry)
-            ? { ...state, checkedAt }
-            : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
-        ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
-      ),
+      Effect.catchTags({
+        LastCodeLocalUpdateError: (error) =>
+          setState(
+            state.status === "available" ||
+              state.downloadedVersion !== null ||
+              (state.status === "error" && state.errorContext === "download" && state.canRetry)
+              ? { ...state, checkedAt, refreshFailure: error.message }
+              : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
+          ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
+      }),
     );
   });
 
@@ -1346,7 +1356,9 @@ export const make = Effect.gen(function* () {
                         Effect.forEach(
                           instances,
                           (instance) =>
-                            instance.stop({ timeout: DesktopBackendManager.BACKEND_QUIT_STOP_TIMEOUT }),
+                            instance.stop({
+                              timeout: DesktopBackendManager.BACKEND_QUIT_STOP_TIMEOUT,
+                            }),
                           { concurrency: "unbounded" },
                         ),
                         sshEnvironment.closeAllTunnels,
@@ -1752,9 +1764,21 @@ export const make = Effect.gen(function* () {
             });
             // Its progress events left the updater "downloading", which would block every check.
             if (state.status === "downloading") {
-              yield* setState(
-                reduceDesktopUpdateStateOnNoUpdate(state, yield* currentIsoTimestamp),
-              );
+              // Finishing a download inspected nothing, so the last check's freshness stands.
+              const {
+                checkSucceededAt: _,
+                refreshFailure: __,
+                ...reset
+              } = reduceDesktopUpdateStateOnNoUpdate(state, yield* currentIsoTimestamp);
+              yield* setState({
+                ...reset,
+                ...(state.checkSucceededAt === undefined
+                  ? {}
+                  : { checkSucceededAt: state.checkSucceededAt }),
+                ...(state.refreshFailure === undefined
+                  ? {}
+                  : { refreshFailure: state.refreshFailure }),
+              });
             }
             return;
           }
@@ -1820,7 +1844,11 @@ export const make = Effect.gen(function* () {
                 isArm64HostRunningIntelBuild(environment.runtimeInfo),
               );
             }
-            if (enabled && Option.isNone(disabledReason) && (yield* Ref.get(updaterConfiguredRef))) {
+            if (
+              enabled &&
+              Option.isNone(disabledReason) &&
+              (yield* Ref.get(updaterConfiguredRef))
+            ) {
               yield* checkForUpdatesUnlocked("local-nightlies-setting-change");
             }
             return yield* makeLastCodeSettingsState;

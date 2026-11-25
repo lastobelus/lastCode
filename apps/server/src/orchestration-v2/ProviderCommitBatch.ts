@@ -429,6 +429,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
     after: Effect.Effect<boolean, E2, R2>,
     canBatch: Effect.Effect<boolean, never, R2> = Effect.succeed(true),
     priority?: StreamPriority,
+    batchableSnapshot: (event: A) => boolean = isSnapshot,
   ) {
     if (!enabled)
       return yield* source.pipe(
@@ -461,7 +462,10 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           let reply: Effect.Effect<boolean, E | E2 | CommitBatchError, R2>;
           let check = false;
           const snapshot =
-            signal._tag === "Event" && isSnapshot(signal.event) && (yield* canBatch)
+            signal._tag === "Event" &&
+            isSnapshot(signal.event) &&
+            batchableSnapshot(signal.event) &&
+            (yield* canBatch)
               ? signal.event
               : undefined;
           if (snapshot !== undefined) {

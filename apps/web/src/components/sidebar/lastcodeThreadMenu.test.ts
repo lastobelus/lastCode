@@ -1,4 +1,4 @@
-import { CommandId, ThreadId } from "@t3tools/contracts";
+import { CommandId, ThreadId, type ThreadOwnershipAvailability } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   buildLastCodeThreadMenu,
@@ -12,12 +12,13 @@ function input(): Parameters<typeof buildLastCodeThreadMenu>[0] {
   return {
     thread: {
       branch: "feature",
-      creatorGrouping: "grouped",
       persistent: false,
       archivePending: null,
     },
+    parentThreadId: ThreadId.make("creator"),
     creator: { groupingEligible: true, canOpen: true },
     canAnnotate: true,
+    hasActiveAnnotation: false,
     supportsPersistence: true,
     hasStoppableProcesses: true,
     projectSettingsKey: "project",
@@ -36,10 +37,11 @@ function menuInput(
   return {
     ...data,
     canOperate,
+    hasActiveAnnotation: optional,
+    parentThreadId: grouped ? ThreadId.make("creator") : null,
     thread: {
       ...data.thread,
       persistent,
-      creatorGrouping: grouped ? "grouped" : "independent",
       archivePending: optional
         ? {
             status: "failed",
@@ -54,7 +56,16 @@ function menuInput(
 }
 
 describe("LastCode thread context menu", () => {
-  it("classifies every emitted static action across optional menu states", () => {
+  it("offers edit and resolve instead of creation while an annotation is unresolved", () => {
+    const menu = buildLastCodeThreadMenu({ ...input(), hasActiveAnnotation: true });
+    expect(
+      menu.filter((item) => item.id === "annotate" || item.id === "resolve-annotation"),
+    ).toEqual([
+      { id: "annotate", label: "Edit Annotation…", disabled: false },
+      { id: "resolve-annotation", label: "Resolve Annotation…", disabled: false },
+    ]);
+  });
+  it("classifies every static action emitted by the base menu across optional states", () => {
     const emitted = new Set<string>();
     const permissions = [true, false].flatMap((canOperate) =>
       [true, false].map((persistent) => ({ canOperate, persistent })),
@@ -62,11 +73,36 @@ describe("LastCode thread context menu", () => {
     const grouping = permissions.flatMap((permission) =>
       [true, false].map((grouped) => ({ ...permission, grouped })),
     );
+    const ownershipStates: ThreadOwnershipAvailability[] = [
+      null,
+      { action: "promote", ownerHere: true, refusal: "in_flight" },
+      { action: "return_to_owner", ownerHere: false, refusal: null },
+    ];
     const cases = grouping.flatMap((group) =>
-      [true, false].map((optional) => ({ ...group, optional })),
+      [true, false].flatMap((optional) =>
+        ownershipStates.map((ownership) => ({ ...group, optional, ownership })),
+      ),
     );
-    for (const { canOperate, persistent, grouped, optional } of cases) {
-      const menu = buildLastCodeThreadMenu(menuInput(canOperate, persistent, grouped, optional));
+    for (const { canOperate, persistent, grouped, optional, ownership } of cases) {
+      const menu = buildLastCodeThreadMenu({
+        ...menuInput(canOperate, persistent, grouped, optional),
+        ownership,
+      });
+      if (ownership?.action === "promote") {
+        expect(menu.find((item) => item.id === "promote")).toMatchObject({
+          disabled: true,
+          detail: expect.any(String),
+        });
+        expect(
+          menu.some((item) => item.id === "creator-independent" || item.id === "creator-grouped"),
+        ).toBe(false);
+      }
+      if (ownership?.action === "return_to_owner") {
+        expect(menu.find((item) => item.id === "return-to-owner")).toMatchObject({
+          disabled: !canOperate,
+          detail: expect.any(String),
+        });
+      }
       for (const item of menu) {
         if (item.id.startsWith("handoff:")) continue;
         expect(isLastCodeThreadActionId(item.id), item.id).toBe(true);
@@ -75,7 +111,12 @@ describe("LastCode thread context menu", () => {
           expect(item.disabled, item.id).toBe(true);
       }
     }
-    expect([...emitted].sort()).toEqual(Object.keys(LASTCODE_THREAD_ACTION_POLICY).sort());
+    expect([...emitted].sort()).toEqual(
+      Object.keys(LASTCODE_THREAD_ACTION_POLICY)
+        // The workspace menu extension adds this action after the base menu is built.
+        .filter((action) => action !== "archive-discard")
+        .sort(),
+    );
     for (const action of [null, "unknown", "constructor", "__proto__"]) {
       expect(isLastCodeThreadActionId(action)).toBe(false);
       expect(lastcodeThreadActionRequiresOperate(action)).toBe(false);
@@ -94,6 +135,7 @@ describe("LastCode thread context menu", () => {
     for (const action of [
       "rename",
       "annotate",
+      "resolve-annotation",
       "creator-independent",
       "creator-grouped",
       "mark-persistent",
@@ -101,6 +143,7 @@ describe("LastCode thread context menu", () => {
       "stop-thread-processes",
       "dismiss-archive-failure",
       "delete",
+      "archive-discard",
     ]) {
       expect(lastcodeThreadActionRequiresOperate(action), action).toBe(true);
     }
@@ -113,7 +156,6 @@ describe("LastCode thread context menu", () => {
       "copy-thread-id",
       "new-thread-on-branch",
       "project-settings",
-      "open-dashboard",
       "handoff:handoff-1",
       "handoff-show-all",
     ]) {
@@ -134,7 +176,6 @@ describe("LastCode thread context menu", () => {
       "stop-thread-processes",
       "copy-path",
       "copy-thread-id",
-      "open-dashboard",
       "project-settings",
       "handoffs-heading",
       "handoff:handoff-1",
@@ -163,7 +204,6 @@ describe("LastCode thread context menu", () => {
       "mark-read",
       "open-creator",
       "copy-path",
-      "open-dashboard",
       "handoff:handoff-1",
     ]) {
       expect(menu.find((item) => item.id === id)?.disabled, id).not.toBe(true);
@@ -183,6 +223,7 @@ describe("LastCode thread context menu", () => {
       ...data,
       thread: { ...data.thread, branch: null },
       creator: { groupingEligible: false, canOpen: false },
+      parentThreadId: null,
       canAnnotate: false,
       supportsPersistence: false,
       hasStoppableProcesses: false,

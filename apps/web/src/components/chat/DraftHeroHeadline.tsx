@@ -32,6 +32,8 @@ import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { ProjectEnvironmentBadge } from "../ProjectEnvironmentBadge";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { isProjectPinShortcut, ProjectPinButton } from "../ProjectPinButton";
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
+import { TemporaryProjectsToggle } from "../TemporaryProjectsToggle";
 import { useSortedProjectGroups } from "../CommandPaletteLookups";
 import {
   Combobox,
@@ -93,7 +95,7 @@ export function DraftHeroHeadline({
   const environmentLabelById = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
   );
-  const projectGroups = useSortedProjectGroups(environmentLabelById);
+  const { pickerGroups: projectGroups } = useSortedProjectGroups(environmentLabelById);
   const showProjectEnvironments = projectGroupsSpanEnvironments(projectGroups);
   const environmentMachineById = new Map(
     environments.map(
@@ -122,7 +124,7 @@ export function DraftHeroHeadline({
   const activeProjectKey = activeProjectGroup?.projectKey ?? "";
   const hasResolvedProject = activeProjectTitle !== null;
   const canChooseProject = projectPickerEntries.length > 0;
-  const shouldShowProjectMenu = canChooseProject;
+  const shouldShowProjectMenu = canChooseProject || projects.some(isTemporaryProject);
   const menuEntries = projectPickerEntries.filter(
     ({ targetProject }) =>
       !isScratchProject(targetProject, scratchWorkspaceRootFor(targetProject.environmentId)),
@@ -312,6 +314,7 @@ export function DraftHeroHeadline({
             );
           }}
         </ComboboxList>
+        <TemporaryProjectsToggle />
       </ComboboxPopup>
     </Combobox>
   ) : (

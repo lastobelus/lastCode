@@ -25,6 +25,8 @@ export interface BackgroundThreadSnapshot {
   readonly activeRunId: RunId | null;
   /** A snoozed thread stays hidden until its timer, so it stays quiet too. */
   readonly snoozed: boolean;
+  /** Finished-thread alerts leave this thread to whoever started it; its requests still speak. */
+  readonly quietOutcome: boolean;
 }
 
 /** The request and its id come from the same source, so a subagent's request never takes the parent's id. */
@@ -113,7 +115,12 @@ export function nextBackgroundThreadAnnouncement(
     // cancelled before it started) isn't the thread finishing. The shell then
     // only reports the latest run, so the working run's own ending stays quiet.
     const anotherRunWorking = thread.activeRunId !== null && thread.activeRunId !== thread.runId;
-    if (outcome !== null && thread.runId !== before.settledRunId && !anotherRunWorking) {
+    if (
+      outcome !== null &&
+      thread.runId !== before.settledRunId &&
+      !anotherRunWorking &&
+      !thread.quietOutcome
+    ) {
       announcements.push(
         resolve(msg("{status}: {title}", { status: outcome, title: thread.title })),
       );

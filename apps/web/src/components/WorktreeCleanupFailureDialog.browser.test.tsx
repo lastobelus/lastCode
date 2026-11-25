@@ -1,7 +1,7 @@
-import { act, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { act, render } from "../../test/render";
+import type { ReactNode } from "react";
 import type { SidebarThreadSummary } from "../types";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 const testState = vi.hoisted(() => ({
   copy: vi.fn(),
@@ -13,7 +13,9 @@ const testState = vi.hoisted(() => ({
   close: vi.fn(),
 }));
 
-vi.mock("../hooks/useCopyToClipboard", () => ({
+vi.mock("../hooks/useCopyToClipboard", async (importOriginal) => ({
+  namedClipboardTarget: (await importOriginal<typeof import("../hooks/useCopyToClipboard")>())
+    .namedClipboardTarget,
   useCopyToClipboard: (options: { onError?: (error: unknown) => void }) => {
     testState.copyOptions = options;
     return { copyToClipboard: (value: string) => testState.copy(value) };
@@ -67,46 +69,38 @@ const failedThread = makeThreadFixture({
   },
 });
 
-let root: Root;
-let container: HTMLDivElement;
-
-function renderRecovery(thread: SidebarThreadSummary = failedThread): void {
-  const rows = filterSidebarV2VisibleThreads([thread], null);
-  act(() => {
-    const list = rows.map((row) => (
-      <WorktreeCleanupFailureDialog key={row.id} thread={row} open onOpenChange={testState.close} />
-    ));
-    root.render(<>{list}</>);
-  });
+function recovery(thread: SidebarThreadSummary = failedThread) {
+  const rows = filterSidebarV2VisibleThreads([thread], null, new Set());
+  return (
+    <>
+      {rows.map((row) => (
+        <WorktreeCleanupFailureDialog
+          key={row.id}
+          thread={row}
+          open
+          onOpenChange={testState.close}
+        />
+      ))}
+    </>
+  );
 }
-
-function button(label: string) {
-  return Array.from(container.querySelectorAll("button")).find(
-    (item) => item.textContent === label,
-  )!;
+function setup() {
+  vi.clearAllMocks();
+  testState.copyOptions = undefined;
+  testState.retry.mockResolvedValue({ _tag: "Success" });
+  testState.abandon.mockResolvedValue({ _tag: "Success" });
+  testState.confirm.mockResolvedValue(true);
 }
-
 describe("WorktreeCleanupFailureDialog", () => {
-  beforeEach(() => {
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    vi.clearAllMocks();
-    testState.copyOptions = undefined;
-    testState.retry.mockResolvedValue({ _tag: "Success" });
-    testState.abandon.mockResolvedValue({ _tag: "Success" });
-    testState.confirm.mockResolvedValue(true);
-  });
-
-  afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
-    vi.unstubAllGlobals();
-  });
-
   it("offers Retry and Keep worktree for archived cleanup and removes them after settlement", async () => {
-    renderRecovery();
+    setup();
+    await using screen = await render(<></>, { router: false });
+    const { container } = screen;
+    const button = (label: string) =>
+      [...container.querySelectorAll("button")].find((item) => item.textContent === label)!;
+    const renderRecovery = (thread: SidebarThreadSummary = failedThread) =>
+      screen.rerender(recovery(thread));
+    await renderRecovery();
     expect(button("Keep worktree")).toBeDefined();
     await act(async () => button("Retry").click());
     expect(testState.retry).toHaveBeenCalledWith({
@@ -115,13 +109,20 @@ describe("WorktreeCleanupFailureDialog", () => {
     });
     expect(testState.close).toHaveBeenCalledWith(false);
 
-    renderRecovery({ ...failedThread, worktreeCleanup: null });
+    await renderRecovery({ ...failedThread, worktreeCleanup: null });
     expect(container.childNodes).toHaveLength(0);
     expect(failedThread.archivedAt).toBe("2026-08-24T09:00:00.000Z");
   });
 
   it("keeps the recovery available when Keep worktree is declined, then dismisses it on confirmation", async () => {
-    renderRecovery();
+    setup();
+    await using screen = await render(<></>, { router: false });
+    const { container } = screen;
+    const button = (label: string) =>
+      [...container.querySelectorAll("button")].find((item) => item.textContent === label)!;
+    const renderRecovery = (thread: SidebarThreadSummary = failedThread) =>
+      screen.rerender(recovery(thread));
+    await renderRecovery();
     testState.confirm.mockResolvedValueOnce(false);
     await act(async () => button("Keep worktree").click());
     expect(testState.abandon).not.toHaveBeenCalled();
@@ -134,12 +135,19 @@ describe("WorktreeCleanupFailureDialog", () => {
       input: { threadId: failedThread.id },
     });
     expect(testState.close).toHaveBeenCalledWith(false);
-    renderRecovery({ ...failedThread, worktreeCleanup: null });
+    await renderRecovery({ ...failedThread, worktreeCleanup: null });
     expect(container.childNodes).toHaveLength(0);
   });
 
   it("copies recovery details and reports clipboard failures", async () => {
-    renderRecovery();
+    setup();
+    await using screen = await render(<></>, { router: false });
+    const { container } = screen;
+    const button = (label: string) =>
+      [...container.querySelectorAll("button")].find((item) => item.textContent === label)!;
+    const renderRecovery = (thread: SidebarThreadSummary = failedThread) =>
+      screen.rerender(recovery(thread));
+    await renderRecovery();
     await act(async () => button("Copy details").click());
     expect(testState.copy).toHaveBeenCalledWith(
       expect.stringContaining("Worktree: /repo-worktrees/deleted"),

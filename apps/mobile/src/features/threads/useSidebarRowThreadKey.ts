@@ -16,12 +16,15 @@ const sidebarRowThreadKeyAtom = Atom.family((openThreadKey: string) =>
     const openThreadRef = parseScopedThreadKey(openThreadKey);
     if (openThreadRef === null) return openThreadKey;
     const threads = get(environmentThreadShells.quietThreadShellsAtom);
-    const rowRef = resolveListedAncestorThreadRef(openThreadRef, threads);
+    const pendingChildThreadKeys = get(
+      environmentThreadShells.annotationPendingChildThreadKeysAtom,
+    );
+    const rowRef = resolveListedAncestorThreadRef(openThreadRef, threads, pendingChildThreadKeys);
     return scopedThreadKey(rowRef.environmentId, rowRef.threadId);
   }),
 );
 
-/** An open subagent, side chat or delegated task has no row; its listed ancestor's row is selected. */
+/** Select the open thread's own row when it is listed, or its listed ancestor. */
 export function useSidebarRowThreadKey(openThreadKey: string | null): string | null {
   return useAtomValue(
     openThreadKey === null ? NULL_ROW_KEY_ATOM : sidebarRowThreadKeyAtom(openThreadKey),

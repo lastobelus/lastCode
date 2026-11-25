@@ -1,10 +1,11 @@
-import type { ProjectId } from "@t3tools/contracts";
+import type { ProjectId, ThreadAnnotation } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
   generateSpreadPinOrderKeys,
   LEADING_ORDER_TIER,
   pinOrderKeyBetween,
 } from "@t3tools/shared/pinOrderKey";
+import { threadAnnotationRevealAt } from "@t3tools/shared/threadAnnotation";
 import type { EnvironmentThreadShell } from "./models.ts";
 
 export { generateSpreadPinOrderKeys, pinOrderKeyBetween } from "@t3tools/shared/pinOrderKey";
@@ -13,6 +14,7 @@ export interface ThreadSortInput {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly latestUserMessageAt?: string | null;
+  readonly annotation?: ThreadAnnotation | null | undefined;
   readonly latestUserAuthoredMessageAt?: string | null;
   readonly messages?: ReadonlyArray<{
     readonly createdAt: string;
@@ -39,11 +41,13 @@ export function resolveSettledThreadTimestamp(thread: SettledThreadTimestampInpu
 }
 
 export function resolveThreadActivityTimestamp(
-  thread: Pick<EnvironmentThreadShell, "latestUserMessageAt" | "latestRun" | "updatedAt">,
+  thread: Pick<EnvironmentThreadShell, "latestUserMessageAt" | "latestRun" | "updatedAt"> &
+    Pick<ThreadSortInput, "annotation">,
 ): string | null {
   let latest: string | null = null;
   let latestMs = Number.NEGATIVE_INFINITY;
   for (const candidate of [
+    threadAnnotationRevealAt(thread.annotation),
     thread.latestUserMessageAt,
     thread.latestRun?.requestedAt,
     thread.latestRun?.startedAt,
@@ -135,7 +139,10 @@ export function getThreadSortTimestamp(
       getFirstSortableTimestamp(thread.createdAt, thread.updatedAt) ?? Number.NEGATIVE_INFINITY
     );
   }
-  return getLatestUserMessageTimestamp(thread);
+  return Math.max(
+    getLatestUserMessageTimestamp(thread),
+    toSortableTimestamp(threadAnnotationRevealAt(thread.annotation)) ?? Number.NEGATIVE_INFINITY,
+  );
 }
 
 function activeThreadAnchorTimestampMs(thread: {

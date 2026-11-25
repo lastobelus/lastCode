@@ -1,4 +1,4 @@
-import type { ProjectId, ScopedProjectRef } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId, ScopedProjectRef } from "@t3tools/contracts";
 import {
   scopedProjectKey,
   scopeProjectRef,
@@ -6,10 +6,30 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import type { Project, SidebarThreadSummary } from "../../types";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
-import { derivePhysicalProjectKey } from "../../logicalProject";
+import { derivePhysicalProjectKey } from "@t3tools/client-runtime/state/project-grouping";
 import { sortScopedProjectsForSidebar } from "../Sidebar.logic";
+
+export function temporaryProjectsWithThreads(
+  projects: readonly Project[],
+  threads: readonly SidebarThreadSummary[],
+  olderCounts: ReadonlyMap<EnvironmentId, ReadonlyMap<ProjectId, number> | undefined>,
+): readonly Project[] {
+  const loaded = new Set(
+    threads
+      .filter(threadShellIsVisible)
+      .map((thread) => scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId))),
+  );
+  return projects.filter(
+    (project) =>
+      isTemporaryProject(project) &&
+      (loaded.has(scopedProjectKey(scopeProjectRef(project.environmentId, project.id))) ||
+        (olderCounts.get(project.environmentId)?.get(project.id) ?? 0) > 0),
+  );
+}
+
 /** Pre-resolve known scoped projects once; retain physical-key fallback for missing project records. */
 export function createLastCodeSidebarProjectLookup(
   projects: readonly Project[],
@@ -35,6 +55,7 @@ export function createLastCodeSidebarProjectLookup(
 export function indexLastCodeSidebarThreads(
   threads: readonly SidebarThreadSummary[],
   projectKey: ReturnType<typeof createLastCodeSidebarProjectLookup>,
+  hiddenThreadKeys: ReadonlySet<string> = new Set(),
 ) {
   const byThreadKey = new Map<string, SidebarThreadSummary>();
   const byProjectKey = new Map<string, SidebarThreadSummary[]>();
@@ -45,7 +66,7 @@ export function indexLastCodeSidebarThreads(
     if (members) members.push(thread);
     else byProjectKey.set(key, [thread]);
   }
-  return { byThreadKey, byProjectKey };
+  return { byThreadKey, byProjectKey, hiddenThreadKeys };
 }
 export function sortLastCodeSidebarProjects(
   groups: readonly SidebarProjectSnapshot[],

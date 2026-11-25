@@ -11,8 +11,8 @@ function fixture() {
       cohort,
       fingerprint: {
         candidate: "candidate",
-        node: "v26.12.1",
-        testNode: "v26.12.1",
+        node: "v26.13.1",
+        testNode: "v26.13.1",
         cpu: "CPU family A",
         cpus: 4,
         memoryGiB: 16,

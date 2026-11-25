@@ -1,5 +1,6 @@
 import {
   TurnItemId,
+  CommandId,
   NodeId,
   MessageId,
   ProviderInstanceId,
@@ -271,6 +272,67 @@ describe("thread execution presentation", () => {
     } as unknown as typeof v2Projection;
     expect(deriveResumableRunId(projection, null)).toBe(resumes ? stopped.id : null);
   });
+
+  it.each(["pending", "claimed", "acknowledged", "failed"] as const)(
+    "presents an empty workspace preparation as %s without inventing a run",
+    (state) => {
+      const projection = {
+        ...v2Projection,
+        runs: [],
+        turnItems: [],
+        providerSessions: [],
+        providerThreads: [],
+        thread: {
+          ...v2Projection.thread,
+          worktreePath: null,
+          emptyWorkspacePreparation: {
+            requestId: CommandId.make("empty-launch"),
+            failureCommandId: CommandId.make("empty-launch:fail"),
+            resetAt: DateTime.formatIso(now),
+            state,
+            workspaceStrategy: {
+              type: "worktree" as const,
+              baseRef: "origin/main",
+              startFromOrigin: true,
+            },
+            failure: {
+              class: "validation_error" as const,
+              message: "Git command timed out.",
+              code: "workspace_preparation_failed",
+              retryable: false,
+            },
+          },
+        },
+      };
+      const runtime = deriveThreadRuntime(projection);
+      if (state === "acknowledged") expect(runtime).toBeNull();
+      else
+        expect(runtime).toMatchObject({
+          status: state === "claimed" ? "preparing" : "failed",
+          lastError: state === "claimed" ? null : "Git command timed out.",
+        });
+      expect(deriveLatestThreadRun(projection)).toBeNull();
+      if (state === "claimed")
+        expect(
+          deriveThreadRuntime({
+            ...projection,
+            thread: {
+              ...projection.thread,
+              emptyWorkspacePreparation: undefined,
+              emptyWorkspacePreparationClaim: {
+                commandId: CommandId.make("empty-launch:claim"),
+                requestId: CommandId.make("empty-launch"),
+                workspaceStrategy: {
+                  type: "worktree",
+                  baseRef: "origin/main",
+                  startFromOrigin: true,
+                },
+              },
+            },
+          }),
+        ).toMatchObject({ status: "preparing", lastError: null });
+    },
+  );
 
   // regression: #15029 working timers no longer reset on every background wake
   it("counts a wake run's activity from the start of the work it continues", () => {

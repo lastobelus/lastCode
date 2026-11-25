@@ -779,7 +779,8 @@ function ThreadRouteContent(
 
     const targetTerminalId = resolveProjectScriptTerminalId({
       existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-      ...(knownTerminalSessions === null ||
+      ...(script.terminalLinkProfileName !== undefined ||
+      knownTerminalSessions === null ||
       !readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope)
         ? { uniqueSuffix: uuidv4() }
         : {}),
@@ -811,6 +812,9 @@ function ThreadRouteContent(
         env,
         initialInput: projectScriptTerminalInput(script.command),
         stopOnSettle: script.stopOnSettle ?? false,
+        ...(script.terminalLinkProfileName === undefined
+          ? {}
+          : { terminalLinkProfileName: script.terminalLinkProfileName }),
       },
     });
 
@@ -959,7 +963,9 @@ function ThreadRouteContent(
     if (selectedThreadCreation.outcome?.kind === "failed") {
       return {
         kind: "failed",
-        reason: selectedThreadCreation.outcome.reason,
+        reason:
+          selectedThreadCreation.outcome.resolveReason?.(m) ??
+          selectedThreadCreation.outcome.reason,
         onEditTask: handleEditFailedCreation,
       };
     }
@@ -1104,6 +1110,7 @@ function ThreadRouteContent(
           composerDraftKey={composer.composerDraftKey}
           followUpBehavior={composer.followUpBehavior}
           canSteerActiveTurn={composer.canSteerActiveTurn}
+          forceQueue={composer.forceQueue}
           isSavingQueuedEdit={composer.isSavingQueuedEdit}
           onCancelQueuedRunEdit={composer.cancelQueuedRunEdit}
           onRemoveQueuedEditAttachment={composer.onRemoveQueuedEditAttachment}

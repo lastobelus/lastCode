@@ -26,6 +26,7 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { ProjectChipIconRasterizer } from "./native/ProjectChipIconImages";
 import { ThreadArrangementHost } from "./features/threads/ThreadArrangementSheet";
 import * as Dialog from "./components/ui/Dialog";
+import { LastCodeMobileArchiveDialogHost } from "./features/archive/LastCodeMobileArchiveDialog";
 import { CloudAuthProvider } from "./features/cloud/CloudAuthProvider";
 import { prepareNativeShowcaseCapture } from "./features/showcase/nativeShowcaseScene";
 import { installShowcaseCapture } from "./features/showcase/ShowcaseCaptureCoordinator";
@@ -318,6 +319,7 @@ function AppContent() {
                   onStateChange={handleNavigationStateChange}
                 />
                 <Dialog.Host />
+                <LastCodeMobileArchiveDialogHost />
                 <ThreadArrangementHost />
                 <ProjectChipIconRasterizer />
               </NativeLayoutMetricsProvider>

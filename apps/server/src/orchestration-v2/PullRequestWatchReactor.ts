@@ -43,6 +43,9 @@ import {
 } from "@t3tools/source-control-core/server/PullRequestProvider";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import { forkParked } from "../serverActivation.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import { WatchProcessAdmission, guardWatchProcess } from "../updateDrain/WatchProcessAdmission.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { isTerminalRunStatus } from "./ThreadManagementService.ts";
@@ -174,6 +177,14 @@ function planRead(
   fingerprint: ProviderChangeRequestWatchFingerprint | null,
   now: number,
 ): ReadPlan {
+  if (
+    group.targets.some(
+      ({ watch }) =>
+        watch.quietDeadline?.dueAt != null && now >= Date.parse(watch.quietDeadline.dueAt),
+    )
+  ) {
+    return { detail: true, activity: true };
+  }
   if (last === undefined || group.targets.some((target) => !last.watches.has(watchKey(target)))) {
     return { detail: true, activity: true };
   }
@@ -214,6 +225,8 @@ const checksPendingBeforeOf = ({ watch }: WatchTarget) =>
 function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatch): boolean {
   return (
     left.startedAt === right.startedAt &&
+    left.quietDeadline?.timeoutMinutes === right.quietDeadline?.timeoutMinutes &&
+    left.quietDeadline?.dueAt === right.quietDeadline?.dueAt &&
     left.headSha === right.headSha &&
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
     left.passed === right.passed &&
@@ -250,6 +263,13 @@ export const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const random = yield* SecureRandom.SecureRandom;
+  const admission = yield* Effect.serviceOption(UpdateDrainAdmission.UpdateDrainAdmission);
+  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+  const automationPaused = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(
+        Effect.map((session) => session !== null && session.phase !== "resuming"),
+      )
+    : Effect.succeed(false);
   const bootedAt = yield* Clock.currentTimeMillis;
   const lives = new Map<string, WatchLife>();
 
@@ -300,6 +320,7 @@ export const make = Effect.gen(function* () {
     Effect.suspend(() => reportEnd(lifeKey(target), lifeOf(target), reason));
 
   const readFailures = new Map<string, number>();
+  const ownedReadFailures = new Map<string, number>();
   /** The last sweep's groups, whose pull requests get host change feeds. */
   let currentGroups: ReadonlyArray<WatchGroup> = [];
   // A pass reads watches and records new ones, so passes must not overlap.
@@ -351,6 +372,10 @@ export const make = Effect.gen(function* () {
       threadId: target.thread.id,
       ...identityOf(target.link),
       startedAt: target.watch.startedAt,
+      ...(target.watch.generation === undefined
+        ? {}
+        : { generation: target.watch.generation, expectedWatch: target.watch }),
+      expectedQuietDeadline: target.watch.quietDeadline ?? null,
       watch: next,
       ...checksPendingBeforeOf(target),
       ...(endedWatch === undefined ? {} : { endedWatch }),
@@ -360,29 +385,47 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const giveUp = (target: WatchTarget, cause: Cause.Cause<PullRequestService.PullRequestError>) => {
+  const giveUp = Effect.fn("PullRequestWatchReactor.giveUp")(function* (
+    target: WatchTarget,
+    cause: Cause.Cause<PullRequestService.PullRequestError>,
+  ) {
     const error = Option.getOrUndefined(Cause.findErrorOption(cause));
     // The message is the host's own setup instruction, never the subprocess output in `cause`.
     const unusable =
       error?._tag === "PullRequestUnavailableError" && error.reason !== "provider-unsupported"
         ? error.message
         : null;
-    return record(target, null, {
-      text:
-        unusable === null
-          ? `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row. Check it yourself, and call watch_pull_request only if it is still open.`
-          : `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because the T3 Code server cannot use the host: ${unusable} Fix that on the server, then call watch_pull_request only if it is still open.`,
-      notification: {
-        source: { kind: "monitor" },
-        outcome: "failed",
-        summary: `#${target.link.number}: stopped watching, ${unusable === null ? "could not read it" : "host not set up on the server"}`,
+    const text =
+      unusable === null
+        ? `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row.`
+        : `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because the T3 Code server cannot use the host: ${unusable} Fix the host setup on the server.`;
+    const lastState = target.link.snapshot?.state;
+    const incomplete =
+      target.watch.generation !== undefined && lastState !== undefined && lastState !== "open"
+        ? ` The last state T3 Code recorded for it was ${lastState}, and its latest comments and reviews were not read.`
+        : "";
+    yield* record(
+      target,
+      null,
+      {
+        text: `${text}${incomplete} Check it yourself and act on what you find. If it is still open and waiting, report that T3 Code cannot read it as a blocker: a new watch would stop the same way. Watch again only if the user asks you to keep waiting.`,
+        notification: {
+          source: { kind: "monitor" },
+          outcome: "failed",
+          summary: `#${target.link.number}: stopped watching, ${unusable === null ? "could not read it" : "host not set up on the server"}`,
+        },
       },
-    }).pipe(
+      { ...target.watch, unreadable: true },
+    ).pipe(
       Effect.tap(() => woke(target)),
-      Effect.catch(() => record(target, null)),
+      Effect.catch((error) =>
+        target.watch.generation === undefined
+          ? record(target, null, undefined, { ...target.watch, unreadable: true })
+          : Effect.fail(error),
+      ),
       Effect.tap(() => ended(target, "unreadable")),
     );
-  };
+  });
 
   const readRemarks = Effect.fn("PullRequestWatchReactor.readRemarks")(
     function* (
@@ -503,12 +546,14 @@ export const make = Effect.gen(function* () {
       threadId: first.target.thread.id,
       ...identityOf(first.target.link),
       startedAt: first.target.watch.startedAt,
+      expectedQuietDeadline: first.target.watch.quietDeadline ?? null,
       watch: first.next,
       ...checksPendingBeforeOf(first.target),
       ...(first.endedWatch === undefined ? {} : { endedWatch: first.endedWatch }),
       others: rest.map((item) => ({
         ...identityOf(item.target.link),
         startedAt: item.target.watch.startedAt,
+        expectedQuietDeadline: item.target.watch.quietDeadline ?? null,
         watch: item.next,
         ...checksPendingBeforeOf(item.target),
         ...(item.endedWatch === undefined ? {} : { endedWatch: item.endedWatch }),
@@ -538,7 +583,11 @@ export const make = Effect.gen(function* () {
   const sendHeld = Effect.suspend(() => {
     const byThread = new Map<string, Array<HeldWake>>();
     for (const item of held) {
-      byThread.set(item.target.thread.id, [...(byThread.get(item.target.thread.id) ?? []), item]);
+      const key =
+        item.target.watch.generation === undefined
+          ? item.target.thread.id
+          : `${item.target.thread.id}:${item.target.watch.generation}`;
+      byThread.set(key, [...(byThread.get(key) ?? []), item]);
     }
     held = [];
     return Effect.forEach(
@@ -580,10 +629,12 @@ export const make = Effect.gen(function* () {
   };
 
   // A merged snapshot still gets one read, so the wake can name the merge commit.
-  const endsWithoutRead = ({ thread }: WatchTarget): WatchEndReason | undefined =>
+  const endsWithoutRead = ({ thread, watch }: WatchTarget): WatchEndReason | undefined =>
     thread.settledOverride === "settled" || thread.settledAt !== null
       ? "settled"
-      : thread.lineage.relationshipToParent === "subagent"
+      : thread.lineage.relationshipToParent === "subagent" &&
+          thread.lineage.independent !== true &&
+          watch.generation === undefined
         ? "subagent"
         : undefined;
 
@@ -604,15 +655,37 @@ export const make = Effect.gen(function* () {
       ),
     ).pipe(Effect.map((landed) => landed.every(Boolean)));
 
-  // A merged PR's watch holds its thread from settling, so it must not wait out the host.
+  // Ordinary watches can report a known merge even while the host is unavailable.
+  // Owned watches keep reading for final remarks and reserve their own terminal event.
   const endMergedSnapshots = (group: WatchGroup) => {
-    const merged = group.targets.filter((target) => target.link.snapshot?.state === "merged");
+    const merged = group.targets.filter(
+      (target) => target.watch.generation === undefined && target.link.snapshot?.state === "merged",
+    );
     return eachTarget({ ...group, targets: merged }, (target) =>
       target.link.snapshot ? finished(group.key, target, target.link.snapshot) : Effect.void,
     ).pipe(
       Effect.as({ ...group, targets: group.targets.filter((target) => !merged.includes(target)) }),
     );
   };
+
+  const countReadFailure = Effect.fn("PullRequestWatchReactor.countReadFailure")(function* (
+    group: WatchGroup,
+    failures: Map<string, number>,
+    cause: Cause.Cause<PullRequestService.PullRequestError>,
+  ) {
+    if (group.targets.length === 0) {
+      failures.delete(group.key);
+      return;
+    }
+    const count = (failures.get(group.key) ?? 0) + 1;
+    failures.set(group.key, count);
+    if (
+      count >= READ_FAILURE_LIMIT &&
+      (yield* eachTarget(group, (target) => giveUp(target, cause)))
+    ) {
+      failures.delete(group.key);
+    }
+  });
 
   const referenceOf = (group: WatchGroup) => {
     const first = group.targets[0]!;
@@ -671,26 +744,30 @@ export const make = Effect.gen(function* () {
       const unended = yield* endMergedSnapshots(group);
       if (unended.targets.length === 0) {
         readFailures.delete(group.key);
+        ownedReadFailures.delete(group.key);
         return;
       }
       const reason = providerFailureReason(detailRead.cause);
       if (reason === "rate-limited") return;
-      // Transport and host failures can outlast the failure limit; keep the watch for recovery.
+      const owned = unended.targets.filter((target) => target.watch.generation !== undefined);
+      yield* countReadFailure({ ...unended, targets: owned }, ownedReadFailures, detailRead.cause);
+      // A transport error can outlast the failure limit for a watch outside a delegation.
       if (reason === "failed") {
         readFailures.delete(group.key);
-        return yield* Effect.failCause(detailRead.cause);
-      }
-      const failures = (readFailures.get(group.key) ?? 0) + 1;
-      readFailures.set(group.key, failures);
-      if (
-        failures >= READ_FAILURE_LIMIT &&
-        (yield* eachTarget(unended, (target) => giveUp(target, detailRead.cause)))
-      ) {
-        readFailures.delete(group.key);
+      } else {
+        yield* countReadFailure(
+          {
+            ...unended,
+            targets: unended.targets.filter((target) => target.watch.generation === undefined),
+          },
+          readFailures,
+          detailRead.cause,
+        );
       }
       return yield* Effect.failCause(detailRead.cause);
     }
     readFailures.delete(group.key);
+    ownedReadFailures.delete(group.key);
     const detail = detailRead.value;
     for (const target of group.targets) {
       const life = lifeOf(target);
@@ -705,7 +782,10 @@ export const make = Effect.gen(function* () {
           : {}),
       });
     }
-    if (detail.state !== "open") {
+    if (
+      detail.state !== "open" &&
+      group.targets.every((target) => target.watch.generation === undefined)
+    ) {
       lastReads.delete(group.key);
       return yield* eachTarget(group, (target) => finished(group.key, target, detail));
     }
@@ -749,7 +829,37 @@ export const make = Effect.gen(function* () {
       remarks: fingerprint?.remarks ?? null,
     });
     yield* eachTarget(group, (target) => {
+      if (detail.state !== "open" && target.watch.generation === undefined) {
+        return finished(group.key, target, detail);
+      }
       const report = evaluatePullRequestWatch(target.watch, detail, remarks, now);
+      if (detail.state !== "open") {
+        const update = pullRequestWatchMessage({
+          number: target.link.number,
+          url: target.link.url,
+          baseBranch: detail.baseBranch,
+          headSha: report.next.headSha,
+          report,
+          ended: detail.state,
+        });
+        return record(
+          target,
+          null,
+          {
+            text: `${update.text}${remarks === null ? "\nT3 Code could not fully read its comments and reviews, so check them yourself if your task depends on them." : ""}`,
+            notification: {
+              source: { kind: "monitor" },
+              outcome: "updated",
+              summary: `#${target.link.number}: ${detail.state}, stopped watching`,
+            },
+          },
+          report.next,
+        ).pipe(
+          Effect.tap(() => woke(target)),
+          Effect.tap(() => ended(target, detail.state === "closed" ? "closed" : "merged")),
+        );
+      }
+
       if (report.changes.length > 0) {
         const wake = {
           ...pullRequestWatchMessage({
@@ -783,6 +893,34 @@ export const make = Effect.gen(function* () {
   // The sweep and change reads each name their own span.
   const pass = Effect.fnUntraced(function* (changed: string | undefined) {
     held = [];
+    // Keep the watch and its cursors intact: Resume reads everything that moved.
+    if (yield* automationPaused) return;
+    const pending = yield* projections.getPendingPullRequestWatchDeliveries;
+    yield* Effect.forEach(
+      pending,
+      (delivery) =>
+        Effect.gen(function* () {
+          const uuid = yield* random.uuidV4();
+          yield* engine
+            .dispatch({
+              type: "thread.pull-request-watch.deliver",
+              commandId: CommandId.make(`server:pr-watch-recover:${uuid}`),
+              ...delivery,
+            })
+            .pipe(
+              Effect.provideService(
+                Orchestrator.PullRequestWatchDeliveryAuthorization,
+                delivery.generation,
+              ),
+              Effect.catchCause(
+                logFailure("pull request watch delivery recovery failed", {
+                  threadId: delivery.threadId,
+                }),
+              ),
+            );
+        }),
+      { discard: true },
+    );
     const threads = yield* projections.getThreadsWithPullRequests();
     const targets = threads.flatMap((thread) =>
       visibleThreadPullRequests(thread.pullRequests ?? []).flatMap((link) =>
@@ -820,7 +958,7 @@ export const make = Effect.gen(function* () {
     }));
     if (changed === undefined) {
       currentGroups = groups;
-      for (const cache of [readFailures, lastReads, threadTails]) {
+      for (const cache of [readFailures, ownedReadFailures, lastReads, threadTails]) {
         for (const key of cache.keys()) if (!byPullRequest.has(key)) cache.delete(key);
       }
     }
@@ -879,7 +1017,16 @@ export const make = Effect.gen(function* () {
     yield* sendHeld;
   }, passes.withPermit);
 
-  const sweep = pass(undefined).pipe(
+  const withWatchProcessAdmission = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Option.isSome(admission)
+      ? Effect.provideService(
+          effect,
+          WatchProcessAdmission,
+          guardWatchProcess(admission.value.admitPullRequestWatchProcess),
+        )
+      : effect;
+
+  const sweep = withWatchProcessAdmission(pass(undefined)).pipe(
     Effect.catchCause(logFailure("pull request watch sweep failed", {})),
     Effect.withSpan("PullRequestWatchReactor.sweep"),
   );
@@ -887,7 +1034,7 @@ export const make = Effect.gen(function* () {
   const pullRequestOf = (group: WatchGroup) => threadPullRequestKeyOf(group.targets[0]!.link);
 
   const readOnChange = (pullRequest: string) =>
-    pass(pullRequest).pipe(
+    withWatchProcessAdmission(pass(pullRequest)).pipe(
       Effect.catchCause(logFailure("pull request watch change read failed", { pullRequest })),
       Effect.withSpan("PullRequestWatchReactor.readOnChange"),
     );
@@ -974,10 +1121,12 @@ export const make = Effect.gen(function* () {
       for (const [pullRequest, group] of wanted) {
         // An ended feed restarts here, so a host that refused it is asked again each sweep.
         yield* FiberMap.run(feeds, pullRequest, { onlyIfMissing: true })(
-          pullRequests.changes(referenceOf(group)).pipe(
-            // A review sends an event per comment; those landing during a read make one more.
-            Stream.buffer({ capacity: 1, strategy: "sliding" }),
-            Stream.runForEach(() => readOnChange(pullRequest)),
+          withWatchProcessAdmission(
+            pullRequests.changes(referenceOf(group)).pipe(
+              // A review sends an event per comment; those landing during a read make one more.
+              Stream.buffer({ capacity: 1, strategy: "sliding" }),
+              Stream.runForEach(() => readOnChange(pullRequest)),
+            ),
           ),
         );
       }
@@ -1007,4 +1156,7 @@ export const make = Effect.gen(function* () {
   return { start, sweep } satisfies PullRequestWatchReactor["Service"];
 });
 
-export const layer = Layer.effect(PullRequestWatchReactor, make);
+export const layer = Layer.effect(
+  PullRequestWatchReactor,
+  Effect.andThen(UpdateDrainAdmission.UpdateDrainAdmission, make),
+);

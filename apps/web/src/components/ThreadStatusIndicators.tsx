@@ -548,9 +548,11 @@ export function ThreadLinkBadge({
 export function ThreadPullRequestsMiniList({
   pullRequests,
   onOpenPullRequest,
+  plain = false,
 }: {
   pullRequests: ReadonlyArray<ThreadPullRequestLink>;
-  onOpenPullRequest?: (event: MouseEvent<HTMLAnchorElement>, url: string) => void;
+  onOpenPullRequest?: ((event: MouseEvent<HTMLAnchorElement>, url: string) => void) | undefined;
+  plain?: boolean;
 }) {
   const lines = pipe(
     visibleThreadPullRequests(pullRequests),
@@ -575,6 +577,7 @@ export function ThreadPullRequestsMiniList({
             presentation={presentation}
             depth={line.depth}
             onOpenPullRequest={onOpenPullRequest}
+            plain={plain}
           >
             {line.stack ? (
               <span className="ml-auto shrink-0 pl-1 text-3xs">
@@ -600,6 +603,7 @@ function ThreadPullRequestMiniListItem({
   presentation,
   depth = 0,
   onOpenPullRequest,
+  plain = false,
   children,
 }: {
   number: number;
@@ -608,6 +612,7 @@ function ThreadPullRequestMiniListItem({
   presentation: Pick<ThreadPullRequestBadgePresentation, "Icon" | "toneClassName"> | null;
   depth?: number;
   onOpenPullRequest?: ((event: MouseEvent<HTMLAnchorElement>, url: string) => void) | undefined;
+  plain?: boolean;
   children?: ReactNode;
 }) {
   const Icon = presentation?.Icon ?? PullRequestGlyph.pullRequest;
@@ -629,7 +634,10 @@ function ThreadPullRequestMiniListItem({
           href={url}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex min-w-0 items-center gap-2 rounded-sm px-1 py-1 hover:bg-accent focus-visible:bg-accent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+          className={cn(
+            "flex min-w-0 cursor-pointer items-center gap-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+            !plain && "rounded-sm px-1 py-1 hover:bg-accent focus-visible:bg-accent",
+          )}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => onOpenPullRequest(event, url)}
         >
@@ -679,7 +687,7 @@ export function ChangeRequestStatusIcon({
   return <presentation.Icon className={className} />;
 }
 
-function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }) {
+export function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }) {
   return (
     <span className="flex max-w-[min(34rem,calc(100vw-2rem))] items-stretch overflow-hidden whitespace-nowrap">
       <span className="shrink-0 pr-2 font-medium">{status.tooltipLead}</span>
@@ -974,12 +982,7 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
     linkedPullRequest?.sourceControlProvider ?? resolveDisplayedThreadPrProvider(displayedPrInput),
     m,
   );
-  const threadStatus = resolveThreadStatusPill({
-    thread: {
-      ...thread,
-      lastVisitedAt,
-    },
-  });
+  const threadStatus = resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } }, m);
 
   const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
   const pendingLink =

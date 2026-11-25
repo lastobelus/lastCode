@@ -1,28 +1,37 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 
+import {
+  PROJECT_ACTION_ORCHESTRATION_INSTRUCTIONS,
+  projectActionOrchestrationSections,
+} from "./lastcodeProjectActions.ts";
+import { LASTCODE_THREAD_INSTRUCTIONS } from "./lastcodeThreadInstructions.ts";
+
 // Codex truncates entries over 4,000 bytes; keep each section self-contained and below that limit.
 export const T3_CODE_ORCHESTRATION_SECTIONS: ReadonlyArray<string> = [
   `## T3 Code orchestration
 
 Ordinary coding tasks need no T3 tools.
 
-- Subagents: use your native tool when the child uses your provider, a model it offers, and no T3 model settings, requested or inherited, and it finishes in this turn (Claude \`Agent\` always with \`run_in_background:false\`; Codex \`spawn_agent\`, then wait). Native subagents cannot reliably apply T3 model settings. Use \`delegate_task\` for another provider's model, requested or inherited settings, a separate checkout (\`isolation:"worktree"\`), background work, or \`delegate_task\` by name. A native type running another provider's model counts too. Workflow only when asked.
+- For a subagent request, use your native tool when the child uses your provider, a model it offers, and no T3 model settings, requested or inherited, and it finishes in this turn (Claude \`Agent\` always with \`run_in_background:false\`; Codex \`spawn_agent\`, then wait). Native subagents cannot reliably apply T3 model settings. Use \`delegate_task\` for another provider's model, requested or inherited settings, a separate checkout (\`isolation:"worktree"\`), background work, or \`delegate_task\` by name. A native type running another provider's model counts too. Workflow only when asked.
 - Before you start a subagent, call \`orchestrator_capabilities\` once per thread; it reports the settings you would pass on. Again only after an error or a user-named provider change. Settings go in \`target.options\`, not only in \`task\`; inherited ones carry over only to the same provider instance and model. Check the returned provider, model, and options against the request. Provider, model, or setting unavailable: say so. Never switch unasked, or fall back to native tools, Workflow, or CLIs. Never make a child's checkout in the shell or in \`task\`.
 - Every new delegate review or re-check is a new \`delegate_task\` (brief, findings, objections), never a \`t3_thread_send\`. A follow-up that needs the same child's conversation is a \`t3_thread_send\` to its \`childThreadId\`. Fix small review findings yourself; start no delegate for them. When told to proceed without a delegate, or to run fewer, \`task_cancel\` the extras. Start no replacement.
 - Follow a running delegate's \`next\`. Do not poll it (\`task_status\`, \`sleep\`, watchers, Monitor, ScheduleWakeup). Stop a delegate run you replace or no longer need with \`task_cancel\`, never \`t3_thread_interrupt\` on a \`childThreadId\`.
-- If you are a subagent or child, do the work yourself. Start no subagents unless your task says to.`,
-  `- \`t3_thread_launch\` and \`create_threads\` make new top-level threads, only when the user asks for a new thread. "Subagent", "delegate", and "parallel" never mean one. Worktree thread: set \`workspaceStrategy\`. Honor a requested base. Otherwise, independent work uses the default branch as \`remote/branch\` with \`startFromOrigin:true\`; with no remote, use the local default. Required unpublished commits and dependent work use their local base. Shell worktrees do not bind it, and no checkout setup in its prompt. No \`workspaceStrategy\`: project root, not your worktree.
-- Given a thread id, \`t3_thread_read\` it before you answer about it or ask where it lives. After a local miss it tries the client's other connected environments; reuse the returned \`environmentId\` for later pages. Asked to settle a thread, this one too: \`t3_thread_organize\`.
+- As a subagent or child thread, do the work yourself unless your brief calls for delegation.`,
+  `${LASTCODE_THREAD_INSTRUCTIONS}
+- For a launched worktree, set \`workspaceStrategy\`; shell worktrees cannot bind it. Keep checkout setup out of the brief. Honor a requested base. Otherwise use the local base for dependent or unpublished work, or the default \`remote/branch\` with \`startFromOrigin:true\` for independent work (local default without a remote). Without \`workspaceStrategy\`, a launch uses the project root, not your worktree. For remote task worktrees, check \`features.remoteWorktreeIsolationVersion:1\` on the destination and make the parent HEAD fetchable.
+- Given a thread id, \`t3_thread_read\` it before you answer about it or ask where it lives; see Find mentioned threads for routing. Asked to settle a thread, this one too: \`t3_thread_organize\`.
 - Another machine: \`t3_environment_links\` lists linked ones. Pass its \`environmentId\` to a T3 tool to act there. Ids are then that machine's, so pass \`threadId\`.
 - A machine the user names that is not linked ("delegate this to my vps"): call \`t3_environment_link\` with a \`hint\` from their words. Never ask for a pairing code in chat. No link tools: say to enable Settings → Labs → Linked environments.
 - In your reply, a thread's first mention is its \`link\` verbatim, from \`t3_thread_read\` or \`t3_thread_list\`; it carries the owning environment. Never build a link, or use a plain title or bare id. No link retrievable: say so.
 - A login, token, PIN, pairing code or sudo password only the user can give: call \`request_secret\`, not a chat ask or a handoff. Not for access you have. Sudo: if \`sudo -n <cmd>\` says a password is required, use \`delivery: "file"\` and run \`sudo -S -p '' <cmd> < "$file"\`; the password takes stdin, so give other input as a file argument. When asked only to schedule, \`schedule_task\` without running its prompt.
 - T3 tools may load late. Try the name once before you call it absent.`,
+  `- Whoever you brief is a peer. A thread or subagent you start in this project begins with the same T3 instructions and AGENTS.md that you have, and is as careful as you are. On your provider it also shares your system prompt and skills; on another provider it has that provider's own, so spell out anything you rely on that only your harness supplies. Leave out what the recipient already has and anything you would do without being told. Use the brief for what only you know: the goal and what it serves, what you have already learned or ruled out, what makes the task hard, and what to send back. It cannot see this conversation or the arguments of the call that starts it, so a value you set there that it must act on, such as the base branch, still goes in the brief.`,
+  PROJECT_ACTION_ORCHESTRATION_INSTRUCTIONS,
   `### Find mentioned threads
 
 When the user mentions or pastes another thread, finding it is your job; they should not have to track which environment owns it. Thread IDs are opaque. UI threads use bare UUIDs and agent-launched threads can use IDs such as \`mcp:<uuid>\`; the prefix is part of the ID, so pass the full ID unchanged.
 
-Start with \`t3_thread_read\`. After a local miss it asks the T3 client's other connected environments; reuse the returned \`thread.environmentId\` for later pages. \`thread_not_found\` covers only the environments it reached, and \`environment_unavailable\` means some could not be checked, so neither proves the thread is missing or calls for asking the user yet. Keep looking with access you already have: \`t3_thread_search\` or \`t3_thread_list\` (including \`settled=true\`) for a title or partial ID, then the \`lastcode-thread\` CLI (\`list\`, \`read\`, \`send\`, \`wait\`) on this host or on known hosts you already reach over SSH, at \`<LastCode home>/userdata/bin/lastcode-thread\` when it is not on \`PATH\`. If that wrapper is absent, use the owning installation's \`thread\` subcommand with its actual \`--base-dir\` and \`--state-dir\`. Its \`list\` returns only the 50 most recently updated active threads (check \`threadsTruncated\`), and it never sees archived or deleted threads.
+Start with \`t3_thread_read\`. ID-only discovery tries locally, then through the initiating client's connected environments; after success, bind \`thread.environmentId\`. An attached reference starts every fresh read, including a later status refresh, with its exact \`environmentId\`, \`threadId\` and \`via: "reference"\`; the server picks an authorized route. Later pages and item chunks of one read keep its exact environment and pass \`via: "client"\` if it returned \`readVia: "client"\`, otherwise omit \`via\`. Machine-directed reads omit \`via\` and use peer routing; a local target stays local. A failed exact read ends: report it to the user and never switch routes, unless the error has \`noDestinationAttempt: true\`, which allows a fresh \`via: "reference"\` read. That allowance holds only while an independently authorized link might reach the thread. A failed \`via: "reference"\` read has already checked every route, so repeat it only after a connection, authorization or link changes. A wake leaves a failed read's goal in place: carry out that failure's recovery, then read again. History pages and item chunks keep separate cursors: a chunk's \`hasMore: false\` or \`nextPosition: null\` ends only that item, so resume the history from the saved \`nextPosition\`, never \`afterPosition=-1\`. When you need the whole history and its cut-off text, finish the history first. Reading a thread never permits messaging or changing it; remote send and wait need a peer link that allows them. For unresolved ID-only discovery, \`thread_not_found\` covers only checked environments; \`environment_unavailable\` means discovery was incomplete. Neither proves the thread is missing: continue through already-authorized routes. Permission refusal is never a miss or permission to bypass a boundary. Search with \`t3_thread_search\` or \`t3_thread_list\` (including \`settled=true\`) for a title or partial ID, then the \`lastcode-thread\` CLI (\`list\`, \`read\`, \`send\`, \`wait\`) on this host or on known hosts you already reach over SSH, at \`<LastCode home>/userdata/bin/lastcode-thread\` when it is not on \`PATH\`. If that wrapper is absent, use the owning installation's \`thread\` subcommand with its actual \`--base-dir\` and \`--state-dir\`. Its \`list\` returns only the 50 most recently updated active threads (check \`threadsTruncated\`), and it never sees archived or deleted threads.
 
 For an unlinked environment, run \`lastcode-thread send\` on its owning host; the message arrives without a link back to you, so name the source thread in it. A \`"kind":"accepted"\` result confirms delivery; \`send --wait\` returns a tracked turn result instead, where \`"kind":"completed"\` confirms delivery and completion. A wait timeout does not mean delivery failed: resume its \`waitHandle\` instead of resending. For \`dispatch-unknown\` or \`transport-unknown\`, read the target's history before retrying. An authorization or permission refusal is a boundary, not a miss: report it instead of routing around it. Ask the user only after these routes are exhausted, naming what you checked and the specific access or detail still missing.
 
@@ -31,16 +40,16 @@ To mention another thread to the user, use the ready-to-paste \`link\` returned 
 
 - Answer data with a trend or comparison with a chart, and show any visual the user asks for here: pass the path to an HTML file, or inline HTML to \`html_preview\`, then \`html_render\`. A screenshot on disk or a text description does not show it. Never start a server for it. Page tools write only on user request. Never use them to show results. Asked for an image to post, send, or use elsewhere: a \`.png\` file and its path, never \`html_render\`.
 - Use \`preview_*\` for browser work the request or project instructions call for, or a page or tab the user names. Public pages: web fetch or search unless browser work was asked; then preview tools only, no web fetch.`,
+  `- An app-owned delegated child owns a PR watch only when \`orchestrator_capabilities\` for its environment reports \`features.appOwnedPullRequestWatchContinuationVersion\` and #482 explicitly accepts that environment's installed checkpoint for Phase 4, or in a narrow isolated acceptance scenario you were authorized to run. Say which in its brief. Child Action ownership is a separate gate and never enables a watch; neither does the flag in source or a newer-looking version. Otherwise the parent keeps the watch, and waits already mediated keep their recorded owner.
+- A child that owns its watch registers it, runs any required project gate check once, and ends its turn unfinished while gates are pending. Genuine watch events continue the same task; a Pause, pending input, or recovery still needs attention. Do not poll, read, schedule, or relay routine events to keep the task alive. Before handback the child calls \`unwatch_pull_request\` and reports the PR's actual head, checks, and reviews. A wake or elapsed time is neither merge permission nor a clean review.`,
 ];
 
-const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
-
-${T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n")}
-`;
+export const t3CodeOrchestrationSections = (actionLaunchDisabled = false) =>
+  projectActionOrchestrationSections(T3_CODE_ORCHESTRATION_SECTIONS, actionLaunchDisabled);
 
 export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
-## T3 Code collaborative browser
+## T3 Code browser
 
 You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 
@@ -49,6 +58,8 @@ For routine QA within the user's requested task, use a thread-owned background b
 A new blank tab can briefly report \`available: false\` while its native browser starts; use \`preview_navigate\`, which waits for readiness, before declaring the browser unavailable. Then use \`preview_snapshot\` and the focused interaction tools. Prefer snapshot-provided locators over coordinates. A managed server readiness failure is separate from browser permission: inspect the returned readiness and terminal-status diagnostics, the launch command, actual listening port, and ownership. Terminal transcripts are not returned and a failed initial launch cleans up its terminal; do not search for deleted output or infer a specific startup error from status alone. Repair an identified startup problem and retry within a bounded attempt. Do not ask the user to open a browser to fix a server launch failure.
 
 \`preview_status\` lists every browser tab in this thread, including tabs the user opened. When the user asks about "this page" or a page they have open, read their tab: pass its \`tabId\` to \`preview_snapshot\` or \`preview_wait_for\`, or omit \`tabId\` when you have no tab of your own. You may act on the user's tab, including \`preview_evaluate\`, only while its owner is \`unclaimed\`; while it is \`human\`, the user is driving, so read it with \`preview_snapshot\` or open your own tab. To use a browser profile (a set of saved logins), pass \`profileId\` from \`preview_status\` profiles to \`preview_open\`.
+
+When the user asks to see or use a page, such as a dashboard or explainer, open it for them yourself with \`preview_open({ purpose: 'user', url })\` so it appears in front of them. For a page you serve, start it with \`preview_host\` first and pass the URL it returns; for a dev-server port or a published document, pass \`target\` instead of \`url\`. Choose \`browserHost: 'environment'\` for a loopback page and \`'desktop'\` for a page the desktop can reach. The user can use that tab straight away, with no Take control step. It stays their workspace even while \`unclaimed\`: read it with \`preview_snapshot\` when you need to, and do any clicking, typing, or QA in a separate tab of your own.
 
 Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Inspect a failed preview call and retry with corrected arguments when the error is actionable. Use another browser system when:
 - the T3 preview tools are absent, or \`preview_open\` returns an explicit unsupported/unavailable error;
@@ -79,10 +90,15 @@ export const T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH = deviceToolInstr
 // its tools, so they need the terminal transport other harnesses never use.
 const T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS = `ACP fallback: if the T3 tools are absent and \`T3_ACP_MCP_NODE\` is present, call them through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" \${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`T3_ACP_MCP_ENTRYPOINT\` is unset for a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. On Windows, run \`T3_ACP_MCP_CALL\` instead and pipe the JSON to stdin, as in PowerShell \`'{}' | & $env:T3_ACP_MCP_CALL orchestrator_capabilities -\`, writing non-ASCII characters as \`\\uXXXX\` escapes.`;
 
-export const T3_CODE_MCP_INSTRUCTIONS = [
-  T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(),
-  T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
-].join("\n\n");
+export const t3CodeMcpInstructions = (actionLaunchDisabled = false, browser = true) =>
+  [
+    ...(browser ? [T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim()] : []),
+    ...t3CodeOrchestrationSections(actionLaunchDisabled),
+  ]
+    .join("\n\n")
+    .trim();
+
+const T3_CODE_MCP_INSTRUCTIONS = t3CodeMcpInstructions();
 
 const T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS = `## T3 Code interaction mode: Default
 
@@ -96,6 +112,7 @@ export interface T3AcpInstructionState {
   readonly interactionMode: ProviderInteractionMode;
   readonly hasT3Mcp: boolean;
   readonly hasDeviceTools: boolean;
+  readonly projectActionLaunchDisabled?: boolean | undefined;
 }
 
 /** ACP lacks system/developer fields; inject context on first prompt and tool/mode changes. */
@@ -109,7 +126,8 @@ export function t3AcpPromptWithInstructions(input: {
   if (
     input.previousState?.interactionMode === input.state.interactionMode &&
     input.previousState.hasT3Mcp === input.state.hasT3Mcp &&
-    input.previousState.hasDeviceTools === input.state.hasDeviceTools
+    input.previousState.hasDeviceTools === input.state.hasDeviceTools &&
+    input.previousState.projectActionLaunchDisabled === input.state.projectActionLaunchDisabled
   ) {
     return input.prompt;
   }
@@ -119,7 +137,10 @@ export function t3AcpPromptWithInstructions(input: {
       : T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS,
     ...(input.state.hasT3Mcp
       ? [
-          orchestrationInstructions(input.state.hasDeviceTools),
+          orchestrationInstructions(
+            input.state.hasDeviceTools,
+            input.state.projectActionLaunchDisabled,
+          ),
           T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS,
         ]
       : []),
@@ -127,10 +148,10 @@ export function t3AcpPromptWithInstructions(input: {
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
 }
 
-const orchestrationInstructions = (hasDeviceTools: boolean) =>
-  hasDeviceTools
-    ? `${T3_CODE_MCP_INSTRUCTIONS}\n\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS}\n`
-    : T3_CODE_MCP_INSTRUCTIONS;
+const orchestrationInstructions = (hasDeviceTools: boolean, actionLaunchDisabled?: boolean) => {
+  const mcp = actionLaunchDisabled ? t3CodeMcpInstructions(true) : T3_CODE_MCP_INSTRUCTIONS;
+  return hasDeviceTools ? `${mcp}\n\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS}\n` : mcp;
+};
 
 function prependT3OrchestrationInstructions(prompt: string, instructions: string): string {
   return `<t3_code_orchestration_instructions>${instructions.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
@@ -142,6 +163,7 @@ export function t3OrchestrationPrompt(input: {
   readonly hasT3Mcp: boolean;
   readonly hasDeviceTools: boolean;
   readonly orchestrationDelivered: boolean;
+  readonly projectActionLaunchDisabled?: boolean | undefined;
   readonly deviceInstructionsDelivered: boolean;
   /** Guidance for this provider's own tools, sent until `providerInstructionsDelivered`. */
   readonly providerInstructions?: string;
@@ -150,7 +172,7 @@ export function t3OrchestrationPrompt(input: {
   if (!input.hasT3Mcp) return input.prompt;
   const instructions = [
     !input.orchestrationDelivered
-      ? orchestrationInstructions(input.hasDeviceTools)
+      ? orchestrationInstructions(input.hasDeviceTools, input.projectActionLaunchDisabled)
       : input.hasDeviceTools && !input.deviceInstructionsDelivered
         ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS
         : undefined,
@@ -164,6 +186,7 @@ export function t3OrchestrationPrompt(input: {
 export function t3OrchestrationSystemPrompt(
   hasT3Mcp: boolean,
   hasDeviceTools: boolean,
+  actionLaunchDisabled?: boolean,
 ): string | undefined {
-  return hasT3Mcp ? orchestrationInstructions(hasDeviceTools) : undefined;
+  return hasT3Mcp ? orchestrationInstructions(hasDeviceTools, actionLaunchDisabled) : undefined;
 }

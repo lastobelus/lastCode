@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - the probe test controls native directory watch callbacks.
+import * as NodeEvents from "node:events";
+import * as NodeFS from "node:fs";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { assert, it } from "@effect/vitest";
@@ -50,7 +54,7 @@ vi.mock("node:fs", async (importOriginal) => {
   return { ...actual, watch, realpath: Object.assign(actual.realpath.bind(undefined), { native }) };
 });
 
-it.live.each(["linked", "plain"] as const)(
+it.effect.each(["linked", "plain"] as const)(
   "backs off stopped watches for an unchanged %s directory",
   (kind) =>
     Effect.gen(function* () {
@@ -69,6 +73,12 @@ it.live.each(["linked", "plain"] as const)(
       let identity = firstIdentity;
       const events = yield* Queue.unbounded<"probe" | "refresh">();
 
+      // Only the periodic probe drives this test. Native changes have their own cases.
+      using _watch = vi
+        .spyOn(NodeFS, "watch")
+        .mockImplementation(
+          () => Object.assign(new NodeEvents.EventEmitter(), { close() {} }) as NodeFS.FSWatcher,
+        );
       // An ended child emits a final refresh, as it does when registration fails.
       yield* watchDirectoryPath(entry, Stream.succeed(undefined), Effect.succeed(false)).pipe(
         Stream.runForEach(() => Queue.offer(events, "refresh")),
@@ -84,66 +94,70 @@ it.live.each(["linked", "plain"] as const)(
         ),
         Effect.forkScoped,
       );
-      assert.deepEqual(
-        yield* Queue.takeN(events, 10),
-        // Each acquire stats too: the first, a retry after 1 tick, then after 2 more.
-        [
-          "probe",
-          "probe",
-          "refresh",
-          "probe",
-          "probe",
-          "refresh",
-          "probe",
-          "probe",
-          "probe",
-          "refresh",
-        ],
-      );
+      assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
+
+      yield* TestClock.adjust("1 second");
+      assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
+
+      yield* TestClock.adjust("1 second");
+      assert.equal(yield* Queue.take(events), "probe");
+      assert.equal(yield* Queue.size(events), 0);
+
+      yield* TestClock.adjust("1 second");
+      assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
 
       identity = secondIdentity;
+      yield* TestClock.adjust("1 second");
       assert.deepEqual(yield* Queue.takeN(events, 3), ["probe", "probe", "refresh"]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.live.skipIf(!symlinksSupported)(
-  "rebuilds when a probe sees a tree other than the one the watches were acquired on",
-  () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const base = yield* fs.makeTempDirectoryScoped();
-      const entry = path.join(base, "linked");
-      const first = path.join(base, "first");
-      const second = path.join(base, "second");
-      yield* fs.makeDirectory(first);
-      yield* fs.makeDirectory(second);
-      yield* fs.symlink(first, entry);
-      const a = yield* fs.stat(first);
-      const b = yield* fs.stat(second);
-      // Probe A, acquire A, probe B, swap back and acquire A, then B returns for the next probe.
-      const identities = [a, a, b, a, b, b];
-      const refreshes = yield* Queue.unbounded<void>();
+it.effect("rebuilds when a probe sees a tree other than the one the watches were acquired on", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const base = yield* fs.makeTempDirectoryScoped();
+    const first = path.join(base, "first");
+    const second = path.join(base, "second");
+    yield* fs.makeDirectory(first);
+    yield* fs.makeDirectory(second);
+    const a = yield* fs.stat(first);
+    const b = yield* fs.stat(second);
+    // The probe alone drives replacements. An unrelated native event would consume an identity.
+    silent.root = path.resolve("/silent-watch", "probe");
+    silent.links.clear();
+    silent.missing.clear();
+    const entry = path.join(silent.root, "linked");
+    const target = path.join(silent.root, "target", "themes");
+    silent.links.set(entry, target);
+    // Probe A, acquire A, probe B, swap back and acquire A, then B returns for the next probe.
+    const identities = [a, a, b, a, b, b];
+    const refreshes = yield* Queue.unbounded<void>();
 
-      yield* watchDirectoryPath(
-        entry,
-        Stream.concat(Stream.succeed(undefined), Stream.never),
-        Effect.succeed(false),
-      ).pipe(
-        Stream.runForEach(() => Queue.offer(refreshes, undefined)),
-        Effect.provideService(
-          FileSystem.FileSystem,
-          FileSystem.FileSystem.of({
-            ...fs,
-            stat: (file) =>
-              file === entry ? Effect.sync(() => identities.shift() ?? b) : fs.stat(file),
-          }),
-        ),
-        Effect.forkScoped,
-      );
-      yield* Queue.takeN(refreshes, 3);
-      assert.deepEqual(identities, []);
-    }).pipe(Effect.provide(NodeServices.layer)),
+    yield* watchDirectoryPath(
+      entry,
+      Stream.concat(Stream.succeed(undefined), Stream.never),
+      Effect.succeed(false),
+    ).pipe(
+      Stream.runForEach(() => Queue.offer(refreshes, undefined)),
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.FileSystem.of({
+          ...fs,
+          readLink: (file) => (file === entry ? Effect.succeed(target) : fs.readLink(file)),
+          stat: (file) =>
+            file === entry ? Effect.sync(() => identities.shift() ?? b) : fs.stat(file),
+        }),
+      ),
+      Effect.forkScoped,
+    );
+    yield* Queue.take(refreshes);
+    yield* TestClock.adjust("1 second");
+    yield* Queue.take(refreshes);
+    yield* TestClock.adjust("1 second");
+    yield* Queue.take(refreshes);
+    assert.deepEqual(identities, []);
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect.each([
