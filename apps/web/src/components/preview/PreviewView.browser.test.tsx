@@ -242,6 +242,7 @@ vi.mock(import("~/previewStateStore"), async () => {
     updatePreviewServerSnapshot: vi.fn(),
     isPreviewSupportedInRuntime: () => Boolean(window.desktopBridge?.preview),
     rememberPreviewUrl: mocks.rememberPreviewUrl,
+    setActivePreviewTab: vi.fn(),
     readThreadPreviewState: (() => ({
       sessions: { "tab-1": { navStatus: mocks.navStatus } },
       handledOpenTabIds: new Set<string>(),

@@ -118,6 +118,7 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
 import { surfaceShortcutKey } from "~/lib/surfaceShortcutKey";
 import { HandoffsMenu } from "./handoffs/HandoffsMenu";
+import { dashboardsMenuActions } from "./lastcodeDashboardsEntry";
 
 export interface RightPanelTabsProps {
   mode: PreviewPanelMode;
@@ -160,6 +161,8 @@ export interface RightPanelTabsProps {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddHandoffs?: (() => void) | undefined;
+  /** Absent in projects without a "Dashboards" Action. */
+  onAddDashboards?: (() => void) | undefined;
   threadRef?: import("@t3tools/contracts").ScopedThreadRef | undefined;
   onAddDevice: () => void;
   /** Absent where side chats are not offered. */
@@ -348,6 +351,8 @@ function RightPanelEmptyState(props: {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddHandoffs?: (() => void) | undefined;
+  /** Absent in projects without a "Dashboards" Action. */
+  onAddDashboards?: (() => void) | undefined;
   threadRef?: import("@t3tools/contracts").ScopedThreadRef | undefined;
   onAddDevice: () => void;
   /** Absent where side chats are not offered. */
@@ -375,6 +380,11 @@ function RightPanelEmptyState(props: {
       disabledReason: messages(SURFACE_UNAVAILABLE_HINTS.browser),
       onClick: props.onAddBrowser,
     },
+    ...dashboardsMenuActions(
+      props.onAddDashboards,
+      props.browserAvailable,
+      messages(SURFACE_UNAVAILABLE_HINTS.browser),
+    ),
     {
       label: msg("Terminal"),
       icon: TerminalSquare,
@@ -1222,6 +1232,11 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       disabledReason: messages(SURFACE_DISABLED_REASONS.browser),
       onClick: props.onAddBrowser,
     },
+    ...dashboardsMenuActions(
+      props.onAddDashboards,
+      props.browserAvailable,
+      messages(SURFACE_DISABLED_REASONS.browser),
+    ),
     {
       label: msg("Terminal"),
       icon: TerminalSquare,
@@ -1718,6 +1733,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddPullRequests={props.onAddPullRequests}
             onAddDevice={props.onAddDevice}
             onAddSideChat={props.onAddSideChat}
+            onAddDashboards={props.onAddDashboards}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}

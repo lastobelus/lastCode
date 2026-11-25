@@ -342,6 +342,8 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
         threadRef: activeThreadRef,
         url: resolveDiscoveredServerUrl(activeThreadRef.environmentId, script.previewUrl),
         openPreview,
+        // The Action may have just started or restarted the service an open tab shows.
+        reuse: "none",
       });
       if (previewResult._tag === "Failure" && !isAtomCommandInterrupted(previewResult)) {
         const error = squashAtomCommandFailure(previewResult);

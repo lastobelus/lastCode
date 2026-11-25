@@ -12,6 +12,7 @@ import {
   preparedPreviewOpenTarget,
 } from "~/browser/preparedPreviewOpenTarget";
 import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
+import { reuseOpenPreviewTab } from "~/browser/lastcodePreviewTabReuse";
 import { recordVisitForThread } from "~/browserHistoryStore";
 import {
   applyPreviewServerSnapshot,
@@ -115,6 +116,21 @@ export async function openTerminalLinkInPreview<E>(
       input.url,
       profileId,
     );
+    if (
+      reuseOpenPreviewTab({
+        threadRef: input.threadRef,
+        authoredUrl: input.url,
+        target,
+        profileId,
+        background: false,
+        restarted: prepared.restarted,
+        reuse: undefined,
+        panelRevision: focus.userActionRevision,
+      }) !== null
+    ) {
+      recordVisitForThread(input.threadRef, input.url);
+      return null;
+    }
     const result = await input.openPreview({
       environmentId: input.threadRef.environmentId,
       input: {
