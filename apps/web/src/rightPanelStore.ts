@@ -8,6 +8,7 @@ import { msg } from "gt-react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import { recordBrowserTabSelection } from "./browser/lastcodePreviewTabSelection";
 import { useClosedViewStore } from "./closedViewStore";
 import { m } from "./i18n/messages";
 import { resolveStorage } from "./lib/storage";
@@ -156,6 +157,7 @@ export interface ThreadRightPanelState {
   isOpen: boolean;
   activeSurfaceId: string | null;
   surfaces: RightPanelSurface[];
+  lastcodeSelectedBrowserTabIds?: readonly string[];
   dismissedDeviceSurfaceIds?: string[];
   maximized?: true;
   proactiveDiffTurnId?: RunId;
@@ -949,7 +951,8 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             const withoutPlaceholder = tabId
               ? current.surfaces.filter((entry) => entry.id !== "browser:new")
               : current.surfaces;
-            return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
+            const next = upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
+            return automatic ? next : recordBrowserTabSelection(next, surface.id);
           }),
         ),
       openPullRequest: (ref, target) =>
@@ -1170,7 +1173,9 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
         ),
       activateSurface: (ref, surfaceId) =>
         set((state) =>
-          userAction(state, scopedThreadKey(ref), (current) => activated(current, surfaceId)),
+          userAction(state, scopedThreadKey(ref), (current) =>
+            recordBrowserTabSelection(activated(current, surfaceId), surfaceId),
+          ),
         ),
       revealSurface: (ref, surfaceId) =>
         set((state) =>
@@ -1274,7 +1279,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             const closedLastSessionTab =
               surfaces.length === 0 &&
               current.surfaces.some((surface) => surface.kind === "preview" && surface.resourceId);
-            return {
+            const next = {
               ...current,
               isOpen: focusedSurface ? true : closedLastSessionTab ? false : current.isOpen,
               surfaces,
@@ -1284,6 +1289,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
                   ? current.activeSurfaceId
                   : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null)),
             };
+            return recordBrowserTabSelection(next, focusedSurface?.id);
           }),
         ),
       reconcileFileSurfaces: (ref, workspaceAvailable) =>

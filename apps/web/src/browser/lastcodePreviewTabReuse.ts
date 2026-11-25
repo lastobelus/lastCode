@@ -96,7 +96,8 @@ function resolvePlacement(
 
 /**
  * The reader-controlled tab to reveal for `urls`, or null. Agent-owned, hidden and closing
- * tabs never match. The active tab wins, then the most recently updated one.
+ * tabs never match. An origin open prefers selection order. Other matches and
+ * tabs without selection history use the active tab, then update time.
  */
 export function findReusablePreviewTab(
   state: ThreadPreviewState,
@@ -105,10 +106,16 @@ export function findReusablePreviewTab(
     readonly placement: PreviewTabPlacement;
     readonly reuse: PreviewTabReuse;
     readonly sourceTabId?: string | undefined;
+    readonly selectedTabIds?: readonly string[] | undefined;
   },
 ): string | null {
   const targets = request.urls.flatMap((url) => parseUrl(url) ?? []);
+  const selectedTabIds = request.reuse === "origin" ? request.selectedTabIds : undefined;
+  const selectionOrder =
+    selectedTabIds &&
+    new Map(selectedTabIds.map((id, index) => [id, selectedTabIds.length - index]));
   let best: PreviewSessionSnapshot | null = null;
+  let bestOrder = 0;
   for (const tab of Object.values(state.sessions)) {
     if (tab.tabId === request.sourceTabId) continue;
     if (tab.automationOwner !== undefined || tab.reveal === false) continue;
@@ -122,8 +129,17 @@ export function findReusablePreviewTab(
     if (!tabUrl || !targets.some((target) => addressMatches(tabUrl, target, request.reuse))) {
       continue;
     }
-    if (tab.tabId === state.activeTabId) return tab.tabId;
-    if (best === null || tab.updatedAt > best.updatedAt) best = tab;
+    const order = selectionOrder?.get(tab.tabId) ?? 0;
+    if (
+      best === null ||
+      order > bestOrder ||
+      (order === bestOrder &&
+        (tab.tabId === state.activeTabId ||
+          (best.tabId !== state.activeTabId && tab.updatedAt > best.updatedAt)))
+    ) {
+      best = tab;
+      bestOrder = order;
+    }
   }
   return best?.tabId ?? null;
 }
@@ -169,6 +185,9 @@ export function reuseOpenPreviewTab(input: {
     placement,
     reuse: input.reuse ?? "address",
     sourceTabId: input.sourceTabId,
+    selectedTabIds:
+      useRightPanelStore.getState().byThreadKey[scopedThreadKey(input.threadRef)]
+        ?.lastcodeSelectedBrowserTabIds,
   });
   if (tabId === null) return null;
   rememberPreviewUrl(input.threadRef, input.authoredUrl);

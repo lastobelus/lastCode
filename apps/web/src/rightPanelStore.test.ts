@@ -1345,6 +1345,7 @@ describe("rightPanelStore", () => {
       isOpen: true,
       activeSurfaceId: "browser:tab-a",
       surfaces: [{ id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
+      lastcodeSelectedBrowserTabIds: ["tab-a"],
     });
   });
 
