@@ -89,8 +89,8 @@ export interface NativeEvidence {
 export interface PendingWork {
   taskId: string;
   kind: string;
-  awaited?: boolean;
-  description?: string;
+  awaited?: boolean | undefined;
+  description?: string | undefined;
 }
 
 export function ownedWorkerLookup(db: NodeSqlite.DatabaseSync) {
@@ -190,7 +190,24 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
   const accounted = new Set<string>();
   const requestIds = new Set<string>();
   const reportedClaudeRequestIds = new Set<string>();
+  const claudeStarts = new Set<string>();
+  let claudeResultsWithUsage = 0;
   let toolCatalog: string[] | undefined;
+
+  const recordClaudeContext = (msg: Data) => {
+    const id = msg.id;
+    const tokens = record(msg.usage);
+    if (typeof id !== "string" || typeof tokens.input_tokens !== "number") return;
+    if (!contexts.has(id)) {
+      contexts.set(
+        id,
+        number(tokens.input_tokens) +
+          number(tokens.cache_creation_input_tokens) +
+          number(tokens.cache_read_input_tokens),
+      );
+    }
+    requestIds.add(id);
+  };
 
   for (const row of readLines(input, true)) {
     const frame = record(record(row.event).payload);
@@ -224,19 +241,19 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
     if (frame.type === "system" && frame.subtype === "init" && Array.isArray(frame.tools)) {
       toolCatalog = frame.tools.filter((tool): tool is string => typeof tool === "string");
     }
+    const stream = record(frame.event);
+    if (
+      frame.type === "stream_event" &&
+      frame.parent_tool_use_id == null &&
+      stream.type === "message_start"
+    ) {
+      const msg = record(stream.message);
+      if (typeof msg.id === "string") claudeStarts.add(msg.id);
+      recordClaudeContext(msg);
+    }
     const msg = record(frame.message);
     if (frame.type === "assistant" && typeof msg.id === "string") {
-      const id = msg.id;
-      const tokens = record(msg.usage);
-      if (typeof tokens.input_tokens === "number") {
-        contexts.set(
-          id,
-          number(tokens.input_tokens) +
-            number(tokens.cache_creation_input_tokens) +
-            number(tokens.cache_read_input_tokens),
-        );
-        requestIds.add(id);
-      }
+      if (frame.parent_tool_use_id == null) recordClaudeContext(msg);
       const rootToolBlocks =
         frame.parent_tool_use_id == null && Array.isArray(msg.content)
           ? msg.content.map(record)
@@ -260,20 +277,41 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
       turns.add(frame.uuid);
       trace.push({ kind: "turn-end" });
       const counts = Object.values(record(frame.model_usage_since_last_result)).map(record);
-      for (const model of counts) {
-        usage.push({
-          input:
-            number(model.inputTokens) +
-            number(model.cacheReadInputTokens) +
-            number(model.cacheCreationInputTokens),
-          cached: number(model.cacheReadInputTokens),
-          output: number(model.outputTokens),
-        });
-      }
       if (counts.length > 0 && Array.isArray(frame.begun_message_ids)) {
+        claudeResultsWithUsage++;
+        for (const model of counts) {
+          usage.push({
+            input:
+              number(model.inputTokens) +
+              number(model.cacheReadInputTokens) +
+              number(model.cacheCreationInputTokens),
+            cached: number(model.cacheReadInputTokens),
+            output: number(model.outputTokens),
+          });
+        }
         for (const id of frame.begun_message_ids)
           if (typeof id === "string") reportedClaudeRequestIds.add(id);
+      } else {
+        // SDK usage is per result and covers the main agent. modelUsage is cumulative.
+        const tokens = record(frame.usage);
+        if (
+          typeof tokens.input_tokens === "number" &&
+          typeof tokens.output_tokens === "number" &&
+          claudeStarts.size > 0
+        ) {
+          claudeResultsWithUsage++;
+          usage.push({
+            input:
+              number(tokens.input_tokens) +
+              number(tokens.cache_read_input_tokens) +
+              number(tokens.cache_creation_input_tokens),
+            cached: number(tokens.cache_read_input_tokens),
+            output: number(tokens.output_tokens),
+          });
+          for (const id of claudeStarts) reportedClaudeRequestIds.add(id);
+        }
       }
+      claudeStarts.clear();
     }
   }
 
@@ -290,6 +328,7 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
       usage.length > 0 &&
       (provider === "codex" ||
         (reportedClaudeRequestIds.size > 0 &&
+          claudeResultsWithUsage === turns.size &&
           reportedClaudeRequestIds.size === requestIds.size &&
           [...requestIds].every((id) => reportedClaudeRequestIds.has(id)))),
   };

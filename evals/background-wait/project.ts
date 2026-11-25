@@ -156,11 +156,12 @@ export function makeProject(workspace: string, arm: Arm, scenario: Scenario, sec
     ...(scenario.wrapper[0] === "ci" ? [commandFor("prepare-dependencies.ts", ["--for-ci"])] : []),
     commandFor(scenario.script, scenario.args ?? []),
   ].join(" && ");
+  const action = { id: scenario.actionId, name: scenario.name, command, icon: "test" };
   NodeFS.writeFileSync(
     NodePath.join(workspace, "t3.json"),
     JSON.stringify(
       {
-        scripts: [{ id: scenario.actionId, name: scenario.name, command, icon: "test" }],
+        scripts: [action],
       },
       null,
       2,
@@ -192,6 +193,7 @@ export function makeProject(workspace: string, arm: Arm, scenario: Scenario, sec
     ],
     workspace,
   );
+  return action;
 }
 
 export async function registerProject(base: string, workspace: string, scenario: Scenario) {

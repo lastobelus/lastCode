@@ -13,7 +13,7 @@ function load(path: string): Results {
 }
 
 function paired(a: Results, b: Results, baselineHead?: string) {
-  if (a.version !== b.version) {
+  if (a.version !== b.version || a.config.sampling !== b.config.sampling) {
     throw new Error(
       "Cannot compare runs with different catalog probe protocols. Run both arms with the same task prompts.",
     );
@@ -95,7 +95,7 @@ export function compare(a: Results, b: Results, subsequentTurns: number, baselin
       cached: rounded(completeMean(rows, (row) => row.tokens?.cached ?? null)),
       output: rounded(completeMean(rows, (row) => row.tokens?.output ?? null)),
       standingAcrossRequests: rounded(completeMean(rows, (row) => row.standingAcrossRequests)),
-      holds: rows.reduce((sum, row) => sum + (row?.holds ?? 0), 0),
+      holds: total(rows, (row) => row.holds),
       polls: total(rows, (row) => row.polls),
       redundantMarks,
       waitToolLookups: total(rows, (row) => row.waitToolLookups),
@@ -119,9 +119,15 @@ export function compare(a: Results, b: Results, subsequentTurns: number, baselin
   const full = cases.length === 6 && cases.every((row) => row.a.length === 20);
   const sufficient =
     full &&
-    (a.version === 1 ||
-      (checkActionCatalog(a.catalogProbe?.tools, false) === "verified" &&
-        checkActionCatalog(b.catalogProbe?.tools, true) === "verified")) &&
+    (a.config.sampling === "external"
+      ? [...aResults, ...bResults].every(
+          (row) =>
+            row?.actionCatalogs?.length &&
+            row.actionCatalogs.every((check) => check === "verified"),
+        )
+      : a.version === 1 ||
+        (checkActionCatalog(a.catalogProbe?.tools, false) === "verified" &&
+          checkActionCatalog(b.catalogProbe?.tools, true) === "verified")) &&
     [...aResults, ...bResults].every((row) => row?.setupFault !== true) &&
     summaries.every(
       ({ a, b }) =>

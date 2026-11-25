@@ -32,7 +32,7 @@ vp run dev:server --home-dir "$b" --no-seed --host 127.0.0.1 --port 44192 --dev-
 
 Use `--dry-run` to print the plan. Inspect `problems` in the results if a sample fails.
 
-Run paired arms at the same concurrency. The default is 20 fresh threads per case and two active samples at once. Before launching each sample, the runner saves its opted-in Action in that project's settings through the running server and checks the effective Action. This also works in homes that have migrated their legacy project settings. Each arm verifies its live tool catalog in a separate probe thread before the samples start. The probe uses Codex's tool catalog or Claude's SDK initialization catalog. Its requests stay outside the sample costs and its instructions stay out of the task prompts. A catalog mismatch, missing catalog evidence, or Action launch in arm B makes the comparison incomplete.
+Run paired arms at the same concurrency. The default is 20 fresh threads per case and two active samples at once. Before launching each sample, the runner saves its opted-in Action in that project's settings through the running server and checks the effective Action. This also works in homes that have migrated their legacy project settings. Each arm verifies its live tool catalog in a separate Codex thread before the samples start. The probe's requests stay outside the sample costs and its instructions stay out of the task prompts. A catalog mismatch, missing catalog evidence, or Action launch in arm B makes the comparison incomplete.
 
 ```sh
 node evals/background-wait/run.ts --base-dir "$a" --arm a --model gpt-6-luna --out luna
@@ -64,24 +64,27 @@ node evals/background-wait/compare.ts "$a_results" "$b_results" --baseline-head 
 
 For a smoke run, use a separate output name with `--samples 1 --case prepare,quick-ci,standing-watch`. The fixture uses the checked-out wrapper as shipped. The comparison JSON includes `redundantMarksPerWrapperWait`, the number of redundant marks divided by background wait instructions observed.
 
-## Optional Claude comparison
+## Claude samples launched through T3
 
-Run this only with an Anthropic API key or the owner's explicit go-ahead to use their Claude subscription. Create fresh Claude homes. For API access, pass `ANTHROPIC_API_KEY` in the shell running each dev server. For authorized subscription use, sign in with `CLAUDE_CONFIG_DIR="$ca/claude-home" claude auth login` and repeat for `$cb`.
-
-```sh
-ca="$eval_root/claude-a"
-cb="$eval_root/claude-b"
-node evals/background-wait/run.ts --base-dir "$ca" --arm a --provider claudeAgent --init
-node evals/background-wait/run.ts --base-dir "$cb" --arm b --provider claudeAgent --init
-```
-
-Start the two dev servers as above using `$ca` and `$cb` and unused ports. Run the comparison with matching credentials and settings.
+Use `delegate_task` from an orchestrator in the authorized destination. Run the fixture and grading commands from one committed checkout. Set `server_home` to the destination's T3 data directory, `fixtures_root` to an existing directory outside it, and `worktrees_root` to the destination's worktree directory. Set `results_file` to a file in an existing directory outside the server home. Use one file per arm, model and effort.
 
 ```sh
-node evals/background-wait/run.ts --base-dir "$ca" --arm a --provider claudeAgent --model claude-haiku-5-5 --out haiku
-node evals/background-wait/run.ts --base-dir "$cb" --arm b --provider claudeAgent --model claude-haiku-5-5 --out haiku
-node evals/background-wait/compare.ts "$ca/background-wait-eval/haiku/results.json" "$cb/background-wait-eval/haiku/results.json"
+node evals/background-wait/make-fixture.ts \
+  --server-home "$server_home" --workspace "$fixtures_root/$sample_name" \
+  --arm "$arm" --case "$case_id" --model "$model"
 ```
+
+Register the returned workspace as a temporary project in T3 and save the returned Action with agent resume enabled in both arms. Launch the returned prompt via `delegate_task` in that project's shared checkout. Quick CI's prompt asks the sample agent to create its own isolated worker. Use a fresh sample thread with `lastcodeBackgroundWaitEnabled` off in arm A and on in arm B. Retain the sample's thread ID, project ID, workspace, trace logs, and worktree until it is graded.
+
+```sh
+node evals/background-wait/grade-sample.ts \
+  --server-home "$server_home" --thread-id "$thread_id" --project-id "$project_id" \
+  --workspace "$fixtures_root/$sample_name" --fixtures-root "$fixtures_root" \
+  --worktrees-root "$worktrees_root" --arm "$arm" --case "$case_id" \
+  --provider claudeAgent --model "$model" --results "$results_file" --timeout-seconds 900
+```
+
+Pass the same `--effort` and `--duration-scale` to both commands when applicable. The grader reads SQLite and native provider logs. It waits for 12 seconds of quiescence and appends each thread once. Holds come from observed status during grading, retained armed or delivered Actions, and wrapper result wakes. Missing hold evidence remains unknown where a wait was expected. Wall time starts at the first run's recorded start. The compare command takes the two external result files in A, B order. A missing catalog, tool trace, token count or required wrapper wake evidence leaves the comparison incomplete. The grader accepts `--provider codex` for inspecting saved isolated runs. Those grades have no separate tool-catalog proof. External result files compare with other external result files.
 
 ## Resume
 
@@ -106,8 +109,8 @@ When a LastCode thread's main agent backgrounds a wrapper command, the grader re
 
 ## Cost
 
-- **Primary** is raw input plus output tokens per sample. Input includes cache reads and cache writes. Cached input is a subset, reported separately. Codex uses per-request `last` usage events, deduplicated by provider thread, turn, and cumulative tokens. Claude uses per-result SDK usage totals and distinct begun message IDs, checked against observed assistant request IDs.
-- **Standing** is a source-size estimate at four UTF-8 bytes per token. It includes project guidance, the server's Action-related launch, handoff or availability text, the visible Action and wait tool descriptions and advertised input schemas, and the flag-gated Codex background-wait instruction. The estimate uses the server's instruction builders and tool visibility predicates. The result records each estimate per request and its total across requests. Providers may truncate project guidance or defer tool definitions, so this is an inventory estimate. Do not add it to raw usage.
+- **Primary** is raw input plus output tokens per sample. Input includes cache reads and cache writes. Cached input is a subset, reported separately. Codex uses per-request `last` usage events, deduplicated by provider thread, turn, and cumulative tokens. Claude uses per-result SDK usage and distinct request starts. The standard SDK's `usage` covers the main agent of each app-owned thread and excludes provider-native subagents and auxiliary calls.
+- **Standing** is a source-size estimate at four UTF-8 bytes per token. It includes fixture guidance, the server's Action-related launch, handoff or availability text, the visible Action and wait tool descriptions and advertised input schemas, and the flag-gated Codex background-wait instruction. Personal instructions and skills are outside this estimate. The result records each estimate per request and its total across requests. Providers may truncate project guidance or defer tool definitions, so this is an inventory estimate. Do not add it to raw usage.
 - **Projected** is the owner's formula, `turns × typical context size when called + increased context × typical subsequent turns`. Turns are mean observed thread-family turns. Context size is the median first request input tokens in arm A for the same model and effort. Increased context is the median change from first to last request input in the initiating thread. This is a proxy that includes task dialogue as well as wait overhead. `--subsequent-turns` defaults to a scenario value of **5** and the report shows 0, 1, 5 and 10. Historical subsequent-turn counts were unavailable. Supply a measured value if available.
 - LastCode's 30-day sample had **1,388** agent-launched Actions, **84%** from Codex. The four short operations had medians of **0.3–2.6 minutes** and checkpoint waits had a **43-minute** median. The default fixtures deliberately compress the longest wait and sample the six workloads equally. They cannot support a production-weighted monthly estimate without counts by operation, a measured subsequent-turn distribution, and representative thread depths.
 

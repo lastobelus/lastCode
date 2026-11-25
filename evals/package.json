@@ -9,6 +9,8 @@
     "mcp-tool-use:compare": "node mcp-tool-use/compare-arms.ts",
     "background-wait": "node background-wait/run.ts",
     "background-wait:compare": "node background-wait/compare.ts",
+    "background-wait:make-fixture": "node background-wait/make-fixture.ts",
+    "background-wait:grade-sample": "node background-wait/grade-sample.ts",
     "thread-titles": "node --env-file-if-exists=../.env thread-titles/run.ts",
     "pr-content": "node --env-file-if-exists=../.env pr-content/run.ts",
     "voice-cleanup": "node --env-file-if-exists=../.env voice-cleanup/run.ts",

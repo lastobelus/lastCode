@@ -7,12 +7,14 @@ import {
   sumUsage,
 } from "./observe.ts";
 import type { Arm, Scenario } from "./cases.ts";
+import type { ActionCatalogCheck } from "./actionPolicy.ts";
 
 export interface SampleResult {
   finished: boolean;
   correct: boolean;
   problems: string[];
   setupFault?: boolean;
+  actionCatalogs?: readonly ActionCatalogCheck[];
   turns: number;
   requests: number | null;
   tokens: Usage | null;
@@ -21,10 +23,10 @@ export interface SampleResult {
   redundantMarks: number | null;
   waitToolLookups: number | null;
   extraCallsWhileWaiting: number | null;
-  holdEngaged: boolean;
-  holds: number;
+  holdEngaged: boolean | null;
+  holds: number | null;
   holdExpected: number | null;
-  wallSeconds: number;
+  wallSeconds: number | null;
   firstInput: number | null;
   contextGrowth: number | null;
   standing: { guidance: number; toolDefinitions: number; backgroundWaitInstruction: number };
@@ -52,6 +54,7 @@ interface GradeInput {
   turns: number;
   expectedTurnCounts: number[];
   holds: readonly string[];
+  retrospective?: boolean;
   wrapperWakeIds: readonly string[];
   actionWakes: number;
   actionRunObserved?: boolean;
@@ -61,7 +64,7 @@ interface GradeInput {
   native: NativeEvidence[];
   traces: TraceEvent[][] | null;
   waitInstruction?: string;
-  wallSeconds: number;
+  wallSeconds: number | null;
   standing: SampleResult["standing"];
 }
 
@@ -120,6 +123,10 @@ export function gradeSample(input: GradeInput): SampleResult {
   const extraCallsWhileWaiting =
     observed?.reduce((sum, trace) => sum + trace.extraCallsWhileWaiting, 0) ?? null;
   const holdExpected = worker === undefined ? null : arm === "a" ? stages : worker.markers;
+  const waitEvidence = new Set([...input.holds, ...input.wrapperWakeIds]);
+  const confirmed = input.retrospective ? waitEvidence.size : input.holds.length;
+  const holds =
+    input.retrospective && (holdExpected === null || confirmed < holdExpected) ? null : confirmed;
   if (worker === undefined) {
     problems.push("Tool trace incomplete.");
   } else {
@@ -142,9 +149,11 @@ export function gradeSample(input: GradeInput): SampleResult {
     ) {
       problems.push("Worker did not use the wrapper for each operation.");
     }
-    if (arm === "b" && new Set([...input.holds, ...input.wrapperWakeIds]).size < worker.markers)
+    if (arm === "b" && waitEvidence.size < worker.markers)
       problems.push(
-        "Expected wrapper wait had neither an observed hold nor a delivered result wake.",
+        input.retrospective
+          ? "Expected wrapper wait had no retained hold or result wake evidence."
+          : "Expected wrapper wait had neither an observed hold nor a delivered result wake.",
       );
     if (extraCallsWhileWaiting !== 0)
       problems.push("An unexpected tool was called after the instruction to end the turn.");
@@ -163,7 +172,9 @@ export function gradeSample(input: GradeInput): SampleResult {
     finished,
     correct: problems.length === 0,
     problems,
-    ...(forbiddenAction ? { setupFault: true } : {}),
+    ...(forbiddenAction || (arm === "b" && input.retrospective && holds === null)
+      ? { setupFault: true }
+      : {}),
     turns: input.turns,
     requests,
     tokens,
@@ -172,8 +183,8 @@ export function gradeSample(input: GradeInput): SampleResult {
     redundantMarks,
     waitToolLookups,
     extraCallsWhileWaiting,
-    holdEngaged: input.holds.length > 0,
-    holds: input.holds.length,
+    holdEngaged: confirmed > 0 ? true : holds === null ? null : false,
+    holds,
     holdExpected,
     wallSeconds: input.wallSeconds,
     firstInput: completeUsage ? (parent?.contexts[0] ?? null) : null,
@@ -213,6 +224,7 @@ export interface Results {
     effort?: string;
     head: string;
     serverCli?: string;
+    sampling?: "external";
     scale: number;
     base: string;
   };
@@ -257,7 +269,8 @@ export function printCases(data: Results) {
           polls: result?.polls ?? null,
           redundantMarks: result?.redundantMarks ?? null,
           waitToolLookups: result?.waitToolLookups ?? null,
-          hold: result === undefined ? null : `${result.holds}/${result.holdExpected ?? "?"}`,
+          hold:
+            result === undefined ? null : `${result.holds ?? "?"}/${result.holdExpected ?? "?"}`,
           standing: result?.standingAcrossRequests ?? null,
           seconds: result?.wallSeconds ?? null,
         })),

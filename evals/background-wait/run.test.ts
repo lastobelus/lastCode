@@ -1,4 +1,7 @@
-// @effect-diagnostics nodeBuiltinImport:off -- Use an in-memory copy of the worker lookup tables.
+// @effect-diagnostics nodeBuiltinImport:off -- Use isolated SQLite fixtures and worker lookup tables.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -17,6 +20,7 @@ import {
   wrapperWakeIds,
 } from "./observe.ts";
 import { fixtureGuidance, wrapperWaitInstruction } from "./project.ts";
+import { openSampleDatabase } from "./read-sample.ts";
 
 const native = (...rows: object[]) =>
   rows
@@ -29,6 +33,33 @@ const native = (...rows: object[]) =>
 const wait = wrapperWaitInstruction();
 
 describe("real-session evidence", () => {
+  it("reads committed WAL entries without creating a missing shared-memory file", () => {
+    const home = NodeFS.realpathSync(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "bw-eval-sqlite-")),
+    );
+    try {
+      const path = NodePath.join(home, "userdata/statev2.sqlite");
+      NodeFS.mkdirSync(NodePath.dirname(path));
+      using writer = new NodeSqlite.DatabaseSync(path);
+      writer.exec(
+        "PRAGMA journal_mode = WAL; CREATE TABLE evidence(value); INSERT INTO evidence VALUES (42);",
+      );
+      using reader = openSampleDatabase(home);
+      expect(reader.prepare("SELECT value FROM evidence").get()).toEqual({ value: 42 });
+
+      const copyHome = NodePath.join(home, "copy");
+      const copy = NodePath.join(copyHome, "userdata/statev2.sqlite");
+      NodeFS.mkdirSync(NodePath.dirname(copy), { recursive: true });
+      NodeFS.copyFileSync(path, copy);
+      NodeFS.copyFileSync(path + "-wal", copy + "-wal");
+      using noIndex = openSampleDatabase(copyHome);
+      expect(() => noIndex.prepare("SELECT value FROM evidence").get()).toThrow();
+      expect(NodeFS.existsSync(copy + "-shm")).toBe(false);
+    } finally {
+      NodeFS.rmSync(home, { recursive: true });
+    }
+  });
+
   it("measures the flag-selected Action guidance and advertised tool schemas", () => {
     const enabled = standingActionPolicy(false, "codex");
     const disabled = standingActionPolicy(true, "codex");
@@ -456,6 +487,34 @@ describe("real-session evidence", () => {
       markers: 0,
       polls: 0,
     });
+    const standardSdk = readNative(
+      native(
+        { type: "system", subtype: "init", tools: ["mcp__t3_code__inspect_action_run"] },
+        {
+          type: "stream_event",
+          event: { type: "message_start", message: { id: "request-1", usage } },
+        },
+        {
+          type: "assistant",
+          message: { id: "request-1", usage: { input_tokens: 0 }, content: [] },
+        },
+        { type: "result", uuid: "turn-1", usage, modelUsage: { model: { inputTokens: 500 } } },
+        {
+          type: "stream_event",
+          event: { type: "message_start", message: { id: "request-2", usage } },
+        },
+        { type: "result", uuid: "turn-2", usage, modelUsage: { model: { inputTokens: 1000 } } },
+      ),
+      "claudeAgent",
+    );
+    expect(standardSdk).toMatchObject({
+      turns: 2,
+      requests: 2,
+      usage: { input: 210, cached: 180, output: 2 },
+      contexts: [105, 105],
+      toolCatalog: ["mcp__t3_code__inspect_action_run"],
+      complete: true,
+    });
   });
 
   it("counts Action tools invoked through Codex's exec and recognizes an armed Action", () => {
@@ -526,6 +585,13 @@ describe("real-session evidence", () => {
       holdExpected: 1,
       holdEngaged: false,
     });
+    expect(gradeSample({ ...input, traces: [[], [...trace]], retrospective: true })).toMatchObject({
+      correct: false,
+      holdExpected: 1,
+      holds: null,
+      holdEngaged: null,
+      setupFault: true,
+    });
     expect(
       gradeSample({
         ...input,
@@ -535,6 +601,14 @@ describe("real-session evidence", () => {
         finalMessage: "Quick CI's exit code was **3**. Result ID `result-example`.",
       }),
     ).toMatchObject({ correct: true, holds: 0, holdExpected: 1, holdEngaged: false });
+    expect(
+      gradeSample({
+        ...input,
+        traces: [[], [...trace]],
+        retrospective: true,
+        wrapperWakeIds: ["worker-command"],
+      }),
+    ).toMatchObject({ correct: true, holds: 1, holdExpected: 1, holdEngaged: true });
     expect(
       gradeSample({
         ...input,
