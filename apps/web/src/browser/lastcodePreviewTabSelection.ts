@@ -24,9 +24,9 @@ export function reconcileBrowserTabSelection(
 ): ThreadRightPanelState {
   // An optimistic close removes its surface before the browser confirms the close.
   const previous = panel.lastcodeSelectedBrowserTabIds;
-  if (!previous?.length) return panel;
+  if (suppressedTabIds === undefined || !previous?.length) return panel;
   const liveTabIds = new Set(tabIds);
-  const retained = previous.filter((id) => liveTabIds.has(id) || suppressedTabIds?.has(id));
+  const retained = previous.filter((id) => liveTabIds.has(id) || suppressedTabIds.has(id));
   if (retained.length === previous.length) return panel;
   const { lastcodeSelectedBrowserTabIds: _previous, ...rest } = panel;
   return retained.length === 0 ? rest : { ...rest, lastcodeSelectedBrowserTabIds: retained };

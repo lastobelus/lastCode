@@ -162,7 +162,6 @@ export async function openPreparedUrlInPreview<E>(
         Object.keys(state.sessions),
         hiddenPreviewTabIds(state.sessions),
         snapshot.tabId,
-        state.suppressedTabIds,
       );
     input.onOpened?.(snapshot.tabId);
   });

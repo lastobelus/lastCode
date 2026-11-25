@@ -171,7 +171,6 @@ export async function openTerminalLinkInPreview<E>(
         Object.keys(state.sessions),
         hiddenPreviewTabIds(state.sessions),
         result.value.tabId,
-        state.suppressedTabIds,
       );
     }
     return null;

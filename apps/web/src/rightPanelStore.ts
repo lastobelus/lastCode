@@ -262,6 +262,7 @@ interface RightPanelStoreState {
     hiddenTabIds?: ReadonlySet<string>,
     /** One consumed foreground creation intent, not the current preview selection. */
     focusTabId?: string,
+    /** Suppressed IDs for a complete session list, which can prune selection history. */
     suppressedTabIds?: ReadonlySet<string>,
   ) => void;
   reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;

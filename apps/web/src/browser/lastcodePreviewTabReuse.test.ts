@@ -48,6 +48,7 @@ import {
   beginPreviewSessionClose,
   cancelPreviewSessionClose,
   readThreadPreviewState,
+  reconcilePreviewServerSessions,
   resetPreviewStateForTests,
   setActivePreviewTab,
   updatePreviewServerSnapshot,
@@ -295,6 +296,43 @@ describe("link clicks reuse an open tab", () => {
       undefined,
       undefined,
       readThreadPreviewState(threadRef).suppressedTabIds,
+    );
+
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, reuse: "origin" });
+
+    expect(activeSurfaceId()).toBe("browser:a");
+    expect(openPreview).not.toHaveBeenCalled();
+  });
+
+  it("keeps dashboard selections when a foreground tab opens before the session list", async () => {
+    const a = tab("a", `${HUB}/d/a`);
+    const b = tab("b", `${HUB}/d/b`, { updatedAt: "2026-11-24T11:00:00.000Z" });
+    seed(a, b);
+    const panels = useRightPanelStore.getState();
+    panels.reconcileBrowserSurfaces(threadRef, ["a", "b"]);
+    for (const tabId of ["a", "b", "a"]) {
+      panels.activateSurface(threadRef, `browser:${tabId}`);
+      setActivePreviewTab(threadRef, tabId);
+    }
+
+    resetPreviewStateForTests();
+    const other = tab("other", "https://example.com/");
+    await openUrlInPreview({
+      threadRef,
+      url: "https://example.com/",
+      openPreview: async () => AsyncResult.success(other),
+    });
+    reconcilePreviewServerSessions(threadRef, {
+      serverEpoch: "server",
+      revision: 1,
+      sessions: [a, b, other],
+    });
+    panels.reconcileBrowserSurfaces(
+      threadRef,
+      ["a", "b", "other"],
+      undefined,
+      undefined,
+      new Set(),
     );
 
     await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, reuse: "origin" });

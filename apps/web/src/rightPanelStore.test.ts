@@ -1378,7 +1378,7 @@ describe("rightPanelStore", () => {
   it("hides the panel when browser reconciliation removes its last session tab", () => {
     const store = useRightPanelStore.getState();
     store.openBrowser(refA, "tab-a");
-    store.reconcileBrowserSurfaces(refA, []);
+    store.reconcileBrowserSurfaces(refA, [], undefined, undefined, new Set());
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: false,
       activeSurfaceId: null,

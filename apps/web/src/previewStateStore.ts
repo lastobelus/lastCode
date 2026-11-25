@@ -418,7 +418,6 @@ export function applyPreviewServerEvent(
       Object.keys(state.sessions),
       hiddenPreviewTabIds(state.sessions),
       event.tabId,
-      state.suppressedTabIds,
     );
   }
 }
