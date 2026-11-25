@@ -138,6 +138,12 @@ describe("link clicks reuse an open tab", () => {
     expect(openPreview).toHaveBeenCalledOnce();
   });
 
+  it("opens a new tab when the caller opts out of reuse", async () => {
+    seed(tab("hub", `${HUB}/`));
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, reuse: "none" });
+    expect(openPreview).toHaveBeenCalledOnce();
+  });
+
   it("does not reuse a tab whose page failed to load", async () => {
     seed(
       tab("failed", `${HUB}/`, {

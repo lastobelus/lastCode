@@ -22,8 +22,9 @@ import { readEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
  * Which open tab a foreground link may reveal instead of opening another.
  * `address`: the same address, or on a local host the same origin and path.
  * `origin`: any page on the same origin, for an entry point such as a hub index.
+ * `none`: always a new tab, for an open that must load what it just started.
  */
-export type PreviewTabReuse = "address" | "origin";
+export type PreviewTabReuse = "address" | "origin" | "none";
 
 export interface PreviewTabPlacement {
   readonly profileId: string | undefined;
@@ -145,7 +146,7 @@ export function reuseOpenPreviewTab(input: {
   readonly reuse: PreviewTabReuse | undefined;
   readonly panelRevision: number;
 }): string | null {
-  if (input.background || input.restarted) return null;
+  if (input.background || input.restarted || input.reuse === "none") return null;
   const state = readThreadPreviewState(input.threadRef);
   if (Object.keys(state.sessions).length === 0) return null;
   const placement = resolvePlacement(input.threadRef.environmentId, {
