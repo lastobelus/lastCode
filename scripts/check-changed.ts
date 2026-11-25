@@ -40,7 +40,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { vitePlusCommand } from "./check-changed-command.ts";
-import { preserveCheckOutput } from "./check-changed-output.ts";
+import { collectCheckOutput, preserveStepOutput } from "./check-changed-output.ts";
 
 const GiB = 1024 ** 3;
 
@@ -55,6 +55,11 @@ export interface Step<R> {
   readonly name: string;
   readonly run: Effect.Effect<
     { readonly ok: boolean; readonly output: string; readonly logPath?: string | null },
+    never,
+    R
+  >;
+  readonly onTimeout?: Effect.Effect<
+    { readonly output: string; readonly logPath?: string | null },
     never,
     R
   >;
@@ -90,10 +95,15 @@ export const runSteps = Effect.fn("checkChanged.runSteps")(function* <R>(
           outcome === "TIMEOUT"
             ? `killed after ${options.timeoutSeconds}s`
             : `${seconds.toFixed(1)}s`;
+        const details = Option.isSome(result)
+          ? result.value
+          : step.onTimeout
+            ? yield* step.onTimeout
+            : undefined;
         yield* Console.log(`\n> vp ${step.name}  ${outcome}  ${time}`);
-        const output = Option.getOrUndefined(result)?.output.trimEnd();
+        const output = details?.output.trimEnd();
         if (output) yield* Console.log(output);
-        return { name: step.name, outcome, time, logPath: Option.getOrUndefined(result)?.logPath };
+        return { name: step.name, outcome, time, logPath: details?.logPath };
       });
       const slots = Math.min(step.weight ?? 1, options.concurrency);
       const limited = Effect.acquireUseRelease(
@@ -672,7 +682,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
           }),
         );
         const [output, exitCode] = yield* Effect.all(
-          [Stream.mkString(Stream.decodeText(handle.all)), handle.exitCode],
+          [collectCheckOutput(handle.all), handle.exitCode],
           { concurrency: 2 },
         );
         return { ok: exitCode === 0, output };
@@ -726,7 +736,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const typecheckWorkers = Math.min(concurrency, affected.length);
   const command = (name: string, args: ReadonlyArray<string>) => ({
     name,
-    run: vp(args).pipe(Effect.flatMap((result) => preserveCheckOutput(root, result))),
+    ...preserveStepOutput(root, vp(args)),
   });
   const compilerFiles = compilerApps.reduce((count, app) => count + app.names.length, 0);
 
@@ -735,7 +745,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       ? [
           {
             name: "unused patches",
-            run: checkPatches.pipe(Effect.flatMap((result) => preserveCheckOutput(root, result))),
+            ...preserveStepOutput(root, checkPatches),
           },
         ]
       : []),
