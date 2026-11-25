@@ -11,12 +11,15 @@ import type { PreparedHostedPreview } from "@t3tools/client-runtime/preview-host
 const mocks = vi.hoisted(() => ({
   runtime: vi.fn<() => "server" | undefined>(() => "server"),
   desktopHost: vi.fn<() => string | undefined>(() => "local"),
+  localDesktopBrowser: vi.fn<() => boolean | undefined>(() => true),
+  restarted: vi.fn<() => boolean>(() => false),
 }));
 vi.mock("~/components/preview/previewHostingRecovery", () => ({
   prepareHostedPreview: async (_ref: unknown, url: string): Promise<PreparedHostedPreview> => ({
     url,
     managed: false,
     restored: false,
+    restarted: mocks.restarted(),
   }),
 }));
 vi.mock("~/browser/previewRuntime", () => ({
@@ -24,7 +27,10 @@ vi.mock("~/browser/previewRuntime", () => ({
   previewRuntimeFor: mocks.runtime,
   desktopBrowserHostFor: mocks.desktopHost,
 }));
-vi.mock("~/state/entities", () => ({ readEnvironmentSupportsServerBrowser: () => true }));
+vi.mock("~/state/entities", () => ({
+  readEnvironmentSupportsServerBrowser: () => true,
+  readEnvironmentHasLocalDesktopBrowser: mocks.localDesktopBrowser,
+}));
 vi.mock("./browserDefaults", () => ({
   resolveBrowserDefaults: async () => ({ viewport: { _tag: "fill" }, profileId: "default" }),
 }));
@@ -81,6 +87,8 @@ function activeSurfaceId() {
 beforeEach(() => {
   mocks.runtime.mockReturnValue("server");
   mocks.desktopHost.mockReturnValue("local");
+  mocks.localDesktopBrowser.mockReturnValue(true);
+  mocks.restarted.mockReturnValue(false);
   resetPreviewStateForTests();
   useRightPanelStore.setState({
     byThreadKey: {},
@@ -126,6 +134,41 @@ describe("link clicks reuse an open tab", () => {
       tab("environment", `${HUB}/`, { desktopHostId: undefined, backingPage: "server" }),
       tab("other-desktop", `${HUB}/`, { desktopHostId: "laptop" }),
     );
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview });
+    expect(openPreview).toHaveBeenCalledOnce();
+  });
+
+  it("does not reuse a tab whose page failed to load", async () => {
+    seed(
+      tab("failed", `${HUB}/`, {
+        navStatus: { _tag: "LoadFailed", url: `${HUB}/`, title: "", code: -102, description: "" },
+      }),
+    );
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview });
+    expect(openPreview).toHaveBeenCalledOnce();
+  });
+
+  it("does not reuse a tab after preparation restarted its preview", async () => {
+    mocks.restarted.mockReturnValue(true);
+    seed(tab("hub", `${HUB}/`));
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview });
+    expect(openPreview).toHaveBeenCalledOnce();
+  });
+
+  it("matches only the host the server will choose when the open names none", async () => {
+    mocks.desktopHost.mockReturnValue(undefined);
+    seed(tab("environment", `${HUB}/`, { desktopHostId: undefined, backingPage: "server" }));
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview });
+    expect(openPreview).toHaveBeenCalledOnce();
+
+    openPreview.mockClear();
+    mocks.localDesktopBrowser.mockReturnValue(false);
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview });
+    expect(openPreview).not.toHaveBeenCalled();
+    expect(activeSurfaceId()).toBe("browser:environment");
+
+    openPreview.mockClear();
+    mocks.localDesktopBrowser.mockReturnValue(undefined);
     await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview });
     expect(openPreview).toHaveBeenCalledOnce();
   });

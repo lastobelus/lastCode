@@ -108,6 +108,7 @@ export async function openPreparedUrlInPreview<E>(
     target,
     profileId,
     background: input.background,
+    restarted: prepared.restarted,
     reuse: input.reuse,
     panelRevision,
   });

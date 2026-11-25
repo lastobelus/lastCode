@@ -123,6 +123,7 @@ export async function openTerminalLinkInPreview<E>(
         target,
         profileId,
         background: false,
+        restarted: prepared.restarted,
         reuse: undefined,
         panelRevision: focus.userActionRevision,
       }) !== null

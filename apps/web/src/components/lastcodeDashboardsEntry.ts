@@ -31,14 +31,19 @@ async function openDashboards<E>(
   previewUrl: string,
   openPreview: OpenPreviewMutation<E>,
 ): Promise<void> {
-  const result = await openUrlInPreview({
-    threadRef,
-    url: resolveDiscoveredServerUrl(threadRef.environmentId, previewUrl),
-    openPreview,
-    reuse: "origin",
-  });
-  if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
-  const error = squashAtomCommandFailure(result);
+  let error: unknown;
+  try {
+    const result = await openUrlInPreview({
+      threadRef,
+      url: resolveDiscoveredServerUrl(threadRef.environmentId, previewUrl),
+      openPreview,
+      reuse: "origin",
+    });
+    if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
+    error = squashAtomCommandFailure(result);
+  } catch (cause) {
+    error = cause;
+  }
   toastManager.add(
     stackedThreadToast({
       type: "error",

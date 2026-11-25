@@ -1,6 +1,7 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   DEFAULT_BROWSER_PROFILE_ID,
+  type EnvironmentId,
   type PreviewRuntime,
   type PreviewSessionSnapshot,
   type ScopedThreadRef,
@@ -15,6 +16,7 @@ import {
   type ThreadPreviewState,
 } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
+import { readEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 
 /**
  * Which open tab a foreground link may reveal instead of opening another.
@@ -59,14 +61,33 @@ function samePlacement(tab: PreviewSessionSnapshot, target: PreviewTabPlacement)
   ) {
     return false;
   }
-  if (target.runtime !== "server" && target.browserHost !== "environment") {
-    return tab.runtime !== "server";
-  }
+  if (target.runtime !== "server") return tab.runtime !== "server";
   if (tab.runtime !== "server") return false;
-  if (target.browserHost === "environment") return tab.desktopHostId === undefined;
-  if (target.desktopHostId !== undefined) return tab.desktopHostId === target.desktopHostId;
-  // The server chooses its own desktop browser, or none, for an open that names no host.
-  return tab.desktopHostId === undefined || tab.desktopHostId === "local";
+  return (
+    tab.desktopHostId === (target.browserHost === "environment" ? undefined : target.desktopHostId)
+  );
+}
+
+/**
+ * The host a server open lands on. One naming no host goes to the environment's own desktop
+ * browser when it has one, else its headless browser; null while that is not known yet.
+ */
+function resolvePlacement(
+  environmentId: EnvironmentId,
+  placement: PreviewTabPlacement,
+): PreviewTabPlacement | null {
+  if (
+    placement.runtime !== "server" ||
+    placement.browserHost === "environment" ||
+    placement.desktopHostId !== undefined
+  ) {
+    return placement;
+  }
+  const localDesktopBrowser = readEnvironmentHasLocalDesktopBrowser(environmentId);
+  if (localDesktopBrowser === undefined) return null;
+  return localDesktopBrowser
+    ? { ...placement, desktopHostId: "local" }
+    : { ...placement, browserHost: "environment" };
 }
 
 /**
@@ -86,7 +107,8 @@ export function findReusablePreviewTab(
   for (const tab of Object.values(state.sessions)) {
     if (tab.automationOwner !== undefined || tab.reveal === false) continue;
     if (state.suppressedTabIds.has(tab.tabId)) continue;
-    if (tab.navStatus._tag === "Idle") continue;
+    // A failed page may have recovered since; a fresh open retries it.
+    if (tab.navStatus._tag === "Idle" || tab.navStatus._tag === "LoadFailed") continue;
     if (!samePlacement(tab, request.placement)) continue;
     const tabUrl = parseUrl(tab.navStatus.url);
     if (!tabUrl || !targets.some((target) => addressMatches(tabUrl, target, request.reuse))) {
@@ -118,18 +140,24 @@ export function reuseOpenPreviewTab(input: {
   readonly target: { readonly url: string } & Omit<PreviewTabPlacement, "profileId">;
   readonly profileId: string | undefined;
   readonly background: boolean | undefined;
+  /** Preparation restarted a managed preview; an open tab shows its previous run. */
+  readonly restarted: boolean | undefined;
   readonly reuse: PreviewTabReuse | undefined;
   readonly panelRevision: number;
 }): string | null {
-  if (input.background) return null;
-  const tabId = findReusablePreviewTab(readThreadPreviewState(input.threadRef), {
+  if (input.background || input.restarted) return null;
+  const state = readThreadPreviewState(input.threadRef);
+  if (Object.keys(state.sessions).length === 0) return null;
+  const placement = resolvePlacement(input.threadRef.environmentId, {
+    profileId: input.profileId,
+    runtime: input.target.runtime,
+    desktopHostId: input.target.desktopHostId,
+    browserHost: input.target.browserHost,
+  });
+  if (placement === null) return null;
+  const tabId = findReusablePreviewTab(state, {
     urls: [input.target.url, input.authoredUrl],
-    placement: {
-      profileId: input.profileId,
-      runtime: input.target.runtime,
-      desktopHostId: input.target.desktopHostId,
-      browserHost: input.target.browserHost,
-    },
+    placement,
     reuse: input.reuse ?? "address",
   });
   if (tabId === null) return null;
