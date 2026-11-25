@@ -1,5 +1,7 @@
 import type { ThreadRightPanelState } from "~/rightPanelStore";
 
+const BROWSER_SELECTION_HISTORY_LIMIT = 32;
+
 export function recordBrowserTabSelection(
   panel: ThreadRightPanelState,
   surfaceId: string | undefined,
@@ -13,26 +15,9 @@ export function recordBrowserTabSelection(
   if (previous[0] === tabId) return panel;
   return {
     ...panel,
-    lastcodeSelectedBrowserTabIds: [tabId, ...previous.filter((id) => id !== tabId)],
+    lastcodeSelectedBrowserTabIds: [tabId, ...previous.filter((id) => id !== tabId)].slice(
+      0,
+      BROWSER_SELECTION_HISTORY_LIMIT,
+    ),
   };
-}
-
-export function reconcileBrowserTabSelection(
-  panel: ThreadRightPanelState,
-  tabIds: readonly string[],
-  suppressedTabIds: ReadonlySet<string> | undefined,
-): ThreadRightPanelState {
-  // An optimistic close removes its surface before the browser confirms the close.
-  const previous = panel.lastcodeSelectedBrowserTabIds;
-  if (suppressedTabIds === undefined || !previous?.length) return panel;
-  const liveTabIds = new Set(tabIds);
-  const retained = previous.filter((id) => liveTabIds.has(id) || suppressedTabIds.has(id));
-  if (retained.length === previous.length) return panel;
-  const { lastcodeSelectedBrowserTabIds: _previous, ...rest } = panel;
-  return retained.length === 0 ? rest : { ...rest, lastcodeSelectedBrowserTabIds: retained };
-}
-
-export function readBrowserTabSelectionOrder(panel: ThreadRightPanelState | undefined) {
-  const selected = panel?.lastcodeSelectedBrowserTabIds ?? [];
-  return new Map(selected.map((tabId, index) => [tabId, selected.length - index]));
 }

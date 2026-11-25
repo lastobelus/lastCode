@@ -8,10 +8,7 @@ import { msg } from "gt-react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
-import {
-  reconcileBrowserTabSelection,
-  recordBrowserTabSelection,
-} from "./browser/lastcodePreviewTabSelection";
+import { recordBrowserTabSelection } from "./browser/lastcodePreviewTabSelection";
 import { useClosedViewStore } from "./closedViewStore";
 import { m } from "./i18n/messages";
 import { resolveStorage } from "./lib/storage";
@@ -262,8 +259,6 @@ interface RightPanelStoreState {
     hiddenTabIds?: ReadonlySet<string>,
     /** One consumed foreground creation intent, not the current preview selection. */
     focusTabId?: string,
-    /** Suppressed IDs for a complete session list, which can prune selection history. */
-    suppressedTabIds?: ReadonlySet<string>,
   ) => void;
   reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   show: (ref: ScopedThreadRef) => void;
@@ -452,7 +447,6 @@ const updateThreadStateMap = (
     !next.isOpen &&
     next.activeSurfaceId === null &&
     next.surfaces.length === 0 &&
-    !next.lastcodeSelectedBrowserTabIds?.length &&
     !next.dismissedDeviceSurfaceIds?.length &&
     next.proactiveDiffTurnId === undefined
   ) {
@@ -1255,7 +1249,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             return { ...current, surfaces };
           }),
         ),
-      reconcileBrowserSurfaces: (ref, tabIds, hiddenTabIds, focusTabId, suppressedTabIds) =>
+      reconcileBrowserSurfaces: (ref, tabIds, hiddenTabIds, focusTabId) =>
         set((state) =>
           automaticUpdate(state, scopedThreadKey(ref), (current) => {
             const validIds = new Set(tabIds.map((tabId) => `browser:${tabId}`));
@@ -1295,10 +1289,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
                   ? current.activeSurfaceId
                   : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null)),
             };
-            return recordBrowserTabSelection(
-              reconcileBrowserTabSelection(next, tabIds, suppressedTabIds),
-              focusedSurface?.id,
-            );
+            return recordBrowserTabSelection(next, focusedSurface?.id);
           }),
         ),
       reconcileFileSurfaces: (ref, workspaceAvailable) =>

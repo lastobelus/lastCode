@@ -18,8 +18,6 @@ import {
 import { useRightPanelStore } from "~/rightPanelStore";
 import { readEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 
-import { readBrowserTabSelectionOrder } from "./lastcodePreviewTabSelection";
-
 /**
  * Which open tab a foreground link may reveal instead of opening another.
  * `address`: the same address, or on a local host the same origin and path.
@@ -108,11 +106,14 @@ export function findReusablePreviewTab(
     readonly placement: PreviewTabPlacement;
     readonly reuse: PreviewTabReuse;
     readonly sourceTabId?: string | undefined;
-    readonly selectionOrder?: ReadonlyMap<string, number>;
+    readonly selectedTabIds?: readonly string[] | undefined;
   },
 ): string | null {
   const targets = request.urls.flatMap((url) => parseUrl(url) ?? []);
-  const selectionOrder = request.reuse === "origin" ? request.selectionOrder : undefined;
+  const selectedTabIds = request.reuse === "origin" ? request.selectedTabIds : undefined;
+  const selectionOrder =
+    selectedTabIds &&
+    new Map(selectedTabIds.map((id, index) => [id, selectedTabIds.length - index]));
   let best: PreviewSessionSnapshot | null = null;
   let bestOrder = 0;
   for (const tab of Object.values(state.sessions)) {
@@ -179,19 +180,14 @@ export function reuseOpenPreviewTab(input: {
     browserHost: input.target.browserHost,
   });
   if (placement === null) return null;
-  const panels = useRightPanelStore.getState();
   const tabId = findReusablePreviewTab(state, {
     urls: [input.target.url, input.authoredUrl],
     placement,
     reuse: input.reuse ?? "address",
     sourceTabId: input.sourceTabId,
-    ...(input.reuse === "origin"
-      ? {
-          selectionOrder: readBrowserTabSelectionOrder(
-            panels.byThreadKey[scopedThreadKey(input.threadRef)],
-          ),
-        }
-      : {}),
+    selectedTabIds:
+      useRightPanelStore.getState().byThreadKey[scopedThreadKey(input.threadRef)]
+        ?.lastcodeSelectedBrowserTabIds,
   });
   if (tabId === null) return null;
   rememberPreviewUrl(input.threadRef, input.authoredUrl);

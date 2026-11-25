@@ -282,21 +282,9 @@ describe("link clicks reuse an open tab", () => {
 
     panels.closeSurface(threadRef, "browser:a");
     beginPreviewSessionClose(threadRef, "a");
-    panels.reconcileBrowserSurfaces(
-      threadRef,
-      ["b", "other"],
-      undefined,
-      undefined,
-      readThreadPreviewState(threadRef).suppressedTabIds,
-    );
+    panels.reconcileBrowserSurfaces(threadRef, ["b", "other"]);
     cancelPreviewSessionClose(threadRef, a, "a");
-    panels.reconcileBrowserSurfaces(
-      threadRef,
-      ["b", "other", "a"],
-      undefined,
-      undefined,
-      readThreadPreviewState(threadRef).suppressedTabIds,
-    );
+    panels.reconcileBrowserSurfaces(threadRef, ["b", "other", "a"]);
 
     await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, reuse: "origin" });
 
@@ -327,13 +315,7 @@ describe("link clicks reuse an open tab", () => {
       revision: 1,
       sessions: [a, b, other],
     });
-    panels.reconcileBrowserSurfaces(
-      threadRef,
-      ["a", "b", "other"],
-      undefined,
-      undefined,
-      new Set(),
-    );
+    panels.reconcileBrowserSurfaces(threadRef, ["a", "b", "other"]);
 
     await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, reuse: "origin" });
 
