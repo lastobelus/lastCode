@@ -583,7 +583,11 @@ export interface PullRequestProviderApi {
 
   /** Re-runs the named checks' jobs. A check the host cannot re-run gets a `detail`. */
   readonly rerunChecks?: (
-    input: ProviderRepositoryRef & { readonly checks: ReadonlyArray<ProviderCheckReference> },
+    input: ProviderRepositoryRef & {
+      readonly checks: ReadonlyArray<ProviderCheckReference>;
+      readonly runId?: number;
+      readonly jobId?: number;
+    },
   ) => Effect.Effect<ReadonlyArray<ProviderCheckRerun>, PullRequestProviderError>;
 
   /** Requires edit capability and at least one field. */

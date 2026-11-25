@@ -742,6 +742,29 @@ it.effect(
 );
 
 layer("GitHubPullRequestApi.layer", (it) => {
+  it.effect.each(["runId", "jobId"] as const)("reruns the explicit GitHub %s", (selector) =>
+    Effect.gen(function* () {
+      mockedExecute.mockReturnValue(Effect.succeed(output("{}")));
+      const api = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const checks = yield* api.rerunChecks({
+        host: "github.com",
+        repository: "acme/web",
+        checks: [],
+        [selector]: 42,
+      });
+      expect(checks).toMatchObject([{ rerun: true }]);
+      expect(
+        mockedExecute.mock.calls.flatMap(([call]) =>
+          call.kind === "rest" && call.method === "POST" ? [call.path] : [],
+        ),
+      ).toEqual([
+        selector === "runId"
+          ? "repos/acme/web/actions/runs/42/rerun-failed-jobs"
+          : "repos/acme/web/actions/jobs/42/rerun",
+      ]);
+    }),
+  );
+
   it.effect("keeps recent references when the typed number does not exist", () =>
     Effect.gen(function* () {
       const search = {
