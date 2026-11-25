@@ -54,6 +54,7 @@ const SNAPSHOT: OrchestrationV2ThreadDetailSnapshot = { snapshotSequence: 7, pro
 const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?: {
   readonly snapshot?: OrchestrationV2ThreadDetailSnapshot;
   readonly socketSnapshot?: false;
+  readonly snapshotMissing?: boolean;
 }) {
   const subscriptions = yield* Queue.unbounded<{
     readonly afterSequence: number | undefined;
@@ -70,6 +71,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
   let diskLoads = 0;
   let opened = 0;
   let active = 0;
+  let snapshotMissing = options?.snapshotMissing === true;
   const client = {
     [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: { readonly afterSequence?: number }) =>
       Stream.unwrap(
@@ -87,6 +89,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
               }).pipe(Effect.andThen(Deferred.succeed(closed, undefined))),
           );
           yield* Queue.offer(subscriptions, { afterSequence: input.afterSequence, events, closed });
+          // A failed cold socket open asks HTTP whether the thread exists yet.
+          if (snapshotMissing) return yield* Effect.die("Thread not found");
           // Like a paging server, a fresh subscribe opens with the bounded snapshot.
           if (input.afterSequence === undefined && options?.socketSnapshot !== false) {
             yield* Queue.offer(events, { kind: "snapshot", ...snapshot });
@@ -195,6 +199,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
           load: () =>
             Effect.sync(() => {
               httpLoads += 1;
+              if (snapshotMissing) return { _tag: "missing" as const };
               return {
                 _tag: "present" as const,
                 snapshot,
@@ -213,7 +218,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
       ),
     ),
   );
-  const raw = createEnvironmentThreadStateAtoms(runtime);
+  const existsAtom = Atom.make(false);
+  const raw = createEnvironmentThreadStateAtoms(runtime, () => existsAtom);
   const details = createEnvironmentThreadDetailAtoms(raw.stateAtom);
   const ref = { environmentId: TARGET.environmentId, threadId: THREAD_ID };
   const stateAtom = details.stateAtom(ref);
@@ -234,6 +240,10 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     olderLoads,
     loadEarlier: () => historyController.loadEarlier(TARGET.environmentId, THREAD_ID),
     counts: () => ({ httpLoads, diskLoads, opened, active }),
+    createThread: () => {
+      snapshotMissing = false;
+      registry.set(existsAtom, true);
+    },
   };
 });
 
@@ -261,6 +271,29 @@ describe("createEnvironmentThreadStateAtoms", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
+
+  it.effect("loads a missing thread once the shell confirms its creation", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ snapshotMissing: true });
+      const unmount = h.registry.mount(h.stateAtom);
+      const missing = yield* Queue.take(h.subscriptions);
+      expect(missing.afterSequence).toBeUndefined();
+      yield* observeState(h.registry, h.stateAtom, (state) => state.status === "deleted");
+      yield* Deferred.await(missing.closed);
+      expect(h.counts()).toEqual({ httpLoads: 1, diskLoads: 1, opened: 1, active: 0 });
+
+      h.createThread();
+      const subscription = yield* Queue.take(h.subscriptions);
+      expect(subscription.afterSequence).toBeUndefined();
+      yield* Queue.offer(subscription.events, { kind: "synchronized" });
+      yield* observeState(h.registry, h.stateAtom, (state) => state.status === "live");
+      expect(currentThread(h.registry, h.stateAtom)).toEqual(THREAD);
+      expect(h.counts()).toEqual({ httpLoads: 1, diskLoads: 2, opened: 2, active: 1 });
+
+      unmount();
+      yield* Deferred.await(subscription.closed);
+    }),
+  );
 
   it.effect("keeps warm data and resumes a completed cursor without loading another snapshot", () =>
     Effect.gen(function* () {

@@ -27,6 +27,7 @@ import {
   closeFinishedUpdateRun,
   getUpdateEverythingToastView,
   isServerUpdateHandedOff,
+  SKIPPED_SERVER_UPDATE,
   type RestoredRetry,
   type UpdateEverythingResult,
   type UpdateEverythingRun,
@@ -140,9 +141,12 @@ export function retryFailedUpdateRunServers(
         target.environmentId,
         outcome.status === "updated"
           ? providerFailure
-          : outcome.status === "failed"
-            ? outcome.message
-            : m(msg("Could not start the update")),
+          : [
+              outcome.status === "failed" ? outcome.message : m(SKIPPED_SERVER_UPDATE),
+              providerFailure,
+            ]
+              .filter(Boolean)
+              .join(" "),
         { serverUpdated: outcome.status === "updated" },
       ),
     );

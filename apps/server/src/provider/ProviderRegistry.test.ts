@@ -2524,7 +2524,7 @@ it.layer(
                     : Effect.void,
                 ),
               ),
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(),
               textGeneration: {} as ProviderInstance["textGeneration"],
             } satisfies ProviderInstance;
             const takeMaintenanceReads = Ref.getAndSet(maintenanceReads, []);
@@ -3720,7 +3720,7 @@ it.layer(
             streamChanges: Stream.fromPubSub(changes),
             applyUsageLimits: () => Effect.void,
           },
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         } satisfies ProviderInstance;
         const instanceRegistryLayer = Layer.succeed(

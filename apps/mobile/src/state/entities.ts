@@ -242,7 +242,7 @@ export function useSideChats(ref: ScopedThreadRef) {
 
 const NO_LINKED_ENVIRONMENTS: ReadonlyMap<EnvironmentId, string> = new Map();
 
-/** `linked` names the machines `environmentId` links to, whose threads open read-only. */
+/** Labels thread links with their current titles, or with the machine they can be read through. */
 export function useLiveThreadLinkLabels(
   markdown: string,
   environmentId: EnvironmentId,
@@ -258,17 +258,21 @@ export function useLiveThreadLinkLabels(
   return relabelThreadLinks(
     markdown,
     environmentId,
-    (ref, label) => {
+    (ref) => {
       const title = titles.get(threadKey(ref));
-      if (typeof title === "string") return title;
-      // A thread only the message's environment can reach keeps its written name.
+      return typeof title === "string" ? title : undefined;
+    },
+    resolve,
+    (ref, label) => {
       const machine = linked.get(ref.environmentId);
       if (machine !== undefined) {
         return label?.trim() || gt("Thread on {label}", { label: machine });
       }
-      return title && resolve(msg("Thread", { $context: "fallback title of a linked thread" }));
+      if (titles.get(threadKey(ref)) === FALLBACK_THREAD_TITLE) {
+        return resolve(msg("Thread", { $context: "fallback title of a linked thread" }));
+      }
+      return undefined;
     },
-    resolve,
   );
 }
 
@@ -289,6 +293,12 @@ export function resolveThreadLink(
     return AsyncResult.getOrElse(metadata, () => null)?.[ref.threadId] !== undefined;
   });
   if (known) return known;
+  if (link.legacyThreadId !== undefined) {
+    return (
+      guessThreadLinkRef(link, read(environmentThreadShells.threadRefsAtom)) ??
+      scopeThreadRef(messageEnvironmentId, link.legacyThreadId)
+    );
+  }
   return link.environmentId === null
     ? guessThreadLinkRef(link, read(environmentThreadShells.threadRefsAtom))
     : scopeThreadRef(link.environmentId, link.threadId);

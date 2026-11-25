@@ -77,6 +77,7 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore.ts";
@@ -85,6 +86,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(ThreadReadBroker.layer),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -838,7 +840,14 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "task_not_cancellable");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorService.pipe(
+            Layer.provide(ThreadReadBroker.layer),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1056,7 +1065,14 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop"],
         );
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorService.pipe(
+            Layer.provide(ThreadReadBroker.layer),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1150,7 +1166,14 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop", "delegated_task.completion-delivery.dispose"],
         );
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorService.pipe(
+            Layer.provide(ThreadReadBroker.layer),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1332,7 +1355,14 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "runtime_mode_escalation_denied");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorService.pipe(
+            Layer.provide(ThreadReadBroker.layer),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1531,7 +1561,14 @@ describe("OrchestratorMcpService", () => {
           dispatched: yield* Ref.get(dispatched),
           stoppedBelow: yield* Ref.get(stoppedBelow),
         };
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorService.pipe(
+            Layer.provide(ThreadReadBroker.layer),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     });
 
   it.effect("refuses to cancel a task when a task under it now runs above the parent's modes", () =>
@@ -2332,7 +2369,14 @@ describe("OrchestratorMcpService provider resolution", () => {
             "Driver 'forkOnly' is not registered in this build.",
             "Provider instance is disabled.",
           ]);
-        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+        }).pipe(
+          Effect.provide(
+            layerOrchestratorService.pipe(
+              Layer.provide(ThreadReadBroker.layer),
+              Layer.provide(layerDependencies),
+            ),
+          ),
+        );
       }),
   );
 
@@ -2984,7 +3028,14 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.isTrue(
           byDriver.message.includes("No V2 provider adapter is registered for driver forkOnly."),
         );
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorService.pipe(
+            Layer.provide(ThreadReadBroker.layer),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -3054,6 +3105,16 @@ describe("OrchestratorMcpService provider resolution", () => {
           },
           runs: [],
         } as unknown as OrchestrationV2ThreadProjection;
+        const dispatch = (command: OrchestrationV2ServerCommand) =>
+          command.type === failingType
+            ? Effect.fail(
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: new Error("refused by the orchestrator"),
+                }),
+              )
+            : Effect.succeed({ sequence: 0, storedEvents: [] });
         const layerDependencies = Layer.mergeAll(
           NodeServices.layer,
           NodeCrypto.layer,
@@ -3062,16 +3123,14 @@ describe("OrchestratorMcpService provider resolution", () => {
             assertProviderInstanceEnabled: () => Effect.void,
             getThreadRecords: (threadId) =>
               Effect.succeed(threadId === parentThreadId ? parentProjection([]) : childShell),
-            dispatch: (command) =>
-              command.type === failingType
-                ? Effect.fail(
-                    new OrchestratorDispatchError({
-                      commandId: command.commandId,
-                      commandType: command.type,
-                      cause: new Error("refused by the orchestrator"),
-                    }) as never,
-                  )
-                : Effect.succeed({ storedEvents: [] } as never),
+            dispatch,
+            dispatchLaunch: (input) =>
+              Effect.gen(function* () {
+                const claimed = yield* dispatch(input.claim);
+                if (input.beforeInitialMessage !== undefined) yield* input.beforeInitialMessage;
+                const initialMessage = yield* dispatch(input.initialMessage);
+                return { claimed, initialMessage };
+              }),
           }),
           ServerSettings.layerTest(),
           providerRegistryLayer([
@@ -3359,6 +3418,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           ServerSettings.layerTest(),
         );
         const layerService = OrchestratorMcpService.layer.pipe(
+          Layer.provide(ThreadReadBroker.layer),
           Layer.provide(
             Layer.mock(ThreadLaunchService.ThreadLaunchService)({
               prepareRun: (input) =>
@@ -4109,7 +4169,14 @@ describe("OrchestratorMcpService provider resolution", () => {
             } else {
               assert.equal(request.modelSelection.model, "codex-alt-model", testCase.name);
             }
-          }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+          }).pipe(
+            Effect.provide(
+              layerOrchestratorService.pipe(
+                Layer.provide(ThreadReadBroker.layer),
+                Layer.provide(layerDependencies),
+              ),
+            ),
+          );
         }
       }),
   );
@@ -4166,6 +4233,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       created?: Ref.Ref<ReadonlyArray<ScheduledTask>>,
     ) =>
       OrchestratorMcpService.layer.pipe(
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
         Layer.provide(
           Layer.mock(GitVcsDriver.GitVcsDriver)({
@@ -4354,6 +4422,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(
             layerOrchestratorService.pipe(
+              Layer.provide(ThreadReadBroker.layer),
               Layer.provide(
                 Layer.mergeAll(
                   NodeServices.layer,
@@ -4449,6 +4518,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       } = { project: existing.modelSelection },
     ) =>
       OrchestratorMcpService.layer.pipe(
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
         Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)(git)),
         Layer.provide(
