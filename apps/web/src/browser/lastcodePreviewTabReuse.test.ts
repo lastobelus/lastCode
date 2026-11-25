@@ -48,6 +48,7 @@ import {
   readThreadPreviewState,
   resetPreviewStateForTests,
   setActivePreviewTab,
+  updatePreviewServerSnapshot,
 } from "~/previewStateStore";
 import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 import { previewEnvironment } from "~/state/preview";
@@ -240,6 +241,30 @@ describe("link clicks reuse an open tab", () => {
     mocks.localDesktopBrowser.mockReturnValue(undefined);
     await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview });
     expect(openPreview).toHaveBeenCalledOnce();
+  });
+
+  it("reveals the most recently selected dashboard after another dashboard navigates", async () => {
+    seed(tab("a", `${HUB}/d/a`), tab("b", `${HUB}/d/b`), tab("other", "https://example.com/"));
+    const panels = useRightPanelStore.getState();
+    panels.reconcileBrowserSurfaces(threadRef, ["a", "b", "other"]);
+    for (const tabId of ["a", "b", "a"]) {
+      panels.activateSurface(threadRef, `browser:${tabId}`);
+      setActivePreviewTab(threadRef, tabId);
+    }
+    updatePreviewServerSnapshot(
+      threadRef,
+      tab("b", `${HUB}/d/b?view=2`, { updatedAt: "2026-11-24T11:00:00.000Z" }),
+    );
+    panels.activateSurface(threadRef, "browser:other");
+    setActivePreviewTab(threadRef, "other");
+
+    await openUrlInPreview({ threadRef, url: `${HUB}/`, openPreview, reuse: "origin" });
+
+    expect(activeSurfaceId()).toBe("browser:a");
+    expect(openPreview).not.toHaveBeenCalled();
+    expect(readThreadPreviewState(threadRef).sessions.a?.navStatus).toMatchObject({
+      url: `${HUB}/d/a`,
+    });
   });
 });
 

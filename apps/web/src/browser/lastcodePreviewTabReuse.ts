@@ -18,6 +18,8 @@ import {
 import { useRightPanelStore } from "~/rightPanelStore";
 import { readEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 
+import { readBrowserTabSelectionOrder } from "./lastcodePreviewTabSelection";
+
 /**
  * Which open tab a foreground link may reveal instead of opening another.
  * `address`: the same address, or on a local host the same origin and path.
@@ -96,7 +98,8 @@ function resolvePlacement(
 
 /**
  * The reader-controlled tab to reveal for `urls`, or null. Agent-owned, hidden and closing
- * tabs never match. The active tab wins, then the most recently updated one.
+ * tabs never match. An origin open prefers selection order. Other matches and
+ * tabs without selection history use the active tab, then update time.
  */
 export function findReusablePreviewTab(
   state: ThreadPreviewState,
@@ -105,10 +108,13 @@ export function findReusablePreviewTab(
     readonly placement: PreviewTabPlacement;
     readonly reuse: PreviewTabReuse;
     readonly sourceTabId?: string | undefined;
+    readonly selectionOrder?: ReadonlyMap<string, number>;
   },
 ): string | null {
   const targets = request.urls.flatMap((url) => parseUrl(url) ?? []);
+  const selectionOrder = request.reuse === "origin" ? request.selectionOrder : undefined;
   let best: PreviewSessionSnapshot | null = null;
+  let bestOrder = 0;
   for (const tab of Object.values(state.sessions)) {
     if (tab.tabId === request.sourceTabId) continue;
     if (tab.automationOwner !== undefined || tab.reveal === false) continue;
@@ -122,8 +128,17 @@ export function findReusablePreviewTab(
     if (!tabUrl || !targets.some((target) => addressMatches(tabUrl, target, request.reuse))) {
       continue;
     }
-    if (tab.tabId === state.activeTabId) return tab.tabId;
-    if (best === null || tab.updatedAt > best.updatedAt) best = tab;
+    const order = selectionOrder?.get(tab.tabId) ?? 0;
+    if (
+      best === null ||
+      order > bestOrder ||
+      (order === bestOrder &&
+        (tab.tabId === state.activeTabId ||
+          (best.tabId !== state.activeTabId && tab.updatedAt > best.updatedAt)))
+    ) {
+      best = tab;
+      bestOrder = order;
+    }
   }
   return best?.tabId ?? null;
 }
@@ -164,11 +179,19 @@ export function reuseOpenPreviewTab(input: {
     browserHost: input.target.browserHost,
   });
   if (placement === null) return null;
+  const panels = useRightPanelStore.getState();
   const tabId = findReusablePreviewTab(state, {
     urls: [input.target.url, input.authoredUrl],
     placement,
     reuse: input.reuse ?? "address",
     sourceTabId: input.sourceTabId,
+    ...(input.reuse === "origin"
+      ? {
+          selectionOrder: readBrowserTabSelectionOrder(
+            panels.byThreadKey[scopedThreadKey(input.threadRef)],
+          ),
+        }
+      : {}),
   });
   if (tabId === null) return null;
   rememberPreviewUrl(input.threadRef, input.authoredUrl);
