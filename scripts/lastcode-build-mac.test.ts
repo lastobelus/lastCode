@@ -1,12 +1,28 @@
-import { expect, it } from "vite-plus/test";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 import {
+  announceLocalPackageReady,
   parseBuildOptions,
   resolveBuildEnvironment,
   resolveNextBuildNumber,
 } from "./lastcode-build-mac.ts";
 
 const checkpoint = "lastcode/checkpoint/v1.2.3-nightly.20260811.9";
+
+it.effect("writes the package readiness marker to the selected artifact root", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped();
+    const commit = "a".repeat(40);
+    yield* Effect.sync(() => announceLocalPackageReady(root, commit));
+    expect(yield* fs.readFileString(path.join(root, "package-ready"))).toBe(`${commit}\n`);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 it("requires an explicit immutable installable tag", () => {
   expect(() => parseBuildOptions([])).toThrow("An installable tag is required");

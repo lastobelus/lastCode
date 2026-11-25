@@ -11,12 +11,15 @@ import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import {
   BUILD_PHASES,
   estimateBuildProgress,
+  LOCAL_PACKAGE_READY_FILE,
   resolveBuildPhaseIndex,
 } from "../../../../scripts/lib/lastcode-build-progress.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -295,6 +298,7 @@ export class LastCodeLocalUpdates extends Context.Service<
   {
     readonly supported: boolean;
     readonly buildLogPath: string;
+    readonly packageReady: (onReady: () => void) => Stream.Stream<void>;
     readonly inspect: (
       currentVersion: string,
       requestCheckpoint?: boolean,
@@ -382,14 +386,34 @@ export function armInstallPreflightTimeout(
   };
 }
 
-function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"]) {
-  const dashboardPath = NodePath.join(environment.homeDirectory, ".lastcode", "dashboard.json");
-  const buildLogPath = NodePath.join(
-    environment.homeDirectory,
-    ".lastcode",
-    "local-updates",
-    "build.log",
+export function watchLocalPackageReady(
+  fileSystem: FileSystem.FileSystem,
+  artifactsDir: string,
+  onReady: () => void,
+) {
+  return Stream.unwrap(
+    fileSystem
+      .makeDirectory(artifactsDir, { recursive: true, mode: 0o700 })
+      .pipe(Effect.as(fileSystem.watch(artifactsDir, { onReady }))),
+  ).pipe(
+    Stream.filter(
+      (event) =>
+        event._tag !== "Remove" && NodePath.basename(event.path) === LOCAL_PACKAGE_READY_FILE,
+    ),
+    Stream.as(undefined),
+    Stream.debounce(Duration.millis(50)),
+    Stream.ignoreCause({ log: true }),
   );
+}
+
+function makeLive(
+  environment: DesktopEnvironment.DesktopEnvironment["Service"],
+  fileSystem: FileSystem.FileSystem,
+) {
+  const lastCodeDir = NodePath.join(environment.homeDirectory, ".lastcode");
+  const dashboardPath = NodePath.join(lastCodeDir, "dashboard.json");
+  const updateDir = NodePath.join(lastCodeDir, "local-updates");
+  const buildLogPath = NodePath.join(updateDir, "build.log");
 
   const readRepository = (): {
     readonly repoRoot: string;
@@ -690,6 +714,8 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
       environment.platform === "darwin" &&
       environment.runtimeInfo.hostArch === "arm64",
     buildLogPath,
+    packageReady: (onReady) =>
+      watchLocalPackageReady(fileSystem, NodePath.join(updateDir, "artifacts"), onReady),
     inspect: Effect.fn("LastCodeLocalUpdates.inspect")((currentVersion, requestCheckpoint) =>
       runHelper("inspect", groupedInspectionArgs(currentVersion, requestCheckpoint)).pipe(
         Effect.flatMap((result) =>
@@ -726,7 +752,9 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
 
 export const layer = Layer.effect(
   LastCodeLocalUpdates,
-  Effect.map(DesktopEnvironment.DesktopEnvironment, makeLive),
+  Effect.gen(function* () {
+    return makeLive(yield* DesktopEnvironment.DesktopEnvironment, yield* FileSystem.FileSystem);
+  }),
 );
 
 export const layerTest = (service: LastCodeLocalUpdates["Service"]) =>
