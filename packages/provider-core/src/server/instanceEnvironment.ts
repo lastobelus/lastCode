@@ -8,17 +8,18 @@ import { expandHomeVariable } from "./pathExpansion.ts";
 export const mergeProviderInstanceEnvironment = Effect.fn(function* (
   environment: ProviderInstanceEnvironment | undefined,
   baseEnv: NodeJS.ProcessEnv = process.env,
+  localCiSettingsPath?: string,
 ) {
   // Commands the agent runs inherit this env; the AppImage mount's libraries would shadow the system's.
   const hostEnv = stripAppImageRuntimeEnv(baseEnv);
-  if (!environment || environment.length === 0) {
+  if ((!environment || environment.length === 0) && localCiSettingsPath === undefined) {
     return hostEnv;
   }
 
   const home = yield* HostProcess.HomeDirectory;
   const windows = (yield* HostProcess.Platform) === "win32";
   const next: NodeJS.ProcessEnv = { ...hostEnv };
-  for (const variable of environment) {
+  for (const variable of environment ?? []) {
     // An unresolved secret reference carries no value; the registry resolves it for the provider.
     if (typeof variable.value !== "string") continue;
     // Windows reads names without regard to case, and a child gets the first spelling in sort
@@ -31,6 +32,10 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
       }
     }
     next[name] = expandHomeVariable(name, variable.value, home);
+  }
+  // Provider shells run CI for this server, including servers with a custom home.
+  if (localCiSettingsPath !== undefined) {
+    next.T3CODE_LOCAL_CI_SETTINGS_PATH = localCiSettingsPath;
   }
   return next;
 });

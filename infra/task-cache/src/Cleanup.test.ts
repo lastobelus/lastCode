@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - real SQLite exercises concurrent D1 claims and accounting.
 import * as NodeFS from "node:fs";
+import * as NodeBuffer from "node:buffer";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeUtil from "node:util";
 import * as Effect from "effect/Effect";
 import { expect, it } from "@effect/vitest";
 import { cleanup } from "../vendor/vite-plus-remote-cache-cloudflare/src/database.ts";
@@ -43,9 +45,12 @@ it.effect("cleans three full disjoint batches within the D1 invocation budget", 
         let args: NodeSqlite.SQLInputValue[] = [];
         const statement = {
           bind: (...values: NodeSqlite.SQLInputValue[]) => {
-            args = values.map((value) =>
-              value instanceof ArrayBuffer ? new Uint8Array(value) : value,
-            );
+            args = values.map((value) => {
+              if (NodeUtil.types.isArrayBuffer(value)) {
+                return value.byteLength === 0 ? NodeBuffer.Buffer.alloc(0) : new Uint8Array(value);
+              }
+              return value;
+            });
             return statement;
           },
           all: async () => {

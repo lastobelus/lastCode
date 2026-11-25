@@ -56,6 +56,7 @@ function keepWindowsProsePathEscape(this: EscapeCompileContext) {
  * from a sentence, and `C:\x and \*this\*` must still read `*this*`.
  */
 export function remarkKeepWindowsProsePaths(this: Processor) {
+  // oxlint-disable-next-line no-this-in-exported-function -- Unified invokes plugins with the Processor as this.
   (this.data().fromMarkdownExtensions ??= []).push({
     exit: { characterEscape: keepWindowsProsePathEscape },
   });
@@ -67,6 +68,7 @@ export function remarkKeepWindowsProsePaths(this: Processor) {
  * Windows paths keep the text as written, and so do escapes inside drive paths.
  */
 export function remarkKeepWindowsPaths(this: Processor) {
+  // oxlint-disable-next-line no-this-in-exported-function -- Unified invokes plugins with the Processor as this.
   (this.data().fromMarkdownExtensions ??= []).push({
     exit: {
       resourceDestinationString: keepWindowsPathDestination,
