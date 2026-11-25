@@ -29,4 +29,4 @@ A tier of `—` means the area has no charter yet and follows lean upstream.
 | `seeing-the-work`: Seeing what agents build            | prefer ours | Background browser for agent QA · Preview hosting and handoff links · Browser profiles, import and annotations · Simulator and emulator devices  |
 | `machines-and-checkouts`: Machines and worktrees       | prefer ours | Linked environments · Pausing and resuming an environment · Worktree lifecycle (suspend, hand off, restore) · Storage cleanup · Machine capacity |
 | `in-a-thread`: Working inside a thread                 | —           | Composer and prompt snippets · Keyboard scrolling and focus · Terminal · Provider adjustments                                                    |
-| `running-lastcode`: Running my own LastCode            | —           | Local nightly updates and install · Checkpoints and carry replay · Local CI and PR gates · Setup and settings import · Appearance and branding   |
+| `running-lastcode`: Running my own LastCode            | yield       | Local nightly updates and install · Checkpoints and carry replay · Local CI and PR gates · Setup and settings import · Appearance and branding   |
