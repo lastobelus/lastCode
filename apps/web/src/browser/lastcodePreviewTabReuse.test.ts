@@ -195,6 +195,7 @@ describe("findReusablePreviewTab", () => {
     expect(find(`${HUB}/d/a?x=2`)).toBe("hub");
     expect(find(`${HUB}/d/b`)).toBeNull();
     expect(find("http://other.localhost:4000/d/a")).toBeNull();
+    expect(find(`${HUB}/d/a?x=1#/other`)).toBeNull();
   });
 
   it("uses a desktop tab's live address over its last server report", () => {

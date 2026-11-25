@@ -52,7 +52,10 @@ function addressMatches(tab: URL, target: URL, reuse: PreviewTabReuse): boolean 
   if (target.protocol !== "http:" && target.protocol !== "https:") return false;
   if (tab.origin !== target.origin) return false;
   if (reuse === "origin") return true;
-  return isLocalHost(target.hostname) && tab.pathname === target.pathname;
+  // The fragment stays: hash-routed apps keep their route there.
+  return (
+    isLocalHost(target.hostname) && tab.pathname === target.pathname && tab.hash === target.hash
+  );
 }
 
 function samePlacement(tab: PreviewSessionSnapshot, target: PreviewTabPlacement): boolean {
