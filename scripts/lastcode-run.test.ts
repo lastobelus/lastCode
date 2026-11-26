@@ -65,7 +65,7 @@ it("preserves an attention result and keeps the whole summary within the wake's 
     console.log("[lastcode-action] Result: " + JSON.stringify({
       version: 1, outcome: "attention", reason: "build-failed",
       summary: "Build failed\\n" + "é".repeat(1000),
-      facts: { dmgPath: "/tmp/package.dmg" },
+      facts: { reportPath: "artifacts/build-report.json" },
     }));
     console.log("Final child output");
     process.exitCode = 7;
@@ -73,10 +73,13 @@ it("preserves an attention result and keeps the whole summary within the wake's 
   );
   const result = run(["package", "--tag", "lastcode/checkpoint/v0.1.0-nightly.20261122.1"], true);
   expect(result.status).toBe(7);
-  const marker = "[lc-run] package: attention (exit 7) [build-failed]\n";
+  const marker =
+    "[lc-run] package: attention (exit 7) [build-failed]. Needs attention. Read the report below.\n";
   const tail = result.stdout.slice(result.stdout.lastIndexOf(marker));
   expect(result.stdout).toContain("Final child output\n" + marker);
-  expect(tail).toMatch(/^\[lc-run\].*\nBuild failed é+\.\.\.\n\/tmp\/package\.dmg\n$/u);
+  expect(tail).toMatch(
+    /^\[lc-run\].*\nBuild failed é+\.\.\.\nReport: artifacts\/build-report\.json\n$/u,
+  );
   expect(Buffer.byteLength(tail)).toBeLessThan(1_000);
 });
 
@@ -92,5 +95,46 @@ it("does not start CI after preparation fails", () => {
   writeStep("lastcode-local-ci.ts", "console.log('Unexpected CI');");
   const result = run(["ci", "--quick"], true);
   expect(result.status).toBe(43);
-  expect(result.stdout).toMatch(/\[lc-run\] ci: attention \(exit 43\)\nInstall failed\n$/u);
+  expect(result.stdout).toContain(
+    "[lc-run] ci: attention (exit 43). Needs attention. Any available details are in this output.\nInstall failed\n",
+  );
+});
+
+it("keeps a long report path in the full output and the failure in the wake tail", () => {
+  const { writeStep, run } = fixture();
+  const reportPath = "/checkout" + ("/" + "directory".repeat(20)).repeat(6) + "/report.json";
+  writeStep("prepare-dependencies.ts", "");
+  writeStep(
+    "lastcode-local-ci.ts",
+    `
+    console.log("[lastcode-action] Result: " + JSON.stringify({
+      version: 1, outcome: "attention", reason: "validation-failed",
+      summary: "Full CI validation failed.", facts: { reportPath: ${JSON.stringify(reportPath)} },
+    }));
+    process.exitCode = 1;
+  `,
+  );
+  const result = run(["ci", "--full"], false);
+  expect(result.status).toBe(1);
+  const tail =
+    "[lc-run] ci: attention (exit 1) [validation-failed]. Needs attention. Read the report path in the full command output.\n" +
+    "Full CI validation failed.\n";
+  expect(result.stdout).toBe(`Report: ${reportPath}\n${tail}`);
+  expect(Buffer.byteLength(tail)).toBeLessThan(1_000);
+});
+
+it("explains a blocked report even when the process exits successfully", () => {
+  const { writeStep, run } = fixture();
+  writeStep(
+    "lastcode-wait-for-checkpoint.ts",
+    `
+    console.log('[lastcode-action] Result: {"version":1,"outcome":"blocked","summary":"Checkpoint unavailable","facts":{"diagnostic":"No active checkpoint."}}');
+  `,
+  );
+  const result = run(["wait-checkpoint"], false);
+  expect(result.status).toBe(0);
+  expect(result.stdout).toBe(
+    "[lc-run] wait-checkpoint: blocked (exit 0). Could not proceed. Any available details are in this output.\n" +
+      "Checkpoint unavailable\nNo active checkpoint.\n",
+  );
 });
