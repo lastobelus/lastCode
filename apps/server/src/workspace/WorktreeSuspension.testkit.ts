@@ -13,8 +13,8 @@ export const layerWith = (
     Layer.mock(WorktreeSuspensionRegistry)({
       root: "/test/saved-workspaces",
       list: Effect.succeed([]),
-      snapshotWorktreeProtection: Effect.succeed((workspacePath) =>
-        automaticProtection(workspacePath, "worktree"),
+      snapshotWorktreeProtection: Effect.succeed((workspacePath, resource = "worktree") =>
+        automaticProtection(workspacePath, resource),
       ),
       dependenciesRemoved: () => Effect.void,
       recoveryDestinationProtection: () => Effect.succeed(null),
