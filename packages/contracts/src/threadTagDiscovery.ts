@@ -1,5 +1,11 @@
 import * as Schema from "effect/Schema";
-import { EnvironmentId, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { OrchestrationV2ThreadShell } from "./orchestrationV2.ts";
 import { ThreadTag } from "./threadTags.ts";
 
@@ -51,6 +57,12 @@ export const ThreadTagQueryResult = Schema.Struct({
   nextCursor: Schema.NullOr(NonNegativeInt),
 });
 export type ThreadTagQueryResult = typeof ThreadTagQueryResult.Type;
+export const ThreadTagSetInput = Schema.Struct({
+  threadId: ThreadId,
+  tag: ThreadTag,
+  tagged: Schema.Boolean,
+});
+export type ThreadTagSetInput = typeof ThreadTagSetInput.Type;
 export class ThreadTagDiscoveryError extends Schema.TaggedError<ThreadTagDiscoveryError>()(
   "ThreadTagDiscoveryError",
   {

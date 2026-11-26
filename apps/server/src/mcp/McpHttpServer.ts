@@ -1,3 +1,6 @@
+import * as ThreadTags from "../orchestration-v2/ThreadTags.ts";
+import { ThreadTagsToolkit } from "./toolkits/threadTags/tools.ts";
+import * as ThreadTagsHandlers from "./toolkits/threadTags/handlers.ts";
 import {
   hasNativeMcpMetadata,
   McpProviderSessions,
@@ -1605,6 +1608,11 @@ export const layerWorktreeSuspensionToolkit = toolkitRegistration(
   WorktreeSuspensionHandlers.layer,
 );
 
+export const layerThreadTagsToolkit = toolkitRegistration(
+  ThreadTagsToolkit,
+  ThreadTagsHandlers.layer,
+).pipe(Layer.provide(ThreadTags.layer));
+
 const makeMcpTransport = <RA, RE, RR>(
   path: McpEndpointPath,
   registrations: Layer.Layer<RA, RE, RR>,
@@ -1641,6 +1649,7 @@ export const layerTools = Layer.mergeAll(
   layerMessageToolkit,
   layerActionResumeToolkit,
   layerWorktreeSuspensionToolkit,
+  layerThreadTagsToolkit,
 );
 
 const layerToolExposure = Layer.effect(
@@ -1768,6 +1777,7 @@ const layerThreadOnlyToolkit = makeMcpTransport(
     layerEnvironmentToolkit,
     layerWorktreeToolkitRegistration,
     layerWorktreeSuspensionToolkit,
+    layerThreadTagsToolkit,
     layerPullRequestsToolkit,
     layerToolSearch,
   ),

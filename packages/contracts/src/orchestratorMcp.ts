@@ -408,6 +408,7 @@ export const OrchestratorMcpThreadBackgroundTask = Schema.Struct({
 export type OrchestratorMcpThreadBackgroundTask = typeof OrchestratorMcpThreadBackgroundTask.Type;
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
+  tags: Schema.optional(Schema.Array(Schema.String)),
   threadId: ThreadId,
   projectId: ProjectId,
   environmentId: EnvironmentId,
@@ -491,6 +492,7 @@ export const OrchestratorMcpThreadReadToolInput = Schema.Struct({
 export type OrchestratorMcpThreadReadToolInput = typeof OrchestratorMcpThreadReadToolInput.Type;
 
 export const OrchestratorMcpThreadDetail = Schema.Struct({
+  tags: Schema.optional(Schema.Array(Schema.String)),
   threadId: ThreadId,
   environmentId: EnvironmentId,
   link: Schema.String,
