@@ -92,6 +92,8 @@ export interface NewProjectScriptInput {
   keybinding?: string | null;
   previewUrl: string | null;
   autoOpenPreview: boolean;
+  /** Permit provider-scoped MCP launch plus a one-shot automated follow-up. */
+  allowAgentResume: boolean;
 }
 
 export type ProjectScriptActionResult = AtomCommandResult<void, unknown>;
@@ -107,6 +109,7 @@ export const EMPTY_PROJECT_SCRIPT_INPUT: NewProjectScriptInput = {
   keybinding: null,
   previewUrl: null,
   autoOpenPreview: false,
+  allowAgentResume: false,
 };
 
 export interface ProjectScriptEditorRequest {
@@ -132,6 +135,7 @@ export function editorRequestForScript(
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
+      allowAgentResume: script.allowAgentResume ?? false,
     },
   };
 }
@@ -297,6 +301,7 @@ function ProjectScriptEditorForm({
   const [keybinding, setKeybinding] = useState(request.initial.keybinding ?? "");
   const [previewUrl, setPreviewUrl] = useState(request.initial.previewUrl ?? "");
   const [autoOpenPreview, setAutoOpenPreview] = useState(request.initial.autoOpenPreview);
+  const [allowAgentResume, setAllowAgentResume] = useState(request.initial.allowAgentResume);
   const [isSaving, setIsSaving] = useState(false);
   const pendingSubmissionRef = useRef<object | null>(null);
   // A save that settles after this form is replaced must not close or error
@@ -396,6 +401,7 @@ function ProjectScriptEditorForm({
           : {}),
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
+        allowAgentResume,
       } satisfies NewProjectScriptInput;
     } catch (error) {
       setValidationError(thrownErrorMessage(error, m) ?? gt("Failed to save action."));
@@ -593,6 +599,13 @@ function ProjectScriptEditorForm({
                 checked={autoOpenPreview}
                 disabled={previewUrl.trim().length === 0}
                 onCheckedChange={(checked) => setAutoOpenPreview(Boolean(checked))}
+              />
+            </label>
+            <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+              <span>Allow Codex and Claude to run and resume</span>
+              <Switch
+                checked={allowAgentResume}
+                onCheckedChange={(checked) => setAllowAgentResume(Boolean(checked))}
               />
             </label>
             {validationError && <p className="text-sm text-destructive">{validationError}</p>}
