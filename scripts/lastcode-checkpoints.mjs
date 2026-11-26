@@ -837,13 +837,10 @@ export function selectRevisionBuilds(checkpointTag, buildTags) {
     .toSorted((left, right) => compareNightlies(left.version, right.version));
 }
 
-function checkpointRows(repoRoot, home, count, remoteState) {
+function checkpointRows(repoRoot, home, count, remoteState, localCheckpointTags, pendingTag) {
   const runs = readRuns(home);
-  const allCheckpointTags = splitLines(
-    git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
-  );
   const checkpointTags = checkpointTagsWithoutUnpublishedFailures(
-    allCheckpointTags,
+    localCheckpointTags,
     remoteState.publishedTags,
     runs,
   );
@@ -887,8 +884,9 @@ function checkpointRows(repoRoot, home, count, remoteState) {
       sourceCommit: trailers["Source-Commit"],
       sourceObjectRef: trailers["Source-Object-Ref"],
     };
-    const revisionBuildRows = selectRevisionBuilds(checkpointTag, buildTags).map(
-      ({ build: revisionBuild, buildTag, revisionTag, version }) => {
+    const revisionBuildRows = selectRevisionBuilds(checkpointTag, buildTags)
+      .filter(({ revisionTag }) => revisionTag !== pendingTag)
+      .map(({ build: revisionBuild, buildTag, revisionTag, version }) => {
         const revisionCommit = git(repoRoot, ["rev-list", "-n", "1", revisionTag]);
         const revisionTrailers = parseTrailers(
           git(repoRoot, ["for-each-ref", "--format=%(contents)", `refs/tags/${revisionTag}`]),
@@ -915,8 +913,7 @@ function checkpointRows(repoRoot, home, count, remoteState) {
           sourceCommit: revisionTrailers["Source-Commit"],
           sourceObjectRef: revisionTrailers["Source-Object-Ref"],
         };
-      },
-    );
+      });
     return { finishedAt: row.finishedAt, rows: [row, ...revisionBuildRows] };
   });
   const failures = failedRunsWithoutPublishedTags(remoteState.publishedTags, runs).map(
@@ -976,10 +973,46 @@ function daemonStatus() {
   return { summary: `Daemon: ${label} · Last exit: ${exit}`, running: state === "running" };
 }
 
+function pendingPostPublishTag(commonDirectory) {
+  try {
+    const { tag } = JSON.parse(
+      NodeFS.readFileSync(
+        NodePath.join(commonDirectory, "lastcode-checkpoint-post-publish.json"),
+        "utf8",
+      ),
+    );
+    const version =
+      typeof tag === "string" ? tag.replace(/^lastcode\/(?:checkpoint|revision)\//u, "") : "";
+    if (version === tag || !parseNightly(version)) {
+      throw new Error("Invalid pending checkpoint post-publish tag.");
+    }
+    return tag;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
 function printDashboard(repoRoot, home, count, verbose) {
   const daemon = daemonStatus();
   const remoteState = remotePublicationState(repoRoot);
-  const rows = checkpointRows(repoRoot, home, count, remoteState);
+  const localTags = splitLines(
+    git(repoRoot, [
+      "tag",
+      "--list",
+      `${CHECKPOINT_PREFIX}v*-nightly.*`,
+      `${REVISION_PREFIX}v*-nightly.*`,
+    ]),
+  );
+  const commonDirectory = git(repoRoot, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  const pendingTag = pendingPostPublishTag(commonDirectory);
+  const eligibleTags = localTags.filter((tag) => tag !== pendingTag);
+  const localCheckpointTags = eligibleTags.filter((tag) => tag.startsWith(CHECKPOINT_PREFIX));
+  remoteState.publishedTags = remoteState.publishedTags.filter((tag) => tag !== pendingTag);
+  const rows = checkpointRows(repoRoot, home, count, remoteState, localCheckpointTags, pendingTag);
   const columns = [
     {
       key: "status",
@@ -1091,9 +1124,6 @@ function printDashboard(repoRoot, home, count, verbose) {
 
   const upstreamTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]));
   const latestVisibleCheckpoint = rows.find((row) => row.status === "success");
-  const localCheckpointTags = splitLines(
-    git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
-  );
   const latestCheckpoint = latestPublishedCheckpointTag(
     localCheckpointTags,
     remoteState.publishedTags,
@@ -1106,14 +1136,7 @@ function printDashboard(repoRoot, home, count, verbose) {
   );
   const freshness = checkpointFreshness(latestUpstream, latestCheckpoint);
   const latestInstallableTag = latestPublishedInstallableTag(
-    splitLines(
-      git(repoRoot, [
-        "tag",
-        "--list",
-        `${CHECKPOINT_PREFIX}v*-nightly.*`,
-        `${REVISION_PREFIX}v*-nightly.*`,
-      ]),
-    ),
+    eligibleTags,
     remoteState.publishedTags,
   );
   const latestInstallableCommit = latestInstallableTag
@@ -1139,6 +1162,7 @@ function printDashboard(repoRoot, home, count, verbose) {
     : undefined;
   console.log("");
   console.log(style(ansi.lavender, daemon.summary));
+  if (pendingTag) console.log(`Post-publish command pending for ${pendingTag}.`);
   for (const detail of serviceFailureDetailLines(readCheckpointServiceState(home), verbose)) {
     console.log(style(ansi.error, detail));
   }

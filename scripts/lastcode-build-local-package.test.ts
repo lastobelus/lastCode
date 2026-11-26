@@ -59,6 +59,33 @@ describe("local build package action", () => {
     ).toEqual(request());
     expect(saved).toEqual(request());
   });
+  it("rejects a pending tag before saving a selection from a linked worktree", () => {
+    const commonDirectory = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "local-build-pending-"),
+    );
+    onTestFinished(() => NodeFS.rmSync(commonDirectory, { recursive: true, force: true }));
+    const pending = NodePath.join(commonDirectory, "lastcode-checkpoint-post-publish.json");
+    NodeFS.writeFileSync(pending, JSON.stringify({ tag, commit, remote: "origin" }));
+    const worktree = NodePath.join(commonDirectory, "linked-worktree");
+    let saved: LocalBuildRequest | undefined;
+    const deps = {
+      git: (root: string, args: ReadonlyArray<string>) => {
+        expect(root).toBe(worktree);
+        if (args.includes("--git-common-dir")) return commonDirectory;
+        expect(args).toEqual(["rev-parse", `${tag}^{commit}`]);
+        return commit;
+      },
+      writeRequest: (value: LocalBuildRequest) => {
+        saved = value;
+      },
+    };
+    const select = () => selectLocalBuild(worktree, tag, deps, request().requestToken);
+    expect(select).toThrow("waiting for its post-publish command");
+    expect(saved).toBeUndefined();
+    NodeFS.unlinkSync(pending);
+    expect(select()).toEqual(request());
+    expect(saved).toEqual(request());
+  });
   it("rejects moving or invalid selectors and parses the helper result", () => {
     expect(() =>
       selectLocalBuild("/repo", "latest", { git: () => commit, writeRequest: () => {} }),

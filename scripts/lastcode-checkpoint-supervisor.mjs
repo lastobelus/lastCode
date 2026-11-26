@@ -297,7 +297,7 @@ export function checkpointEnvironment(
   return environment;
 }
 
-class CommandFailure extends Error {
+export class CommandFailure extends Error {
   constructor(phase, command, status, diagnostic) {
     super(`${command} failed with exit code ${status ?? "unknown"}.`);
     this.diagnostic = diagnostic;
@@ -993,7 +993,8 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     retainedRecoveryMatches: (checkpointRun) =>
       retainedRecoveryMatches(repoRoot, checkpointRun, environment),
     refreshSupervisor: () => refreshInstalledSupervisor(repoRoot, installedSupervisorPath),
-    runPhase: (phase, command, args) => runCommand(phase, repoRoot, command, args, environment),
+    runPhase: (phase, command, args, extraEnvironment = {}) =>
+      runCommand(phase, repoRoot, command, args, { ...environment, ...extraEnvironment }),
     sendThread: (threadId, message) => sendThread(home, threadId, message, environment),
     writeIncidentRecord: (incident) => writeIncidentRecord(paths.incidentsDirectory, incident),
     writeState: (state) => writeJsonAtomic(paths.statePath, state),
@@ -1118,7 +1119,12 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
         `[lastcode:checkpoint-supervisor] Could not snapshot checkpoint history before the run: ${historyError instanceof Error ? historyError.message : String(historyError)}`,
       );
     }
-    measure(phase, () => dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS));
+    measure(phase, () =>
+      dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS, {
+        LASTCODE_CHECKPOINT_SUPERVISOR_RUN_ID: runId,
+        LASTCODE_CHECKPOINT_SUPERVISOR_LAUNCHD_PID: String(dependencies.launchdPid),
+      }),
+    );
   } catch (error) {
     const finishedAt = dependencies.now();
     let checkpointRun = null;
@@ -1151,7 +1157,12 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       checkpointRun,
       ...(diagnostic ? { diagnostic } : {}),
       error: error instanceof Error ? error.message : String(error),
-      phase: error instanceof CommandFailure ? error.phase : phase,
+      phase:
+        error instanceof CommandFailure
+          ? error.phase === "checkpoint" && error.status === 75
+            ? "post-publish"
+            : error.phase
+          : phase,
     };
     const fingerprint = checkpointIncidentFingerprint(failure);
     const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];

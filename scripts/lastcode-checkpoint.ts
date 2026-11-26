@@ -10,6 +10,11 @@ import type { CheckpointCiCandidate } from "./lastcode-local-ci.ts";
 import { CiCommandFailure } from "./lib/lastcode-ci-process.ts";
 import { withCiFailingSteps } from "./lib/lastcode-ci-diagnostics.ts";
 import { PUBLICATION_CHECKS } from "./lib/lastcode-publication-checks.ts";
+import { readCheckpointPostPublishPending } from "./lib/lastcode-checkpoint-service-run-now.mjs";
+import {
+  CheckpointPostPublishError,
+  checkpointPostPublishGate,
+} from "./lastcode-checkpoint-post-publish.ts";
 
 import {
   migrationDependenciesInstalled,
@@ -96,10 +101,11 @@ interface CheckpointOptions {
   readonly revisionOnly?: string;
   readonly replayMode?: CheckpointReplayMode;
   readonly rollbackReason?: string;
+  readonly postPublish?: ReturnType<typeof checkpointPostPublishGate>;
 }
 
 function appendCheckpointRunForOptions(
-  options: CheckpointOptions,
+  options: Pick<CheckpointOptions, "revisionOnly">,
   record: CheckpointHistoryRecord,
   worktree?: string,
 ): boolean {
@@ -1130,6 +1136,56 @@ function installableTagPushArgs(
   });
 }
 
+function publishedCheckpointCommit(
+  repoRoot: string,
+  remote: string,
+  tag: string,
+): string | undefined {
+  const ref = `refs/tags/${tag}`;
+  const peeledRef = `${ref}^{}`;
+  const refs = new Map(
+    splitLines(git(repoRoot, ["ls-remote", remote, ref, peeledRef])).map((line) => {
+      const [commit, name] = line.split("\t");
+      return [name, commit] as const;
+    }),
+  );
+  return refs.get(peeledRef) ?? refs.get(ref);
+}
+
+function retryCheckpointPostPublish(repoRoot: string, options: CheckpointOptions): void {
+  const postPublish = options.postPublish;
+  if (!postPublish) return;
+  const started = Date.now();
+  const pending = postPublish.retry((tag) =>
+    publishedCheckpointCommit(repoRoot, options.pushRemote, tag),
+  );
+  if (!pending) return;
+  const nightly = parseLastCodeInstallableTag(pending.tag)!.nightly;
+  const contents = git(repoRoot, [
+    "for-each-ref",
+    `refs/tags/${pending.tag}`,
+    "--format=%(contents)",
+  ]);
+  const replayMode = checkpointReplayMode(contents);
+  const rollbackReason = checkpointTrailer(contents, "Rollback-Reason");
+  const sourceCommit = checkpointSourceCommit(contents);
+  const finished = Date.now();
+  appendCheckpointRunForOptions(pending.revisionOnly ? { revisionOnly: nightly.tag } : {}, {
+    schemaVersion: 1,
+    status: "success",
+    upstreamTag: nightly.tag,
+    startedAt: new Date(started).toISOString(),
+    finishedAt: new Date(finished).toISOString(),
+    durationMs: finished - started,
+    commitsRebased: Number(checkpointTrailer(contents, "Fork-Commits-Rebased") ?? 0),
+    checkpointCommit: pending.commit,
+    checkpointTag: pending.tag,
+    ...(replayMode ? { replayMode } : {}),
+    ...(rollbackReason && replayMode === "historical" ? { rollbackReason } : {}),
+    ...(sourceCommit ? { sourceCommit, sourceObjectRef: sourceObjectRef(pending.tag) } : {}),
+  });
+}
+
 export function promotionNeeded(remoteCommit: string, checkpointCommit: string): boolean {
   return remoteCommit !== checkpointCommit;
 }
@@ -1435,6 +1491,7 @@ function createCheckpointTag(
     readonly finishedAt: string;
     readonly startedAt: string;
   },
+  postPublish?: CheckpointOptions["postPublish"],
 ): string {
   const checkpointTag = checkpointTagFromNightlyTag(nightly.tag);
   assertPinnedNightly(repoRoot, nightly.tag, upstreamCommit);
@@ -1447,6 +1504,7 @@ function createCheckpointTag(
   });
   if (upstreamRemote)
     assertRemotePinnedNightly(repoRoot, upstreamRemote, nightly.tag, upstreamCommit);
+  postPublish?.prepare(checkpointTag, commit);
   const canonicalSourceRef = sourceObjectRef(checkpointTag);
   const sourceRefCreated = ensureLocalSourceObjectRef(repoRoot, checkpointTag, sourceCommit);
   try {
@@ -1483,6 +1541,7 @@ function createRevisionTag(
   sourceRef: string,
   sourceCommit: string,
   replay: EffectiveReplayConfiguration,
+  postPublish?: CheckpointOptions["postPublish"],
 ): string {
   assertPinnedNightly(repoRoot, plan.nightly.tag, upstreamCommit);
   validateInstallableMigrations({
@@ -1495,6 +1554,7 @@ function createRevisionTag(
   if (upstreamRemote) {
     assertRemotePinnedNightly(repoRoot, upstreamRemote, plan.nightly.tag, upstreamCommit);
   }
+  postPublish?.prepare(plan.installableTag, commit);
   const canonicalSourceRef = sourceObjectRef(plan.installableTag);
   const sourceRefCreated = ensureLocalSourceObjectRef(repoRoot, plan.installableTag, sourceCommit);
   try {
@@ -1878,6 +1938,7 @@ function publishRevisionIfNeeded(
       sourceRef,
       sourceCommit,
       replay,
+      options.postPublish,
     );
     if (options.pushTags) {
       run(
@@ -1901,6 +1962,7 @@ function publishRevisionIfNeeded(
     const publishedTag = pendingTag;
     pendingTag = undefined;
     completed = true;
+    options.postPublish?.finishPublication();
     const finishedAtMs = Date.now();
     appendCheckpointRunForOptions(
       options,
@@ -1928,7 +1990,7 @@ function publishRevisionIfNeeded(
       checkpointFailureRecord({
         commitsRebased: 0,
         error,
-        failurePhase,
+        failurePhase: error instanceof CheckpointPostPublishError ? "post-publish" : failurePhase,
         ...(!completed ? { recoveryBranch: branch } : {}),
         replayMode: replay.mode,
         ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
@@ -2451,11 +2513,40 @@ function main(argv: ReadonlyArray<string>): void {
     "checkpoint operation",
   );
   try {
-    runCheckpoint(
-      repoRoot,
-      options,
-      NodePath.join(commonDirectory, "lastcode-recovery-selection.json"),
-    );
+    const selectionPath = NodePath.join(commonDirectory, "lastcode-recovery-selection.json");
+    const runsCheckpoint = !options.dryRun && !options.selectRecovery;
+    const pending = options.dryRun ? undefined : readCheckpointPostPublishPending(commonDirectory);
+    if (
+      pending &&
+      !pending.revisionOnly &&
+      options.selectRecovery &&
+      NodeFS.existsSync(selectionPath) &&
+      publishedCheckpointCommit(repoRoot, pending.remote, pending.tag)
+    ) {
+      throw new CheckpointPostPublishError(
+        "Finish the pending selected checkpoint recovery before changing its selection.",
+      );
+    }
+    if (pending && runsCheckpoint && !options.pushTags) {
+      throw new CheckpointPostPublishError(
+        `Checkpoint ${pending.tag} has a pending post-publish command. Retry with --push-tags.`,
+      );
+    }
+    if (
+      pending &&
+      !pending.revisionOnly &&
+      options.revisionOnly &&
+      NodeFS.existsSync(selectionPath)
+    ) {
+      throw new CheckpointPostPublishError(
+        "Finish the pending selected checkpoint recovery before running --revision-only.",
+      );
+    }
+    const postPublish =
+      options.pushTags && runsCheckpoint
+        ? checkpointPostPublishGate(repoRoot, commonDirectory, options, pending)
+        : undefined;
+    runCheckpoint(repoRoot, { ...options, ...(postPublish ? { postPublish } : {}) }, selectionPath);
   } finally {
     release();
   }
@@ -2583,6 +2674,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       ]);
     }
   }
+
+  retryCheckpointPostPublish(repoRoot, options);
 
   if (replay.mode === "carry" && replay.bootstrap) {
     assertCarryBootstrapRef(repoRoot, replay.bootstrap);
@@ -2815,6 +2908,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             options.sourceRef,
             selection.sourceCommit,
             replay,
+            options.postPublish,
           )
         : createCheckpointTag(
             repoRoot,
@@ -2826,10 +2920,12 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             selection.sourceCommit,
             replay,
             timing,
+            options.postPublish,
           );
       publishRepairedCheckpoint(repoRoot, options.pushRemote, pendingTag, selection);
       const publishedTag = pendingTag;
       pendingTag = undefined;
+      options.postPublish?.finishPublication();
       appendCheckpointRunForOptions(
         options,
         {
@@ -2865,7 +2961,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         checkpointFailureRecord({
           commitsRebased,
           error,
-          failurePhase,
+          failurePhase: error instanceof CheckpointPostPublishError ? "post-publish" : failurePhase,
           recoveryBranch: carryRecoveryBranch(selection.nightlyTag),
           ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
           replayMode: replay.mode,
@@ -3068,6 +3164,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         sourceCommit,
         replay,
         timing,
+        options.postPublish,
       );
       pendingCheckpointTag = checkpointTag;
       if (options.pushTags) {
@@ -3093,6 +3190,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         );
       }
       pendingCheckpointTag = undefined;
+      options.postPublish?.finishPublication();
       appendCheckpointRunForOptions(
         options,
         {
@@ -3115,12 +3213,15 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         ? deleteCheckpointTag(repoRoot, pendingCheckpointTag)
         : true;
       const replayStops = carryWorktreePrepared ? readCarryReplayStops(automationWorktree()) : [];
-      const disposition = carryBootstrapFailureDisposition({
-        failurePhase: bootstrapFailurePhase,
-        ...(pendingCheckpointTag ? { pendingCheckpointTag } : {}),
-        ...(carryWorktreePrepared && carryBranch ? { recoveryBranch: carryBranch } : {}),
-        tagDeleted,
-      });
+      const disposition =
+        error instanceof CheckpointPostPublishError
+          ? { cleanup: carryWorktreePrepared, recoveryBranch: undefined }
+          : carryBootstrapFailureDisposition({
+              failurePhase: bootstrapFailurePhase,
+              ...(pendingCheckpointTag ? { pendingCheckpointTag } : {}),
+              ...(carryWorktreePrepared && carryBranch ? { recoveryBranch: carryBranch } : {}),
+              tagDeleted,
+            });
       const worktree = carryWorktreePrepared ? automationWorktree() : undefined;
       let recoveryFingerprint: string | undefined;
       let recoveryBranch = disposition.recoveryBranch;
@@ -3152,7 +3253,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           {
             commitsRebased,
             error,
-            failurePhase: bootstrapFailurePhase,
+            failurePhase:
+              error instanceof CheckpointPostPublishError ? "post-publish" : bootstrapFailurePhase,
             replayStops,
             ...(!tagDeleted ? { localTagRetained: true } : {}),
             ...(recoveryBranch ? { recoveryBranch } : {}),
@@ -3215,6 +3317,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           options.sourceRef,
           sourceCommit,
           replay,
+          options.postPublish,
         );
         if (options.pushTags) {
           run(
@@ -3235,6 +3338,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             ),
           );
         }
+        const publishedTag = pendingTag;
+        pendingTag = undefined;
+        options.postPublish?.finishPublication();
         const finishedAtMs = Date.now();
         appendCheckpointRunForOptions(
           options,
@@ -3247,19 +3353,19 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             durationMs: finishedAtMs - startedAtMs,
             commitsRebased: 0,
             checkpointCommit: candidateCommit,
-            checkpointTag: pendingTag,
+            checkpointTag: publishedTag,
             replayMode: replay.mode,
-            sourceObjectRef: sourceObjectRef(pendingTag),
+            sourceObjectRef: sourceObjectRef(publishedTag),
             sourceCommit,
           },
           worktree,
         );
-        newestProducedInstallableTag = pendingTag;
-        pendingTag = undefined;
+        newestProducedInstallableTag = publishedTag;
       } catch (error) {
         if (pendingTag) deleteCheckpointTag(repoRoot, pendingTag);
+        const postPublishFailed = error instanceof CheckpointPostPublishError;
         let recoveryFingerprint: string | undefined;
-        if (carryBranch) {
+        if (carryBranch && !postPublishFailed) {
           try {
             recoveryFingerprint = checkpointRecoveryFingerprint(worktree, carryBranch);
           } catch {
@@ -3271,8 +3377,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           checkpointFailureRecord({
             commitsRebased: 0,
             error,
-            failurePhase: carryRevisionFailurePhase,
-            ...(carryBranch ? { recoveryBranch: carryBranch } : {}),
+            failurePhase: postPublishFailed ? "post-publish" : carryRevisionFailurePhase,
+            ...(carryBranch && !postPublishFailed ? { recoveryBranch: carryBranch } : {}),
             ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
             replayMode: replay.mode,
             sourceCommit,
@@ -3281,6 +3387,11 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           }),
           worktree,
         );
+        if (postPublishFailed) {
+          removeAutomationWorktree(repoRoot, worktree);
+          if (carryBranch) git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
+          throw error;
+        }
         notify(
           hostPlatform,
           "LastCode carry revision needs attention",
@@ -3479,6 +3590,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             options.sourceRef,
             sourceCommit,
             replay,
+            options.postPublish,
           )
         : createCheckpointTag(
             repoRoot,
@@ -3490,6 +3602,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             sourceCommit,
             replay,
             timing,
+            options.postPublish,
           );
       pendingCheckpointTag = checkpointTag;
       if (options.pushTags) {
@@ -3516,6 +3629,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         }
       }
       pendingCheckpointTag = undefined;
+      options.postPublish?.finishPublication();
       appendCheckpointRunForOptions(
         options,
         {
@@ -3545,12 +3659,15 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     const tagDeleted = pendingCheckpointTag
       ? deleteCheckpointTag(repoRoot, pendingCheckpointTag)
       : true;
-    const disposition = checkpointFailureDisposition(
-      pendingCheckpointTag,
-      branch,
-      tagDeleted,
-      selection !== undefined,
-    );
+    const disposition =
+      error instanceof CheckpointPostPublishError && !selection
+        ? { cleanup: true, recoveryBranch: undefined }
+        : checkpointFailureDisposition(
+            pendingCheckpointTag,
+            branch,
+            tagDeleted,
+            selection !== undefined,
+          );
     completed = disposition.cleanup;
     if (attempt) {
       const finishedAtMs = Date.now();
@@ -3570,7 +3687,11 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           {
             commitsRebased: attempt.commitsRebased,
             error,
-            ...(failurePhase ? { failurePhase } : {}),
+            ...(error instanceof CheckpointPostPublishError
+              ? { failurePhase: "post-publish" }
+              : failurePhase
+                ? { failurePhase }
+                : {}),
             ...(!tagDeleted ? { localTagRetained: true } : {}),
             ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
             ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
@@ -3649,6 +3770,6 @@ if (import.meta.main) {
     console.error(
       `[lastcode:checkpoint] ${error instanceof Error ? error.message : String(error)}`,
     );
-    process.exitCode = 1;
+    process.exitCode = error instanceof CheckpointPostPublishError ? 75 : 1;
   }
 }

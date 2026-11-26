@@ -13,6 +13,7 @@ import {
   boundedCommandDiagnostic,
   checkpointEnvironment,
   checkpointSchedulerPid,
+  CommandFailure,
   checkpointFailureMessage,
   checkpointIncidentFingerprint,
   changedGitlinks,
@@ -31,6 +32,7 @@ import {
   writeIncidentRecord,
 } from "./lastcode-checkpoint-supervisor.mjs";
 import { refreshPrimaryCheckoutTransaction } from "./lastcode-primary-checkout-transaction.mjs";
+import { waitForCheckpoint } from "./lastcode-wait-for-checkpoint.ts";
 
 function fixture(overrides = {}) {
   const activities = [];
@@ -432,6 +434,48 @@ describe("LastCode checkpoint supervisor", () => {
     expect(test.dependencies.reconcileProjectActions).toHaveBeenCalledWith(undefined, []);
     expect(test.messages).toEqual([]);
     expect(test.states.at(-1)).toMatchObject({ status: "success", phase: "complete" });
+  });
+
+  it("only resolves post-publish recovery and the waiter after a successful retry", async () => {
+    let shouldFail = true;
+    const runPhase = vi.fn((phase) => {
+      if (phase !== "checkpoint") return;
+      expect(test.state?.status).toBe(shouldFail ? undefined : "failed");
+      expect(test.messages.some(({ message }) => message.includes("resolved alert"))).toBe(false);
+      if (shouldFail) throw new CommandFailure(phase, "node", 75, "post-publish command failed");
+    });
+    const test = fixture({ dependencies: { runPhase, latestFailedCheckpointRun: () => null } });
+    for (const runs of [1, 2]) {
+      let serviceRunning = true;
+      const nextObservation = Promise.withResolvers();
+      const wait = waitForCheckpoint({
+        daemonStatus: () =>
+          serviceRunning ? { state: "running", pid: process.pid, runs } : { state: "idle", runs },
+        readState: () => test.state,
+        readProcesses: () => [],
+        now: () => 0,
+        sleep: () => nextObservation.promise,
+      });
+      let waiterCompleted = false;
+      void wait.then(() => {
+        waiterCompleted = true;
+      });
+      const run = () => runCheckpointSupervisor({}, test.dependencies);
+      if (shouldFail) expect(run).toThrow("exit code 75");
+      else run();
+      const status = shouldFail ? "failed" : "success";
+      const phase = shouldFail ? "post-publish" : "complete";
+      expect(test.state).toMatchObject({ status, phase });
+      expect(waiterCompleted).toBe(false);
+      serviceRunning = false;
+      nextObservation.resolve();
+      await expect(wait).resolves.toMatchObject({ status, phase });
+      shouldFail = false;
+    }
+    expect(test.messages.map(({ message }) => message)).toEqual([
+      expect.stringContaining("failed during post-publish"),
+      expect.stringContaining("resolved alert"),
+    ]);
   });
 
   it("keeps running when the activity journal cannot be written", () => {

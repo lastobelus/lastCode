@@ -10,6 +10,33 @@ const SCHEDULE_HELPER_FILE = "lastcode-checkpoint-schedule.mjs";
 const SCHEDULE_REQUEST_FILE = "checkpoint-schedule-run-now.request";
 const SERVICE_REQUEST_FILE = "checkpoint-service-run-now.request";
 
+export function checkpointPostPublishPendingPath(commonDirectory) {
+  return NodePath.join(commonDirectory, "lastcode-checkpoint-post-publish.json");
+}
+
+export function readCheckpointPostPublishPending(commonDirectory) {
+  try {
+    const target = JSON.parse(
+      NodeFS.readFileSync(checkpointPostPublishPendingPath(commonDirectory), "utf8"),
+    );
+    if (
+      !/^lastcode\/(?:checkpoint|revision)\/v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+(?:\.\d+)?$/u.test(
+        target?.tag ?? "",
+      ) ||
+      !/^[0-9a-f]{40}$/u.test(target?.commit ?? "") ||
+      typeof target?.remote !== "string" ||
+      !target.remote ||
+      (target.revisionOnly !== undefined && target.revisionOnly !== true)
+    ) {
+      throw new Error("Invalid pending checkpoint post-publish target.");
+    }
+    return target;
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 export function checkpointServiceRunNowPaths(homeDirectory) {
   const automationDirectory = NodePath.join(homeDirectory, ".lastcode", "automation");
   return {

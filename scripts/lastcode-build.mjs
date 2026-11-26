@@ -14,6 +14,7 @@ import {
   estimateBuildProgress,
   resolveBuildPhaseIndex,
 } from "./lib/lastcode-build-progress.ts";
+import { readCheckpointPostPublishPending } from "./lib/lastcode-checkpoint-service-run-now.mjs";
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
@@ -576,7 +577,14 @@ async function main(argv) {
       `${REVISION_PREFIX}v*-nightly.*`,
     ]),
   );
-  await buildCheckpoint(repoRoot, home, resolveCheckpointTag(tags, options.checkpoint));
+  const commonDirectory = runGit(repoRoot, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  const pending = readCheckpointPostPublishPending(commonDirectory);
+  const eligibleTags = tags.filter((tag) => tag !== pending?.tag);
+  await buildCheckpoint(repoRoot, home, resolveCheckpointTag(eligibleTags, options.checkpoint));
 }
 
 if (

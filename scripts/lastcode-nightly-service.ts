@@ -364,6 +364,9 @@ export function nextCheckpointSupervisorConfig(
   return {
     schemaVersion: 1,
     ...(recoveryThreadId ? { recoveryThreadId } : {}),
+    ...("postPublishCommand" in previous
+      ? { postPublishCommand: previous.postPublishCommand }
+      : {}),
     trustedProjectActionIds: [...options.trustedProjectActionIds],
   };
 }
