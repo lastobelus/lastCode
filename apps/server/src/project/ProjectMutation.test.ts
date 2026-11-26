@@ -4,7 +4,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
-import { ProjectNotEmptyError } from "./ProjectService.ts";
+import { type ProjectDeleteInput, ProjectNotEmptyError } from "./ProjectService.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
 
 const projectId = ProjectId.make("project-1");
@@ -32,6 +32,7 @@ describe("mutateProjectWithClone", () => {
         {
           create: () => Effect.die("unused"),
           update: () => Effect.die("unused"),
+          reconcileScripts: () => Effect.die("unused"),
           delete: () => Effect.fail(rejected),
         },
         { discard: () => Effect.die("must not discard a project that still exists") },
@@ -45,15 +46,18 @@ describe("mutateProjectWithClone", () => {
   it.effect("discards the clone record even when the caller disconnects mid-delete", () =>
     Effect.gen(function* () {
       const committed = yield* Deferred.make<void>();
-      const finishDelete = yield* Deferred.make<void>();
+      const continueAfterCommit = yield* Deferred.make<void>();
       const discarded: Array<ProjectId> = [];
+      const discardedBeforeSettingsCleanup: Array<ProjectId> = [];
       const projects = {
         create: () => Effect.die("unused"),
         update: () => Effect.die("unused"),
-        // The delete event is already durable while its post-commit cleanup runs.
-        delete: () =>
+        reconcileScripts: () => Effect.die("unused"),
+        delete: (_input: ProjectDeleteInput, onCommitted = Effect.void) =>
           Deferred.succeed(committed, undefined).pipe(
-            Effect.andThen(Deferred.await(finishDelete)),
+            Effect.andThen(Deferred.await(continueAfterCommit)),
+            Effect.andThen(onCommitted),
+            Effect.tap(() => Effect.sync(() => discardedBeforeSettingsCleanup.push(...discarded))),
             Effect.as(deletedProject),
           ),
       };
@@ -69,10 +73,11 @@ describe("mutateProjectWithClone", () => {
       yield* Deferred.await(committed);
       // Delivered synchronously so it lands before the delete can finish.
       request.interruptUnsafe();
-      yield* Deferred.succeed(finishDelete, undefined);
+      yield* Deferred.succeed(continueAfterCommit, undefined);
       yield* Fiber.await(request);
 
       expect(discarded).toEqual([projectId]);
+      expect(discardedBeforeSettingsCleanup).toEqual([projectId]);
     }),
   );
 });

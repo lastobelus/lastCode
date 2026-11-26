@@ -37,6 +37,7 @@ import {
   taskFoldersTestProjectId as projectId,
   type TaskFoldersTestState,
 } from "../workspace/TaskFolders.testkit.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as CheckpointCaptureService from "./CheckpointCaptureService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
@@ -176,6 +177,7 @@ const layerFor = (state: State, options: Options) => {
           layerNode,
           ServerSettings.layerTest(),
           ThreadCommandExecutor.layer,
+          WorkspaceAcquisitionTestkit.layer,
           Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
             open: () =>
               Effect.succeed({

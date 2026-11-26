@@ -11,7 +11,10 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
 
 import { useProjects } from "../../state/entities";
-import { steadyNavigationThreadShellsAtom } from "../../state/threads";
+import {
+  steadyAnnotationHiddenThreadKeysAtom,
+  steadyNavigationThreadShellsAtom,
+} from "../../state/threads";
 import { useLaunchingThreads, usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
@@ -33,6 +36,7 @@ import {
   sortHomeProjectScopes,
 } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
+import { filterLastCodeAnnotationThreadRows } from "../threads/lastCodeAnnotationThreadLists";
 import { useThreadListActions } from "./useThreadListActions";
 import { useWorkspaceTabs } from "../layout/workspace/WorkspaceTabsContext";
 import { openSettings } from "../settings/settings-navigation";
@@ -52,8 +56,13 @@ export function HomeRouteScreen() {
   const projects = useProjects();
   // Stop rebuilding the streaming thread list while Thread covers Home.
   const visible = useHomeRouteVisible();
-  const threads = useLaunchingThreads(
+  const orderCandidates = useLaunchingThreads(
     useAtomValueWhileVisible(steadyNavigationThreadShellsAtom, visible),
+  );
+  const annotationHidden = useAtomValueWhileVisible(steadyAnnotationHiddenThreadKeysAtom, visible);
+  const threads = useMemo(
+    () => filterLastCodeAnnotationThreadRows(orderCandidates, annotationHidden),
+    [orderCandidates, annotationHidden],
   );
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
@@ -232,6 +241,7 @@ export function HomeRouteScreen() {
           selectedEnvironmentId={selectedEnvironmentId}
           selectedProjectKey={selectedProjectKey}
           threads={threads}
+          orderCandidates={orderCandidates}
           visible={visible}
         />
         <ThreadUndoNotice visible={visible} />

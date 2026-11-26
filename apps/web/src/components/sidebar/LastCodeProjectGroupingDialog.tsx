@@ -1,6 +1,10 @@
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { useState } from "react";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
-import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
+import {
+  PROJECT_GROUPING_MODE_LABELS,
+  type SidebarProjectGroupMember,
+} from "../../sidebarProjectGrouping";
 import {
   Dialog,
   DialogDescription,
@@ -14,30 +18,22 @@ import { Button } from "../ui/button";
 import type { SidebarProjectGroupingMode } from "@t3tools/contracts";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import {
-  deriveProjectGroupingOverrideKey,
+  derivePhysicalProjectKey as deriveProjectGroupingOverrideKey,
   selectProjectGroupingSettings,
-} from "../../logicalProject";
+} from "@t3tools/client-runtime/state/project-grouping";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 type DialogProps = { target: SidebarProjectGroupMember | null; onClose: () => void };
 function targetKey(target: SidebarProjectGroupMember | null) {
   return target ? scopedProjectKey(scopeProjectRef(target.environmentId, target.id)) : "closed";
 }
 
-const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
-  repository: "Group by repository",
-  repository_path: "Group by repository path",
-  separate: "Keep separate",
+const PROJECT_GROUPING_MODE_DESCRIPTIONS: Record<SidebarProjectGroupingMode, string> = {
+  repository: msg("Projects from the same repository share one sidebar row."),
+  repository_path: msg(
+    "Projects group only when both the repository and repo-relative path match.",
+  ),
+  separate: msg("Every project path gets its own sidebar row."),
 };
-function projectGroupingModeDescription(mode: SidebarProjectGroupingMode): string {
-  switch (mode) {
-    case "repository":
-      return "Projects from the same repository share one sidebar row.";
-    case "repository_path":
-      return "Projects group only when both the repository and repo-relative path match.";
-    case "separate":
-      return "Every project path gets its own sidebar row.";
-  }
-}
 
 type GroupingSelection = SidebarProjectGroupingMode | "inherit";
 function isGroupingSelection(value: unknown): value is GroupingSelection {
@@ -49,7 +45,10 @@ function isGroupingSelection(value: unknown): value is GroupingSelection {
   );
 }
 function ProjectGroupingForm({ target: projectGroupingTarget, onClose }: DialogProps) {
+  const gt = useGT();
+  const messages = useMessages();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const globalGroupingMode = projectGroupingSettings.sidebarProjectGroupingMode;
   const [projectGroupingSelection, setProjectGroupingSelection] = useState<
     SidebarProjectGroupingMode | "inherit"
   >(() =>
@@ -82,16 +81,25 @@ function ProjectGroupingForm({ target: projectGroupingTarget, onClose }: DialogP
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Project grouping</DialogTitle>
+        <DialogTitle>
+          <T>Project grouping</T>
+        </DialogTitle>
         <DialogDescription>
-          {projectGroupingTarget
-            ? `Choose how ${projectGroupingTarget.workspaceRoot} should be grouped in the sidebar.`
-            : "Choose how this project should be grouped in the sidebar."}
+          {projectGroupingTarget ? (
+            <T>
+              Choose how <Var>{projectGroupingTarget.workspaceRoot}</Var> should be grouped in the
+              sidebar.
+            </T>
+          ) : (
+            <T>Choose how this project should be grouped in the sidebar.</T>
+          )}
         </DialogDescription>
       </DialogHeader>
       <DialogPanel>
         <div className="grid gap-1.5">
-          <span className="text-xs font-medium text-foreground">Grouping rule</span>
+          <span className="text-xs font-medium text-foreground">
+            <T>Grouping rule</T>
+          </span>
           <Select
             value={projectGroupingSelection}
             onValueChange={(value) => {
@@ -100,45 +108,57 @@ function ProjectGroupingForm({ target: projectGroupingTarget, onClose }: DialogP
               }
             }}
           >
-            <SelectTrigger className="w-full" aria-label="Project grouping rule">
+            <SelectTrigger className="w-full" aria-label={gt("Project grouping rule")}>
               <SelectValue>
                 {projectGroupingSelection === "inherit"
-                  ? `Use global default (${PROJECT_GROUPING_MODE_LABELS[projectGroupingSettings.sidebarProjectGroupingMode]})`
-                  : PROJECT_GROUPING_MODE_LABELS[projectGroupingSelection]}
+                  ? gt("Use global default ({mode})", {
+                      mode: messages(PROJECT_GROUPING_MODE_LABELS[globalGroupingMode]),
+                    })
+                  : messages(PROJECT_GROUPING_MODE_LABELS[projectGroupingSelection])}
               </SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
               <SelectItem hideIndicator value="inherit">
-                Use global default
+                <T>Use global default</T>
               </SelectItem>
               <SelectItem hideIndicator value="repository">
-                {PROJECT_GROUPING_MODE_LABELS.repository}
+                {messages(PROJECT_GROUPING_MODE_LABELS.repository)}
               </SelectItem>
               <SelectItem hideIndicator value="repository_path">
-                {PROJECT_GROUPING_MODE_LABELS.repository_path}
+                {messages(PROJECT_GROUPING_MODE_LABELS.repository_path)}
               </SelectItem>
               <SelectItem hideIndicator value="separate">
-                {PROJECT_GROUPING_MODE_LABELS.separate}
+                {messages(PROJECT_GROUPING_MODE_LABELS.separate)}
               </SelectItem>
             </SelectPopup>
           </Select>
         </div>
         <p className="text-xs text-muted-foreground">
-          {projectGroupingSelection === "inherit"
-            ? projectGroupingModeDescription(projectGroupingSettings.sidebarProjectGroupingMode)
-            : projectGroupingModeDescription(projectGroupingSelection)}
+          {messages(
+            PROJECT_GROUPING_MODE_DESCRIPTIONS[
+              projectGroupingSelection === "inherit" ? globalGroupingMode : projectGroupingSelection
+            ],
+          )}
         </p>
       </DialogPanel>
       <DialogFooter>
         <Button variant="outline" onClick={onClose}>
-          Cancel
+          <T>Cancel</T>
         </Button>
-        <Button onClick={saveProjectGroupingPreference}>Save</Button>
+        <Button onClick={saveProjectGroupingPreference}>
+          <T>Save</T>
+        </Button>
       </DialogFooter>
     </>
   );
 }
 export function LastCodeProjectGroupingDialog({ target, onClose }: DialogProps) {
+  const currentTargetKey = targetKey(target);
+  const [formIdentity, setFormIdentity] = useState({ targetKey: currentTargetKey, generation: 0 });
+  // Closing popups retain their form; reopening the same target must create a fresh draft.
+  if (formIdentity.targetKey !== currentTargetKey) {
+    setFormIdentity({ targetKey: currentTargetKey, generation: formIdentity.generation + 1 });
+  }
   return (
     <Dialog
       open={target !== null}
@@ -147,7 +167,7 @@ export function LastCodeProjectGroupingDialog({ target, onClose }: DialogProps) 
       }}
     >
       <DialogPopup className="max-w-lg">
-        <ProjectGroupingForm key={targetKey(target)} target={target} onClose={onClose} />
+        <ProjectGroupingForm key={formIdentity.generation} target={target} onClose={onClose} />
       </DialogPopup>
     </Dialog>
   );

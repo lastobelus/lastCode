@@ -48,6 +48,7 @@ import {
 } from "../../apps/server/src/mcp/McpToolAccess.testkit.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import * as ProjectStore from "../../apps/server/src/orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "../../apps/server/src/orchestration-v2/ProjectionStore.ts";
 import * as ProjectService from "../../apps/server/src/project/ProjectService.ts";
 import { ServerSettingsService } from "../../apps/server/src/serverSettings.ts";
 import { shellInvocations } from "./device-grading.ts";
@@ -791,6 +792,7 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
               Effect.succeedSome({
                 projectId,
                 title: "Device eval project",
+                hasCustomTitle: false,
                 workspaceRoot: environment.cwd,
                 defaultModelSelection: null,
                 defaultThreadEnvMode: null,
@@ -800,6 +802,7 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
                 faviconPath: null,
                 projectIcon: null,
                 scripts: [],
+                trackedFolders: [],
                 createdAt: "2026-01-01T00:00:00.000Z",
                 updatedAt: "2026-01-01T00:00:00.000Z",
                 deletedAt: null,
@@ -851,6 +854,10 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
     const entry = tools.find((tool) => tool.tool.name === name);
     if (entry === undefined) return yield* Effect.die(new Error(`T3 has no device tool ${name}.`));
     const result = yield* entry.handle(input).pipe(
+      Effect.provideService(
+        ProjectionStore.ProjectionStoreV2,
+        Context.get(context, ProjectionStore.ProjectionStoreV2),
+      ),
       Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
       Effect.provideService(McpSchema.McpRequestContext, request),
       Effect.provideService(HostProcess.ExecutablePath, NODE),

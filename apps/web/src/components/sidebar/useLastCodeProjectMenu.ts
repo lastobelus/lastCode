@@ -1,3 +1,6 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
+import { useWorkspaceLifecycleConfirmation } from "../../hooks/useWorkspaceLifecycleConfirmation";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import type {
   SidebarProjectGroupMember,
@@ -9,7 +12,7 @@ import {
 } from "../../sidebarProjectGrouping";
 import type { SidebarThreadSummary } from "../../types";
 import { useClientSettings } from "~/hooks/useSettings";
-import { selectProjectGroupingSettings } from "../../logicalProject";
+import { selectProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import { useRouter } from "@tanstack/react-router";
 import { readLocalApi } from "../../localApi";
 import { readEnvironmentScope } from "../../state/session";
@@ -34,6 +37,7 @@ export function useLastCodeProjectMenu(
   getThreads: () => readonly SidebarThreadSummary[],
 ) {
   const { isMobile, setOpenMobile } = useSidebar();
+  const lifecycle = useWorkspaceLifecycleConfirmation();
   const router = useRouter();
   const settings = useClientSettings(selectProjectGroupingSettings);
   const projectSettingsKey = resolveSidebarProjectSettingsKey({
@@ -51,7 +55,7 @@ export function useLastCodeProjectMenu(
     onCopy: (ctx) => {
       toastManager.add({
         type: "success",
-        title: "Path copied",
+        title: m(msg("Path copied")),
         description: ctx.path,
       });
     },
@@ -59,8 +63,8 @@ export function useLastCodeProjectMenu(
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to copy path",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: m(msg("Failed to copy path")),
+          description: error instanceof Error ? error.message : m(msg("An error occurred.")),
         }),
       );
     },
@@ -76,7 +80,23 @@ export function useLastCodeProjectMenu(
           (thread) =>
             thread.environmentId === member.environmentId && thread.projectId === member.id,
         ).length,
-        removeProject: (member) => deleteLastCodeSidebarProject(member, deleteProject, threads),
+        removeProject: (member, savedWorkspace) =>
+          deleteLastCodeSidebarProject(member, deleteProject, threads, savedWorkspace),
+        confirmSavedData: async (member, description) => {
+          const result = await lifecycle.confirm(
+            [
+              {
+                environmentId: member.environmentId,
+                input: { operation: "delete", target: { kind: "project", projectId: member.id } },
+              },
+            ],
+            {
+              title: m(msg('Remove project "{title}"?', { title: member.title })),
+              description,
+            },
+          );
+          return result === null ? null : (result.dispositions[0] ?? { mode: "retain" });
+        },
         waitForWarning: () => new Promise<void>((resolve) => window.setTimeout(resolve, 180)),
       });
     const api = readLocalApi();
@@ -96,16 +116,6 @@ export function useLastCodeProjectMenu(
     });
     const clicked = await api.contextMenu.show(items, position);
     const actionHandlers = new Map<string, () => Promise<void> | void>([
-      [
-        "open-dashboard",
-        () => {
-          if (isMobile) setOpenMobile(false);
-          void router.navigate({
-            to: "/dashboard",
-            search: { environmentId: project.environmentId, projectId: project.id },
-          });
-        },
-      ],
       [
         "project-settings",
         () => {

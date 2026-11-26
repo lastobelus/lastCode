@@ -12,6 +12,11 @@ import { Command, Flag } from "effect/cli";
 
 import * as ServerConfig from "../config.ts";
 import { streamTraceFileLines, toRotatedTracePaths } from "../diagnostics/TraceDiagnostics.ts";
+import {
+  formatStorageCleanupInventory,
+  makeStorageCleanupInventorySummary,
+  STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+} from "../observability/StorageCleanupInventoryTrace.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import { baseDirFlag, DurationFromString, traceFileConfig, traceMaxFilesConfig } from "./config.ts";
 
@@ -30,7 +35,10 @@ const decodeTraceSpanLine = Schema.decodeUnknownOption(
         }),
       ),
       attributes: Schema.optional(
-        Schema.Struct({ "effect.fiber.interrupted": Schema.optional(Schema.Unknown) }),
+        Schema.Struct({
+          "effect.fiber.interrupted": Schema.optional(Schema.Unknown),
+          [STORAGE_CLEANUP_INVENTORY_ATTRIBUTE]: Schema.optional(Schema.Unknown),
+        }),
       ),
     }),
   ),
@@ -43,6 +51,7 @@ export function makeTraceSpanSummary(window?: { nowMs: number; duration: Duratio
       ? BigInt(window.nowMs) * 1_000_000n - Duration.toNanosUnsafe(window.duration)
       : undefined;
   const byName = new Map<string, { durations: number[]; interrupted: number; failures: number }>();
+  const cleanupInventory = makeStorageCleanupInventorySummary();
   let spanCount = 0;
   let skippedLineCount = 0;
   let firstEndMs = Infinity;
@@ -69,6 +78,17 @@ export function makeTraceSpanSummary(window?: { nowMs: number; duration: Duratio
         : endMs < sinceMs;
     if (beforeWindow) return;
 
+    const interrupted =
+      span.exit?._tag === "Interrupted" ||
+      span.attributes?.["effect.fiber.interrupted"] === true ||
+      span.status?.message === "Interrupted";
+    const failed = span.exit?._tag === "Failure" || span.status?.code === "2";
+    if (!interrupted && !failed)
+      cleanupInventory.add(
+        span.name,
+        endMs,
+        span.attributes?.[STORAGE_CLEANUP_INVENTORY_ATTRIBUTE],
+      );
     spanCount += 1;
     firstEndMs = Math.min(firstEndMs, endMs);
     lastEndMs = Math.max(lastEndMs, endMs);
@@ -79,14 +99,8 @@ export function makeTraceSpanSummary(window?: { nowMs: number; duration: Duratio
     lastPrintedMs = Math.max(lastPrintedMs, printedMs);
     const stats = byName.get(span.name) ?? { durations: [], interrupted: 0, failures: 0 };
     stats.durations.push(span.durationMs);
-    if (
-      span.exit?._tag === "Interrupted" ||
-      span.attributes?.["effect.fiber.interrupted"] === true ||
-      span.status?.message === "Interrupted"
-    ) {
-      stats.interrupted += 1;
-    }
-    if (span.exit?._tag === "Failure" || span.status?.code === "2") stats.failures += 1;
+    if (interrupted) stats.interrupted += 1;
+    if (failed) stats.failures += 1;
     byName.set(span.name, stats);
   };
 
@@ -116,6 +130,7 @@ export function makeTraceSpanSummary(window?: { nowMs: number; duration: Duratio
       lastEndMs: lastPrintedMs,
       minutes,
       spans,
+      cleanupInventory: cleanupInventory.finish(),
     };
   };
 
@@ -167,6 +182,7 @@ export function formatTraceSummary(
     ...(summary.spans.length > limit
       ? ["", `${summary.spans.length - limit} more span names. Use --limit to show more.`]
       : []),
+    ...formatStorageCleanupInventory(summary.cleanupInventory, formatIso, formatMs),
   ].join("\n");
 }
 

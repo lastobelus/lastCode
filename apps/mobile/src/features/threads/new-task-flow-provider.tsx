@@ -21,7 +21,6 @@ import {
   repositoryGroupingKeyOf,
   ThreadId,
 } from "@t3tools/contracts";
-import { threadContextsOutsideEnvironment } from "@t3tools/shared/composerContextReferences";
 import { isTriagePrompt, replaceTriagePlaybookLink } from "@t3tools/shared/triagePrompt";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
@@ -42,7 +41,6 @@ import { scopedProjectKey } from "../../lib/scopedEntities";
 import { useAtomValue } from "@effect/atom-react";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
-import { useLinkedEnvironments } from "../../state/peerLinks";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
@@ -179,8 +177,6 @@ type NewTaskFlowContextValue = {
     readonly environmentLabel: string;
   }>;
   readonly selectedProject: EnvironmentProject | null;
-  /** The machines the selected project's environment links to, whose threads it can read. */
-  readonly linkedEnvironments: ReadonlyMap<EnvironmentId, string>;
   readonly isScratchDraft: boolean;
   readonly modelOptions: ReadonlyArray<ModelOption>;
   readonly selectedModel: ModelSelection | null;
@@ -360,7 +356,6 @@ export function NewTaskFlowProvider(
         projectsForEnvironment[0] ??
         null);
 
-  const linkedEnvironments = useLinkedEnvironments(selectedProject?.environmentId ?? null);
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const modelSelectionNow = useNowMinuteMs();
   const projectDefaults = useNewTaskProjectDefaults(selectedProject);
@@ -801,16 +796,6 @@ export function NewTaskFlowProvider(
     if ((text.length === 0 && draft.attachments.length === 0) || !draftModelSelection) {
       return null;
     }
-    if (
-      threadContextsOutsideEnvironment({
-        text: draft.text,
-        records: draft.context?.records ?? [],
-        environmentId: selectedProject.environmentId,
-        linkedEnvironments,
-      }).length > 0
-    ) {
-      return null;
-    }
     const workspaceSelection = resolveWorkspaceSelection(draft.workspaceSelection);
     const mode = workspaceSelection.mode;
     return {
@@ -944,7 +929,6 @@ export function NewTaskFlowProvider(
     expandedProvider,
     environments,
     selectedProject,
-    linkedEnvironments,
     isScratchDraft,
     modelOptions,
     selectedModel,

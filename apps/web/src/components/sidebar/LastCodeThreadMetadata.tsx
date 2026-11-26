@@ -1,8 +1,11 @@
+import { useGT, useMessages } from "gt-react";
 import type { CSSProperties, ReactNode } from "react";
+import { resolveThreadActivityTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import type { SidebarThreadSummary } from "../../types";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { useClientSetting } from "../../hooks/useSettings";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { PopoverCreateHandle, PopoverTrigger } from "../ui/popover";
@@ -30,6 +33,7 @@ export function LastCodeThreadMetadataEnvironment({
   providerEntry: ProviderInstanceEntry | null;
   preferences: SidebarProviderBadgePreferences;
 }) {
+  const gt = useGT();
   return (
     <span
       className="inline-flex h-3 w-full items-center justify-center"
@@ -41,7 +45,7 @@ export function LastCodeThreadMetadataEnvironment({
             render={
               <span
                 aria-label={[
-                  label ?? "Remote",
+                  label ?? gt("Remote", { $context: "environment location" }),
                   preferences.enabled ? providerEntry?.displayName : null,
                 ]
                   .filter(Boolean)
@@ -83,18 +87,23 @@ function TimestampContent({
   highlighted: boolean;
   annotated: boolean;
 }) {
+  const messages = useMessages();
+  const nowMinute = useNowMinute();
   if (jumpLabel)
     return (
       <span className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-3xs font-medium tracking-tight text-warning-foreground shadow-sm">
         {jumpLabel}
       </span>
     );
+  const timestamp = resolveThreadActivityTimestamp(thread);
   return (
     <span
       className={`${annotated ? "border-b border-dotted border-warning " : ""}text-3xs tabular-nums ${highlighted ? "text-foreground" : "text-secondary-label"}`}
       data-lastcode-sidebar-unscaled-content
     >
-      {formatRelativeTimeLabel(thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt)}
+      {timestamp === null
+        ? null
+        : formatRelativeTimeLabel(timestamp, Date.parse(`${nowMinute}:00.000Z`), messages)}
     </span>
   );
 }
@@ -109,14 +118,18 @@ function Timestamp({
   highlighted: boolean;
   annotationHandle: AnnotationHandle;
 }) {
+  const gt = useGT();
   const annotated = thread.annotation?.resolvedAt === null;
   if (annotated)
     return (
       <PopoverTrigger
         aria-label={
           jumpLabel
-            ? `${jumpLabel}; show annotation for ${thread.title}`
-            : `Show annotation for ${thread.title}`
+            ? gt("{shortcut}; show annotation for {title}", {
+                shortcut: jumpLabel,
+                title: thread.title,
+              })
+            : gt("Show annotation for {title}", { title: thread.title })
         }
         handle={annotationHandle}
         onPointerDown={(event) => event.stopPropagation()}

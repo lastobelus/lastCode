@@ -12,7 +12,6 @@ import * as Layer from "effect/Layer";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
-import type * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { describe, expect, it } from "vite-plus/test";
@@ -331,24 +330,25 @@ const layerTailscaleUp = Layer.succeed(
   ),
 );
 
-const T3_DESCRIPTOR_BODY = JSON.stringify({
-  environmentId: "serve-test",
-  label: "Serve test",
-  platform: { os: "darwin", arch: "arm64" },
+const environmentId = EnvironmentId.make("environment-direct-endpoints");
+const descriptor = {
+  environmentId,
+  label: "Workstation",
+  platform: { os: "linux" as const, arch: "x64" as const },
   serverVersion: "0.0.0-test",
   capabilities: { repositoryIdentity: true },
-});
-
-const serveProbeResponse = (request: HttpClientRequest.HttpClientRequest, status: number) =>
-  HttpClientResponse.fromWeb(
-    request,
-    new Response(status === 200 ? T3_DESCRIPTOR_BODY : null, { status }),
-  );
-
-const layerServeProbe = (status: number) =>
+};
+const layerServeProbe = (status: number, peerId: string) =>
   Layer.succeed(
     HttpClient.HttpClient,
-    HttpClient.make((request) => Effect.succeed(serveProbeResponse(request, status))),
+    HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({ ...descriptor, environmentId: peerId }, { status }),
+        ),
+      ),
+    ),
   );
 
 const layerServeConfig = (host = "127.0.0.1") =>
@@ -366,13 +366,13 @@ const layerServeConfig = (host = "127.0.0.1") =>
     Layer.provide(NodeServices.layer),
     Layer.merge(
       Layer.succeed(ServerEnvironment.ServerEnvironment, {
-        getEnvironmentId: Effect.succeed(EnvironmentId.make("serve-test")),
-        getDescriptor: Effect.die("unused"),
+        getEnvironmentId: Effect.succeed(environmentId),
+        getDescriptor: Effect.succeed(descriptor),
       }),
     ),
   );
 
-const resolveWithServe = (probeStatus: number) =>
+const resolveWithServe = (probeStatus: number, peerId: string = environmentId) =>
   Effect.flatMap(DirectEndpoints.DirectEndpoints, (service) => service.resolve()).pipe(
     Effect.provide(
       DirectEndpoints.layer.pipe(
@@ -380,7 +380,7 @@ const resolveWithServe = (probeStatus: number) =>
           Layer.mergeAll(
             layerServeConfig(),
             layerTailscaleUp,
-            layerServeProbe(probeStatus),
+            layerServeProbe(probeStatus, peerId),
             NodeFileSystem.layer,
           ),
         ),
@@ -425,7 +425,9 @@ describe("DirectEndpoints Tailscale Serve", () => {
                           )
                         : Effect.void,
                     ),
-                    Effect.map((status) => serveProbeResponse(request, status)),
+                    Effect.map((status) =>
+                      HttpClientResponse.fromWeb(request, Response.json(descriptor, { status })),
+                    ),
                   ),
                 ),
               ),
@@ -453,9 +455,12 @@ describe("DirectEndpoints Tailscale Serve", () => {
       }),
   );
 
-  effectIt.effect("leaves the tailnet name out when Serve is not forwarding", () =>
+  effectIt.effect.each([
+    { status: 502, peerId: environmentId },
+    { status: 200, peerId: "environment-other" },
+  ])("leaves the tailnet name out for $status and $peerId", ({ status, peerId }) =>
     Effect.gen(function* () {
-      expect(yield* resolveWithServe(502)).toEqual([]);
+      expect(yield* resolveWithServe(status, peerId)).toEqual([]);
     }),
   );
 });

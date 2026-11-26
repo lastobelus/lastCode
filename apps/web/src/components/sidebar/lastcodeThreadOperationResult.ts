@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -14,8 +16,8 @@ export function reportThreadOperationFailure(
   toastManager.add(
     stackedThreadToast({
       type: "error",
-      title,
-      description: error instanceof Error ? error.message : "An error occurred.",
+      title: m(title),
+      description: error instanceof Error ? error.message : m(msg("An error occurred.")),
     }),
   );
 }

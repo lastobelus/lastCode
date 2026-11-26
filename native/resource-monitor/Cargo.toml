@@ -17,6 +17,9 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Threading",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.186"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

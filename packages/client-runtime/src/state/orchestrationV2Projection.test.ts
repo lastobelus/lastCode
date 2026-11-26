@@ -6,6 +6,8 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
+  EventId,
+  ProviderDriverKind,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -133,6 +135,38 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     });
     expect(next?.thread).toEqual({ ...projection.thread, pullRequests: [links[0], updated] });
     expect(next?.thread.pullRequests?.[0]).toBe(links[0]);
+  });
+
+  it.each([
+    "thread.persistence-changed",
+    "thread.annotation-upserted",
+    "thread.annotation-resolved",
+    "thread.annotation-reopened",
+    "thread.attention-set",
+    "thread.attention-cleared",
+  ] as const)("keeps LastCode metadata updates live through %s", (type) => {
+    const thread = {
+      ...emptyProjection.thread,
+      persistent: true,
+      annotation: {
+        body: "Keep this review open",
+        anchorMessageId: MessageId.make("annotation-anchor"),
+        createdAt: "2026-06-20T00:00:00.000Z",
+        updatedAt: "2026-06-20T00:00:00.000Z",
+        resolvedAt: null,
+      },
+    };
+    const next = applyOrchestrationV2ProjectionEvent(emptyProjection, {
+      id: EventId.make(`metadata-${type}`),
+      type,
+      threadId,
+      driver: ProviderDriverKind.make("codex"),
+      occurredAt: now,
+      payload: thread,
+    });
+    expect(next?.thread).toBe(thread);
+    expect(next?.visibleTurnItems).toBe(emptyProjection.visibleTurnItems);
+    expect(next?.runs).toBe(emptyProjection.runs);
   });
 
   it("keeps live token usage when the terminal provider turn omits it", () => {

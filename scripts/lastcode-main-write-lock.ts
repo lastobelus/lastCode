@@ -5,6 +5,41 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 export const MAIN_WRITE_LOCK_REF = "refs/lastcode/main-write-lock";
+// Only the guarded merge and the checkpoint publisher post this status, under the main-write lock.
+export const LASTCODE_GUARDED_MERGE_CONTEXT = "lastcode:merge";
+// GitHub can only attach a status to a commit it already has.
+export const MAIN_WRITE_CANDIDATE_REF = "refs/lastcode/main-write-candidate";
+
+export function guardedMergeStatusArgs(
+  repository: string,
+  commit: string,
+  state: "success" | "failure",
+): ReadonlyArray<string> {
+  const description =
+    state === "success"
+      ? "Approved under the main-write lock by lastcode:merge or the checkpoint publisher."
+      : "The guarded write did not complete. Merge only with pnpm lastcode:merge.";
+  return [
+    "api",
+    "--method",
+    "POST",
+    `repos/${repository}/statuses/${commit}`,
+    "-f",
+    `state=${state}`,
+    "-f",
+    `context=${LASTCODE_GUARDED_MERGE_CONTEXT}`,
+    "-f",
+    `description=${description}`,
+  ];
+}
+
+export function githubRepositoryFromRemoteUrl(url: string): string | null {
+  const match =
+    /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|ssh:\/\/git@github\.com(?::\d+)?\/|git@github\.com:)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/u.exec(
+      url.trim(),
+    );
+  return match?.[1] ?? null;
+}
 
 // Preserve native result ordering: parse the report before classifying failed writes.
 // Only a hook receipt or a rejected-only ref report proves no write landed.
@@ -84,6 +119,16 @@ export function acquireMainWriteLock(
   const assertActive = () => {
     if (released || uncertain) throw new Error(`Main write lock is not available: ${identity}.`);
   };
+  // Marks `commit` as written by a guarded writer; a ruleset requiring this status refuses others.
+  const approve = (repository: string, commit: string): void => {
+    assertActive();
+    const result = command("gh", guardedMergeStatusArgs(repository, commit, "success"));
+    if (result.error || result.status !== 0) {
+      throw new Error(
+        `Could not post the ${LASTCODE_GUARDED_MERGE_CONTEXT} status on ${commit} under ${identity}.\n${result.error?.message ?? result.stderr.trim()}`,
+      );
+    }
+  };
   return {
     push(args: ReadonlyArray<string>): void {
       assertActive();
@@ -162,6 +207,23 @@ export function acquireMainWriteLock(
         throw new Error(`PR merge has not completed at the expected head under ${identity}.`);
       }
       uncertain = false;
+    },
+    approve,
+    // A main push needs the status too. Returns null for a remote that is not on GitHub.
+    approvePush(commit: string): string | null {
+      assertActive();
+      const url = command("git", ["remote", "get-url", "--push", remote]);
+      const repository = githubRepositoryFromRemoteUrl(url.status === 0 ? url.stdout : remote);
+      if (!repository) return null;
+      git(["push", "--no-verify", "--force", remote, `${commit}:${MAIN_WRITE_CANDIDATE_REF}`]);
+      approve(repository, commit);
+      return repository;
+    },
+    // Best effort: a stale success would let a later unguarded merge of the same head through.
+    revoke(repository: string, commit: string): string | null {
+      const result = command("gh", guardedMergeStatusArgs(repository, commit, "failure"));
+      if (!result.error && result.status === 0) return null;
+      return `Could not reset the ${LASTCODE_GUARDED_MERGE_CONTEXT} status on ${commit}; set it to failure by hand.\n${result.error?.message ?? result.stderr.trim()}`;
     },
     release(): void {
       if (released) return;

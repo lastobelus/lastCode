@@ -1,3 +1,4 @@
+import { T } from "gt-react";
 import type { ReactNode } from "react";
 import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
 import {
@@ -137,7 +138,7 @@ function ActionResultBody({
       {details.length > 0 && expanded ? <ActionDetails details={details} /> : null}
       {followUp.detailedOutputAvailable && details.length === 0 ? (
         <p className="mt-0.5 text-xs text-muted-foreground">
-          Detailed output retained in the Action terminal.
+          <T>Detailed output retained in the Action terminal.</T>
         </p>
       ) : null}
     </div>
@@ -180,7 +181,7 @@ function AutomatedFollowUp({
     <div className="mx-1 rounded-lg border border-warning/25 bg-warning/6 px-3 py-2.5">
       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-warning-foreground">
         <BotIcon aria-hidden className="size-3.5" />
-        Automated follow-up
+        <T>Automated follow-up</T>
       </div>
       <div className="text-sm text-foreground/90">
         <ChatMarkdown

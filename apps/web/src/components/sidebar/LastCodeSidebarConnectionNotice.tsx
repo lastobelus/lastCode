@@ -1,3 +1,4 @@
+import { T, Var } from "gt-react";
 import { TriangleAlertIcon } from "lucide-react";
 import { isDesktopLocalConnectionTarget } from "../../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../../connection/useDesktopLocalBootstraps";
@@ -38,18 +39,26 @@ export function LastCodeSidebarConnectionNotice() {
       {connecting.length > 0 ? (
         <Alert variant="sidebar">
           <Spinner />
-          <AlertTitle>Connecting {connecting.join(", ")}</AlertTitle>
+          <AlertTitle>
+            <T>
+              Connecting <Var>{connecting.join(", ")}</Var>
+            </T>
+          </AlertTitle>
         </Alert>
       ) : null}
       {failed.length > 0 ? (
         <Alert variant="warning">
           <TriangleAlertIcon />
-          <AlertTitle>Couldn't connect {failed.map((entry) => entry.label).join(", ")}</AlertTitle>
+          <AlertTitle>
+            <T>
+              Couldn't connect <Var>{failed.map((entry) => entry.label).join(", ")}</Var>
+            </T>
+          </AlertTitle>
           <AlertDescription>
             {failed
               .map((entry) => entry.error)
               .filter(Boolean)
-              .join("; ") || "The backend didn't respond."}
+              .join("; ") || <T>The backend didn't respond.</T>}
           </AlertDescription>
         </Alert>
       ) : null}

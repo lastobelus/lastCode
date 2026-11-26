@@ -1,5 +1,8 @@
+import * as LinkedArchiveTools from "./LastCodeLinkedArchiveTools.ts";
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
-  type CommandId,
+  CommandId,
   type RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
@@ -10,15 +13,18 @@ import {
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
+import { getRecordedThreadOwner } from "@t3tools/shared/threadOwnership";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertFullAccess,
   dispatchFailure,
   newCommandId,
   readCaller,
   readThread,
   unavailable,
+  resolveProjectId,
 } from "../../threadAccess.ts";
 import type * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
@@ -103,11 +109,87 @@ const required = <A>(value: A | undefined, name: string) =>
         }),
       )
     : Effect.succeed(value);
+
+/** Failed participants inspect, retry, and dismiss the original archive owner's attempt. */
+const readArchiveThread = Effect.fn("mcp.readArchiveThread")(function* (threadId?: ThreadId) {
+  const context = yield* readThread(threadId);
+  const thread = context.projection.thread;
+  const failedArchive =
+    thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
+  const ownerContext =
+    failedArchive !== undefined && failedArchive.threadId !== thread.id
+      ? yield* readThread(failedArchive.threadId)
+      : context;
+  return { ...ownerContext, observedArchiveCommandId: failedArchive?.commandId };
+});
+/** A tool that changes `threadId`, or the caller's own thread when it is omitted. */
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
-export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+type ThreadHandlers = McpToolAccess.Handlers<typeof ThreadToolkit.tools>;
+
+const handlers = (archive: LinkedArchiveTools.LinkedArchiveTools): ThreadHandlers => ({
+  t3_thread_group: McpToolAccess.writesThreads(
+    (input) =>
+      input.items.flatMap((item) => [
+        item.threadId,
+        ...(item.groupedUnderThreadId === null ? [] : [item.groupedUnderThreadId]),
+      ]),
+    (input) =>
+      Effect.gen(function* () {
+        const caller = yield* readCaller();
+        const projectId = yield* resolveProjectId(caller, input.projectId);
+        const namespace = caller.scope.requestNamespace;
+        const items = input.items.map((item) => ({
+          ...item,
+          commandId: CommandId.make(
+            `mcp:group:${encodeURIComponent(namespace)}:${encodeURIComponent(input.clientRequestId)}:${encodeURIComponent(item.threadId)}`,
+          ),
+        }));
+        return {
+          items: yield* caller.threads.setThreadParents({ projectId, items }),
+          atomic: false as const,
+        };
+      }),
+  ),
+  t3_thread_recover: writesThread((input) =>
+    Effect.gen(function* () {
+      yield* readThread(input.threadId);
+      const service = yield* ThreadRecovery.ThreadRecoveryService;
+      yield* service
+        .recover(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+      return { ok: true as const };
+    }),
+  ),
+  t3_thread_repair: writesThread((input) =>
+    Effect.gen(function* () {
+      yield* readCaller().pipe(
+        Effect.tap((caller) =>
+          assertFullAccess(
+            caller,
+            "Starting a repair agent requires a live full-access/default thread or a full-access client.",
+          ),
+        ),
+      );
+      yield* readThread(input.threadId);
+      const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
+      return yield* service
+        .launch(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
@@ -239,7 +321,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         } = yield* readThread(input.threadId);
         const type = modelSelectionCommandType(thread.providerInstanceId, modelSelection);
         const result = yield* threads
-          .dispatch({ type, threadId: thread.id, commandId: yield* newCommandId(), modelSelection })
+          .dispatch({
+            type,
+            threadId: thread.id,
+            commandId: yield* newCommandId(),
+            modelSelection,
+          })
           .pipe(Effect.mapError(dispatchFailure));
         return { sequence: result.sequence };
       }),
@@ -307,6 +394,16 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
               : unavailable(),
           ),
         );
+    }),
+  ),
+  t3_thread_archive_family: writesThread((input) =>
+    Effect.gen(function* () {
+      const context = yield* readArchiveThread(input.threadId);
+      const { threads, projection } = context;
+      return yield* threads.getThreadArchiveFamily(projection.thread.id).pipe(
+        Effect.flatMap((family) => archive.preview(projection.thread.id, family, context)),
+        Effect.mapError(unavailable),
+      );
     }),
   ),
   t3_queue: McpToolAccess.either(
@@ -402,15 +499,78 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection, caller } = yield* readThread(input.threadId);
+      const { threads, projection, caller, scope, observedArchiveCommandId } =
+        yield* input.action === "archive" ||
+        (input.action === "unarchive" && input.expectedArchiveCommandId !== undefined)
+          ? readArchiveThread(input.threadId)
+          : readThread(input.threadId).pipe(
+              Effect.map((context) => ({ ...context, observedArchiveCommandId: undefined })),
+            );
+      const expectedArchiveCommandId = input.expectedArchiveCommandId ?? observedArchiveCommandId;
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       if (input.action === "settle") {
         return yield* threads
           .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
           .pipe(Effect.mapError(dispatchFailure));
       }
+      if (input.action === "promote" || input.action === "return_to_owner") {
+        const result = yield* threads
+          .dispatch({ ...common, type: "thread.ownership.change", action: input.action })
+          .pipe(Effect.mapError(dispatchFailure));
+        return {
+          sequence: result.sequence,
+          ...(input.action === "return_to_owner"
+            ? {
+                ownerStateChecked:
+                  getRecordedThreadOwner(projection.thread, scope.environmentId)?.environmentId ===
+                  scope.environmentId,
+              }
+            : {}),
+        };
+      }
       let command: OrchestrationV2Command;
       switch (input.action) {
+        case "archive":
+          if (input.expectedTemporaryProjects?.length) yield* McpToolAccess.checkEnvironmentWrite();
+          command = {
+            ...common,
+            type: "thread.archive",
+            ...(input.childDisposition === undefined
+              ? {}
+              : { childDisposition: input.childDisposition }),
+            ...(input.expectedChildThreadIds === undefined
+              ? {}
+              : { expectedChildThreadIds: input.expectedChildThreadIds }),
+            ...(input.expectedArchiveThreadIds === undefined
+              ? {}
+              : { expectedArchiveThreadIds: input.expectedArchiveThreadIds }),
+            ...(input.expectedTemporaryProjects === undefined
+              ? {}
+              : { expectedTemporaryProjects: input.expectedTemporaryProjects }),
+            ...(input.linkedArchiveSelection === undefined
+              ? {}
+              : { linkedArchiveSelection: input.linkedArchiveSelection }),
+            ...(input.expectedLinkedArchiveCommandId === undefined
+              ? {}
+              : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
+            ...(input.includeTypedInThreadIds === undefined
+              ? {}
+              : { includeTypedInThreadIds: input.includeTypedInThreadIds }),
+            ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
+          };
+          break;
+        case "unarchive":
+          command = {
+            ...common,
+            type: "thread.unarchive",
+            ...(input.expectedLinkedArchiveCommandId === undefined
+              ? {}
+              : { expectedLinkedArchiveCommandId: input.expectedLinkedArchiveCommandId }),
+            ...(input.expectedArchiveCommandId === undefined
+              ? {}
+              : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+          };
+          break;
         case "snooze":
           if (input.snoozedUntil === undefined) {
             return yield* new OrchestratorMcpFailure({
@@ -438,8 +598,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         default:
           command = { ...common, type: `thread.${input.action}` };
       }
-      const result = yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
+      return yield* archive.dispatch(command, { caller, scope }, threads);
     }),
   ),
 });
+
+export const layer = McpToolAccess.toLayer(
+  ThreadToolkit,
+  Effect.map(LinkedArchiveTools.capture, handlers),
+);

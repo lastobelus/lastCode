@@ -118,6 +118,10 @@ export function createPeerLinkEnvironmentAtoms<R, E>(
       if (wanted.every((id) => known.has(id))) return;
       registry.refresh(atom);
     },
+    preflight: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-links:preflight",
+      tag: WS_METHODS.peerLinksPreflight,
+    }),
     link: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-links:link",
       tag: WS_METHODS.peerLinksLink,

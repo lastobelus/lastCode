@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import type { EnvironmentId, LocalApi, ScopedThreadRef } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { SidebarThreadSummary } from "../../types";
@@ -21,8 +23,8 @@ export function warnPersistentBulkThread() {
   toastManager.add(
     stackedThreadToast({
       type: "warning",
-      title: "Persistent thread protected",
-      description: "Disable persistence or move it to another thread first.",
+      title: m(msg("Persistent thread protected")),
+      description: m(msg("Disable persistence or move it to another thread first.")),
     }),
   );
 }
@@ -49,10 +51,10 @@ export async function archiveLastCodeSelection(
   const outcome = await access.archiveThreads(current);
   if (!outcome) return;
   for (const failure of outcome.followupFailures)
-    reportThreadOperationFailure(failure, "Thread archived, but navigation failed");
+    reportThreadOperationFailure(failure, msg("Thread archived, but navigation failed"));
   if (outcome.mutationFailure) {
     access.removeFromSelection(outcome.archivedThreadKeys);
-    reportThreadOperationFailure(outcome.mutationFailure, "Failed to archive threads");
+    reportThreadOperationFailure(outcome.mutationFailure, msg("Failed to archive threads"));
     return;
   }
   access.removeFromSelection(originalKeys);
@@ -63,21 +65,38 @@ export async function deleteLastCodeSelection(
   access: SelectionAccess & {
     confirm: LocalApi["dialogs"]["confirm"];
     confirmDeletion: boolean;
+    confirmSavedData?: LastCodeThreadActions["confirmThreadDeletion"];
+    deleteThreads?: LastCodeThreadActions["deleteThreads"];
     deleteThread: LastCodeThreadActions["deleteThread"];
     threadExists: (ref: ScopedThreadRef) => boolean;
   },
 ) {
-  if (access.confirmDeletion && !(await confirmSelectionDeletion(entries.length, access.confirm)))
+  const savedData = access.confirmSavedData
+    ? await access.confirmSavedData(entries.map(({ threadRef }) => threadRef))
+    : null;
+  if (savedData && (savedData._tag !== "Success" || savedData.value === null)) return;
+  if (
+    !savedData &&
+    access.confirmDeletion &&
+    !(await confirmSelectionDeletion(entries.length, access.confirm))
+  )
     return;
   if (!entries.every(({ threadRef }) => access.canOperate(threadRef.environmentId))) return;
   const current = currentOperableEntries(entries, access);
   if (!current) return;
-  const { deletedThreadKeys, firstFailure } = await deleteSelectedThreadEntries({
-    entries: current,
-    delete: ({ threadRef }, deletedThreadKeys) =>
-      access.deleteThread(threadRef, { deletedThreadKeys }),
-  });
-  if (firstFailure) reportThreadOperationFailure(firstFailure, "Failed to delete threads");
+  if (savedData?._tag === "Success" && savedData.value !== null && !access.deleteThreads) return;
+  const { deletedThreadKeys, firstFailure } =
+    savedData?._tag === "Success" && savedData.value !== null && access.deleteThreads
+      ? await access.deleteThreads(
+          current.map(({ threadRef }) => threadRef),
+          savedData.value,
+        )
+      : await deleteSelectedThreadEntries({
+          entries: current,
+          delete: ({ threadRef }, deletedThreadKeys) =>
+            access.deleteThread(threadRef, { deletedThreadKeys }),
+        });
+  if (firstFailure) reportThreadOperationFailure(firstFailure, msg("Failed to delete threads"));
   access.removeFromSelection(
     getThreadKeysToDeselectAfterDelete(originalKeys, deletedThreadKeys, (key) => {
       const ref = parseScopedThreadKey(key);
@@ -88,8 +107,18 @@ export async function deleteLastCodeSelection(
 function confirmSelectionDeletion(count: number, confirm: LocalApi["dialogs"]["confirm"]) {
   return confirm(
     [
-      `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-      `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
+      m(msg("Delete {count, plural, one {{count} thread} other {{count} threads}}?", { count })),
+      count === 1
+        ? m(
+            msg(
+              "This also deletes any of its subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.",
+            ),
+          )
+        : m(
+            msg(
+              "This also deletes any of their subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.",
+            ),
+          ),
     ].join("\n"),
     { variant: "destructive" },
   );

@@ -111,6 +111,7 @@ export type DevShareError =
 export const unshareDevServer = (
   webPort: number,
   localTarget?: { readonly port: number; readonly host: string },
+  options: { readonly replaceVerifiedHandler?: boolean } = {},
 ): Effect.Effect<
   {
     readonly cleared: boolean;
@@ -126,6 +127,7 @@ export const unshareDevServer = (
     localHost: localTarget?.host ?? SHARED_DEV_LOOPBACK_HOST,
     localPort: localTarget?.port ?? webPort,
     servePort: webPort,
+    ...(options.replaceVerifiedHandler === true ? { replaceVerifiedHandler: true } : {}),
   }).pipe(
     Effect.as({ cleared: true } as const),
     Effect.catch((error: TailscaleServeError) =>
@@ -187,7 +189,9 @@ export const shareDevServer = Effect.fn("devShare.shareDevServer")(function* (in
     return yield* new DevServePortTakenError({ webPort: input.webPort });
   }
 
-  const cleared = yield* unshareDevServer(input.webPort, target);
+  const cleared = yield* unshareDevServer(input.webPort, target, {
+    replaceVerifiedHandler: holder === "dead",
+  });
   if (!cleared.cleared) {
     // Refuse stale routes: the page could load while /ws and /api still point at a dead backend.
     return yield* new DevServeFailedError({
@@ -202,6 +206,7 @@ export const shareDevServer = Effect.fn("devShare.shareDevServer")(function* (in
     localPort: target.port,
     servePort: input.webPort,
     localHost: target.host,
+    replaceVerifiedHandler: holder === "dead",
   }).pipe(
     Effect.mapError((error) => {
       const explanation = explainCommandFailure(error);

@@ -1,5 +1,8 @@
 import type { RepositoryIdentity, SourceControlProviderError } from "@t3tools/contracts";
-import { parseGitRemoteHost } from "@t3tools/source-control-core/shared/definition";
+import {
+  hasDistinctLastCodeWebOrigins,
+  parseGitRemoteHost,
+} from "@t3tools/source-control-core/shared/definition";
 import { repositoryPathFromRemoteUrl } from "@t3tools/source-control-core/server/SourceControlProvider";
 import { withoutRemoteUrlCredentials } from "@t3tools/shared/cloneUrl";
 import { canonicalRepositoryPath, normalizeGitRemoteUrl } from "@t3tools/shared/git";
@@ -81,12 +84,7 @@ function parseRemoteFetchUrls(
       (sourceControlDefinitions.recognizeRemote(configuredUrl)?.kind ?? "unknown") !== "unknown"
         ? configuredUrl
         : fetchUrl;
-    if (
-      direction !== "fetch" ||
-      remoteName.length === 0 ||
-      remoteUrl.length === 0 ||
-      isLocalRemoteUrl(remoteUrl)
-    ) {
+    if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
       continue;
     }
     // The identity names the remote, not the login used to reach it.
@@ -205,10 +203,12 @@ function buildRepositoryOrigin(
   originUrl: string | undefined,
   originKeyUrl: string | undefined,
   canonicalKey: string,
+  remoteUrl: string,
 ): RepositoryIdentity["origin"] {
   if (!originUrl) return undefined;
   const originKey = sourceControlDefinitions.repositoryKeyFromRemote(originKeyUrl ?? originUrl);
-  if (originKey === canonicalKey) return undefined;
+  if (originKey === canonicalKey && !hasDistinctLastCodeWebOrigins(remoteUrl, originUrl))
+    return undefined;
   const displayName = repositoryPathOf(originKey, originUrl);
   return { canonicalKey: originKey, remoteUrl: originUrl, ...(displayName ? { displayName } : {}) };
 }
@@ -227,7 +227,12 @@ function buildRepositoryIdentity(input: {
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
   const repositoryName = repositoryPathSegments.at(-1);
-  const origin = buildRepositoryOrigin(input.originUrl, input.originKeyUrl, canonicalKey);
+  const origin = buildRepositoryOrigin(
+    input.originUrl,
+    input.originKeyUrl,
+    canonicalKey,
+    input.remoteUrl,
+  );
 
   return {
     canonicalKey,
@@ -369,10 +374,11 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
   // Exits 1 when no key matches.
   const resolved =
     configResult._tag === "Some" && configResult.value.code === 0 ? configResult.value.stdout : "";
-  const remotes = parseRemoteFetchUrls(
+  const fetchRemotes = parseRemoteFetchUrls(
     remoteResult.value.stdout,
     parseConfiguredRemoteUrls(resolved),
   );
+  const remotes = new Map([...fetchRemotes].filter(([, url]) => !isLocalRemoteUrl(url)));
   const remote = pickPrimaryRemote(remotes, resolved);
   if (!remote) return null;
   const originUrl = remotes.get("origin");
@@ -381,13 +387,16 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     originUrl === undefined || originUrl === remote.remoteUrl
       ? keyUrl
       : yield* sshResolvedRemoteUrl(originUrl);
-  return buildRepositoryIdentity({
+  const identity = buildRepositoryIdentity({
     ...remote,
     keyUrl,
     originUrl,
     originKeyUrl,
     rootPath: cacheKey.rootPath,
   });
+  return originUrl === undefined && fetchRemotes.has("origin")
+    ? { ...identity, originIsLocal: true as const }
+    : identity;
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (

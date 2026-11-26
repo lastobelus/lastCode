@@ -17,6 +17,7 @@ vi.mock("electron", () => ({
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as DesktopApplicationMenu from "./DesktopApplicationMenu.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -141,6 +142,9 @@ const configureMenu = (
   applicationMenuTemplate: Deferred.Deferred<readonly Electron.MenuItemConstructorOptions[]>,
   environment: Partial<DesktopEnvironment.MakeDesktopEnvironmentInput> = {},
   services: MenuServices = {},
+  openPath: ElectronShell.ElectronShell["Service"]["openPath"] = () =>
+    Effect.die("unexpected openPath"),
+  config: Readonly<Record<string, string | undefined>> = {},
 ) =>
   Effect.gen(function* () {
     const menu = yield* DesktopApplicationMenu.DesktopApplicationMenu;
@@ -157,10 +161,18 @@ const configureMenu = (
         Layer.provideMerge(layerDesktopWindow(selectedAction)),
         Layer.provideMerge(layerDesktopUpdates(services)),
         Layer.provideMerge(layerElectronDialog(services)),
+        Layer.provideMerge(
+          Layer.succeed(ElectronShell.ElectronShell, {
+            openPath,
+            openExternal: () => Effect.die("unexpected openExternal"),
+            openSystemSettings: () => Effect.die("unexpected openSystemSettings"),
+            copyText: () => Effect.die("unexpected copyText"),
+          }),
+        ),
         Layer.provideMerge(layerElectronApp),
         Layer.provideMerge(
           DesktopEnvironment.layer({ ...environmentInput, ...environment }).pipe(
-            Layer.provide(Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({}))),
+            Layer.provide(Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest(config))),
           ),
         ),
       ),
@@ -241,6 +253,98 @@ const pressPasteAsText = (
 };
 
 describe("DesktopApplicationMenu", () => {
+  it.effect.each([
+    { platform: "darwin", t3Home: undefined, baseDir: "/desktop-user/.lastcode" },
+    { platform: "linux", t3Home: undefined, baseDir: "/desktop-user/.lastcode" },
+    { platform: "darwin", t3Home: "/desktop home", baseDir: "/desktop home" },
+    { platform: "linux", t3Home: "/desktop home", baseDir: "/desktop home" },
+  ] as const)(
+    "opens the desktop product guide from Help without a renderer action: %o",
+    ({ platform, t3Home, baseDir }) =>
+      Effect.gen(function* () {
+        const selectedAction = yield* Deferred.make<string>();
+        const openedPath = yield* Deferred.make<string>();
+        const templateReady =
+          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+
+        yield* configureMenu(
+          selectedAction,
+          templateReady,
+          { platform, homeDirectory: "/desktop-user" },
+          {},
+          (filePath) => Deferred.succeed(openedPath, filePath).pipe(Effect.asVoid),
+          { T3CODE_HOME: t3Home },
+        );
+
+        const template = yield* Deferred.await(templateReady);
+        const helpMenu = template.find((item) => item.role === "help");
+        if (!Array.isArray(helpMenu?.submenu)) {
+          throw new Error("Expected Help menu submenu to be an array.");
+        }
+        const guide = helpMenu.submenu.find((item) => item.label === "Product Guide");
+        if (typeof guide?.click !== "function") {
+          throw new Error("Expected Product Guide menu item to have a click handler.");
+        }
+
+        guide.click({} as Electron.MenuItem, undefined, {} as KeyboardEvent);
+
+        assert.equal(
+          yield* Deferred.await(openedPath),
+          `${baseDir}/local-docs/eli5-product-guide/index.html`,
+        );
+        assert.isFalse(yield* Deferred.isDone(selectedAction));
+      }),
+  );
+
+  it.effect.each(["File does not exist", "No application is associated with this file"])(
+    "shows a dialog when the guide cannot be opened: %s",
+    (cause) =>
+      Effect.gen(function* () {
+        const selectedAction = yield* Deferred.make<string>();
+        const openedPath = yield* Deferred.make<string>();
+        const messageReady = yield* Deferred.make<Electron.MessageBoxOptions>();
+        const templateReady =
+          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+        const guidePath = "/desktop-home/local-docs/eli5-product-guide/index.html";
+
+        yield* configureMenu(
+          selectedAction,
+          templateReady,
+          {},
+          {
+            onMessage: (options) => Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
+          },
+          (filePath) =>
+            Deferred.succeed(openedPath, filePath).pipe(
+              Effect.andThen(
+                Effect.fail(new ElectronShell.ElectronShellOpenPathError({ filePath, cause })),
+              ),
+            ),
+          { T3CODE_HOME: "/desktop-home" },
+        );
+
+        const template = yield* Deferred.await(templateReady);
+        const helpMenu = template.find((item) => item.role === "help");
+        if (!Array.isArray(helpMenu?.submenu)) {
+          throw new Error("Expected Help menu submenu to be an array.");
+        }
+        const guide = helpMenu.submenu.find((item) => item.label === "Product Guide");
+        if (typeof guide?.click !== "function") {
+          throw new Error("Expected Product Guide menu item to have a click handler.");
+        }
+
+        guide.click({} as Electron.MenuItem, undefined, {} as KeyboardEvent);
+
+        const dialog = yield* Deferred.await(messageReady);
+        assert.equal(yield* Deferred.await(openedPath), guidePath);
+        assert.equal(dialog.type, "warning");
+        assert.equal(dialog.title, "Product guide unavailable");
+        assert.equal(dialog.message, "Could not open the local product guide.");
+        assert.equal(dialog.detail, guidePath);
+        assert.isFalse(yield* Deferred.isDone(selectedAction));
+      }),
+  );
+
   it.effect("keeps display branding in the macOS application menu", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();

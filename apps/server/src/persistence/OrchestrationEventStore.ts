@@ -207,6 +207,9 @@ function metadataForV2Event(event: OrchestrationV2DomainEvent): Record<string, u
       ? {}
       : { providerInstanceId: event.providerInstanceId }),
     ...(event.rawEventId === undefined ? {} : { rawEventId: event.rawEventId }),
+    ...(event.type !== "thread.metadata-updated" || event.previousGroupedUnderThreadId === undefined
+      ? {}
+      : { previousGroupedUnderThreadId: event.previousGroupedUnderThreadId }),
   };
 }
 
@@ -229,6 +232,10 @@ const rowToV2StoredEvent = Effect.fnUntraced(function* (row: ApplicationEventRow
       ? {}
       : { providerInstanceId: values.providerInstanceId }),
     ...(values.rawEventId === undefined ? {} : { rawEventId: values.rawEventId }),
+    ...(row.event_type !== "thread.metadata-updated" ||
+    values.previousGroupedUnderThreadId === undefined
+      ? {}
+      : { previousGroupedUnderThreadId: values.previousGroupedUnderThreadId }),
   });
   const { sequence, commandId } = yield* decodeV2StoredEventHeader({
     sequence: row.sequence,

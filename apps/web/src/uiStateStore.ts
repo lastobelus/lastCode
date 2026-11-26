@@ -18,6 +18,8 @@ const LEGACY_PERSISTED_STATE_KEYS = [
   "codething:renderer-state:v1",
 ] as const;
 
+type ThreadAnnotationExpansion = { updatedAt: string; expanded: boolean };
+
 export interface PersistedUiState {
   projectExpandedById?: Record<string, boolean>;
   projectOrder?: string[];
@@ -29,6 +31,7 @@ export interface PersistedUiState {
   sidebarProjectScopeKey?: string | null;
   sidebarProjectScopeKeys?: string[];
   pullRequestMergeMethod?: string;
+  threadAnnotationExpansionById?: Record<string, ThreadAnnotationExpansion>;
 }
 
 export interface UiProjectState {
@@ -39,6 +42,7 @@ export interface UiProjectState {
 
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
+  threadAnnotationExpansionById: Record<string, ThreadAnnotationExpansion>;
 }
 
 export interface UiEndpointState {
@@ -57,6 +61,7 @@ const initialState: UiState = {
   projectOrder: [],
   sidebarProjectScopeKeys: [],
   threadLastVisitedAtById: {},
+  threadAnnotationExpansionById: {},
   defaultAdvertisedEndpointKey: null,
   pullRequestMergeMethod: "merge",
 };
@@ -88,6 +93,27 @@ function sanitizeBooleanRecord(value: unknown): Record<string, boolean> {
     Object.entries(value).filter(
       (entry): entry is [string, boolean] => entry[0].length > 0 && typeof entry[1] === "boolean",
     ),
+  );
+}
+
+function sanitizeThreadAnnotationExpansion(
+  value: unknown,
+): Record<string, ThreadAnnotationExpansion> {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, ThreadAnnotationExpansion] => {
+      const preference = entry[1];
+      return (
+        entry[0].length > 0 &&
+        preference !== null &&
+        typeof preference === "object" &&
+        "updatedAt" in preference &&
+        typeof preference.updatedAt === "string" &&
+        Number.isFinite(Date.parse(preference.updatedAt)) &&
+        "expanded" in preference &&
+        typeof preference.expanded === "boolean"
+      );
+    }),
   );
 }
 
@@ -140,6 +166,9 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     projectExpandedById,
     projectOrder,
     threadLastVisitedAtById: sanitizeTimestampRecord(parsed.threadLastVisitedAtById),
+    threadAnnotationExpansionById: sanitizeThreadAnnotationExpansion(
+      parsed.threadAnnotationExpansionById,
+    ),
     defaultAdvertisedEndpointKey: sanitizeOptionalKey(parsed.defaultAdvertisedEndpointKey),
     sidebarProjectScopeKeys: sanitizeStringArray(
       parsed.sidebarProjectScopeKeys ?? [parsed.sidebarProjectScopeKey],
@@ -191,6 +220,7 @@ export function persistState(state: UiState): void {
             ? (state.sidebarProjectScopeKeys[0] ?? null)
             : null,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
+        threadAnnotationExpansionById: state.threadAnnotationExpansionById,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -363,6 +393,7 @@ export function reorderProjects(
 interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
+  setThreadAnnotationExpanded: (threadKey: string, updatedAt: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKeys: (projectKeys: readonly string[]) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
@@ -374,12 +405,31 @@ interface UiStateStore extends UiState {
   ) => void;
 }
 
+export function setThreadAnnotationExpanded(
+  state: UiState,
+  threadKey: string,
+  updatedAt: string,
+  expanded: boolean,
+): UiState {
+  const current = state.threadAnnotationExpansionById[threadKey];
+  if (current?.updatedAt === updatedAt && current.expanded === expanded) return state;
+  return {
+    ...state,
+    threadAnnotationExpansionById: {
+      ...state.threadAnnotationExpansionById,
+      [threadKey]: { updatedAt, expanded },
+    },
+  };
+}
+
 export const useUiStateStore = create<UiStateStore>((set) => ({
   ...readPersistedState(),
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
   markThreadUnread: (threadId, latestTurnCompletedAt) =>
     set((state) => markThreadUnread(state, threadId, latestTurnCompletedAt)),
+  setThreadAnnotationExpanded: (threadKey, updatedAt, expanded) =>
+    set((state) => setThreadAnnotationExpanded(state, threadKey, updatedAt, expanded)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setSidebarProjectScopeKeys: (projectKeys) =>

@@ -40,6 +40,7 @@ import {
   OrchestratorDispatchError,
   OrchestratorProjectionError,
   OrchestratorProviderSelectionBusyError,
+  OrchestratorThreadArchivingError,
 } from "../../orchestration-v2/Orchestrator.ts";
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
@@ -51,6 +52,8 @@ import * as ThreadManagement from "../../orchestration-v2/ThreadManagementServic
 import type * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import * as ThreadSearch from "../../orchestration-v2/ThreadSearch.ts";
 import * as PreviewBrowser from "../../preview/PreviewBrowser.ts";
+import * as ThreadRecoveryRepair from "../../orchestration-v2/ThreadRecoveryRepairService.ts";
+import * as ThreadRecovery from "../../orchestration-v2/ThreadRecoveryService.ts";
 import * as ProjectService from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as SecretRequests from "../../secrets/SecretRequests.ts";
@@ -69,8 +72,12 @@ import { ThreadToolkit } from "./thread/tools.ts";
 import * as PeerForwarding from "../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../peer/PeerLinks.ts";
+import * as ActionResume from "../../actionResume/ActionResume.ts";
 
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -88,6 +95,8 @@ const decodeThreadSearchResult = Schema.decodeUnknownEffect(
 );
 
 const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+  Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
@@ -317,6 +326,17 @@ it("bounds public command rejections and redacts internal dispatch causes", () =
     threadId,
   });
   expect(dispatchFailure(busy)).toMatchObject({ code: "invalid_request", message: busy.message });
+  expect(
+    dispatchFailure(
+      new OrchestratorThreadArchivingError({
+        ...command,
+        threadId: ThreadId.make("mcp-archive-hold"),
+      }),
+    ),
+  ).toMatchObject({
+    code: "orchestration_error",
+    message: "This conversation is stopping before it is archived. Wait for the archive to finish.",
+  });
   for (const cause of [
     undefined,
     "",
@@ -954,6 +974,16 @@ it.effect("search names the calling thread, so an agent can tell its own match a
               }),
           }),
         ),
+        Layer.provide(
+          Layer.mock(ThreadRecovery.ThreadRecoveryService)({
+            recover: () => Effect.die("thread search must not recover a thread"),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({
+            launch: () => Effect.die("thread search must not launch a repair"),
+          }),
+        ),
         Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
         Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
         Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
@@ -1033,6 +1063,93 @@ it.effect("a read-only client reads threads and is refused every write before it
 );
 const dispatched: Array<string> = [];
 
+it.effect(
+  "repair accepts a full-access client but refuses limited clients and stale agents",
+  () => {
+    let launches = 0;
+    let targetRuntimeMode: "auto" | "full-access" = "full-access";
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (invocation: McpInvocationContext.McpInvocationScope) =>
+        server
+          .callTool({
+            name: "t3_thread_repair",
+            arguments: {
+              threadId: "repair-target",
+              runId: "repair-run",
+              attemptId: "repair-attempt",
+            },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      const escalation = yield* call(clientScope("auto"));
+      expect(declaredFailure(escalation)).toMatchObject({
+        code: "runtime_mode_escalation_denied",
+      });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "auto";
+      const limited = yield* call(clientScope("auto"));
+      expect(declaredFailure(limited)).toMatchObject({ code: "capability_denied" });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "full-access";
+      const stale = yield* call(scope);
+      expect(declaredFailure(stale)).toMatchObject({ code: "parent_not_active" });
+      expect(launches).toBe(0);
+      const accepted = yield* call(clientScope("full-access"));
+      expect(accepted.isError).toBe(false);
+      expect(accepted.structuredContent).toEqual({ threadId: "repair-conversation" });
+      expect(launches).toBe(1);
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.layerThreadToolkit.pipe(
+          Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+          Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+          Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+          Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+          Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+          Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({
+              launch: () =>
+                Effect.sync(() => {
+                  launches++;
+                  return { threadId: ThreadId.make("repair-conversation") };
+                }),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: () =>
+                Effect.succeed({
+                  id: ThreadId.make("repair-target"),
+                  projectId: "repair-project",
+                  runtimeMode: targetRuntimeMode,
+                  interactionMode: "default",
+                  archivedAt: null,
+                  deletedAt: null,
+                  activeRunId: null,
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                } as never),
+              getProjectThreadRecords: () =>
+                Effect.succeed({
+                  thread: {
+                    id: ThreadId.make("repair-target"),
+                    runtimeMode: targetRuntimeMode,
+                    interactionMode: "default",
+                  },
+                } as never),
+            }),
+          ),
+        ),
+      ),
+    );
+  },
+);
+
 it.effect("hides act-as-caller tools from a client caller", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
@@ -1054,7 +1171,12 @@ it.effect("hides act-as-caller tools from a client caller", () =>
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(ServerSettings.layerTest()),
@@ -1105,7 +1227,12 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(ServerSettings.layerTest()),
@@ -1222,6 +1349,8 @@ it.effect("run_scheduled_task_now reports why a started run failed to dispatch",
       McpHttpServer.layerThreadToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+        Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
         Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
@@ -1295,6 +1424,12 @@ it.effect.each(["t3_thread_interrupt", "t3_workflow_stop"])(
       Effect.provide(
         layerOrchestratorToolkit.pipe(
           Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(
+            Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+              forSession: () => ({ authorize: () => Effect.undefined }),
+              inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+            }),
+          ),
           Layer.provide(NodeCrypto.layer),
           Layer.provide(
             Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -1364,6 +1499,11 @@ it.effect(
                 Effect.succeed(McpToolAccessTestkit.liveThreadShell(id, { activeRunId: null })),
               awaitBackgroundTasks: ({ taskIds }) =>
                 Effect.succeed({ matched: taskIds, unmatched: [] }),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+              forSession: () => ({ authorize: () => Effect.undefined }),
             }),
           ),
           Layer.provide(ServerSettings.layerTest()),
@@ -1449,7 +1589,12 @@ it.effect("discovers workflow stop targets and requires orchestration capability
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -1665,7 +1810,12 @@ it.effect(
       Effect.provide(
         layerOrchestratorToolkit.pipe(
           Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-          Layer.provide(ThreadReadBroker.layer),
+          Layer.provide(
+            Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+              forSession: () => ({ authorize: () => Effect.undefined }),
+              inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+            }),
+          ),
           Layer.provide(NodeCrypto.layer),
           Layer.provide(
             Layer.mock(ThreadManagement.ThreadManagementService)({

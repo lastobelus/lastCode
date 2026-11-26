@@ -21,6 +21,8 @@ function deferred<T>() {
 
 const state = vi.hoisted(() => ({
   granted: new Set<string>(),
+  offline: new Set<string>(),
+  linkedArchiveAvailable: false,
   serverConfigLoaded: true,
   visitedTracking: true,
   effects: [] as string[],
@@ -44,6 +46,17 @@ function recordEffect(action: string) {
 }
 
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
+vi.mock("./useWorktreeSuspensionActions", () => ({
+  useWorktreeSuspensionActions: () => ({ menuItems: () => [], run: async () => false }),
+}));
+vi.mock("./useLastCodeLinkedArchiveRecovery", () => ({
+  LINKED_ARCHIVE_STATUS_ACTION: "linked-archive-status",
+  linkedArchiveStatusMenuItem: () =>
+    state.linkedArchiveAvailable
+      ? [{ id: "linked-archive-status", label: "Linked archive status" }]
+      : [],
+  useLastCodeLinkedArchiveRecovery: () => async () => recordEffect("linked-archive"),
+}));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
@@ -55,7 +68,8 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("../state/session", () => ({
   readEnvironmentScope: (environmentId: string, scope: string) =>
     scope === AuthOrchestrationOperateScope && state.granted.has(environmentId),
-  readEnvironmentScopeDenied: (environmentId: string) => !state.granted.has(environmentId),
+  readEnvironmentScopeDenied: (environmentId: string) =>
+    !state.granted.has(environmentId) && !state.offline.has(environmentId),
 }));
 vi.mock("../state/server", async () => {
   const { Atom } = await import("effect/reactivity");
@@ -91,7 +105,7 @@ vi.mock("../state/entities", () => ({
             commandId: "observed-failure",
           },
     persistent: state.persistent,
-    latestRun: null,
+    latestRun: { completedAt: "2026-03-09T10:00:00.000Z" },
   }),
   useProjects: () => [{ id: "project", environmentId: "secondary" }],
 }));
@@ -158,6 +172,7 @@ vi.mock("./useSettings", () => ({
     select({
       confirmThreadDelete: true,
       confirmThreadArchive: true,
+      handoffsMenuLimit: 7,
       timestampFormat: "12-hour",
     }),
 }));
@@ -181,6 +196,7 @@ vi.mock("./useThreadActions", () => ({
         "confirmAndUnpinThread",
         "archiveThread",
         "deleteThread",
+        "confirmAndDeleteThread",
       ].map((action) => [
         action,
         async (...args: unknown[]) => {
@@ -190,7 +206,9 @@ vi.mock("./useThreadActions", () => ({
               ? "mark-unread"
               : action === "markThreadRead"
                 ? "mark-read"
-                : action,
+                : action === "confirmAndDeleteThread"
+                  ? "deleteThread"
+                  : action,
           );
           return AsyncResult.success(undefined);
         },
@@ -219,6 +237,8 @@ beforeEach(() => {
   state.serverConfigLoaded = true;
   state.visitedTracking = true;
   state.granted = new Set(["primary"]);
+  state.offline.clear();
+  state.linkedArchiveAvailable = false;
   state.effects = [];
   state.completed = deferred<void>();
   state.runtime = null;
@@ -266,6 +286,30 @@ describe("thread menu permissions", () => {
     await state.completed.promise;
     expect(state.effects).toEqual([effect]);
   });
+  it("admits an offline settle from the shared menu and rechecks a later denial", async () => {
+    state.offline.add("secondary");
+    const menu = createMenu().readMenu();
+    expect(menu?.items.find((item) => item.id === "settle")).toBeDefined();
+    expect(menu?.items.find((item) => item.id === "settle")?.disabled).not.toBe(true);
+    expect(menu?.items.find((item) => item.id === "pin")?.disabled).toBe(true);
+    await menu?.run("settle");
+    expect(state.effects).toEqual(["settleThread"]);
+
+    state.offline.delete("secondary");
+    await menu?.run("settle");
+    expect(state.effects).toEqual(["settleThread"]);
+  });
+
+  it("routes linked archive status through the shared menu runner", async () => {
+    state.linkedArchiveAvailable = true;
+    const menu = createMenu().readMenu();
+    expect(menu?.items.find((item) => item.id === "linked-archive-status")?.disabled).not.toBe(
+      true,
+    );
+    await menu?.run("linked-archive-status");
+    expect(state.effects).toEqual(["linked-archive"]);
+  });
+
   it("offers find only to a header that can open it, without task permission", async () => {
     createMenu().openMenu(position);
     expect(state.show.mock.calls[0]![0].some((item) => item.id === "find")).toBe(false);

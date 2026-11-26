@@ -8,6 +8,7 @@ import { msg } from "gt-react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import { recordBrowserTabSelection } from "./browser/lastcodePreviewTabSelection";
 import { useClosedViewStore } from "./closedViewStore";
 import { m } from "./i18n/messages";
 import { resolveStorage } from "./lib/storage";
@@ -32,6 +33,7 @@ const RIGHT_PANEL_KINDS = [
   "issue",
   "thread",
   "linked-thread",
+  "handoffs",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -109,7 +111,8 @@ export type RightPanelSurface =
    */
   | ThreadSurface
   /** A linked environment's thread, read through `viaEnvironmentId`; it has no thread here. */
-  | LinkedThreadSurface;
+  | LinkedThreadSurface
+  | { id: "handoffs"; kind: "handoffs" };
 
 export type ThreadSurface = { id: `thread:${string}`; kind: "thread"; threadId: ThreadId };
 
@@ -154,6 +157,7 @@ export interface ThreadRightPanelState {
   isOpen: boolean;
   activeSurfaceId: string | null;
   surfaces: RightPanelSurface[];
+  lastcodeSelectedBrowserTabIds?: readonly string[];
   dismissedDeviceSurfaceIds?: string[];
   maximized?: true;
   proactiveDiffTurnId?: RunId;
@@ -199,7 +203,7 @@ interface RightPanelStoreState {
   setLinkedThreadTitle: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
-  openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
+  openBrowser: (ref: ScopedThreadRef, tabId: string | null, automatic?: boolean) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
   /** Moves in place; "" opens the root explorer. folderTrail keeps the return path; keepSource opens beside the source. */
   navigateFolder: (
@@ -301,6 +305,8 @@ const singletonSurface = (
       return { id: "files", kind };
     case "pull-requests":
       return { id: "pull-requests", kind };
+    case "handoffs":
+      return { id: "handoffs", kind };
     case "device":
       return { id: "device", kind };
   }
@@ -938,14 +944,15 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             ),
           })),
         ),
-      openBrowser: (ref, tabId) =>
+      openBrowser: (ref, tabId, automatic = false) =>
         set((state) =>
-          userAction(state, scopedThreadKey(ref), (current) => {
+          (automatic ? automaticUpdate : userAction)(state, scopedThreadKey(ref), (current) => {
             const surface = browserSurface(tabId);
             const withoutPlaceholder = tabId
               ? current.surfaces.filter((entry) => entry.id !== "browser:new")
               : current.surfaces;
-            return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
+            const next = upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
+            return automatic ? next : recordBrowserTabSelection(next, surface.id);
           }),
         ),
       openPullRequest: (ref, target) =>
@@ -1166,7 +1173,9 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
         ),
       activateSurface: (ref, surfaceId) =>
         set((state) =>
-          userAction(state, scopedThreadKey(ref), (current) => activated(current, surfaceId)),
+          userAction(state, scopedThreadKey(ref), (current) =>
+            recordBrowserTabSelection(activated(current, surfaceId), surfaceId),
+          ),
         ),
       revealSurface: (ref, surfaceId) =>
         set((state) =>
@@ -1270,7 +1279,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             const closedLastSessionTab =
               surfaces.length === 0 &&
               current.surfaces.some((surface) => surface.kind === "preview" && surface.resourceId);
-            return {
+            const next = {
               ...current,
               isOpen: focusedSurface ? true : closedLastSessionTab ? false : current.isOpen,
               surfaces,
@@ -1280,6 +1289,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
                   ? current.activeSurfaceId
                   : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null)),
             };
+            return recordBrowserTabSelection(next, focusedSurface?.id);
           }),
         ),
       reconcileFileSurfaces: (ref, workspaceAvailable) =>

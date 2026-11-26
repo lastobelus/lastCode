@@ -1,4 +1,4 @@
-import { deriveProviderInstanceConfigMap } from "./provider/ProviderInstanceRegistryHydration.ts";
+import { deriveProviderInstanceConfigMap } from "./provider/providerInstanceConfig.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -3328,8 +3328,8 @@ it.effect("publishes edits made before the restored settings watch is registered
                       Stream.concat(Stream.never),
                     );
                   }
-                  if (directory !== active) return fs.watch(directory, options);
-                  if (yield* Deferred.isDone(replaced)) {
+                  // Drive only the target replacement, without native notifications from startup.
+                  if (directory === active && (yield* Deferred.isDone(replaced))) {
                     yield* Deferred.succeed(registering, undefined);
                     yield* Deferred.await(allowRegistration);
                   }

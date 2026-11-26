@@ -1,4 +1,8 @@
+import { msg } from "gt-react";
+import { m, type MessageResolver } from "~/i18n/messages";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { getInteractiveThreadParentThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+import { getThreadOwner } from "@t3tools/shared/threadOwnership";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSummary } from "../types";
 import {
@@ -21,12 +25,13 @@ export interface LastCodeSidebarFamilyRow {
   descendantStatusCounts: Map<string, number>;
   createdThreadStatusCounts: Map<string, number>;
   creatorGroupingWarning: string | null;
-  groupHeading: "Created by this thread" | null;
+  groupHeading: "Grouped under this thread" | null;
   projectExpanded: boolean;
 }
 
 export type LastCodeSidebarFamilyItem =
   | { type: "thread"; row: LastCodeSidebarFamilyRow }
+  | LastCodeSidebarOwnerGroup
   | {
       type: "subagents";
       key: string;
@@ -40,17 +45,50 @@ export type LastCodeSidebarFamilyItem =
       status: ThreadStatusPill | null;
     };
 
+export interface LastCodeSidebarOwnerGroup {
+  type: "owner";
+  key: string;
+  title: string | null;
+  ownerId: ScopedThreadRef["threadId"];
+  ownerRef: ScopedThreadRef | null;
+  unavailable: boolean;
+  count: number;
+  expanded: boolean;
+  status: ThreadStatusPill | null;
+}
+
+export interface LastCodeSidebarOwnership {
+  projectKey: string;
+  byThreadKey: ReadonlyMap<string, SidebarThreadSummary>;
+  hiddenThreadKeys?: ReadonlySet<string>;
+}
+
+export function lastcodeSidebarOwnerRef(thread: SidebarThreadSummary) {
+  return getThreadOwner(
+    {
+      creatorOrigin: thread.creatorOrigin,
+      delegatedFrom: thread.delegatedFrom ?? undefined,
+      lineage: thread.lineage,
+    },
+    thread.environmentId,
+  );
+}
+
+export function lastcodeSidebarOwnerGroupKey(projectKey: string, owner: ScopedThreadRef) {
+  return JSON.stringify([projectKey, owner.environmentId, owner.threadId]);
+}
+
 export const lastcodeSidebarSubagentGroupKey = (parentKey: string) => `${parentKey}:subagents`;
 
 export const lastcodeSidebarThreadKey = (thread: SidebarThreadSummary) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 
 const RUN_STATUS_LABELS = new Map<string, string>([
-  ["failed", "Failed"],
-  ["interrupted", "Stopped"],
-  ["cancelled", "Stopped"],
-  ["rolled_back", "Stopped"],
-  ["completed", "Done"],
+  ["failed", msg("Failed")],
+  ["interrupted", msg("Stopped")],
+  ["cancelled", msg("Stopped")],
+  ["rolled_back", msg("Stopped")],
+  ["completed", msg("Done")],
 ]);
 
 export function lastcodeSidebarSubagentStatusLabel(
@@ -58,8 +96,8 @@ export function lastcodeSidebarSubagentStatusLabel(
   status: ThreadStatusPill | null,
 ): string {
   if (status && status.label !== "Completed") return status.label;
-  if (thread.runtime?.lastError) return "Failed";
-  return RUN_STATUS_LABELS.get(thread.latestRun?.status ?? "") ?? "Idle";
+  if (thread.runtime?.lastError) return msg("Failed");
+  return RUN_STATUS_LABELS.get(thread.latestRun?.status ?? "") ?? msg("Idle");
 }
 
 // The parent agent decides whether a failed subagent needs human attention.
@@ -78,51 +116,93 @@ export function lastcodeSidebarCreatorGroupingEligible(thread: SidebarThreadSumm
   return lastcodeSidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
 }
 
-function creatorDescription(
-  isAgentCreated: boolean,
-  creator: SidebarThreadSummary | null,
-  unavailableLabel: string | null,
-) {
-  if (!isAgentCreated) return null;
-  return creator ? `Creator: ${creator.title}` : (unavailableLabel ?? "Creator unknown");
+export function lastcodeSidebarThreadParentId(thread: SidebarThreadSummary) {
+  return getInteractiveThreadParentThreadId({
+    ...thread,
+    createdBy: thread.source.createdBy,
+    creationSource: thread.source.creationSource,
+  });
 }
 
-function matchingCreator(thread: SidebarThreadSummary, creator: SidebarThreadSummary | null) {
-  return creator !== null &&
-    creator.id === thread.creatorThreadId &&
-    creator.environmentId === thread.environmentId
-    ? creator
-    : null;
+export function lastcodeSidebarCreatorRef(thread: SidebarThreadSummary): ScopedThreadRef | null {
+  return (
+    thread.creatorOrigin ??
+    thread.delegatedFrom ??
+    (thread.creatorThreadId ? scopeThreadRef(thread.environmentId, thread.creatorThreadId) : null)
+  );
 }
 
-/** Resolve attribution separately from the project-local display family. */
+function matchesRef(thread: SidebarThreadSummary | null, ref: ScopedThreadRef | null) {
+  return (
+    thread !== null &&
+    ref !== null &&
+    thread.id === ref.threadId &&
+    thread.environmentId === ref.environmentId
+  );
+}
+
+/** Attribution can use recovered provenance. The grouping command still uses the legacy local creator. */
 export function lastcodeSidebarCreatorDetails(
   thread: SidebarThreadSummary,
   creator: SidebarThreadSummary | null,
+  resolve: MessageResolver = m,
+  groupingCreator = creator,
 ) {
-  const knownCreator = matchingCreator(thread, creator);
+  const ref = lastcodeSidebarCreatorRef(thread);
+  const knownCreator = matchesRef(creator, ref) ? creator : null;
   const availableCreator = knownCreator && threadShellIsVisible(knownCreator) ? knownCreator : null;
-  const isAgentCreated = lastcodeSidebarIsAgentCreated(thread);
+  const localRef = thread.creatorThreadId
+    ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
+    : null;
+  const knownGroupingCreator = matchesRef(groupingCreator, localRef) ? groupingCreator : null;
   const eligible = lastcodeSidebarCreatorGroupingEligible(thread);
+  const title =
+    availableCreator?.title ??
+    (thread.delegatedFrom?.environmentId === ref?.environmentId &&
+    thread.delegatedFrom?.threadId === ref?.threadId
+      ? thread.delegatedFrom?.title
+      : undefined);
   const unavailableLabel =
-    eligible && !availableCreator ? `Creator unavailable (${thread.creatorThreadId})` : null;
+    ref && !title ? resolve(msg("Creator unavailable ({id})", { id: ref.threadId })) : null;
   return {
-    description: creatorDescription(isAgentCreated, availableCreator, unavailableLabel),
+    description: title
+      ? resolve(msg("Creator: {title}", { title }))
+      : (unavailableLabel ??
+        (lastcodeSidebarIsAgentCreated(thread) ? resolve(msg("Creator unknown")) : null)),
     unavailableLabel: thread.creatorGrouping === "grouped" ? unavailableLabel : null,
-    groupingEligible: eligible && (!knownCreator || knownCreator.projectId === thread.projectId),
-    canOpen: eligible && availableCreator !== null,
+    groupingEligible:
+      eligible && (!knownGroupingCreator || knownGroupingCreator.projectId === thread.projectId),
+    canOpen: availableCreator !== null,
   };
 }
 
-export function lastcodeSidebarFamilySummary(row: LastCodeSidebarFamilyRow): string {
-  const summarize = (counts: ReadonlyMap<string, number>, singular: string, plural: string) => {
+export function lastcodeSidebarFamilySummary(
+  row: LastCodeSidebarFamilyRow,
+  resolve: MessageResolver = m,
+): string {
+  const summarize = (counts: ReadonlyMap<string, number>, kind: "subagent" | "grouped-thread") => {
     const total = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
     if (!total) return null;
-    return `${total} ${total === 1 ? singular : plural} (${Array.from(counts, ([label, count]) => `${count} ${label.toLowerCase()}`).join(", ")})`;
+    const statuses = Array.from(counts, ([label, count]) =>
+      resolve(msg("{count} {status}", { count, status: resolve(label).toLowerCase() })),
+    ).join(", ");
+    return kind === "subagent"
+      ? resolve(
+          msg("{total, plural, one {{total} subagent} other {{total} subagents}} ({statuses})", {
+            total,
+            statuses,
+          }),
+        )
+      : resolve(
+          msg(
+            "{total, plural, one {{total} grouped thread} other {{total} grouped threads}} ({statuses})",
+            { total, statuses },
+          ),
+        );
   };
   return [
-    summarize(row.descendantStatusCounts, "subagent", "subagents"),
-    summarize(row.createdThreadStatusCounts, "created thread", "created threads"),
+    summarize(row.descendantStatusCounts, "subagent"),
+    summarize(row.createdThreadStatusCounts, "grouped-thread"),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -160,19 +240,76 @@ function connectSubagentParents(graph: FamilyGraph) {
   }
 }
 
-function connectCreators(graph: FamilyGraph) {
-  const { byKey, parentByKey, creatorEdges } = graph;
+function connectCreators(graph: FamilyGraph, ownership: LastCodeSidebarOwnership | undefined) {
+  const { byKey, parentByKey, creatorEdges, unavailableByKey } = graph;
   for (const [key, thread] of byKey) {
-    if (!lastcodeSidebarCreatorGroupingEligible(thread) || thread.creatorGrouping !== "grouped")
-      continue;
-    const creatorId = thread.creatorThreadId!;
+    const creatorId =
+      (ownership && thread.groupedUnderThreadId) || lastcodeSidebarThreadParentId(thread);
+    if (creatorId === null) continue;
     const creatorKey = scopedThreadKey(scopeThreadRef(thread.environmentId, creatorId));
     const creator = byKey.get(creatorKey);
     if (creator && creator.projectId === thread.projectId) {
       parentByKey.set(key, creatorKey);
       creatorEdges.add(key);
+    } else if (thread.groupedUnderThreadId != null) {
+      unavailableByKey.set(key, `Parent unavailable (${creatorId})`);
     }
   }
+}
+
+type OwnerGroup = Pick<LastCodeSidebarOwnerGroup, "title" | "ownerId" | "ownerRef" | "unavailable">;
+
+function connectOwners(graph: FamilyGraph) {
+  const owners = new Map<string, ScopedThreadRef>();
+  for (const [key, thread] of graph.byKey) {
+    const owner = lastcodeSidebarOwnerRef(thread);
+    if (owner === null) continue;
+    owners.set(key, owner);
+    if (thread.groupedUnderThreadId != null && graph.parentByKey.has(key)) continue;
+    graph.parentByKey.delete(key);
+    graph.creatorEdges.delete(key);
+    const ownerKey = scopedThreadKey(owner);
+    const ownerShell = graph.byKey.get(ownerKey);
+    if (ownerShell && ownerShell.deletedAt === null && threadShellIsVisible(ownerShell)) {
+      graph.parentByKey.set(key, ownerKey);
+      graph.unavailableByKey.delete(key);
+    }
+  }
+  return owners;
+}
+
+function groupUnattachedOwnedThreads(
+  graph: FamilyGraph,
+  ownership: LastCodeSidebarOwnership,
+  owners: ReadonlyMap<string, ScopedThreadRef>,
+) {
+  const groups = new Map<string, OwnerGroup>();
+  for (const [key, owner] of owners) {
+    if (graph.parentByKey.has(key)) continue;
+    const ownerKey = scopedThreadKey(owner);
+    const groupKey = lastcodeSidebarOwnerGroupKey(ownership.projectKey, owner);
+    graph.parentByKey.set(key, groupKey);
+    const shell = graph.byKey.get(ownerKey) ?? ownership.byThreadKey.get(ownerKey);
+    const available =
+      shell !== undefined &&
+      shell.deletedAt == null &&
+      threadShellIsVisible(shell) &&
+      shell.lineage.sideChat !== true &&
+      !ownership.hiddenThreadKeys?.has(ownerKey);
+    const thread = graph.byKey.get(key)!;
+    const storedTitle = thread.delegatedFrom?.title;
+    const existing = groups.get(groupKey);
+    if (!existing || (!existing.title && storedTitle)) {
+      groups.set(groupKey, {
+        title: shell?.title || storedTitle || null,
+        ownerId: owner.threadId,
+        ownerRef: available ? owner : null,
+        // When a known owner is in this project, cycle repair detached the edge.
+        unavailable: !available || graph.byKey.has(ownerKey),
+      });
+    }
+  }
+  return groups;
 }
 
 function detachFamilyCycle(cycleKeys: readonly string[], graph: FamilyGraph) {
@@ -214,7 +351,7 @@ function detachFamilyCycles(graph: FamilyGraph) {
   }
 }
 
-function orderFamilyChildren(graph: FamilyGraph) {
+function orderFamilyChildren(graph: FamilyGraph, ownerGroups: ReadonlyMap<string, OwnerGroup>) {
   const { byKey, parentByKey } = graph;
   const childrenByKey = new Map<string, string[]>();
   const roots: string[] = [];
@@ -222,13 +359,16 @@ function orderFamilyChildren(graph: FamilyGraph) {
     const parentKey = parentByKey.get(key);
     if (!parentKey) roots.push(key);
     else {
-      const siblings = childrenByKey.get(parentKey) ?? [];
+      const current = childrenByKey.get(parentKey);
+      if (!current && ownerGroups.has(parentKey)) roots.push(parentKey);
+      const siblings = current ?? [];
       siblings.push(key);
       childrenByKey.set(parentKey, siblings);
     }
   }
   // Keep delegated work together after ordinary conversations in both layouts.
   for (const [key, children] of childrenByKey) {
+    if (ownerGroups.has(key)) continue;
     childrenByKey.set(key, [
       ...children.filter((childKey) => !isSidebarSubagentThread(byKey.get(childKey)!)),
       ...children.filter((childKey) => isSidebarSubagentThread(byKey.get(childKey)!)),
@@ -237,17 +377,41 @@ function orderFamilyChildren(graph: FamilyGraph) {
   return { childrenByKey, roots };
 }
 
-function buildFamilyGraph(threads: readonly SidebarThreadSummary[]) {
+function buildFamilyGraph(
+  threads: readonly SidebarThreadSummary[],
+  ownership?: LastCodeSidebarOwnership,
+) {
   const byKey = new Map(threads.map((thread) => [lastcodeSidebarThreadKey(thread), thread]));
   const parentByKey = new Map<string, string>();
   const unavailableByKey = new Map<string, string>();
   const creatorGroupingWarningByKey = new Map<string, string>();
   const creatorEdges = new Set<string>();
   const graph = { byKey, parentByKey, unavailableByKey, creatorGroupingWarningByKey, creatorEdges };
-  connectSubagentParents(graph);
-  connectCreators(graph);
+  if (!ownership) connectSubagentParents(graph);
+  connectCreators(graph, ownership);
+  const owners = ownership ? connectOwners(graph) : null;
   detachFamilyCycles(graph);
-  return { ...graph, ...orderFamilyChildren(graph) };
+  const ownerGroups =
+    ownership && owners
+      ? groupUnattachedOwnedThreads(graph, ownership, owners)
+      : new Map<string, OwnerGroup>();
+  return { ...graph, ownerGroups, ...orderFamilyChildren(graph, ownerGroups) };
+}
+
+export function lastcodeSidebarThreadPath(
+  threads: readonly SidebarThreadSummary[],
+  senderRef: ScopedThreadRef,
+): readonly SidebarThreadSummary[] {
+  const { byKey, parentByKey } = buildFamilyGraph(threads);
+  const path: SidebarThreadSummary[] = [];
+  let cursor: string | undefined = scopedThreadKey(senderRef);
+  while (cursor !== undefined) {
+    const thread = byKey.get(cursor);
+    if (thread === undefined) break;
+    path.push(thread);
+    cursor = parentByKey.get(cursor);
+  }
+  return path.toReversed();
 }
 
 type FamilyProjectionInput = {
@@ -257,6 +421,7 @@ type FamilyProjectionInput = {
   projectExpanded: boolean;
   previewCount: number;
   listExpanded: boolean;
+  ownership?: LastCodeSidebarOwnership | undefined;
   groupingStyle?: "minimal" | "typed-groups";
   showFamilyStatusSubheaders?: boolean;
   statusForThread?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
@@ -267,11 +432,11 @@ type FamilySelection = ReturnType<typeof selectFamilyPath>;
 type FamilyStatusMap = Map<string, ThreadStatusPill | null>;
 
 function selectFamilyPath(graph: OrderedFamilyGraph, activeThreadKey: string | null) {
-  const { byKey, parentByKey } = graph;
+  const { byKey, parentByKey, ownerGroups } = graph;
   const selectedPath = new Set<string>();
   let selectedRoot: string | null = null;
   let cursor = activeThreadKey;
-  while (cursor && byKey.has(cursor)) {
+  while (cursor && (byKey.has(cursor) || ownerGroups.has(cursor))) {
     selectedPath.add(cursor);
     selectedRoot = cursor;
     cursor = parentByKey.get(cursor) ?? null;
@@ -310,6 +475,11 @@ function buildFamilyRows(
   while (stack.length) {
     const { key, depth } = stack.pop()!;
     const children = childrenByKey.get(key) ?? [];
+    if (graph.ownerGroups.has(key)) {
+      for (let index = children.length - 1; index >= 0; index--)
+        stack.push({ key: children[index]!, depth: depth + 1 });
+      continue;
+    }
     const selectedDescendant = selectedPath.has(key) && key !== input.activeThreadKey;
     allRows.push({
       thread: byKey.get(key)!,
@@ -347,7 +517,7 @@ function familyStatuses(
         row.key,
         failed
           ? {
-              label: "Failed" as const,
+              label: msg("Failed"),
               colorClass: "text-red-700 dark:text-red-300",
               dotClass: "bg-red-600 dark:bg-red-300",
               pulse: false,
@@ -474,7 +644,12 @@ function subagentGroupsForRows(
 ) {
   const groups = new Map<string, SubagentGroup>();
   return (row: LastCodeSidebarFamilyRow) => {
-    if (!row.parentKey || !isSidebarSubagentThread(row.thread)) return null;
+    if (
+      !row.parentKey ||
+      graph.ownerGroups.has(row.parentKey) ||
+      !isSidebarSubagentThread(row.thread)
+    )
+      return null;
     let group = groups.get(row.parentKey);
     if (!group) {
       group = buildSubagentGroup(row, graph, index, visibility);
@@ -495,6 +670,33 @@ function subagentRowVisible(
   return selectedPath.has(row.key);
 }
 
+function buildOwnerGroup(
+  key: string,
+  owner: OwnerGroup,
+  graph: OrderedFamilyGraph,
+  index: FamilyRowIndex,
+  visibility: FamilyVisibility,
+): LastCodeSidebarOwnerGroup {
+  const children = graph.childrenByKey.get(key) ?? [];
+  const preference = visibility.collapsedByKey[key];
+  return {
+    ...owner,
+    type: "owner",
+    key,
+    count: children.length,
+    expanded:
+      preference === undefined
+        ? owner.unavailable || visibility.selectedPath.has(key)
+        : !preference,
+    status: resolveProjectStatusIndicator(
+      children.flatMap((childKey) => [
+        index.statusByKey.get(childKey) ?? null,
+        index.byKey.get(childKey)!.descendantsStatus,
+      ]),
+    ),
+  };
+}
+
 function renderFamilyRows(
   allRows: readonly LastCodeSidebarFamilyRow[],
   graph: OrderedFamilyGraph,
@@ -507,7 +709,29 @@ function renderFamilyRows(
   const renderedItems: LastCodeSidebarFamilyItem[] = [];
   const hiddenThreads: SidebarThreadSummary[] = [];
   const cursor = { rootIsRendered: false, collapsedDepth: null as number | null };
+  let previousOwnerGroup: string | null = null;
+  let ownerGroup: LastCodeSidebarOwnerGroup | null = null;
   for (const row of allRows) {
+    if (row.depth === 0) ownerGroup = null;
+    const owner = row.parentKey ? graph.ownerGroups.get(row.parentKey) : undefined;
+    if (owner && row.parentKey !== null && previousOwnerGroup !== row.parentKey) {
+      const key: string = row.parentKey;
+      previousOwnerGroup = key;
+      cursor.rootIsRendered = visibility.renderedRootKeys.has(key);
+      cursor.collapsedDepth = null;
+      ownerGroup = cursor.rootIsRendered
+        ? buildOwnerGroup(key, owner, graph, index, visibility)
+        : null;
+      if (ownerGroup) renderedItems.push(ownerGroup);
+    }
+    if (owner) cursor.collapsedDepth = null;
+    if (
+      ownerGroup &&
+      !ownerGroup.expanded &&
+      !visibility.selectedPath.has(row.key) &&
+      row.depth > 0
+    )
+      continue;
     const disposition = familyRowVisibility(row, cursor, visibility);
     if (disposition === "hidden") hiddenThreads.push(row.thread);
     if (disposition !== "render") continue;
@@ -524,11 +748,19 @@ function renderFamilyRows(
   return { renderedRows, renderedItems, hiddenThreads };
 }
 
-function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[]) {
+function applyCreatorHeadings(
+  renderedRows: readonly LastCodeSidebarFamilyRow[],
+  graph: OrderedFamilyGraph,
+) {
   const shownGroups = new Set<string>();
   for (const row of renderedRows) {
-    if (!row.parentKey || isSidebarSubagentThread(row.thread)) continue;
-    const heading = "Created by this thread";
+    if (
+      !row.parentKey ||
+      graph.ownerGroups.has(row.parentKey) ||
+      isSidebarSubagentThread(row.thread)
+    )
+      continue;
+    const heading = "Grouped under this thread";
     const groupKey = `${row.parentKey}:${heading}`;
     if (!shownGroups.has(groupKey)) {
       row.groupHeading = heading;
@@ -537,13 +769,12 @@ function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[])
   }
 }
 
-/** Projects sorted visible shells into owned subagent and display-only creator families.
- * Root preview limits never split a family; collapsed families retain the selected ancestor path.
- * Creator grouping only changes display placement; it never changes the conversation lineage.
- * Unavailable parents/creators and cycles leave the child reachable as an identified root.
- */
+/** Project sorted visible shells. Preview limits count families, and collapse keeps the selected path. */
 export function projectLastCodeSidebarFamilies(input: FamilyProjectionInput) {
-  const graph = buildFamilyGraph(input.threads);
+  const graph = buildFamilyGraph(
+    input.threads.filter((thread) => thread.lineage.sideChat !== true),
+    input.ownership,
+  );
   const selection = selectFamilyPath(graph, input.activeThreadKey);
   const allRows = buildFamilyRows(graph, selection, input);
   const rowByKey = new Map(allRows.map((row) => [row.key, row]));
@@ -556,7 +787,7 @@ export function projectLastCodeSidebarFamilies(input: FamilyProjectionInput) {
     index,
     familyVisibility(graph, selection, input),
   );
-  if (input.groupingStyle === "typed-groups") applyCreatorHeadings(renderedRows);
+  if (input.groupingStyle === "typed-groups") applyCreatorHeadings(renderedRows, graph);
   return {
     allRows,
     renderedRows,
@@ -567,6 +798,6 @@ export function projectLastCodeSidebarFamilies(input: FamilyProjectionInput) {
       .filter((row) => row.thread.worktreeCleanup == null)
       .map((row) => row.key),
     showEmptyThreadState: input.projectExpanded && graph.roots.length === 0,
-    shouldShowThreadPanel: input.projectExpanded || renderedRows.length > 0,
+    shouldShowThreadPanel: input.projectExpanded || renderedItems.length > 0,
   };
 }

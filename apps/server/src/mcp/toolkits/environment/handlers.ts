@@ -1,11 +1,19 @@
-import { OrchestratorMcpFailure, type ServerSettings } from "@t3tools/contracts";
+import { readEnvironmentCapacity } from "../../capacityRead.ts";
+import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
+import {
+  OrchestratorMcpFailure,
+  type EnvironmentPauseError,
+  type ServerSettings,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
+import * as EnvironmentPause from "../../../environment/EnvironmentPause.ts";
+import { EnvironmentPauseCaller } from "../../../environment/EnvironmentPauseActivity.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { readCaller, unavailable } from "../../threadAccess.ts";
+import { type Caller, readCaller, unavailable } from "../../threadAccess.ts";
 import { EnvironmentToolkit } from "./tools.ts";
 
 export function preferences(settings: ServerSettings) {
@@ -18,6 +26,7 @@ export function preferences(settings: ServerSettings) {
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
+    capacityMode: settings.capacityMode,
     defaultThreadEnvMode,
     newWorktreesStartFromOrigin,
     enableProviderUpdateChecks,
@@ -40,8 +49,95 @@ const access = Effect.gen(function* () {
     });
   return { ...context, descriptor, settings: yield* Settings.ServerSettingsService };
 });
+const pauseFailure = (error: EnvironmentPauseError) =>
+  new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message });
+const pauseCaller = ({ caller, scope }: Caller) =>
+  scope.thread === undefined || caller === undefined
+    ? null
+    : {
+        threadId: scope.thread.threadId,
+        runId: scope.thread.execution?.runId ?? caller.activeRunId,
+        providerSessionId: scope.thread.providerSessionId,
+      };
+const pauseWrite = (operation: "start" | "retry" | "resume") =>
+  McpToolAccess.writesEnvironment((_input, check) =>
+    Effect.gen(function* () {
+      const context = yield* access;
+      yield* check;
+      const pause = yield* EnvironmentPause.EnvironmentPause;
+      // Fanout dispatch acquires each recipient's lock, including the caller's.
+      return yield* pause[operation].pipe(
+        Effect.provideService(EnvironmentPauseCaller, pauseCaller(context)),
+        Effect.mapError(pauseFailure),
+      );
+    }),
+  );
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
-  t3_environment_read: McpToolAccess.reads(() =>
+  prompt_snippets_save: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      return yield* (yield* PromptSnippets.PromptSnippets)
+        .save(input)
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
+  prompt_snippets_restore: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      yield* (yield* PromptSnippets.PromptSnippets)
+        .restore(input)
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
+  prompt_snippets_dismiss: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      yield* (yield* PromptSnippets.PromptSnippets)
+        .dismiss(input)
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
+  prompt_snippets_list: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      yield* access;
+      return yield* (yield* PromptSnippets.PromptSnippets).list;
+    }),
+  ),
+  prompt_snippets_discover: McpToolAccess.writesEnvironment((_input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      return yield* (yield* PromptSnippets.PromptSnippets)
+        .discover()
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
+  prompt_snippets_record_use: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      yield* (yield* PromptSnippets.PromptSnippets)
+        .recordUse(input)
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
+  t3_environment_pause_status: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      const context = yield* access;
+      const pause = yield* EnvironmentPause.EnvironmentPause;
+      return yield* pause.status.pipe(
+        Effect.provideService(EnvironmentPauseCaller, pauseCaller(context)),
+        Effect.mapError(pauseFailure),
+      );
+    }),
+  ),
+  t3_environment_pause_start: pauseWrite("start"),
+  t3_environment_pause_retry: pauseWrite("retry"),
+  t3_environment_pause_resume: pauseWrite("resume"),
+  t3_environment_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { descriptor, settings } = yield* access;
       const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
@@ -51,6 +147,7 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
         serverVersion: descriptor.serverVersion,
         platform: descriptor.platform,
         preferences: preferences(current),
+        capacity: yield* readEnvironmentCapacity(input.includeLinked),
       };
     }),
   ),

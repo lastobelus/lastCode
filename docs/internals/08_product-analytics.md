@@ -47,3 +47,9 @@ an authenticated connection does not count as product use.
   [`otelEnvironment.ts`](../../packages/shared/src/otelEnvironment.ts). An explicit
   `T3CODE_TELEMETRY_ENABLED=true` overrides both defaults; a managed policy that denies telemetry
   overrides everything.
+
+A server can also send a copy to a compatible `/batch/` endpoint by setting both
+`LASTCODE_TELEMETRY_COPY_HOST` and `LASTCODE_TELEMETRY_COPY_KEY`. The copy is off
+when either is unset or empty. It uses the same events and telemetry opt-out, with
+its own bounded buffer and retries so its delivery cannot block upstream. Both
+queues are in memory and may lose events on shutdown or extended failure.

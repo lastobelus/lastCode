@@ -1,13 +1,15 @@
 import { generatedBuildReviewProtection } from "@t3tools/shared/generatedBuildOwnership";
+import { isGeneratedDependencyPath } from "@t3tools/shared/regenerableIgnoredPath";
 import {
   observeDependencyActivity,
+  recentVerifiedDependencyActivity,
   recordDependencyUse,
   dependencyActivitySnapshot,
 } from "@t3tools/shared/dependencyActivity";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - FileSystem lacks lstat; dependency
 // installs contain links, which must be measured and removed without following them.
-import * as NodeFSP from "node:fs/promises";
+import { promises as NodeFSP } from "@t3tools/shared/nativeFileSystem";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as Context from "effect/Context";
@@ -133,6 +135,7 @@ export class GeneratedDependencies extends Context.Service<
       persist?: boolean,
       observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
       observationTargets?: WorktreeConsumers.TargetObservation,
+      skipRecentWithinRetentionDays?: number,
     ) => Effect.Effect<
       { readonly lastUsedAt: number; readonly renewed: boolean } | null,
       GeneratedDependenciesError
@@ -360,7 +363,7 @@ const make = Effect.gen(function* () {
     if (
       !trackedPaths.includes("package.json") ||
       !trackedPaths.includes(candidate.lock) ||
-      trackedPaths.some((entry) => entry === "node_modules" || entry.startsWith("node_modules/"))
+      trackedPaths.some(isGeneratedDependencyPath)
     )
       return null;
     const ignored = yield* runGit(["check-ignore", "--quiet", "--", "node_modules/"]);
@@ -371,15 +374,18 @@ const make = Effect.gen(function* () {
     });
     return identity === null
       ? null
-      : ({
-          managedWorktreesRoot,
-          repositoryRoot,
-          repositoryCommonGitDir,
-          worktreePath,
-          dependencyPath,
-          packageManager: candidate.packageManager,
-          ...identity,
-        } satisfies Omit<DependencyInspection, "estimatedReclaimedBytes">);
+      : {
+          worktreeGitDir: NodePath.resolve(worktreePath, gitDir),
+          inspection: {
+            managedWorktreesRoot,
+            repositoryRoot,
+            repositoryCommonGitDir,
+            worktreePath,
+            dependencyPath,
+            packageManager: candidate.packageManager,
+            ...identity,
+          } satisfies Omit<DependencyInspection, "estimatedReclaimedBytes">,
+        };
   });
 
   const observe = Effect.fn("GeneratedDependencies.observe")(function* (
@@ -389,9 +395,28 @@ const make = Effect.gen(function* () {
     persist = true,
     observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
     observationTargets?: WorktreeConsumers.TargetObservation,
+    skipRecentWithinRetentionDays?: number,
   ) {
-    const current = yield* validate(input, "GeneratedDependencies.observe");
-    if (current === null) return null;
+    const validated = yield* validate(input, "GeneratedDependencies.observe");
+    if (validated === null) return null;
+    const { inspection: current, worktreeGitDir } = validated;
+    if (persist && !used && skipRecentWithinRetentionDays !== undefined) {
+      const currentTime = yield* Clock.currentTimeMillis;
+      const recent = yield* Effect.try({
+        try: () =>
+          recentVerifiedDependencyActivity(
+            worktreeGitDir,
+            current.worktreePath,
+            Math.max(now, currentTime),
+            skipRecentWithinRetentionDays,
+          ),
+        catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+      });
+      if (recent !== null && recent.lastUsedAt <= currentTime) {
+        WorktreeConsumers.recordSkippedUsageCheck(observationTargets);
+        return recent;
+      }
+    }
     let consumed = false;
     // Read-only eligibility compares durable metadata only. Unsaved OS evidence
     // must be captured by a writing observer or the native removal guards.
@@ -404,23 +429,10 @@ const make = Effect.gen(function* () {
         catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
       });
     }
-    const location = yield* git
-      .execute({
-        operation: "GeneratedDependencies.observe",
-        cwd: current.worktreePath,
-        args: ["rev-parse", "--absolute-git-dir"],
-        maxOutputBytes: 64 * 1024,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
-        ),
-      );
-    if (location.stdoutTruncated || location.stderrTruncated) return null;
     return yield* Effect.try({
       try: () =>
         observeDependencyActivity(
-          location.stdout.trim(),
+          worktreeGitDir,
           current.worktreePath,
           now,
           used || consumed,
@@ -431,8 +443,9 @@ const make = Effect.gen(function* () {
   });
 
   const inspect = Effect.fn("GeneratedDependencies.inspect")(function* (input: DependencyInput) {
-    const current = yield* validate(input);
-    if (current === null) return null;
+    const validated = yield* validate(input);
+    if (validated === null) return null;
+    const current = validated.inspection;
     const mounts = yield* mountPoints;
     if (mounts === null || DependencyMounts.containsMount(current.dependencyPath, mounts))
       return null;
@@ -460,9 +473,10 @@ const make = Effect.gen(function* () {
   const rememberConsumed = Effect.fn("GeneratedDependencies.rememberConsumed")(function* (
     current: Pick<DependencyInspection, "worktreePath" | "dependencyPath">,
     paths: ReadonlyArray<string>,
+    targets?: WorktreeConsumers.TargetObservation,
   ) {
     const consumed = yield* Effect.tryPromise({
-      try: () => consumesPath(current.dependencyPath, paths),
+      try: () => consumesPath(current.dependencyPath, paths, targets),
       catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
     });
     if (consumed) {
@@ -502,7 +516,8 @@ const make = Effect.gen(function* () {
       entries,
       ({ inspection, canRemove, isStillEligible }) =>
         Effect.gen(function* () {
-          const current = yield* validate(inspection);
+          const validatedEntry = yield* validate(inspection);
+          const current = validatedEntry?.inspection ?? null;
           if (
             current === null ||
             current.dependencyPath !== inspection.dependencyPath ||
@@ -549,22 +564,27 @@ const make = Effect.gen(function* () {
       );
       return [];
     }
+    // Query each worktree before its node_modules so one walk answers both.
+    const pathTargets = WorktreeConsumers.createTargetObservation();
     const eligible = (yield* Effect.forEach(
       validated,
       ({ current, inspection, canRemove, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
+          const rootConsumed = yield* Effect.exit(
+            Effect.tryPromise({
+              try: async () =>
+                (await consumesPath(current.worktreePath, paths, pathTargets)) ||
+                (await consumesPath(current.worktreePath, processes)),
+              catch: (cause) =>
+                new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+            }),
+          );
           // Preserve the captured native object evidence on the path observation.
-          // Plain cwd evidence remains an independent conservative check.
-          yield* rememberConsumed(current, paths);
+          // Plain cwd evidence remains an independent conservative check. Both
+          // still record use when the broader worktree proof fails.
+          yield* rememberConsumed(current, paths, pathTargets);
           yield* rememberConsumed(current, processes);
-          const rootConsumed = yield* Effect.tryPromise({
-            try: async () =>
-              (await consumesPath(current.worktreePath, paths)) ||
-              (await consumesPath(current.worktreePath, processes)),
-            catch: (cause) =>
-              new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
-          });
-          if (rootConsumed) {
+          if (yield* rootConsumed) {
             yield* decide(inspection, "kept", "An active process owns the worktree");
             return null;
           }
@@ -663,8 +683,14 @@ const make = Effect.gen(function* () {
           const consumerReason = Effect.gen(function* () {
             const paths = yield* processPaths;
             if (paths === null) return "Process file-consumer inspection is unavailable";
-            yield* rememberConsumed(current, paths);
-            return yield* WorktreeConsumers.worktreeConsumerReason(current.worktreePath, paths);
+            const targets = WorktreeConsumers.createTargetObservation();
+            const reason = yield* WorktreeConsumers.worktreeConsumerReason(
+              current.worktreePath,
+              paths,
+              targets,
+            );
+            yield* rememberConsumed(current, paths, targets);
+            return reason;
           });
           const beforeEligibility = yield* consumerReason;
           if (beforeEligibility !== null)
@@ -695,7 +721,6 @@ const make = Effect.gen(function* () {
             catch: (cause) =>
               new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
           }).pipe(
-            Effect.uninterruptible,
             Effect.tap((removed) =>
               decide(
                 inspection,
@@ -705,6 +730,8 @@ const make = Effect.gen(function* () {
                   : "Dependency install removed",
               ),
             ),
+            // Record successful deletion before releasing leases on cancellation.
+            Effect.uninterruptible,
           );
         }).pipe(
           Effect.catch((error) =>

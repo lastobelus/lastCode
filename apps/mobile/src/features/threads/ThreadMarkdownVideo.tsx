@@ -19,9 +19,11 @@ export function ThreadMarkdownVideo(props: {
   readonly thumbnailVisible?: boolean;
   readonly onPlaybackStart?: () => void;
   readonly borderRadius?: number;
+  readonly recoveryUrl?: string;
+  readonly prepareUrl?: ((url: string) => Promise<string>) | undefined;
 }) {
   const gt = useGT();
-  const { source } = props;
+  const { source, prepareUrl, recoveryUrl } = props;
   const feedVisible = useContext(ThreadMediaVisibleContext);
   const visible = props.thumbnailVisible ?? feedVisible;
   const thumbnailKey = props.thumbnailKey ?? mediaVideoThumbnailKey(source);
@@ -41,7 +43,9 @@ export function ThreadMarkdownVideo(props: {
       resolvePlaybackUri={
         "resource" in source
           ? async () => mediaVideoPreviewUri(source, await refreshAssetUrl())
-          : undefined
+          : prepareUrl && recoveryUrl
+            ? () => prepareUrl(recoveryUrl)
+            : undefined
       }
       name={source.name}
       thumbnailKey={thumbnailKey}

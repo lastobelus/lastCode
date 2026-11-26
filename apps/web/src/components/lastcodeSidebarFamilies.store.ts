@@ -37,7 +37,7 @@ export const useLastCodeSidebarFamiliesStore = create<{
 }));
 
 /** Keep project projections stable when another project's family is toggled. */
-export function useCollapsedLastCodeSidebarFamilies(threadKeys: readonly string[]) {
+export function useCollapsedLastCodeSidebarFamilies(threadKeys: Iterable<string>) {
   return useLastCodeSidebarFamiliesStore(
     useShallow((state) => {
       const collapsedByKey: Record<string, boolean> = {};

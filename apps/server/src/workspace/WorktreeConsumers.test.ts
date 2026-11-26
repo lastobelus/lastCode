@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import { it } from "@effect/vitest";
 import { beforeEach, describe, expect, vi } from "vite-plus/test";
 
+import { STORAGE_CLEANUP_INVENTORY_ATTRIBUTE } from "../observability/StorageCleanupInventoryTrace.ts";
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 
@@ -163,7 +165,188 @@ const darwinFixture = (output = lsof, stderr = "", error: Error | null = null) =
     callback(error, output, stderr),
   );
 };
+const emptyFdCapture =
+  "p123\0\nfcwd\0tDIR\0D0x12\0i1\0n/workspace/elsewhere\0\n" +
+  "ftxt\0tREG\0D0x12\0i2\0n/system/example/tool\0\n" +
+  "ferr\0nFD info error: Invalid argument\0\n";
+const helperOutput = (
+  output = emptyFdCapture,
+  header: unknown = {
+    version: 2,
+    type: "lsofCapture",
+    uid: 1000,
+    emptyFdPids: [123],
+  },
+) => `${JSON.stringify(header)}\n${output}`;
+const helperInventory = () =>
+  inventory("darwin").pipe(
+    Effect.provideService(
+      ResourceMonitorBinary.ProcessCaptureBinary,
+      Effect.succeed("/native/resource-monitor"),
+    ),
+  );
+describe("Native Darwin capture", () => {
+  it.effect("accepts only the empty table proved by the same native capture", () =>
+    Effect.gen(function* () {
+      darwinFixture(helperOutput());
+      const paths = yield* helperInventory();
+      expect(paths).toEqual(["/workspace/elsewhere", "/system/example/tool"]);
+      expect(yield* guard(paths)).toBeNull();
+      expect(native.execFile).toHaveBeenCalledWith(
+        "/native/resource-monitor",
+        ["capture-lsof-v2", "1000"],
+        { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 + 100_000 * 12 + 128 },
+        expect.any(Function),
+      );
+      expect(native.execFile).toHaveBeenCalledOnce();
+    }),
+  );
+  it.effect("falls back to capture-lsof-v1 when an older helper rejects capture-lsof-v2", () =>
+    Effect.gen(function* () {
+      native.execFile.mockImplementation((_file, args, _options, callback) => {
+        if (args[0] === "capture-lsof-v2") {
+          callback(
+            new Error("Command failed"),
+            "",
+            'Error: Custom { kind: Other, error: "Unsupported resource monitor command" }\n',
+          );
+          return;
+        }
+        callback(
+          null,
+          helperOutput(emptyFdCapture, {
+            version: 1,
+            type: "lsofCapture",
+            uid: 1000,
+            emptyFdPids: [123],
+          }),
+          "",
+        );
+      });
+      const paths = yield* helperInventory();
+      expect(paths).toEqual(["/workspace/elsewhere", "/system/example/tool"]);
+      expect(native.execFile).toHaveBeenNthCalledWith(
+        1,
+        "/native/resource-monitor",
+        ["capture-lsof-v2", "1000"],
+        expect.any(Object),
+        expect.any(Function),
+      );
+      expect(native.execFile).toHaveBeenNthCalledWith(
+        2,
+        "/native/resource-monitor",
+        ["capture-lsof-v1", "1000"],
+        expect.any(Object),
+        expect.any(Function),
+      );
+    }),
+  );
+  it.effect("retains text and numeric-FD consumers from other processes", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        helperOutput(
+          emptyFdCapture +
+            "p456\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i42\0n/workspace/example/dist/consumer.js\0\n",
+        ),
+      );
+      expect(yield* guard(yield* helperInventory())).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+    }),
+  );
+  it.effect.each([
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123] },
+    { version: 3, type: "lsofCapture", uid: 1000, emptyFdPids: [123] },
+    { version: 2, type: "hello", uid: 1000, emptyFdPids: [123] },
+    { version: 2, type: "lsofCapture", uid: 501, emptyFdPids: [123] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [456] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 123] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 456] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123.5] },
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: ["123"] },
+    null,
+  ])("rejects mismatched or malformed proof metadata (%j)", (header) =>
+    Effect.gen(function* () {
+      darwinFixture(helperOutput(emptyFdCapture, header));
+      expect(yield* helperInventory()).toBeNull();
+      expect(native.execFile).toHaveBeenCalledTimes(2);
+    }),
+  );
+  it.effect.each([
+    emptyFdCapture.replace("Invalid argument", "Permission denied"),
+    emptyFdCapture.replace("ferr\0", "ferr\0tREG\0"),
+    emptyFdCapture.replace("ferr\0", "ferr\0D0x12\0"),
+    emptyFdCapture + "f4\0tREG\0n/system/example/open\0\n",
+    emptyFdCapture + "ferr\0nFD info error: Invalid argument\0\n",
+    emptyFdCapture.replace("fcwd", "f3"),
+    emptyFdCapture + "unknown\0\n",
+    emptyFdCapture.slice(0, -1),
+  ])("keeps incomplete and conflicting captures (%s)", (output) =>
+    Effect.gen(function* () {
+      darwinFixture(helperOutput(output));
+      expect(yield* helperInventory()).toBeNull();
+    }),
+  );
+  it.effect.each(["old-helper", "failed", "warning"])(
+    "rejects unavailable helper capability (%s)",
+    (failure) =>
+      Effect.gen(function* () {
+        darwinFixture(
+          failure === "old-helper" ? '{"version":3,"type":"hello"}\n' : helperOutput(),
+          failure === "warning" ? "incomplete" : "",
+          failure === "failed" ? new Error("unsupported command") : null,
+        );
+        expect(yield* helperInventory()).toBeNull();
+        expect(
+          native.execFile.mock.calls.every(([file]) => file === "/native/resource-monitor"),
+        ).toBe(true);
+      }),
+  );
+  it.effect("retries with a new helper capture and discards earlier evidence", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        helperOutput("p456\0\nfcwd\0tDIR\0n/workspace/example\0\n", {
+          version: 2,
+          type: "lsofCapture",
+          uid: 1000,
+          emptyFdPids: [],
+        }),
+      );
+      native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+        callback(
+          null,
+          helperOutput(emptyFdCapture, {
+            version: 2,
+            type: "lsofCapture",
+            uid: 1000,
+            emptyFdPids: [],
+          }),
+          "",
+        ),
+      );
+      const paths = yield* helperInventory();
+      expect(paths).toEqual(["/workspace/example"]);
+      expect(yield* guard(paths)).toBe("A process is using a file or directory in the worktree.");
+    }),
+  );
+});
+
 describe("Darwin worktree consumers", () => {
+  it.effect("keeps an lsof FD enumeration error without independent empty-table proof", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0D0x12\0i1\0n/workspace/elsewhere\0\n" +
+          "ftxt\0tREG\0D0x12\0i2\0n/system/example/tool\0\n" +
+          "ferr\0nFD info error: Invalid argument\0\n",
+      );
+      const paths = yield* inventory("darwin");
+      expect(paths).toBeNull();
+      expect(yield* guard(paths)).toBe("Process file-consumer inventory is unavailable.");
+      expect(native.execFile).toHaveBeenCalledTimes(2);
+    }),
+  );
   it.effect("reads every cwd, text and open path rather than a cwd-only selection", () =>
     Effect.gen(function* () {
       darwinFixture();
@@ -174,8 +357,12 @@ describe("Darwin worktree consumers", () => {
       ]);
       expect(native.execFile).toHaveBeenCalledWith(
         "lsof",
-        ["-a", "-u", "1000", "-F0pftnDi", "-n", "-P"],
-        { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
+        ["-a", "-u", "1000", "-F0pcftnDi", "-n", "-P"],
+        {
+          timeout: 10_000,
+          maxBuffer: 16 * 1024 * 1024,
+          env: expect.objectContaining({ LC_ALL: "C" }),
+        },
         expect.any(Function),
       );
     }),
@@ -279,6 +466,18 @@ describe("Darwin worktree consumers", () => {
         ]);
       }),
   );
+  it.effect.each(["/shared-memory.example", "/workspace/example/not-a-file"])(
+    "does not mistake a POSIX shared-memory name for a workspace consumer (%s)",
+    (name) =>
+      Effect.gen(function* () {
+        darwinFixture(`p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nf56\0tPSXSHM\0n${name}\0\n`);
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path === name) throw missing();
+          return path;
+        });
+        expect(yield* guard(yield* inventory("darwin"))).toBeNull();
+      }),
+  );
   it.effect(
     "accepts the exact numeric ENOENT no-current-path marker without treating unknown descriptors as safe",
     () =>
@@ -302,6 +501,12 @@ describe("Darwin worktree consumers", () => {
     "f1\0tREG\0n0x1234\0\n",
     "fcwd\0tNPOLICY\0n0x1234\0\n",
     "ftxt\0tNEXUS\0n0x1234\0\n",
+    "fcwd\0tPSXSHM\0n/shared-memory.example\0\n",
+    "ftxt\0tPSXSHM\0n/shared-memory.example\0\n",
+    "ffp.17\0tPSXSHM\0n/shared-memory.example\0\n",
+    "f56u\0tPSXSHM\0n/shared-memory.example\0\n",
+    "f56\0tPSXSHM\0D0x12\0n/shared-memory.example\0\n",
+    "f56\0tPSXSHM\0i42\0n/shared-memory.example\0\n",
   ])(
     "keeps missing or unknown file evidence that does not match an explicit revoked descriptor",
     (record) =>
@@ -348,6 +553,7 @@ const objectStat = (inode: bigint, directory = false, device = 18n, modified = 1
   ctimeNs: modified,
   isDirectory: () => directory,
   isSocket: () => false,
+  isSymbolicLink: () => false,
 });
 const targetFixture = (fileInode = 9007199254740993n) => {
   const stats = new Map([
@@ -378,6 +584,22 @@ const targetFixture = (fileInode = 9007199254740993n) => {
 const objectProofReason = "Process object identity or target inventory could not be verified.";
 
 describe("Captured vnode identity proof", () => {
+  it.effect("retains vnode evidence through the helper capture", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      targetFixture();
+      darwinFixture(
+        helperOutput(
+          emptyFdCapture +
+            "p456\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i9007199254740993\0n/system/example/file\0\n",
+        ),
+      );
+      expect(yield* guard(yield* helperInventory())).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+    }),
+  );
   it.effect("includes target directories in the device-unknown FIFO inode comparison", () =>
     Effect.gen(function* () {
       vnodeFixture("i2\0", "FIFO", "ENOENT");
@@ -745,14 +967,16 @@ describe("Observation-scoped target evidence", () => {
     Effect.gen(function* () {
       socketFixture();
       targetFixture();
-      const paths = (yield* inventory("darwin"))!;
-      const observation = WorktreeConsumers.createTargetObservation();
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      const observation = sweep.targets;
       expect(yield* prove(paths, observation)).toBe(false);
       const opens = native.opendir.mock.calls.length;
       const files = regularFileReads();
       native.lstat.mockClear();
       expect(yield* prove(paths, observation)).toBe(false);
       expect(yield* prove(paths, observation)).toBe(false);
+      expect(yield* prove(paths, observation, `${root}/dist`)).toBe(false);
       expect(opens).toBe(2);
       expect(files).toBe(2);
       expect(native.opendir).toHaveBeenCalledTimes(opens);
@@ -763,7 +987,240 @@ describe("Observation-scoped target evidence", () => {
         ).toBeGreaterThanOrEqual(2);
       }
       expect(native.execFile).toHaveBeenCalledOnce();
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        treeWalks: 1,
+        targetRevalidations: 3,
+        targetRevalidationMs: expect.any(Number),
+      });
+    }).pipe(Effect.withSpan("sweep fixture")),
+  );
+
+  it.effect("answers a nested root from an ancestor walk of the same inventory", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture().set(`${root}/link`, { ...objectStat(3n), isSocket: () => true });
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(true);
+      expect(native.opendir).toHaveBeenCalledTimes(2);
+      native.lstat.mockClear();
+      expect(yield* prove(paths, observation, `${root}/dist`)).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(2);
+      expect(regularFileReads()).toBe(0);
+      expect(native.lstat).toHaveBeenCalledWith(`${root}/dist`, { bigint: true });
+      expect(yield* prove(paths, undefined, `${root}/dist`)).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(3);
     }),
+  );
+
+  it.effect("resolves each repeated inventory path once per query", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          "f7\0tREG\0D0x12\0i5\0n/system/example/library\0\n" +
+          "f8\0tREG\0D0x12\0i5\0n/system/example/library\0\n",
+      );
+      const paths = (yield* inventory("darwin"))!;
+      expect(yield* prove(paths)).toBe(false);
+      expect(
+        native.realpath.mock.calls.filter(([path]) => path === "/system/example/library"),
+      ).toHaveLength(1);
+    }),
+  );
+
+  const sweepInventory = () => {
+    const libraries = Array.from({ length: 6 }, (_, index) => `/system/example/library-${index}`);
+    darwinFixture(
+      "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+        libraries
+          .map((path, index) => `f${index}\0tREG\0D0x12\0i${index + 1}\0n${path}\0\n`)
+          .join("") +
+        `f8\0tREG\0D0x12\0i9007199254740993\0n${libraries[0]}\0\n`,
+    );
+    return libraries;
+  };
+
+  const sweepStats = (paths: readonly string[]) => {
+    const stats = targetFixture();
+    stats.set("/system/example", objectStat(51n, true));
+    for (const [index, path] of paths.entries()) stats.set(path, objectStat(BigInt(index + 1)));
+    return stats;
+  };
+
+  it.effect("reuses stable captured file resolutions across four dependency installs", () =>
+    Effect.gen(function* () {
+      const libraries = sweepInventory();
+      sweepStats(libraries);
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        processCaptures: 0,
+        processCaptureMs: 0,
+        pathResolutions: 0,
+        treeWalks: 0,
+      });
+      expect(native.execFile).not.toHaveBeenCalled();
+      const installs = ["one", "two", "three", "four"].map(
+        (name) => `/workspace/${name}/node_modules`,
+      );
+      for (const install of installs) {
+        expect(yield* prove((yield* sweep.paths)!, sweep.targets, install)).toBe(false);
+      }
+      expect(native.execFile).toHaveBeenCalledOnce();
+      expect(native.realpath).toHaveBeenCalledTimes(14);
+      expect(native.lstat).toHaveBeenCalledTimes(22);
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        processCaptures: 1,
+        processCaptureMs: expect.any(Number),
+        uniquePaths: 7,
+        pathResolutions: 10,
+        cachedPathChecks: 18,
+        cachedPathCheckMs: expect.any(Number),
+        directoryChecks: 4,
+        pathResolutionMs: expect.any(Number),
+        treeWalks: 0,
+        treeWalkMs: 0,
+        objectsVisited: 0,
+      });
+      const paths = (yield* sweep.paths)!;
+      const libraryResolutions = () =>
+        native.realpath.mock.calls.filter(([path]) => libraries.includes(path)).length;
+      expect(libraryResolutions()).toBe(libraries.length);
+      const nextCapture = (yield* inventory("darwin"))!;
+      expect(yield* prove(nextCapture, sweep.targets, installs[0])).toBe(false);
+      expect(libraryResolutions()).toBe(libraries.length * 2);
+      expect(yield* prove(paths, WorktreeConsumers.createTargetObservation(), installs[0])).toBe(
+        false,
+      );
+      expect(libraryResolutions()).toBe(libraries.length * 3);
+      const nextSweep = yield* WorktreeConsumers.makeSweepObservation(Effect.succeed(paths));
+      expect(yield* prove(paths, nextSweep.targets, installs[0])).toBe(false);
+      expect(libraryResolutions()).toBe(libraries.length * 4);
+    }).pipe(Effect.withSpan("sweep fixture")),
+  );
+
+  it.effect.each(["retargeted alias", "replaced file", "vanished vnode"] as const)(
+    "still finds a consumer after a %s changes during the sweep",
+    (change) =>
+      Effect.gen(function* () {
+        const libraries = sweepInventory();
+        const [library] = libraries;
+        const stats = sweepStats(libraries);
+        if (change === "retargeted alias") {
+          native.realpath.mockImplementation(async (path: string) =>
+            path === library ? "/elsewhere/library" : path,
+          );
+        }
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = (yield* sweep.paths)!;
+        expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+        if (change !== "retargeted alias") {
+          stats.set("/system/example", objectStat(51n, true, 18n, 2n));
+        }
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path !== library) return path;
+          if (change === "vanished vnode") throw missing();
+          return `${root}/dist/output.js`;
+        });
+        expect(yield* prove(paths, sweep.targets)).toBe(true);
+        expect(native.realpath.mock.calls.filter(([path]) => path === library)).toHaveLength(2);
+        expect(native.opendir).toHaveBeenCalledTimes(change === "vanished vnode" ? 2 : 0);
+        if (change === "vanished vnode") {
+          yield* sweep.annotate;
+          expect(
+            (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+          ).toMatchObject({ treeWalks: 1, treeWalkMs: expect.any(Number), objectsVisited: 4 });
+        }
+      }).pipe(Effect.withSpan("sweep fixture")),
+  );
+
+  it.effect("checks cached siblings again when their directory changes during a target scan", () =>
+    Effect.gen(function* () {
+      const libraries = sweepInventory();
+      const [, alias, changed] = libraries;
+      const stats = sweepStats(libraries);
+      let retargeted = false;
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === alias) return "/elsewhere/library";
+        if (path === changed && retargeted) return `${root}/dist/output.js`;
+        return path;
+      });
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === alias) {
+          retargeted = true;
+          stats.set("/system/example", objectStat(51n, true, 18n, 2n));
+          return "/elsewhere/library";
+        }
+        if (path === changed && retargeted) return `${root}/dist/output.js`;
+        return path;
+      });
+      expect(yield* prove(paths, sweep.targets)).toBe(true);
+      expect(native.realpath.mock.calls.filter(([path]) => path === changed)).toHaveLength(2);
+    }),
+  );
+
+  it.effect("rechecks earlier cached paths before accepting a later direct match", () =>
+    Effect.gen(function* () {
+      const firstPath = "/system/example/unproven";
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          `f1\0tREG\0n${firstPath}\0\n` +
+          [2, 3, 4]
+            .map((id) => `f${id}\0tREG\0D0x12\0i${id}\0n/system/example/library-${id}\0\n`)
+            .join("") +
+          `f9\0tREG\0n${root}/dist/output.js\0\n`,
+      );
+      const stats = sweepStats([
+        firstPath,
+        ...[2, 3, 4].map((id) => `/system/example/library-${id}`),
+      ]);
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+      stats.set("/system/example", objectStat(51n, true, 18n, 2n));
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === firstPath) throw missing();
+        return path;
+      });
+      expect(
+        yield* WorktreeConsumers.worktreeConsumerReason(root, paths, sweep.targets).pipe(
+          Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+        ),
+      ).toBe(objectProofReason);
+    }),
+  );
+
+  it.effect.each(["replaced by a symlink", "removed"] as const)(
+    "rechecks a cached pathname %s even when the parent token stays equal",
+    (change) =>
+      Effect.gen(function* () {
+        const libraries = sweepInventory();
+        const [library] = libraries;
+        const stats = sweepStats(libraries);
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = (yield* sweep.paths)!;
+        expect(yield* prove(paths, sweep.targets, "/workspace/first/node_modules")).toBe(false);
+        if (change === "removed") stats.delete(library!);
+        else stats.set(library!, { ...objectStat(88n), isSymbolicLink: () => true });
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path !== library) return path;
+          if (change === "removed") throw missing();
+          return `${root}/dist/output.js`;
+        });
+        expect(yield* prove(paths, sweep.targets)).toBe(true);
+        expect(native.realpath.mock.calls.filter(([path]) => path === library)).toHaveLength(2);
+      }),
   );
 
   it.effect("does not share a target walk with another native capture or observation", () =>
@@ -1057,6 +1514,108 @@ describe("Observation-scoped target evidence", () => {
         expect(native.execFile).toHaveBeenCalledTimes(2);
       }),
   );
+
+  it.effect(
+    "records sanitized walk trigger kinds and process names once per walk on the sweep span",
+    () =>
+      Effect.gen(function* () {
+        darwinFixture(
+          "p101\0cGoogle\\x20Chrome\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i99\0n/system/example/file1\0\n" +
+            "f5\0tREG\0D0x12\0i100\0n/system/example/file2\0\n" +
+            "p102\0c/private/secret/bin/worker\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f6\0tunix\0n/system/example/socket\0\n" +
+            "f7\0tREG\0D0x12\0i101\0n/system/example/other\0\n",
+        );
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path === "/system/example/socket") throw missing();
+          if (path.startsWith("/system/example/"))
+            throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return path;
+        });
+        const stats = targetFixture();
+        stats.set("/workspace/other", objectStat(20n, true));
+        stats.set("/workspace/other/dist", objectStat(21n, true));
+        stats.set("/workspace/other/dist/output.js", objectStat(22n));
+        native.opendir.mockImplementation(async (path: string) =>
+          (async function* () {
+            const names =
+              path === root
+                ? ["dist", "link"]
+                : path === "/workspace/other"
+                  ? ["dist"]
+                  : path.endsWith("/dist")
+                    ? ["output.js"]
+                    : [];
+            for (const name of names) yield { name };
+          })(),
+        );
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = yield* sweep.paths;
+        expect(paths).not.toBeNull();
+        expect(yield* prove(paths!, sweep.targets, root)).toBe(false);
+        expect(yield* prove(paths!, sweep.targets, root)).toBe(false);
+        expect(yield* prove(paths!, sweep.targets, "/workspace/other")).toBe(false);
+        WorktreeConsumers.recordSkippedUsageCheck(sweep.targets);
+        yield* sweep.annotate;
+        const inventoryAttr = (yield* Effect.currentSpan).attributes.get(
+          STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+        ) as Record<string, unknown>;
+        expect(inventoryAttr).toMatchObject({
+          treeWalks: 2,
+          skippedRecentUsageChecks: 1,
+          walkTriggers: [
+            { kind: "socket", process: "worker", walks: 2 },
+            { kind: "vnode", process: "Google Chrome", walks: 2 },
+            { kind: "vnode", process: "worker", walks: 2 },
+          ],
+        });
+        expect(JSON.stringify(inventoryAttr)).not.toContain("/private/secret");
+      }).pipe(Effect.withSpan("sweep fixture")),
+  );
+
+  it.effect(
+    "sanitizes control characters in process names, defaults missing or undecodable c fields to unknown, and rejects misplaced c fields",
+    () =>
+      Effect.gen(function* () {
+        darwinFixture(
+          "p101\0cbad\\n\\xc2\\x9b\u0085\u202Ename\\x07\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i99\0n/system/example/file1\0\n" +
+            "p102\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f5\0tunix\0n/system/example/socket\0\n" +
+            "p103\0cC\\xc3\\xb3digo\\xc3\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f6\0tunix\0n/system/example/socket2\0\n" +
+            "p104\0cbad\uFFFDname\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f7\0tunix\0n/system/example/socket3\0\n",
+        );
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path.startsWith("/system/example/socket")) throw missing();
+          if (path.startsWith("/system/example/"))
+            throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return path;
+        });
+        targetFixture();
+        const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+        const paths = yield* sweep.paths;
+        expect(paths).not.toBeNull();
+        expect(yield* prove(paths!, sweep.targets, root)).toBe(false);
+        yield* sweep.annotate;
+        expect(
+          (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+        ).toMatchObject({
+          walkTriggers: [
+            { kind: "socket", process: "unknown", walks: 1 },
+            { kind: "vnode", process: "badname", walks: 1 },
+          ],
+        });
+        darwinFixture("p101\0cfirst\0csecond\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n");
+        expect(yield* inventory("darwin")).toBeNull();
+        darwinFixture("p101\0\nfcwd\0tDIR\0cfirst\0n/workspace/elsewhere\0\n");
+        expect(yield* inventory("darwin")).toBeNull();
+        darwinFixture("p101\0cgood\0\nfcwd\0tDIR\0n/workspace/bad\uFFFDdir\0\n");
+        expect(yield* inventory("darwin")).toBeNull();
+      }).pipe(Effect.withSpan("sweep fixture")),
+  );
 });
 
 describe("Fresh native observation retry", () => {
@@ -1090,11 +1649,16 @@ describe("Fresh native observation retry", () => {
       native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
         callback(null, incomplete, ""),
       );
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      expect(yield* guard(yield* sweep.paths)).toBe(
         "A process is using a file or directory in the worktree.",
       );
       expect(native.execFile).toHaveBeenCalledTimes(2);
-    }),
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({ processCaptures: 2 });
+    }).pipe(Effect.withSpan("sweep fixture")),
   );
   it.effect("does not retry a complete first capture", () =>
     Effect.gen(function* () {
@@ -1180,6 +1744,165 @@ describe("Fresh native observation retry", () => {
 });
 
 describe("worktree removal guard", () => {
+  const denseScreeningPaths = () => {
+    const files = ["one", "two", "three", "four"].map((name) => `/system/example/${name}`);
+    darwinFixture(
+      "p101\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+        files.map((path, index) => `f${index + 4}\0tREG\0n${path}\0\n`).join(""),
+    );
+    const stats = targetFixture();
+    stats.set("/system/example", objectStat(11n, true));
+    for (const [index, path] of files.entries()) stats.set(path, objectStat(BigInt(12 + index)));
+  };
+
+  it.effect("keeps fallback walk evidence local to each worktree screen", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      yield* Effect.gen(function* () {
+        expect(
+          yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example"),
+        ).toBeNull();
+        expect(
+          yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example/dist"),
+        ).toBeNull();
+      }).pipe(worktrees.provide);
+      expect(native.execFile).toHaveBeenCalledOnce();
+      expect(native.opendir.mock.calls.map(([path]) => path)).toEqual([
+        "/workspace/example",
+        "/workspace/example/dist",
+        "/workspace/example/dist",
+      ]);
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+    ),
+  );
+
+  it.effect("uses direct path resolutions when a sweep targets one worktree", () =>
+    Effect.gen(function* () {
+      denseScreeningPaths();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers(1);
+      expect(
+        yield* WorktreeConsumers.screenWorktreeConsumerReason("/workspace/example").pipe(
+          worktrees.provide,
+        ),
+      ).toBeNull();
+      expect(native.lstat).not.toHaveBeenCalledWith("/system/example", { bigint: true });
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+    ),
+  );
+
+  it.effect("counts fresh worktree checks and preview preflight in the worktree inventory", () =>
+    Effect.gen(function* () {
+      const root = "/workspace/example";
+      darwinFixture(
+        "p101\0c/private/fixture/bin/worker\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          "f4\0tREG\0D0x12\0i99\0n/system/example/file\0\n" +
+          "f5\0tunix\0n/system/example/socket\0\n",
+      );
+      targetFixture();
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path.startsWith("/system/example/")) throw missing();
+        return path;
+      });
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      const outputs = yield* WorktreeConsumers.makeSweepObservation(
+        inventory("darwin"),
+        worktrees.inventory,
+      );
+      yield* Effect.gen(function* () {
+        expect(yield* WorktreeConsumers.worktreeConsumerReason(root)).toBeNull();
+        expect(yield* WorktreeConsumers.worktreeConsumerPreflightReason(root)).toBeNull();
+      }).pipe(worktrees.provide);
+      yield* outputs.annotate;
+      const metrics = (yield* Effect.currentSpan).attributes.get(
+        STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+      );
+      expect(metrics).toMatchObject({
+        processCaptures: 0,
+        treeWalks: 0,
+        worktrees: {
+          processCaptures: 2,
+          pathResolutions: 6,
+          uniquePaths: 3,
+          cachedPathChecks: 0,
+          directoryChecks: 0,
+          treeWalks: 2,
+          objectsVisited: 8,
+          targetRevalidations: 0,
+          walkTriggers: [
+            { kind: "socket", process: "worker", walks: 2 },
+            { kind: "vnode", process: "worker", walks: 2 },
+          ],
+        },
+      });
+      expect(JSON.stringify(metrics)).not.toContain("/private/fixture");
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+      Effect.withSpan("StorageCleanup.sweep"),
+    ),
+  );
+
+  it.effect("shares only screening captures and keeps a late consumer on the fresh guard", () =>
+    Effect.gen(function* () {
+      const root = "/workspace/example";
+      const lateRoot = "/workspace/other";
+      denseScreeningPaths();
+      const worktrees = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      const outputs = yield* WorktreeConsumers.makeSweepObservation(
+        inventory("darwin"),
+        worktrees.inventory,
+      );
+      yield* Effect.gen(function* () {
+        expect(yield* WorktreeConsumers.screenWorktreeConsumerReason(root)).toBeNull();
+        darwinFixture(`p101\0\nfcwd\0tDIR\0n${lateRoot}\0\n`);
+        expect(yield* WorktreeConsumers.screenWorktreeConsumerReason(lateRoot)).toBeNull();
+        expect(native.execFile).toHaveBeenCalledOnce();
+        expect(yield* WorktreeConsumers.worktreeConsumerReason(lateRoot)).toBe(
+          "A process is using a file or directory in the worktree.",
+        );
+        expect(native.execFile).toHaveBeenCalledTimes(2);
+      }).pipe(worktrees.provide);
+      yield* outputs.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        worktrees: {
+          processCaptures: 2,
+          cachedPathChecks: 4,
+          directoryChecks: 2,
+          pathResolutions: 6,
+        },
+      });
+      const next = yield* WorktreeConsumers.makeSweepWorktreeConsumers();
+      expect(
+        yield* WorktreeConsumers.screenWorktreeConsumerReason(lateRoot).pipe(next.provide),
+      ).toBe("A process is using a file or directory in the worktree.");
+      expect(native.execFile).toHaveBeenCalledTimes(3);
+    }).pipe(
+      Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
+      Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+      Effect.withSpan("StorageCleanup.sweep"),
+    ),
+  );
+
+  it.effect("checks the complete process inventory before releasing previews", () =>
+    Effect.gen(function* () {
+      const paths = ["/workspace/example/preview", "not-an-absolute-path"];
+      const result = yield* WorktreeConsumers.worktreeConsumerPreflightReason(
+        "/workspace/example",
+      ).pipe(
+        Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed(paths)),
+        Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+      );
+      expect(result).toBe("Worktree consumer protection could not be verified.");
+    }),
+  );
   it.effect("fails closed for unsupported hosts and missing process or mount inventories", () =>
     Effect.gen(function* () {
       expect(yield* inventory("win32")).toBeNull();
@@ -1224,6 +1947,12 @@ describe("worktree removal guard", () => {
           }),
         );
         native.isProcessAlive.mockReturnValue(true);
+        expect(
+          yield* WorktreeConsumers.worktreeConsumerPreflightReason("/workspace/example").pipe(
+            Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed([])),
+            Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+          ),
+        ).toBeNull();
         expect(yield* guard([])).toBe("A server runtime is still active.");
         native.isProcessAlive.mockReturnValue(false);
         expect(yield* guard([])).toBeNull();

@@ -2,8 +2,17 @@
 
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off -- Bounded host-side GitHub reads.
 import * as NodeChildProcess from "node:child_process";
+import { DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES } from "../packages/contracts/src/lastcodePullRequestWatchQuietMinutes.ts";
 
-import { type GithubCiEvidence, type RunGithubJson, readGithubCi } from "./lastcode-github-ci.ts";
+import { readPullRequestWatchQuietMinutes } from "./lib/lastcode-pr-watch-settings.ts";
+import { LASTCODE_GUARDED_MERGE_CONTEXT } from "./lastcode-main-write-lock.ts";
+
+import {
+  type GithubCiEvidence,
+  type RunGithubJson,
+  readGithubCi,
+  readGuardedMergeRequired,
+} from "./lastcode-github-ci.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const LASTCODE_BASE_BRANCH = "lastcode/main";
@@ -78,6 +87,7 @@ export interface ReviewState {
   readonly pending: boolean;
   readonly ready: boolean;
   readonly latestTriggerId: number | null;
+  readonly latestTriggerAt: string | null;
 }
 
 export interface GateObservation {
@@ -86,6 +96,8 @@ export interface GateObservation {
   readonly review: ReviewState;
   readonly unresolvedReviewThreads: number;
   readonly local: LocalState | null;
+  // The base requires the status the guarded merge posts, so GitHub reports BLOCKED until then.
+  readonly guardedMergeRequired?: boolean;
 }
 
 export interface PinnedPullRequestIdentity {
@@ -414,6 +426,7 @@ export function deriveReviewState(input: {
     pending: requestPresent && !matchedCleanReaction && latestTerminalAt <= latestPendingAt,
     ready: artifacts.length > 0 && artifacts.every(({ key }) => readyArtifacts.has(key)),
     latestTriggerId: latestTrigger?.id ?? null,
+    latestTriggerAt: latestTrigger?.created_at ?? null,
   };
 }
 
@@ -657,6 +670,7 @@ export type GateDecision = {
 export function evaluatePullRequestGates(
   current: GateObservation,
   expectedBase = LASTCODE_BASE_BRANCH,
+  options: { readonly nowMs?: number; readonly quietMinutes?: number } = {},
 ): GateDecision {
   const pr = current.pullRequest;
   const attention = (reason: string, detail: string): GateDecision => ({
@@ -705,6 +719,21 @@ export function evaluatePullRequestGates(
     );
   if (!current.review.pending && !current.review.ready)
     return attention("review-unhandled", "The current-head Codex review has an unhandled finding.");
+  if (current.review.pending) {
+    const nowMs = options.nowMs ?? Date.now();
+    const quietMinutes = options.quietMinutes ?? DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES;
+    const requestedAt = Date.parse(current.review.latestTriggerAt ?? "");
+    if (!Number.isFinite(nowMs) || !Number.isFinite(requestedAt) || requestedAt > nowMs)
+      return attention(
+        "review-age-unknown",
+        "The pending current-head review request has no valid age.",
+      );
+    if (nowMs - requestedAt >= quietMinutes * 60_000)
+      return attention(
+        "review-stalled",
+        `The current-head Codex review has been pending for at least ${quietMinutes} minutes.`,
+      );
+  }
   if (current.ci.state === "satisfied" && !current.review.pending && current.review.ready) {
     // The native watch does not wake when GitHub finishes computing mergeability, so unknown
     // mergeability cannot be pending once CI and review are complete.
@@ -713,13 +742,18 @@ export function evaluatePullRequestGates(
         "mergeability-unknown",
         `GitHub has not computed mergeability for pull request #${pr.number}; CI and review are complete. Rerun the check once, then report the blocker if it persists.`,
       );
-    if (pr.mergeStateStatus === "BLOCKED")
+    // Only lastcode:merge posts the guard, and it merges only into the main branch.
+    const awaitingGuard = current.guardedMergeRequired && expectedBase === LASTCODE_BASE_BRANCH;
+    if (pr.mergeStateStatus === "BLOCKED" && !awaitingGuard)
       return attention("merge-blocked", "A repository merge requirement remains unsatisfied.");
     const status = expectedBase === LASTCODE_BASE_BRANCH ? "ready" : "stacked-ready";
     return {
       status,
       reason: status,
-      detail: "Exact GitHub CI and the handled current-head Codex review are complete.",
+      detail:
+        awaitingGuard && pr.mergeStateStatus === "BLOCKED"
+          ? `Exact GitHub CI and the handled current-head Codex review are complete. GitHub blocks the merge until pnpm lastcode:merge posts ${LASTCODE_GUARDED_MERGE_CONTEXT}; it refuses if anything else still blocks it.`
+          : "Exact GitHub CI and the handled current-head Codex review are complete.",
     };
   }
   if (current.ci.state === "pending" && current.ci.reason === "run-registration") {
@@ -770,6 +804,7 @@ export function readPullRequestGates(
   target: string | number,
   trackLocalState: boolean,
   execute: RunGithubJson = runGhJson,
+  options: { readonly nowMs?: number; readonly quietMinutes?: number } = {},
 ) {
   const read = () => execute<PullRequestState>(pullRequestViewArgs(repository, target));
   const chain = (pr: PullRequestState) =>
@@ -788,6 +823,7 @@ export function readPullRequestGates(
   const selected = chain(initial);
   const reviewData = readReviewData(repository, initial, execute);
   const ci = requireExactGithubCi(readGithubCi(repository, initial, execute));
+  const guardedMergeRequired = readGuardedMergeRequired(repository, initial.baseRefName, execute);
   const confirmed = read();
   const confirmedChain = chain(confirmed);
   const confirmedLocal = trackLocalState ? readLocalState() : null;
@@ -814,6 +850,7 @@ export function readPullRequestGates(
     review: reviewData.review,
     unresolvedReviewThreads: reviewData.unresolvedReviewThreads,
     local: confirmedLocal,
+    guardedMergeRequired,
   };
   if (terminalReady(observation)) {
     const finalReview = readReviewData(repository, confirmed, execute);
@@ -830,9 +867,10 @@ export function readPullRequestGates(
       review: finalReview.review,
       unresolvedReviewThreads: finalReview.unresolvedReviewThreads,
       local: finalLocal,
+      guardedMergeRequired,
     };
   }
-  const decision = evaluatePullRequestGates(observation, selected.pullRequest.baseRefName);
+  const decision = evaluatePullRequestGates(observation, selected.pullRequest.baseRefName, options);
   return {
     ...decision,
     repository,
@@ -860,16 +898,21 @@ export function parsePrGatesOptions(args: ReadonlyArray<string>): {
     Number.isSafeInteger(Number(args[1]))
   )
     return { pullRequestNumber: Number(args[1]) };
-  throw new Error("Usage: pnpm lastcode:pr-gates [--pr PR_NUMBER]");
+  throw new Error(
+    "Usage: pnpm --config.verify-deps-before-run=false lastcode:pr-gates [--pr PR_NUMBER]",
+  );
 }
 
 if (import.meta.main) {
   try {
     const { pullRequestNumber } = parsePrGatesOptions(process.argv.slice(2));
+    const quietMinutes = await readPullRequestWatchQuietMinutes();
     const result = readPullRequestGates(
       LASTCODE_GITHUB_REPOSITORY,
       pullRequestNumber ?? currentBranch(),
       pullRequestNumber === null,
+      runGhJson,
+      { quietMinutes },
     );
     console.log(JSON.stringify(result));
     if (result.status === "attention") process.exitCode = 1;

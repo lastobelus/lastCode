@@ -2,7 +2,7 @@ import { useComposerAttachmentActions } from "./use-composer-attachment-actions"
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import * as Effect from "effect/Effect";
 import * as Dialog from "../components/ui/Dialog";
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
 import { readEnvironmentScope } from "./session";
 import { useAtomValue } from "@effect/atom-react";
 import { compactBeforeSendTokens } from "@t3tools/client-runtime/state/context-window";
@@ -12,6 +12,7 @@ import {
   threadSteersDuringCompaction,
 } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
+import { recoveryQueuesFollowUps } from "@t3tools/client-runtime/state/thread-recovery";
 import {
   announcedRun,
   isDetailBehindShell,
@@ -34,6 +35,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  type ComposerContextRecord,
   type EnvironmentId,
   type ModelSelection,
   type RuntimeMode,
@@ -64,6 +66,9 @@ import {
   describeUnavailableModelSelection,
   isModelSelectionUnavailable,
 } from "../lib/modelOptions";
+import { environmentServerConfigsAtom } from "./server";
+import { workspaceConnections } from "./workspace";
+import { threadContextsUnavailableForDestination } from "@t3tools/shared/composerContextReferences";
 
 import {
   type DraftComposerImageAttachment,
@@ -203,6 +208,65 @@ function activeComposerDraftKey(thread: {
   const threadKey = scopedThreadKey(thread.environmentId, thread.id);
   const edit = getQueuedRunEdit(threadKey);
   return edit === null ? threadKey : queuedEditDraftKey(threadKey, edit.runId);
+}
+
+function unavailableComposerThreadReference(input: {
+  readonly text: string;
+  readonly records: ReadonlyArray<ComposerContextRecord>;
+  readonly destinationEnvironmentId: EnvironmentId;
+}): string | null {
+  const connectedEnvironments = appAtomRegistry.get(workspaceConnections.environmentsAtom);
+  const serverConfigs = appAtomRegistry.get(environmentServerConfigsAtom);
+  const environments = new Map(
+    connectedEnvironments.map(
+      (environment) =>
+        [
+          environment.environmentId,
+          {
+            connected: environment.connectionState === "connected",
+            canRead: readEnvironmentScope(environment.environmentId, AuthOrchestrationReadScope),
+            supportsUniversalThreadReferences:
+              serverConfigs.get(environment.environmentId)?.environment.capabilities
+                .universalThreadReferences === true,
+          },
+        ] as const,
+    ),
+  );
+  const unavailable = threadContextsUnavailableForDestination({
+    text: input.text,
+    records: input.records,
+    destinationEnvironmentId: input.destinationEnvironmentId,
+    environments,
+  })[0];
+  if (!unavailable) return null;
+  const owner =
+    connectedEnvironments.find(
+      (environment) => environment.environmentId === unavailable.record.environmentId,
+    )?.environmentLabel ??
+    m(msg("its machine", { $context: "machine that owns the attached thread" }));
+  switch (unavailable.reason) {
+    case "permission-denied":
+      return m(
+        msg(
+          "Check that you have read access to {owner} and to the machine you're sending to. The reference is still in your draft.",
+          { owner },
+        ),
+      );
+    case "unsupported":
+      return m(
+        msg(
+          "Check for server updates on {owner} and the machine you're sending to. The reference is still in your draft.",
+          { owner },
+        ),
+      );
+    case "disconnected":
+      return m(
+        msg(
+          "Check the connections to {owner} and the machine you're sending to before sending. The reference is still in your draft.",
+          { owner },
+        ),
+      );
+  }
 }
 
 export function useThreadDraftForThread(input: {
@@ -367,6 +431,10 @@ export function useThreadComposerState(input: {
   const selectedThreadRuntime = selectedThreadProjection
     ? deriveThreadRuntime(selectedThreadProjection.projection)
     : (selectedThreadShell?.runtime ?? null);
+  const forceQueue = recoveryQueuesFollowUps(
+    selectedThreadShell?.recovery,
+    selectedThreadRuntime?.activeRunId,
+  );
   const selectedThreadActivityRun = selectedThreadProjection
     ? deriveThreadActivityRun(selectedThreadProjection.projection, serverConfig?.providers)
     : (selectedThreadShell?.latestRun ?? null);
@@ -425,6 +493,7 @@ export function useThreadComposerState(input: {
     messages: selectedThreadMessages,
   });
   const canSteerActiveTurn =
+    !forceQueue &&
     queueWorkflow?.canPromoteToSteer === true &&
     !compactionBlocksSteer &&
     !runStopRequested(selectedThreadProjection?.projection, activeRunId);
@@ -700,6 +769,16 @@ export function useThreadComposerState(input: {
       return null;
     }
 
+    const unavailableThread = unavailableComposerThreadReference({
+      text,
+      records: draft.context?.records ?? [],
+      destinationEnvironmentId: selectedThreadShell.environmentId,
+    });
+    if (unavailableThread) {
+      Dialog.alert(m(msg("Attached thread unavailable")), unavailableThread);
+      return null;
+    }
+
     // A redirect's text answers its approval, so `/side` there is that text, not the command.
     const sideChatCommand = beforeDispatch === undefined ? parseSideChatCommand(text) : null;
     if (sideChatCommand) {
@@ -878,6 +957,7 @@ export function useThreadComposerState(input: {
       running: activeThreadBusy && canSteerActiveTurn,
       alternateModifier: followUpOverride !== undefined && followUpOverride !== activeTurnDefault,
       activeTurnDefault,
+      forceQueue,
     });
     const setupRunning = [selectedThreadActivityRun?.status, selectedThreadRuntime?.status].some(
       (status) => status === "preparing" || status === "starting",
@@ -1077,6 +1157,7 @@ export function useThreadComposerState(input: {
     queueHeld,
     resumableRunId,
     canResume,
+    forceQueue,
     queuedRunEdit,
     isSavingQueuedEdit,
     cancelQueuedRunEdit,

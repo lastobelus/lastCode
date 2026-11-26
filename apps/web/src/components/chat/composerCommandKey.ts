@@ -14,7 +14,6 @@ import {
 import {
   type ComposerSubmissionIntent,
   type ComposerTrigger,
-  collapseExpandedComposerCursor,
   composerSubmissionIntentForKey,
 } from "../../composer-logic";
 import { type PendingUserInput } from "../../session-logic";
@@ -28,11 +27,11 @@ import { type ReviewCommentContext } from "../../reviewCommentContext";
 import { composerTargetKey } from "../../composerDraftStore";
 import {
   type ComposerListEdit,
-  listContinuationForEnter,
   listIndentForTab,
   listOutdentForTab,
 } from "../../composer-list-continuation";
 import type { Dispatch, RefObject, SetStateAction } from "react";
+import { composerSourceNewline } from "../../lastcodeComposerSourceEdits";
 
 /**
  * The composer's key handling inside the editor: send shortcuts, the slash/mention menu,
@@ -46,6 +45,7 @@ export function composerCommandKeyHandler(input: {
   readonly routeKind: ChatComposerProps["routeKind"];
   readonly phase: ChatComposerProps["phase"];
   readonly canSteer: boolean;
+  readonly forceQueue: boolean;
   readonly followUpBehavior: ChatComposerProps["settings"]["followUpBehavior"];
   readonly isSoftwareKeyboardOpen: boolean;
   readonly isLiteralPendingAnswer: boolean;
@@ -107,6 +107,7 @@ export function composerCommandKeyHandler(input: {
     routeKind,
     phase,
     canSteer,
+    forceQueue,
     followUpBehavior,
     isSoftwareKeyboardOpen,
     isLiteralPendingAnswer,
@@ -153,7 +154,7 @@ export function composerCommandKeyHandler(input: {
     setComposerDraftPrompt(composerDraftTarget, nextPrompt);
     setComposerDraftThreadContexts(composerDraftTarget, mentions.threadContexts);
     setComposerDraftEnvironmentContexts(composerDraftTarget, mentions.environmentContexts);
-    setComposerCursor(collapseExpandedComposerCursor(nextPrompt, nextPrompt.length));
+    setComposerCursor(nextPrompt.length);
     setComposerTrigger(null);
     setComposerHighlightedItemId(null);
   };
@@ -227,7 +228,7 @@ export function composerCommandKeyHandler(input: {
       context: getShortcutContext(event.target),
       isSoftwareKeyboardOpen,
       isDraftThread: routeKind === "draft",
-      isRunning: phase === "running" || phase === "connecting",
+      isRunning: phase === "running" || phase === "connecting" || forceQueue,
       sendShortcut,
       prompt: promptRef.current,
     });
@@ -292,6 +293,7 @@ export function composerCommandKeyHandler(input: {
           alternateModifier: submissionIntent === "alternate",
           activeTurnDefault: followUpBehavior,
           canSteer,
+          forceQueue,
         }),
         submissionIntent,
       );
@@ -299,7 +301,7 @@ export function composerCommandKeyHandler(input: {
     }
     if (key === "Enter" && isTaskItem) return false;
     if (key === "Enter" || (key === "Tab" && !event.shiftKey)) {
-      return applyListEdit(event, key === "Enter" ? listContinuationForEnter : listIndentForTab);
+      return applyListEdit(event, key === "Enter" ? composerSourceNewline : listIndentForTab);
     }
     return false;
   };

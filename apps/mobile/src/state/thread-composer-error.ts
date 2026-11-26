@@ -1,10 +1,12 @@
 import { Atom } from "effect/reactivity";
 
+import type { MessageResolver } from "../i18n/messages";
 import { appAtomRegistry } from "./atom-registry";
 
 interface ThreadComposerError {
   readonly message: string;
   readonly messageId: string | null;
+  readonly resolveMessage?: (resolve: MessageResolver) => string;
 }
 
 /** Draining can fail after navigation away; retain errors per thread until dismissed, retried, or delivered. */
@@ -16,10 +18,11 @@ export function setThreadComposerError(
   threadKey: string,
   message: string,
   messageId: string | null = null,
+  resolveMessage?: (resolve: MessageResolver) => string,
 ): void {
   appAtomRegistry.set(threadComposerErrorsAtom, {
     ...appAtomRegistry.get(threadComposerErrorsAtom),
-    [threadKey]: { message, messageId },
+    [threadKey]: { message, messageId, ...(resolveMessage ? { resolveMessage } : {}) },
   });
 }
 

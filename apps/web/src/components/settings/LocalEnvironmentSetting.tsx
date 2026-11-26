@@ -1,7 +1,7 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
 import { T, useGT } from "gt-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import {
@@ -20,7 +20,7 @@ import { SettingsRow } from "./settingsLayout";
 import { useSearchableSetting } from "./settingsSearch";
 
 // Toggling relaunches desktop; the switch reflects startup state.
-export function LocalEnvironmentSetting() {
+export function LocalEnvironmentSetting({ pauseControl }: { pauseControl?: ReactNode }) {
   const searchableSetting = useSearchableSetting();
   const gt = useGT();
   const setEnabled = window.desktopBridge?.setLocalEnvironmentEnabled;
@@ -57,12 +57,15 @@ export function LocalEnvironmentSetting() {
             : gt("Turned off. Agents only run in remote environments.")
         }
         control={
-          <Switch
-            checked={enabled}
-            disabled={isUpdating}
-            onCheckedChange={() => setConfirmOpen(true)}
-            aria-label={gt("Local environment")}
-          />
+          <div className="flex items-center gap-2">
+            {enabled ? pauseControl : null}
+            <Switch
+              checked={enabled}
+              disabled={isUpdating}
+              onCheckedChange={() => setConfirmOpen(true)}
+              aria-label={gt("Local environment")}
+            />
+          </div>
         }
       />
       <AlertDialog

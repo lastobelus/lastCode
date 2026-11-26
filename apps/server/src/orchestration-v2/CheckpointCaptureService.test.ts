@@ -6,6 +6,8 @@ import {
   CheckpointRef,
   CheckpointScopeId,
   EventId,
+  EnvironmentId,
+  RunAttemptId,
   MessageId,
   NodeId,
   type OrchestrationV2DomainEvent,
@@ -117,6 +119,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           checkpointId: null,
           contextHandoffId: null,
           delegatedCompletion: staleDelegatedCompletion,
+          pullRequestWatchObligations: [],
         };
         const rootNode = {
           id: rootNodeId,
@@ -376,6 +379,28 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
             "checkpoint capture must omit delegatedCompletion so ProjectionStore can keep a newer cohort",
           );
 
+          assert.isUndefined(runUpdated.payload.pullRequestWatchObligations);
+          const watch = {
+            generation: "checkpoint-watch-generation",
+            key: { host: "github.com", repository: "example/project", number: 1 },
+            owner: {
+              parentEnvironmentId: EnvironmentId.make("watch-parent-environment"),
+              parentThreadId: ThreadId.make("watch-parent"),
+              taskId,
+              sourceRunId: runId,
+            },
+            sourceAttemptId: RunAttemptId.make("watch-attempt"),
+            state: "terminal-pending" as const,
+            pending: {
+              messageId: deliveryMessageId,
+              text: "PR merged",
+              notification: {
+                source: { kind: "monitor" as const },
+                outcome: "updated" as const,
+                summary: "Merged",
+              },
+            },
+          };
           yield* projectionStore.apply({
             id: EventId.make("event:checkpoint-capture:newer-cohort"),
             type: "run.updated",
@@ -387,6 +412,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
             payload: {
               ...staleRun,
               delegatedCompletion: newerCohort,
+              pullRequestWatchObligations: [watch],
             },
           });
 
@@ -400,6 +426,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           assert.equal(projectedRun?.status, "completed");
           assert.equal(projectedRun?.checkpointId, runUpdated.payload.checkpointId);
           assert.deepEqual(projectedRun?.delegatedCompletion, newerCohort);
+          assert.deepEqual(projectedRun?.pullRequestWatchObligations, [watch]);
           assert.equal(projectedRun?.delegatedCompletion?.delivery?.messageId, deliveryMessageId);
           assert.deepEqual(projectedRun?.delegatedCompletion?.delivery?.taskIds, [taskId]);
           yield* Ref.set(committed, []);

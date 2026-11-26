@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -51,6 +52,7 @@ export interface UpdatesHarnessOptions {
   /** Adds a WSL backend beside the primary, as on a Windows host with WSL enabled. */
   readonly wslBackend?: boolean;
   readonly localNightliesEnabled?: boolean;
+  readonly localPackageReady?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["packageReady"];
   readonly localInspection?: LastCodeLocalUpdates.LastCodeLocalUpdateInspection;
   readonly localInspect?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["inspect"];
   readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
@@ -362,6 +364,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   const layerLocalUpdates = LastCodeLocalUpdates.layerTest({
     supported: options.localNightliesEnabled ?? false,
+    packageReady: options.localPackageReady ?? (() => Stream.empty),
     buildLogPath: `/tmp/t3-desktop-updates-home-${process.pid}/.lastcode/local-updates/build.log`,
     inspect: (currentVersion, requestCheckpoint) =>
       options.localInspect

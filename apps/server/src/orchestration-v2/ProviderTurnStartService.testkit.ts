@@ -21,6 +21,8 @@ import * as Layer from "effect/Layer";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as TaskFolders from "../workspace/TaskFolders.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 
 // No project in these tests tracks a repository, so no thread works in a task folder.
 export const layerNoTaskFolders = Layer.mock(TaskFolders.TaskFolders)({
@@ -32,6 +34,8 @@ export const layer = Layer.mergeAll(
   Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
     runForThread: () => Effect.succeed({ status: "no-script" }),
   }),
+  WorkspaceAcquisitionTestkit.layer,
+  SuspensionRegistryTestkit.layer,
   layerNoTaskFolders,
   Layer.mock(GitWorkflow.GitWorkflowService)({
     pruneWorktrees: () => Effect.void,
@@ -45,6 +49,8 @@ export const layer = Layer.mergeAll(
 // Keep repository detection, branch selection and worktree creation on the real Git path.
 export const layerRealGit = GitWorkflow.layer.pipe(
   Layer.provide(GitManager.layer),
+  Layer.provide(WorkspaceAcquisitionTestkit.layer),
+  Layer.provide(SuspensionRegistryTestkit.layer),
   Layer.provide(
     Layer.mergeAll(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({

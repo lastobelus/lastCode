@@ -6,13 +6,11 @@ import {
   reconcilePendingThreadOrder,
   type PendingThreadOrder,
 } from "../features/threads/threadOrder";
-import {
-  getThreadListV2OrderedSection,
-  nextSnoozeWakeAfter,
-} from "../features/threads/threadListV2";
+import { getLastCodeAnnotationOrderedSection } from "../features/threads/lastCodeAnnotationThreadLists";
+import { nextSnoozeWakeAfter } from "../features/threads/threadListV2";
 import { appAtomRegistry } from "./atom-registry";
 import { environmentServerConfigsAtom } from "./server";
-import { steadyNavigationThreadShellsAtom } from "./threads";
+import { steadyAnnotationHiddenThreadKeysAtom, steadyNavigationThreadShellsAtom } from "./threads";
 import { queuedThreadKeysAtom } from "./use-thread-outbox";
 
 export const threadArrangementOpenAtom = Atom.make(false).pipe(Atom.keepAlive);
@@ -37,7 +35,10 @@ export function getPendingThreadOrder(): PendingThreadOrder | null {
   return appAtomRegistry.get(pendingThreadOrderAtom);
 }
 
-export function beginPendingThreadOrder(pending: PendingThreadOrder) {
+export function beginPendingThreadOrder(
+  pending: PendingThreadOrder,
+  retainedThreadKey?: string | null,
+) {
   const unsubscribers: (() => void)[] = [];
   // A timed wake can change section membership without a shell event, so the
   // hold also re-checks on each minute and at the next snooze expiry.
@@ -66,14 +67,18 @@ export function beginPendingThreadOrder(pending: PendingThreadOrder) {
     const configs = appAtomRegistry.get(environmentServerConfigsAtom);
     const threads = appAtomRegistry.get(steadyNavigationThreadShellsAtom);
     const nowMs = Date.now();
-    const ordered = getThreadListV2OrderedSection({
-      threads,
-      section: current.section,
-      now: new Date(nowMs).toISOString(),
-      queuedThreadKeys: appAtomRegistry.get(queuedThreadKeysAtom),
-      settlementEnvironmentIds: new Set(configs.keys()),
-      snoozeEnvironmentIds: new Set(configs.keys()),
-    });
+    const ordered = getLastCodeAnnotationOrderedSection(
+      {
+        threads,
+        section: current.section,
+        now: new Date(nowMs).toISOString(),
+        queuedThreadKeys: appAtomRegistry.get(queuedThreadKeysAtom),
+        settlementEnvironmentIds: new Set(configs.keys()),
+        snoozeEnvironmentIds: new Set(configs.keys()),
+      },
+      appAtomRegistry.get(steadyAnnotationHiddenThreadKeysAtom),
+      retainedThreadKey,
+    );
     const next = reconcilePendingThreadOrder(current, ordered);
     if (next === null) {
       cancel();
@@ -88,6 +93,7 @@ export function beginPendingThreadOrder(pending: PendingThreadOrder) {
   appAtomRegistry.set(pendingThreadOrderAtom, pending);
   unsubscribers.push(
     appAtomRegistry.subscribe(steadyNavigationThreadShellsAtom, refresh),
+    appAtomRegistry.subscribe(steadyAnnotationHiddenThreadKeysAtom, refresh),
     appAtomRegistry.subscribe(environmentServerConfigsAtom, refresh),
     appAtomRegistry.subscribe(queuedThreadKeysAtom, refresh),
     minuteTick.subscribe(refresh),

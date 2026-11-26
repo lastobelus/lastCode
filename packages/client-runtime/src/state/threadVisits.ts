@@ -1,5 +1,11 @@
 // @effect-diagnostics globalTimers:off globalDate:off - The tracker runs in atom subscriptions, outside an Effect runtime.
-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ScopedThreadRef,
+  ThreadAnnotation,
+  ThreadId,
+} from "@t3tools/contracts";
+import { isThreadAnnotationRevealUnseen } from "@t3tools/shared/threadAnnotation";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { parseThreadKey, threadKey } from "./entities.ts";
@@ -22,6 +28,7 @@ interface VisitedShell {
   readonly updatedAt: string;
   readonly lastVisitedAt?: string | null | undefined;
   readonly latestRun: { readonly completedAt: string | null } | null;
+  readonly annotation?: ThreadAnnotation | null | undefined;
   /**
    * When a scheduled wake the user is looking at took effect. A wake later
    * than `updatedAt` is an update the server never sent, so the watermark
@@ -193,7 +200,12 @@ export function createThreadVisitTracker(options: ThreadVisitTrackerOptions) {
         const hasUnseenCompletion =
           !Number.isNaN(completedAtMs) &&
           (Number.isNaN(lastVisitedAtMs) || completedAtMs > lastVisitedAtMs);
-        if (hasUnseenCompletion || wakeIsLatest || elapsed >= VISIT_DISPATCH_THROTTLE_MS) {
+        if (
+          hasUnseenCompletion ||
+          isThreadAnnotationRevealUnseen(shell.annotation, shell.lastVisitedAt) ||
+          wakeIsLatest ||
+          elapsed >= VISIT_DISPATCH_THROTTLE_MS
+        ) {
           dispatch(shell, visitedAt, false);
           return;
         }

@@ -57,7 +57,9 @@ export function showDesktopUpdateDownloadedToast(
   toastManager.add({
     type: "success",
     title:
-      state.source === "lastcode-local" ? m(msg("Local nightly built")) : m(msg("Update downloaded")),
+      state.source === "lastcode-local"
+        ? m(msg("Local nightly built"))
+        : m(msg("Update downloaded")),
     description: (
       <>
         <T>Restart the app from the update button to install it.</T>
