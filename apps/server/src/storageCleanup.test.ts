@@ -2408,24 +2408,31 @@ describe("cleanup ownership event revalidation", () => {
     ),
   );
 
-  it.live("keeps ownerless dependencies when their worktree becomes a project root", () =>
-    runCleanupTest(
-      Effect.gen(function* () {
-        const fixture = yield* cleanupFixture();
-        yield* fixture.enableDependencies;
-        fixture.setThreads([]);
-        fixture.onDependencyInspection(
-          Effect.sync(() =>
-            fixture.setProjectRoots(projectShells([fixture.repo, fixture.worktree])),
-          ),
-        );
-        const report = yield* fixture.service.runNow;
-        expect(
-          report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
-        ).toMatchObject([{ outcome: "kept" }]);
-        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
-      }),
-    ),
+  it.live.each(["project root", "workspace hold"] as const)(
+    "keeps ownerless dependencies after a late %s",
+    (change) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          yield* fixture.enableDependencies;
+          fixture.setThreads([]);
+          let changed = false;
+          fixture.onDependencyInspection(
+            Effect.sync(() => {
+              if (change === "workspace hold")
+                fixture.protectSavedWorkspace(fixture.worktree, "Keep workspace is enabled.");
+              else fixture.setProjectRoots(projectShells([fixture.repo, fixture.worktree]));
+              changed = true;
+            }),
+          );
+          const report = yield* fixture.service.runNow;
+          expect(changed).toBe(true);
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+          ).toMatchObject([{ outcome: "kept" }]);
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+        }),
+      ),
   );
 
   it.live("keeps ownerless dependencies when new thread history names their branch", () =>
