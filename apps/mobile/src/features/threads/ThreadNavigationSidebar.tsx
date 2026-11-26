@@ -1,4 +1,5 @@
 import { useGT, useMessages } from "gt-react-native";
+import { useTagSidebar } from "../lastcode/thread-tags/TagSidebar";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -233,6 +234,13 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   // This map reaches LegendList's extraData, which re-renders every row whenever it changes
   // identity; the hook keeps it stable.
   const threadSearchMatchByKey = useThreadListSearchMatches(threads, threadSearch);
+  const tagSidebar = useTagSidebar(
+    selectedProjectScope === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : selectedProjectScope.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+  );
   const selectedProjectKey = selectedProjectScope?.key ?? null;
   const projectByKey = useMemo(() => {
     const map = new Map<string, EnvironmentProject>();
@@ -377,7 +385,11 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     threadSearchMatchByKey,
     workingShelfEnabled,
   };
-  useThreadJumpShortcuts(listItems, handleSelectThread, props.onOpenPendingTask);
+  useThreadJumpShortcuts(
+    tagSidebar.active ? [] : listItems,
+    handleSelectThread,
+    props.onOpenPendingTask,
+  );
   const sidebarItemsAreEqual = (previous: SidebarListItem, item: SidebarListItem): boolean => {
     if (isThreadListV2ListItem(previous) && isThreadListV2ListItem(item)) {
       return threadListV2ListItemsAreEqual(previous, item);
@@ -618,6 +630,16 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     </View>
   );
 
+  if (tagSidebar.active)
+    return (
+      <View className="flex-1">
+        {Platform.OS === "ios" ? header : null}
+        {tagSidebar.results(tagSidebar.control)}
+        {Platform.OS === "android" ? header : null}
+        <ThreadUndoNotice visible={props.visible} />
+      </View>
+    );
+
   if (Platform.OS === "ios") {
     return (
       <>
@@ -653,6 +675,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.threadList}
+                ListHeaderComponent={tagSidebar.control}
                 ListEmptyComponent={listEmpty}
               />
             </GestureDetector>
@@ -678,7 +701,10 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
         }}
       >
         {listItems.length === 0 ? (
-          <View className="flex-1 items-center justify-center">{listEmpty}</View>
+          <View className="flex-1">
+            {tagSidebar.control}
+            <View className="flex-1 items-center justify-center">{listEmpty}</View>
+          </View>
         ) : (
           <SwipeableScrollGateProvider enabled={swipeEnabled}>
             <GestureDetector gesture={sidebarScrollGesture}>
@@ -706,6 +732,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.threadList}
+                ListHeaderComponent={tagSidebar.control}
                 ListEmptyComponent={listEmpty}
               />
             </GestureDetector>

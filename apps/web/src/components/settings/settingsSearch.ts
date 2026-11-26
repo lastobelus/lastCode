@@ -357,6 +357,18 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("annotation note composer eyebrow expand collapse edited")],
   },
   {
+    id: "thread-tags-header",
+    title: msg("Show thread tags in chat header"),
+    to: "/settings/lastcode",
+    searchTerms: [msg("tag label hashtag nested hierarchy chat title")],
+  },
+  {
+    id: "thread-tags-sidebar",
+    title: msg("Show tag filter in sidebar"),
+    to: "/settings/lastcode",
+    searchTerms: [msg("tag label hashtag nested hierarchy parent filter search")],
+  },
+  {
     id: "incoming-message-style",
     title: msg("Incoming message style"),
     to: "/settings/lastcode",

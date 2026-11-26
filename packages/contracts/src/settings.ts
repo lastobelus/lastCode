@@ -688,6 +688,12 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   lastcodeSidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  lastcodeThreadTagsHeaderEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  lastcodeThreadTagsSidebarEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   lastcodeSidebarFamilyStatusSubheaders: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
@@ -2437,6 +2443,8 @@ export const ClientSettingsPatch = Schema.Struct({
   lastcodeStatusIcons: Schema.optionalKey(LastCodeStatusIcons),
   legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeThreadTagsHeaderEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeThreadTagsSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
   pageScrollOverlapEnabled: Schema.optionalKey(Schema.Boolean),

@@ -142,6 +142,8 @@ export interface Preferences {
   /** Which hidden-by-default PR activity is shown: bot comments and resolved or dismissed ones. */
   readonly pullRequestActivityVisibility?: PullRequestActivityVisibility;
   readonly pullRequestMergeMethod?: PullRequestMergeMethod;
+  readonly lastcodeThreadTagsHeaderEnabled?: boolean;
+  readonly lastcodeThreadTagsSidebarEnabled?: boolean;
   readonly liveActivitiesEnabled?: boolean;
   readonly themeId?: MobileThemeId;
   readonly lightThemeId?: MobileThemeId;
@@ -243,6 +245,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     pullRequestHideTestFiles?: boolean;
     pullRequestActivityVisibility?: PullRequestActivityVisibility;
     pullRequestMergeMethod?: PullRequestMergeMethod;
+    lastcodeThreadTagsHeaderEnabled?: boolean;
+    lastcodeThreadTagsSidebarEnabled?: boolean;
     liveActivitiesEnabled?: boolean;
     themeId?: MobileThemeId;
     lightThemeId?: MobileThemeId;
@@ -312,6 +316,10 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     preferences.pullRequestMergeMethod = parsed.pullRequestMergeMethod;
   }
 
+  if (typeof parsed.lastcodeThreadTagsHeaderEnabled === "boolean")
+    preferences.lastcodeThreadTagsHeaderEnabled = parsed.lastcodeThreadTagsHeaderEnabled;
+  if (typeof parsed.lastcodeThreadTagsSidebarEnabled === "boolean")
+    preferences.lastcodeThreadTagsSidebarEnabled = parsed.lastcodeThreadTagsSidebarEnabled;
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
     preferences.liveActivitiesEnabled = parsed.liveActivitiesEnabled;
   }

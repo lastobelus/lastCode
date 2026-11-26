@@ -87,6 +87,7 @@ export const ThreadSearchScope = Schema.Struct({
   titlesOnly: Schema.optionalKey(Schema.Boolean),
   mode: Schema.optionalKey(Schema.Literal("thread-mention")),
   threadIds: Schema.optionalKey(Schema.Array(ThreadId)),
+  messageThreadIds: Schema.optionalKey(Schema.Record(EnvironmentId, Schema.Array(ThreadId))),
 });
 export type ThreadSearchScope = typeof ThreadSearchScope.Type;
 
@@ -158,9 +159,10 @@ export function createThreadSearchResultsAtomFamily<E>(options: {
       let failures = 0;
 
       for (const environmentId of environmentIds) {
-        const before = options.olderSettledBefore
-          ? get(options.olderSettledBefore(environmentId))
-          : null;
+        const before =
+          scope.messageThreadIds === undefined && options.olderSettledBefore
+            ? get(options.olderSettledBefore(environmentId))
+            : null;
         if (!mentionMode && !searchMessages && before === null) continue;
         const label = scope.environmentLabels?.[environmentId];
         const result = get(
@@ -168,6 +170,9 @@ export function createThreadSearchResultsAtomFamily<E>(options: {
             query,
             ...(mentionMode ? { mode: "thread-mention" as const } : {}),
             ...(scope.threadIds === undefined ? {} : { threadIds: scope.threadIds }),
+            ...(scope.messageThreadIds === undefined
+              ? {}
+              : { messageThreadIds: scope.messageThreadIds[environmentId] ?? [] }),
             ...(label === undefined ? {} : { environmentLabel: label }),
             ...(mentionMode || before === null
               ? {}

@@ -1,5 +1,6 @@
 import { useGT, useMessages } from "gt-react-native";
 
+import { useThreadTagHeader } from "../lastcode/thread-tags/useThreadTagHeader";
 import { AppBar } from "../../components/ui/AppBar";
 import type { AppBarAction, AppBarMenu } from "../../components/ui/AppBar.types";
 import {
@@ -26,6 +27,7 @@ export function ThreadHeader(props: {
 }) {
   const gt = useGT();
   const m = useMessages();
+  const tags = useThreadTagHeader(props.gitControls);
   const goBack = useWorkspaceBackNavigation();
   const { toggleAuxiliaryPane, startNewTask } = useAdaptiveWorkspaceLayout();
   const { panes } = useWorkspacePaneState();
@@ -46,7 +48,7 @@ export function ThreadHeader(props: {
     : [];
   const menus = [gitMenu, terminalMenu].filter((menu): menu is AppBarMenu => menu !== null);
 
-  return (
+  return tags.render(
     <AppBar
       title={props.title}
       subtitle={props.subtitle}
@@ -61,9 +63,9 @@ export function ThreadHeader(props: {
             }
           : undefined
       }
-      actions={actions}
+      actions={tags.action ? [tags.action, ...actions] : actions}
       menus={menus}
       hideBottomBorder
-    />
+    />,
   );
 }

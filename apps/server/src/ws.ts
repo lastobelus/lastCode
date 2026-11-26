@@ -6,6 +6,8 @@ import {
   captureLinkedArchiveOperations,
   localArchiveOperations,
 } from "./orchestration-v2/LastCodeLinkedArchiveOperations.ts";
+import { THREAD_TAG_RPC_METHODS } from "@t3tools/contracts";
+import * as ThreadTags from "./orchestration-v2/ThreadTags.ts";
 import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
 import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
 import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
@@ -773,6 +775,7 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 // Keep complex handlers separate so the main table stays within TypeScript's inference limit.
 const CoreServerWsRpcGroup = ServerWsRpcGroup.omit(
+  ...Object.values(THREAD_TAG_RPC_METHODS),
   ...Object.values(ORCHESTRATION_V2_WS_METHODS),
   WS_METHODS.assetsCreateUrl,
   WS_METHODS.serverDeleteThreads,
@@ -2284,6 +2287,16 @@ const layerCoreWsRpc = (
                 (cause) => new ThreadRecoveryOperationError({ message: cause.message, cause }),
               ),
             ),
+        ),
+        ServerWsRpcGroup.toLayerHandler(THREAD_TAG_RPC_METHODS.vocabulary, (input) =>
+          Effect.flatMap(ThreadTags.ThreadTags, (tags) => tags.vocabulary(input)).pipe(
+            Effect.provide(ThreadTags.layer),
+          ),
+        ),
+        ServerWsRpcGroup.toLayerHandler(THREAD_TAG_RPC_METHODS.query, (input) =>
+          Effect.flatMap(ThreadTags.ThreadTags, (tags) => tags.query(input)).pipe(
+            Effect.provide(ThreadTags.layer),
+          ),
         ),
         ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.searchThreads, (input) =>
           ThreadSearch.searchThreadsWithOlderSettledRows({

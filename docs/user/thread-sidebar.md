@@ -14,6 +14,19 @@ Move the mouse to the middle of the left window edge to find a handle. Drag it r
 it to show the sidebar again. Dragging back to the edge before releasing hides the preview
 and leaves it hidden. The sidebar toggle and shortcut still keep it open.
 
+## Organize with tags
+
+Use **+Tag** below a thread's title to find or add a tag. On mobile, tap
+the tag button in the header. Search matches partial spellings. Paths such as
+`work/client` let you filter by `work` and include its nested tags, even when no
+thread has `work` itself. Adding or removing a tag changes only that exact tag.
+
+Use the sidebar's tag filter to find matching threads across projects. Suggestions
+come from unarchived threads, including settled ones; **Archived only** searches
+the archive instead on web and desktop. Tags stay
+independent of thread placement, annotations and work status. **Settings → LastCode**
+has separate controls for the header and sidebar UI; hiding either keeps the tags.
+
 ## Pause before going offline
 
 Enable **Environment pause button** in **Settings → LastCode** for each environment

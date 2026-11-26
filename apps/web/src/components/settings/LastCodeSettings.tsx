@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import { HardDriveIcon, PaletteIcon } from "lucide-react";
 import { LastCodeAnnotationSettings } from "./LastCodeAnnotationSettings";
+import { LastCodeThreadTagSettings } from "./LastCodeThreadTagSettings";
 import { LastCodeMessageAppearanceSettings } from "./LastCodeMessageAppearanceSettings";
 import { LastCodeWorkStatusSettings } from "./LastCodeWorkStatusSettings";
 import { LastCodeHandoffSettings } from "./LastCodeHandoffSettings";
@@ -40,6 +41,7 @@ export function LastCodeSettingsPanel() {
       <LocalCiSettingsSection />
       <SettingsSection title={gt("Appearance")} icon={<PaletteIcon className="size-5" />}>
         <LastCodeAnnotationSettings />
+        <LastCodeThreadTagSettings />
         <LastCodeMessageAppearanceSettings />
         <LastCodeWorkStatusSettings />
         <LastCodeHandoffSettings />

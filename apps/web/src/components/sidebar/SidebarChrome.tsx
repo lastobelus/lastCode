@@ -1,3 +1,4 @@
+import { TagFilterButton } from "../../lastcode/thread-tags/TagFilterButton";
 import { ArrowLeftIcon, ArrowRightIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { T, useGT } from "gt-react";
@@ -96,6 +97,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           </div>
         ) : null}
       </div>
+      <TagFilterButton onBackdrop={backdropVariant !== null} />
       <EnvironmentPauseControl onBackdrop={backdropVariant !== null} />
     </div>
   );

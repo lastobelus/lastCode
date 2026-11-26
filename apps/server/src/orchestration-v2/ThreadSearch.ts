@@ -73,6 +73,9 @@ export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
 
 // Token lists bind as JSON arrays, so any number of them is one parameter.
 const TokenList = Schema.fromJsonString(Schema.Array(Schema.String));
+type MessageSearchInput = OrchestrationSearchThreadsInput &
+  Pick<OrchestrationV2SearchThreadsInput, "messageThreadIds">;
+
 const SearchRequest = Schema.Struct({
   /** The FTS5 query, or null to scan messages instead. */
   match: Schema.NullOr(Schema.String),
@@ -87,6 +90,7 @@ const SearchRequest = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   /** Threads the caller already lists, left out before the hit limit. */
   excludedThreadIds: TokenList,
+  messageThreadIds: Schema.optionalKey(Schema.NullOr(TokenList)),
 });
 const SearchRow = Schema.Struct({
   messageRowid: Schema.Number,
@@ -171,6 +175,7 @@ function accentInsensitiveGlob(token: string): string {
 function buildMessageSearch(
   query: string,
   hasIndex: boolean,
+  phraseHitLimit = MESSAGE_CANDIDATE_LIMIT,
 ): Omit<typeof SearchRequest.Type, "projectId" | "excludedThreadIds"> | null {
   const { long, short, words, exact } = messageSearchTokens(query);
   if (long.length === 0) return null;
@@ -188,7 +193,7 @@ function buildMessageSearch(
     match: !indexed ? null : near === null ? phrases : `NEAR(${phrases}, ${near})`,
     // The matcher drops most hits that hold a phrase's words but not together, so a
     // phrase reads every candidate: the newest ones would otherwise hide an older match.
-    hitLimit: exact && words.length > 1 ? MESSAGE_CANDIDATE_LIMIT : MESSAGE_HIT_LIMIT,
+    hitLimit: exact && words.length > 1 ? phraseHitLimit : MESSAGE_HIT_LIMIT,
     substrings: (indexed ? narrowing : [...long, ...narrowing]).map((token) => ({
       token,
       accentInsensitive: accentInsensitiveGlob(token),
@@ -245,6 +250,7 @@ export const messageHitsQuery = (
     hitLimit,
     projectId,
     excludedThreadIds,
+    messageThreadIds = null,
   }: typeof SearchRequest.Encoded,
 ) => sql`
     WITH eligible AS MATERIALIZED (
@@ -253,13 +259,16 @@ export const messageHitsQuery = (
       INNER JOIN projection_projects AS projects
         ON projects.project_id = threads.project_id
       WHERE threads.deleted_at IS NULL
-        AND threads.archived_at IS NULL
         AND projects.deleted_at IS NULL
         AND (${projectId} IS NULL OR threads.project_id = ${projectId})
         AND threads.thread_id NOT IN (SELECT value FROM json_each(${excludedThreadIds}))
-        AND json_extract(threads.payload_json, '$.lineage.relationshipToParent')
-          IS NOT 'subagent'
-        AND json_extract(threads.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND (${messageThreadIds} IS NULL
+          OR threads.thread_id IN (SELECT value FROM json_each(${messageThreadIds})))
+        AND (${messageThreadIds} IS NOT NULL OR (
+          threads.archived_at IS NULL
+          AND json_extract(threads.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
+          AND json_extract(threads.payload_json, '$.lineage.sideChat') IS NOT 1
+        ))
     )
     ${
       match === null
@@ -274,11 +283,23 @@ export const messageHitsQuery = (
             messages.created_at AS "messageCreatedAt"
           FROM orchestration_v2_projection_messages AS messages
           INNER JOIN eligible ON eligible.thread_id = messages.thread_id
-          WHERE ${indexedMessageCondition(sql)}
-            -- A scan reads every message it passes, so it stops at the newest ones.
-            AND messages.rowid > (
-              SELECT coalesce(max(rowid), 0) FROM orchestration_v2_projection_messages
-            ) - ${MESSAGE_SCAN_LIMIT}
+          WHERE ${indexedMessageCondition(sql, "messages", messageThreadIds !== null)}
+            AND ${
+              messageThreadIds === null
+                ? sql`
+              messages.rowid > (
+                SELECT coalesce(max(rowid), 0) FROM orchestration_v2_projection_messages
+              ) - ${MESSAGE_SCAN_LIMIT}
+            `
+                : sql`
+              messages.rowid >= coalesce((
+                SELECT scoped.rowid FROM orchestration_v2_projection_messages AS scoped
+                INNER JOIN eligible ON eligible.thread_id = scoped.thread_id
+                ORDER BY scoped.rowid DESC
+                LIMIT 1 OFFSET ${MESSAGE_SCAN_LIMIT - 1}
+              ), 0)
+            `
+            }
         `
         : sql`
           SELECT
@@ -375,7 +396,7 @@ export class ThreadSearch extends Context.Service<
   {
     /** Message text matches, for clients that rank their own thread list. */
     readonly search: (
-      input: OrchestrationSearchThreadsInput,
+      input: MessageSearchInput,
     ) => Effect.Effect<OrchestrationSearchThreadsResult, ThreadSearchError>;
     /**
      * Title, branch, pull request, and project matches ranked as the command
@@ -574,7 +595,7 @@ export const make = Effect.gen(function* () {
   // A project scope applies before ranking, so other projects' stronger hits
   // cannot use up the limit.
   const searchMessages = Effect.fn("ThreadSearch.search")(function* (
-    input: OrchestrationSearchThreadsInput & {
+    input: MessageSearchInput & {
       readonly projectId: ProjectId | null;
       /** Threads the caller already lists, which must not use up the limit. */
       readonly excludedThreadIds?: ReadonlySet<ThreadId>;
@@ -604,13 +625,21 @@ export const make = Effect.gen(function* () {
         const index = yield* sql`
           SELECT 1 FROM sqlite_master WHERE name = 'orchestration_v2_message_search'
         `;
-        const messageSearch = buildMessageSearch(input.query, index.length > 0);
+        // Explicit selections can include children omitted from the message index. Let the
+        // phrase matcher see that bounded scan before dropping non-adjacent word matches.
+        const scoped = input.messageThreadIds !== undefined;
+        const messageSearch = buildMessageSearch(
+          input.query,
+          index.length > 0 && !scoped,
+          scoped ? MESSAGE_SCAN_LIMIT : MESSAGE_CANDIDATE_LIMIT,
+        );
         return messageSearch === null
           ? []
           : yield* searchRows({
               ...messageSearch,
               projectId: input.projectId,
               excludedThreadIds: [...(input.excludedThreadIds ?? [])],
+              messageThreadIds: input.messageThreadIds ?? null,
             });
       }),
     );
@@ -862,7 +891,7 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
 )(function* <E1, E2, E3, E4, E5>(input: {
   readonly request: OrchestrationV2SearchThreadsInput;
   readonly search: (
-    input: OrchestrationSearchThreadsInput,
+    input: MessageSearchInput,
   ) => Effect.Effect<OrchestrationSearchThreadsResult, E1>;
   readonly searchOlderSettled: (
     input: Parameters<ThreadSearch["Service"]["searchOlderSettled"]>[0],
@@ -908,7 +937,7 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
   }
   const messages: OrchestrationV2SearchThreadsResult =
     titlesOnly === true ? { matches: [] } : yield* input.search(request);
-  if (olderSettledBefore === undefined) return messages;
+  if (olderSettledBefore === undefined || request.messageThreadIds !== undefined) return messages;
   // Ranked before the rows' transaction, so scoring never holds the shared reader.
   const threadIds = yield* input.searchOlderSettled({
     query: request.query,

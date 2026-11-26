@@ -95,3 +95,5 @@ export * from "./lastCodePeerArchive.ts";
 export * from "./lastCodeThreadOwnership.ts";
 
 export * from "./environmentPause.ts";
+
+export * from "./threadTagDiscovery.ts";
