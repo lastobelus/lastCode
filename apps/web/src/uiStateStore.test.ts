@@ -12,6 +12,7 @@ import {
   reorderProjects,
   resolveProjectExpanded,
   setProjectExpanded,
+  setThreadAnnotationExpanded,
   type UiState,
 } from "./uiStateStore";
 
@@ -21,6 +22,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     sidebarProjectScopeKeys: [],
     threadLastVisitedAtById: {},
+    threadAnnotationExpandedById: {},
     defaultAdvertisedEndpointKey: null,
     pullRequestMergeMethod: "merge",
     ...overrides,
@@ -91,6 +93,16 @@ describe("uiStateStore pure functions", () => {
 
     expect(next.projectOrder).toEqual([keyB, keyC, keyALocal, keyARemote]);
   });
+  it("remembers expanded annotations by scoped thread and removes collapsed defaults", () => {
+    const threadKey = "environment:thread-1";
+    const expanded = setThreadAnnotationExpanded(makeUiState(), threadKey, true);
+
+    expect(expanded.threadAnnotationExpandedById).toEqual({ [threadKey]: true });
+    expect(setThreadAnnotationExpanded(expanded, threadKey, true)).toBe(expanded);
+    expect(
+      setThreadAnnotationExpanded(expanded, threadKey, false).threadAnnotationExpandedById,
+    ).toEqual({});
+  });
 });
 
 describe("parsePersistedState", () => {
@@ -106,6 +118,9 @@ describe("parsePersistedState", () => {
         invalid: "not-a-date",
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
+      },
     });
 
     expect(parsed).toEqual({
@@ -119,6 +134,9 @@ describe("parsePersistedState", () => {
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKeys: [],
       pullRequestMergeMethod: "merge",
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
+      },
     });
   });
 
@@ -126,6 +144,20 @@ describe("parsePersistedState", () => {
     expect(
       parsePersistedState({ pullRequestMergeMethod: "fast-forward" }).pullRequestMergeMethod,
     ).toBe("fast-forward");
+  });
+
+  it.each([undefined, 1, 2])("ignores changed-file expansion version %s", (version) => {
+    const persisted = {
+      defaultAdvertisedEndpointKey: "desktop-core:lan:http",
+      ...(version === undefined ? {} : { threadChangedFilesExpansionVersion: version }),
+      threadChangedFilesExpandedById: {
+        "environment:thread-1": {
+          "turn-1": false,
+        },
+      },
+    };
+
+    expect(parsePersistedState(persisted)).not.toHaveProperty("threadChangedFilesExpandedById");
   });
 
   it("migrates legacy CWD project preferences into local alias keys", () => {
@@ -186,6 +218,9 @@ describe("uiStateStore persistence", () => {
       threadLastVisitedAtById: {
         "environment:thread-1": "2026-02-25T12:35:00.000Z",
       },
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
+      },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
     });
 
@@ -206,6 +241,9 @@ describe("uiStateStore persistence", () => {
       sidebarProjectScopeKeys: [],
       sidebarProjectScopeKey: null,
       pullRequestMergeMethod: "merge",
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
+      },
     });
     expect(parsePersistedState(persisted)).toEqual({
       ...state,
