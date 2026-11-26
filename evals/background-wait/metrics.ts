@@ -55,7 +55,7 @@ interface GradeInput {
   expectedTurnCounts: number[];
   holds: readonly string[];
   retrospective?: boolean;
-  wrapperWakeIds: readonly string[];
+  wrapperWakes: ReadonlyMap<string, string>;
   actionWakes: number;
   actionRunObserved?: boolean;
   workerMessage: string;
@@ -107,7 +107,14 @@ export function gradeSample(input: GradeInput): SampleResult {
     problems.push("Final response omitted the artifact path.");
   }
 
-  const observed = traces?.map((trace) => gradeTrace(trace, input.waitInstruction, arm === "b"));
+  const observed = traces?.map((trace, index) =>
+    gradeTrace(
+      trace,
+      input.waitInstruction,
+      arm === "b",
+      index === traces.length - 1 ? { holds: input.holds, wakes: input.wrapperWakes } : undefined,
+    ),
+  );
   const forbiddenAction =
     arm === "b" &&
     (input.actionRunObserved === true ||
@@ -123,8 +130,8 @@ export function gradeSample(input: GradeInput): SampleResult {
   const extraCallsWhileWaiting =
     observed?.reduce((sum, trace) => sum + trace.extraCallsWhileWaiting, 0) ?? null;
   const holdExpected = worker === undefined ? null : arm === "a" ? stages : worker.markers;
-  const waitEvidence = new Set([...input.holds, ...input.wrapperWakeIds]);
-  const confirmed = input.retrospective ? waitEvidence.size : input.holds.length;
+  const waitEvidence = worker?.waitEvidence ?? input.holds.length;
+  const confirmed = input.retrospective ? waitEvidence : input.holds.length;
   const holds =
     input.retrospective && (holdExpected === null || confirmed < holdExpected) ? null : confirmed;
   if (worker === undefined) {
@@ -149,7 +156,7 @@ export function gradeSample(input: GradeInput): SampleResult {
     ) {
       problems.push("Worker did not use the wrapper for each operation.");
     }
-    if (arm === "b" && waitEvidence.size < worker.markers)
+    if (arm === "b" && waitEvidence < worker.markers)
       problems.push(
         input.retrospective
           ? "Expected wrapper wait had no retained hold or result wake evidence."

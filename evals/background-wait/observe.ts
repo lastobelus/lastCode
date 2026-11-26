@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import type * as NodeSqlite from "node:sqlite";
 
+import { isLastCodeWrappedCommand } from "../../apps/server/src/provider/LastCodeWrappedBackgroundWait.ts";
 import { catalogMarker } from "./actionPolicy.ts";
 import { wrapperWaitInstruction } from "./project.ts";
 
@@ -337,12 +338,14 @@ export function readNative(input: string, provider: "codex" | "claudeAgent"): Na
 const wrapperResult =
   /\[lc-run\] (?:prepare|prepare-checkpoint|ci|wait-checkpoint|package): (?:success|attention|blocked) \(exit \d+\)/u;
 
-export function wrapperWakeIds(db: NodeSqlite.DatabaseSync, threadId: string): string[] {
+export function readBackgroundWakes(db: NodeSqlite.DatabaseSync, threadId: string) {
   // A fast command can wake the next run between status snapshots. The continuation
   // records which awaited command delivered a result to that run.
   const wakes = db
     .prepare(`
-      SELECT task.value AS task_id, json_extract(message.payload_json, '$.text') AS text
+      SELECT task.value AS task_id,
+        CASE WHEN json_array_length(run.payload_json, '$.backgroundResultContinuation.taskIds') = 1
+          THEN json_extract(message.payload_json, '$.text') END AS body
       FROM orchestration_v2_projection_runs AS run
       JOIN orchestration_v2_projection_messages AS message
         ON message.message_id = json_extract(run.payload_json, '$.userMessageId')
@@ -350,16 +353,13 @@ export function wrapperWakeIds(db: NodeSqlite.DatabaseSync, threadId: string): s
       WHERE run.thread_id = ? AND run.status = 'completed' AND task.type = 'text'
     `)
     .all(threadId);
-  return wakes.flatMap(({ task_id, text }) => {
-    const header = typeof text === "string" ? (text.split("\n", 1)[0] ?? "") : "";
-    return typeof task_id === "string" &&
-      typeof text === "string" &&
-      header.startsWith("Background command completed") &&
-      wrapperCall(header) &&
-      wrapperResult.test(text)
-      ? [task_id]
-      : [];
-  });
+  // The continuation confirms each held task. Only a single-task continuation
+  // can also attribute the delivered output to that task from the message alone.
+  return new Map(
+    wakes.flatMap(({ task_id, body }) =>
+      typeof task_id === "string" ? [[task_id, typeof body === "string" ? body : ""] as const] : [],
+    ),
+  );
 }
 
 function wrapperCall(args: string): boolean {
@@ -375,19 +375,46 @@ function callsTool(call: Extract<TraceEvent, { kind: "call" }>, name: string) {
   );
 }
 
+function fileToolArgs(call: Extract<TraceEvent, { kind: "call" }>): Data {
+  if (call.name !== "Bash" && call.name !== "Read") return {};
+  try {
+    return record(JSON.parse(call.args));
+  } catch {
+    return {};
+  }
+}
+
+function claudeOutputPath(call: Extract<TraceEvent, { kind: "call" }>, args: Data) {
+  if (call.name === "Read" && typeof args.file_path === "string") return args.file_path;
+  if (call.name === "Bash" && typeof args.command === "string") {
+    const cat = /^cat\s+(?:--\s+)?(?:"([^"]+)"|'([^']+)'|([^\s;&|<>]+))$/u.exec(
+      args.command.trim(),
+    );
+    return cat?.[1] ?? cat?.[2] ?? cat?.[3];
+  }
+  return undefined;
+}
+
 export function gradeTrace(
-  trace: TraceEvent[],
+  trace: readonly TraceEvent[],
   waitInstruction = wrapperWaitInstruction(),
   followWrapperCells = false,
+  backgroundEvidence?: { holds: readonly string[]; wakes: ReadonlyMap<string, string> },
 ) {
   const calls = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
   const wrapperCells = new Map<string, Extract<TraceEvent, { kind: "call" }>>();
+  const backgroundFiles = new Map<
+    string,
+    { taskId: string; launchTurn: number; resultSeen: boolean }
+  >();
+  const confirmedHolds = new Set(backgroundEvidence?.holds);
   const waitToolOutputs = new Set(
     trace.flatMap((event) =>
       event.kind === "output" && event.body.includes("t3_background_wait") ? [event.id] : [],
     ),
   );
   let waiting: "action" | "wrapper" | undefined;
+  let turn = 0;
   let wrapperCalls = 0;
   let terminalWrapperOutputs = 0;
   let markers = 0;
@@ -401,6 +428,7 @@ export function gradeTrace(
   for (const event of trace) {
     if (event.kind === "turn-end") {
       waiting = undefined;
+      turn++;
       continue;
     }
     if (event.kind === "call") {
@@ -451,7 +479,32 @@ export function gradeTrace(
       waiting = "action";
       actionWaits++;
     }
-    if (call === undefined || !wrapperCall(call.args)) continue;
+    if (call === undefined) continue;
+    const args = fileToolArgs(call);
+    const path = claudeOutputPath(call, args);
+    const background = path === undefined ? undefined : backgroundFiles.get(path);
+    if (background !== undefined) {
+      if (wrapperResult.test(event.body)) background.resultSeen = true;
+      else if (background.launchTurn === turn && event.body.includes(waitInstruction)) {
+        waiting = "wrapper";
+      }
+      continue;
+    }
+    if (!wrapperCall(call.args)) continue;
+    if (call.name === "Bash" && typeof args.command === "string") {
+      const launch =
+        /^Command running in background with ID: (\S+)\. Output is being written to: ([^\r\n]+?)(?:\. You will be notified when it completes\.[^\r\n]*)?(?:\r?\n|$)/u.exec(
+          event.body,
+        );
+      if (launch && isLastCodeWrappedCommand(args.command)) {
+        backgroundFiles.set(launch[2]!.trimEnd(), {
+          taskId: launch[1]!,
+          launchTurn: turn,
+          resultSeen: false,
+        });
+        continue;
+      }
+    }
     if (wrapperResult.test(event.body)) terminalWrapperOutputs++;
     else if (event.body.includes(waitInstruction)) {
       waiting = "wrapper";
@@ -462,10 +515,29 @@ export function gradeTrace(
       if (cellId !== undefined) wrapperCells.set(cellId, call);
     }
   }
+  for (const { taskId, resultSeen } of backgroundFiles.values()) {
+    const wake = backgroundEvidence?.wakes.get(taskId);
+    const deliveredResult = wake?.startsWith("Background command ") && wrapperResult.test(wake);
+    if ((resultSeen || deliveredResult) && (wake !== undefined || confirmedHolds.has(taskId))) {
+      confirmedHolds.add(taskId);
+      markers++;
+    }
+  }
+  for (const [taskId, wake] of backgroundEvidence?.wakes ?? []) {
+    const header = wake.split("\n", 1)[0] ?? "";
+    if (
+      header.startsWith("Background command completed") &&
+      wrapperCall(header) &&
+      wrapperResult.test(wake)
+    ) {
+      confirmedHolds.add(taskId);
+    }
+  }
   return {
     wrapperCalls,
     terminalWrapperOutputs,
     markers,
+    waitEvidence: confirmedHolds.size,
     lists,
     actions,
     actionWaits,

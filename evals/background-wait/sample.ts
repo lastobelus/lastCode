@@ -21,7 +21,7 @@ import {
   readCodexRollout,
   readLines,
   readNative,
-  wrapperWakeIds,
+  readBackgroundWakes,
   type PendingWork,
 } from "./observe.ts";
 import { existingFile, isInside } from "./paths.ts";
@@ -164,7 +164,7 @@ export async function observeFamily(input: {
     completedAt: endedAt || null,
     delegatedCompletions: Number(wakes.get(rootId)?.delegated),
     actionWakes: Number(wakes.get(latest.at(-1)!.thread.threadId)?.actions),
-    wrapperWakeIds: arm === "b" ? wrapperWakeIds(db, latest.at(-1)!.thread.threadId) : [],
+    wrapperWakes: arm === "b" ? readBackgroundWakes(db, latest.at(-1)!.thread.threadId) : new Map(),
   };
 }
 
@@ -248,7 +248,7 @@ export function sampleMetrics(input: {
     expectedTurnCounts: latest.map(({ thread }) => thread.runCount),
     holds: sample.holds,
     retrospective: input.retrospective === true,
-    wrapperWakeIds: observations.wrapperWakeIds,
+    wrapperWakes: observations.wrapperWakes,
     actionWakes: observations.actionWakes,
     actionRunObserved: latest.some(({ thread }) => thread.actionResume != null),
     workerMessage: finalMessage(worker),

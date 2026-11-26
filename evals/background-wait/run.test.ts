@@ -14,10 +14,10 @@ import {
   awaitedWrapperIds,
   gradeTrace,
   ownedWorkerLookup,
+  readBackgroundWakes,
   readCodexActionCatalog,
   readCodexRollout,
   readNative,
-  wrapperWakeIds,
 } from "./observe.ts";
 import { fixtureGuidance, wrapperWaitInstruction } from "./project.ts";
 import { openSampleDatabase } from "./read-sample.ts";
@@ -206,6 +206,20 @@ describe("real-session evidence", () => {
     const a = data("a", 3, 3);
     expect(compare(a, data("b", 0, 1), 5).gates.zeroPolls).toBe(true);
     expect(compare(a, data("b", 1, 1), 5).gates.zeroPolls).toBe(false);
+    const b = data("b", 0, 0);
+    b.samples[0]!.result!.correct = true;
+    b.samples.push({ ...b.samples[0]!, index: 3 });
+    a.samples.push({ ...a.samples[0]!, index: 2 });
+    expect(compare(a, b, 5)).toMatchObject({
+      outcome: "incomplete",
+      summaries: [
+        {
+          case: "prepare",
+          a: { counted: 2, scheduled: 3, raw: null },
+          b: { correct: 2, counted: 2, scheduled: 3, raw: null },
+        },
+      ],
+    });
   });
 
   it("finds a local owned worker from the app's task record", () => {
@@ -250,7 +264,11 @@ describe("real-session evidence", () => {
       );
       addMessage.run(id, JSON.stringify({ text: message }));
     }
-    expect(wrapperWakeIds(db, "worker")).toEqual(["exec-wrapped"]);
+    const wakes = readBackgroundWakes(db, "worker");
+    expect(wakes.get("exec-wrapped")).toBe(completion);
+    expect(wakes.has("exec-queued")).toBe(false);
+    expect(wakes.has("exec-other")).toBe(false);
+    expect(gradeTrace([], wait, true, { holds: [], wakes }).waitEvidence).toBe(1);
   });
 
   it("counts Codex request usage once and excludes cached tokens from double counting", () => {
@@ -390,6 +408,120 @@ describe("real-session evidence", () => {
       ),
     ).toMatchObject({ wrapperCalls: 1, markers: 1, polls: 1 });
   });
+
+  it.each([
+    {
+      sample: "Opus package 06",
+      command: "package --tag lastcode/revision/v0.0.1-nightly.20260101.10.1",
+      earlyRead: false,
+      reader: "Bash",
+      exit: 0,
+    },
+    {
+      sample: "Opus package 17",
+      command: "package --tag lastcode/revision/v0.0.1-nightly.20260101.10.1",
+      earlyRead: true,
+      reader: "Read",
+      exit: 0,
+    },
+    {
+      sample: "Haiku Quick CI 10",
+      command: "ci --quick",
+      earlyRead: false,
+      reader: "Read",
+      exit: 3,
+    },
+  ])(
+    "credits the exact Claude background task for $sample",
+    ({ command, earlyRead, reader, exit }) => {
+      const task = "b-example";
+      const path = "/tmp/claude/tasks/b-example.output";
+      const operation = command.split(" ")[0];
+      const result = `[lc-run] ${operation}: ${exit === 0 ? "success" : "attention"} (exit ${exit})`;
+      const launch = {
+        kind: "call",
+        id: "bash",
+        name: "Bash",
+        args: JSON.stringify({ command: `./scripts/lc-run ${command}`, run_in_background: true }),
+      } as const;
+      const read = (id: string, name: string, file: string) => ({
+        kind: "call" as const,
+        id,
+        name,
+        args: JSON.stringify(name === "Bash" ? { command: `cat ${file}` } : { file_path: file }),
+      });
+      const trace = [
+        launch,
+        {
+          kind: "output",
+          id: "bash",
+          body:
+            `Command running in background with ID: ${task}. Output is being written to: ${path}.` +
+            " You will be notified when it completes. To check interim output, use Read on that file path.",
+        },
+        ...(earlyRead
+          ? [
+              read("early", "Read", path),
+              {
+                kind: "output" as const,
+                id: "early",
+                body: `1\t${wait}\n2\tChecking workspace inputs…`,
+              },
+            ]
+          : []),
+        { kind: "turn-end" },
+        read("finished", reader, path),
+        {
+          kind: "output",
+          id: "finished",
+          body: [wait, result, "Result ID result-example."]
+            .map((line, index) => (reader === "Read" ? `${index + 1}\t${line}` : line))
+            .join("\n"),
+        },
+        { kind: "turn-end" },
+      ] as const;
+      const wake =
+        exit === 0
+          ? `Background command "./scripts/lc-run ${command}" completed (exit code 0)`
+          : 'Background command "Run Quick CI in this worktree" failed with exit code 3';
+      const wakes = new Map([[task, wake]]);
+      expect(gradeTrace(trace, wait, true, { holds: [], wakes })).toMatchObject({
+        wrapperCalls: 1,
+        markers: 1,
+        terminalWrapperOutputs: 0,
+        waitEvidence: 1,
+        polls: 0,
+        extraCallsWhileWaiting: 0,
+      });
+      expect(
+        gradeTrace(trace, wait, true, { holds: ["different-task"], wakes: new Map() }).markers,
+      ).toBe(0);
+      expect(
+        gradeTrace(
+          [...trace.slice(0, -3), read("finished", reader, path + ".other"), ...trace.slice(-2)],
+          wait,
+          true,
+          { holds: [], wakes },
+        ).markers,
+      ).toBe(0);
+      expect(
+        gradeTrace(trace.slice(0, -3), wait, true, {
+          holds: [],
+          wakes: new Map([[task, wake + "\n\n" + result]]),
+        }).markers,
+      ).toBe(1);
+      const quoted = {
+        ...launch,
+        args: JSON.stringify({
+          command: `echo './scripts/lc-run ${command}'`,
+          run_in_background: true,
+        }),
+      };
+      expect(
+        gradeTrace([quoted, ...trace.slice(1)], wait, true, { holds: [], wakes }).markers,
+      ).toBe(0);
+    },
+  );
 
   it("treats a foreground Claude result as completion and ignores native child tool blocks", () => {
     const usage = {
@@ -549,7 +681,7 @@ describe("real-session evidence", () => {
       turns: 4,
       expectedTurnCounts: [2, 2],
       holds: [],
-      wrapperWakeIds: [],
+      wrapperWakes: new Map(),
       actionWakes: 0,
       workerMessage: "Result ID result-example, exit code 3.",
       finalMessage: "Result ID result-example, exit code 3.",
@@ -596,7 +728,12 @@ describe("real-session evidence", () => {
       gradeSample({
         ...input,
         traces: [[], [...trace]],
-        wrapperWakeIds: ["worker-command"],
+        wrapperWakes: new Map([
+          [
+            "worker-command",
+            "Background command completed: ./scripts/lc-run ci --quick\n[lc-run] ci: attention (exit 3)",
+          ],
+        ]),
         workerMessage: "**Result ID** `result-example`\n**Exit code:** `3`",
         finalMessage: "Quick CI's exit code was **3**. Result ID `result-example`.",
       }),
@@ -606,14 +743,24 @@ describe("real-session evidence", () => {
         ...input,
         traces: [[], [...trace]],
         retrospective: true,
-        wrapperWakeIds: ["worker-command"],
+        wrapperWakes: new Map([
+          [
+            "worker-command",
+            "Background command completed: ./scripts/lc-run ci --quick\n[lc-run] ci: attention (exit 3)",
+          ],
+        ]),
       }),
     ).toMatchObject({ correct: true, holds: 1, holdExpected: 1, holdEngaged: true });
     expect(
       gradeSample({
         ...input,
         traces: [[], [...trace]],
-        wrapperWakeIds: ["worker-command"],
+        wrapperWakes: new Map([
+          [
+            "worker-command",
+            "Background command completed: ./scripts/lc-run ci --quick\n[lc-run] ci: attention (exit 3)",
+          ],
+        ]),
         actionRunObserved: true,
       }),
     ).toMatchObject({

@@ -36,16 +36,22 @@ function paired(a: Results, b: Results, baselineHead?: string) {
     );
   }
   const byCase = (data: Results, id: string) =>
-    data.samples.filter((sample) => sample.caseId === id).toSorted((x, y) => x.index - y.index);
+    new Map(
+      data.samples
+        .filter((sample) => sample.caseId === id)
+        .map(({ index, result }) => [index, result]),
+    );
   return cases.flatMap(({ id }) => {
     const left = byCase(a, id);
     const right = byCase(b, id);
-    if (left.length === 0 && right.length === 0) return [];
-    if (left.map((row) => row.index).join(",") !== right.map((row) => row.index).join(",")) {
-      throw new Error(`Mismatched sample indices for ${id}.`);
-    }
+    const scheduled = [...new Set([...left.keys(), ...right.keys()])].sort((x, y) => x - y);
+    if (scheduled.length === 0) return [];
     return [
-      { case: id, a: left.map(({ result }) => result), b: right.map(({ result }) => result) },
+      {
+        case: id,
+        a: scheduled.map((index) => left.get(index)),
+        b: scheduled.map((index) => right.get(index)),
+      },
     ];
   });
 }
