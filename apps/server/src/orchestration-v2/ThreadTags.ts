@@ -1,6 +1,8 @@
 import {
+  type CommandId,
   type ThreadTagQueryInput,
   type ThreadTagQueryResult,
+  type ThreadTagSetInput,
   type ThreadTagVocabularyInput,
   type ThreadTagVocabularyResult,
   ThreadTagDiscoveryError,
@@ -26,6 +28,9 @@ export class ThreadTags extends Context.Service<
     readonly query: (
       input: ThreadTagQueryInput,
     ) => Effect.Effect<ThreadTagQueryResult, ThreadTagDiscoveryError>;
+    readonly set: (
+      input: ThreadTagSetInput & { readonly commandId: CommandId },
+    ) => Effect.Effect<{ readonly sequence: number }, ThreadTagDiscoveryError>;
   }
 >()("t3/orchestration-v2/ThreadTags") {}
 
@@ -127,6 +132,19 @@ const make = Effect.gen(function* () {
       nextCursor: result.nextCursor,
     };
   });
-  return ThreadTags.of({ query, vocabulary });
+  const set = Effect.fn("ThreadTags.set")(function* (
+    input: ThreadTagSetInput & { readonly commandId: CommandId },
+  ) {
+    const result = yield* threads
+      .dispatch({ type: "thread.tag.set", ...input })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new ThreadTagDiscoveryError({ message: "Unable to access thread tags.", cause }),
+        ),
+      );
+    return { sequence: result.sequence };
+  });
+  return ThreadTags.of({ query, vocabulary, set });
 });
 export const layer = Layer.effect(ThreadTags, make);

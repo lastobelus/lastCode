@@ -23,9 +23,10 @@ thread has `work` itself. Adding or removing a tag changes only that exact tag.
 
 Use the sidebar's tag filter to find matching threads across projects. Suggestions
 come from unarchived threads, including settled ones; **Archived only** searches
-the archive instead on web and desktop. Tags stay
+the archive instead on web and desktop. Agents can also find and change tags when you ask. Tags stay
 independent of thread placement, annotations and work status. **Settings → LastCode**
-has separate controls for the header and sidebar UI; hiding either keeps the tags.
+has separate controls for the header and sidebar UI; hiding either keeps the tags
+and agent access.
 
 ## Pause before going offline
 

@@ -1076,6 +1076,7 @@ function listItemFromShell(
   nowMs: number,
 ): OrchestratorMcpThreadListItem {
   return {
+    ...(shell.tags?.length ? { tags: shell.tags } : {}),
     threadId: shell.id,
     projectId: shell.projectId,
     environmentId: scope.environmentId,
@@ -1124,6 +1125,7 @@ function threadDetail(
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
   return {
+    ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     threadId: projection.thread.id,
     environmentId: scope.environmentId,
     projectId: projection.thread.projectId,

@@ -1,4 +1,5 @@
 import {
+  CommandId,
   EnvironmentId,
   type ThreadTagVocabularyInput,
   ProjectId,
@@ -30,7 +31,7 @@ const active = [
   shell("c", "one", ["Work/client/deep"]),
 ];
 const archived = [shell("d", "one", ["archived"], true)];
-const testLayer = (shells = active) =>
+const testLayer = (commands: unknown[] = [], shells = active) =>
   ThreadTags.layer.pipe(
     Layer.provide(
       Layer.succeed(ThreadManagement.ThreadManagementService, {
@@ -45,6 +46,13 @@ const testLayer = (shells = active) =>
             ),
             archivedThreads: archived,
             snapshotSequence: 73,
+          }),
+        dispatch: (
+          command: Parameters<ThreadManagement.ThreadManagementService["Service"]["dispatch"]>[0],
+        ) =>
+          Effect.sync(() => {
+            commands.push(command);
+            return { sequence: 42 };
           }),
       } as unknown as ThreadManagement.ThreadManagementService["Service"]),
     ),
@@ -74,8 +82,9 @@ it.effect(
 
 it.effect(
   "queries complete shells across projects and pages while exact matching stays narrow",
-  () =>
-    Effect.gen(function* () {
+  () => {
+    const commands: unknown[] = [];
+    return Effect.gen(function* () {
       const tags = yield* ThreadTags.ThreadTags;
       const first = yield* tags.query({ tag: "Work", limit: 2 });
       expect(first).toHaveProperty("snapshotSequence", 73);
@@ -95,7 +104,21 @@ it.effect(
       expect(
         (yield* tags.query({ tag: "archived", archived: true })).threads.map((t) => t.id),
       ).toEqual(["d"]);
-    }).pipe(Effect.provide(testLayer())),
+      yield* tags.set({
+        threadId: ThreadId.make("a"),
+        commandId: CommandId.make("remove"),
+        tag: "Work",
+        tagged: false,
+      });
+      expect(commands.at(-1)).toEqual({
+        type: "thread.tag.set",
+        threadId: "a",
+        commandId: "remove",
+        tag: "Work",
+        tagged: false,
+      });
+    }).pipe(Effect.provide(testLayer(commands)));
+  },
 );
 
 it.effect("filters canonical vocabulary before counting using parent-aware UI privacy", () => {
@@ -160,5 +183,5 @@ it.effect("filters canonical vocabulary before counting using parent-aware UI pr
     expect((yield* tags.vocabulary({})).entries.some((entry) => entry.tag === "leaked/path")).toBe(
       true,
     );
-  }).pipe(Effect.provide(testLayer(shells)));
+  }).pipe(Effect.provide(testLayer([], shells)));
 });

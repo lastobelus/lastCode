@@ -81,6 +81,7 @@ import {
   PullRequestWatchFromSubagentError,
   PullRequestsToolkit,
 } from "../../apps/server/src/mcp/toolkits/pullRequests/tools.ts";
+import { ThreadTagsToolkit } from "../../apps/server/src/mcp/toolkits/threadTags/tools.ts";
 import { ThemeToolkit } from "../../apps/server/src/mcp/toolkits/theme/tools.ts";
 import { ThreadToolkit } from "../../apps/server/src/mcp/toolkits/thread/tools.ts";
 import { WorktreeToolkit } from "../../apps/server/src/mcp/toolkits/worktree/tools.ts";
@@ -526,6 +527,7 @@ const t3SourceTools: ReadonlyArray<Tool.Any> = [
   OrchestratorToolkit,
   ActionResumeToolkit,
   ThreadToolkit,
+  ThreadTagsToolkit,
   AttachmentToolkit,
   ProjectToolkit,
   EnvironmentToolkit,
