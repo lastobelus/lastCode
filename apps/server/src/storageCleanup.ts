@@ -431,15 +431,13 @@ export class FirstAutomaticSweepDelay extends Context.Reference<Duration.Duratio
 const make = Effect.gen(function* () {
   const savedWorkspaces = yield* WorktreeSuspension;
   const suspensionRegistry = yield* WorktreeSuspensionRegistry;
+  const unavailableWorkspaceAuthority =
+    "Saved workspace authority could not be verified; files were retained.";
   const savedWorkspaceProtection = Effect.fn("StorageCleanup.savedWorkspaceProtection")(
     (workspacePath: string, resource: "worktree" | "dependencies" = "worktree") =>
       suspensionRegistry
         .automaticProtection(workspacePath, resource)
-        .pipe(
-          Effect.orElseSucceed(
-            () => "Saved workspace authority could not be verified; files were retained.",
-          ),
-        ),
+        .pipe(Effect.orElseSucceed(() => unavailableWorkspaceAuthority)),
   );
   const dependenciesRemoved = Effect.fn("StorageCleanup.dependenciesRemoved")(
     (workspacePath: string) =>
@@ -1905,6 +1903,17 @@ const make = Effect.gen(function* () {
   ) {
     const generatedBuilds = resource === "generated-builds";
     const protectionResource = generatedBuilds ? "worktree" : "dependencies";
+    const protectionInventory = yield* Effect.cached(suspensionRegistry.snapshotWorktreeProtection);
+    const readWorkspaceProtection = (workspacePath: string) =>
+      savedWorkspaceProtection(workspacePath, protectionResource);
+    // Screening can retain candidates. Removal checks still read current authority under the lease.
+    const screenWorkspaceProtection = generatedBuilds
+      ? readWorkspaceProtection
+      : (workspacePath: string) =>
+          protectionInventory.pipe(
+            Effect.flatMap((protect) => protect(workspacePath, "dependencies")),
+            Effect.orElseSucceed(() => unavailableWorkspaceAuthority),
+          );
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
     const outputExists = Effect.fnUntraced(function* (cwd: string) {
       const exists = yield* fs.exists(cwd).pipe(
@@ -1930,8 +1939,9 @@ const make = Effect.gen(function* () {
       used = false,
       persist = true,
       skipRecentWithinRetentionDays?: number,
+      checkProtection: typeof readWorkspaceProtection = readWorkspaceProtection,
     ) {
-      if (yield* savedWorkspaceProtection(input.worktreePath, protectionResource)) return null;
+      if (yield* checkProtection(input.worktreePath)) return null;
       if (generatedBuilds)
         return yield* builds.observe(
           buildInput(input),
@@ -2145,6 +2155,7 @@ const make = Effect.gen(function* () {
           ) ?? false,
           true,
           automaticWork !== undefined ? days : undefined,
+          screenWorkspaceProtection,
         ).pipe(Effect.orElseSucceed(() => null));
         dependencyActivityByPath.set(
           cwd,
@@ -2535,7 +2546,7 @@ const make = Effect.gen(function* () {
         files: null,
       };
       entries.push(entry);
-      const savedProtection = yield* savedWorkspaceProtection(cwd, protectionResource);
+      const savedProtection = yield* screenWorkspaceProtection(cwd);
       if (savedProtection !== null) {
         entry.reason = savedProtection;
         continue;
@@ -2784,10 +2795,7 @@ const make = Effect.gen(function* () {
         const outputPresent =
           !generatedBuilds && days !== null ? yield* outputExists(thread.cleanupPath) : undefined;
         if (outputPresent === false) return [];
-        const savedProtection = yield* savedWorkspaceProtection(
-          thread.cleanupPath,
-          protectionResource,
-        );
+        const savedProtection = yield* screenWorkspaceProtection(thread.cleanupPath);
         if (savedProtection !== null) {
           if (outputPresent ?? (yield* outputExists(thread.cleanupPath)))
             noteCandidate(

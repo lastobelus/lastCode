@@ -653,9 +653,11 @@ const cleanupFixture = (
         ).pipe(
           Effect.map((protect) => {
             const snapshot = new Map(savedWorkspaceProtection);
-            return (workspacePath: string) => {
+            return (workspacePath: string, resource?: "worktree" | "dependencies") => {
               const reason = snapshot.get(workspacePath);
-              return reason === undefined ? protect(workspacePath) : protectionResult(reason);
+              return reason === undefined
+                ? protect(workspacePath, resource)
+                : protectionResult(reason);
             };
           }),
         ),
@@ -2450,8 +2452,8 @@ describe("cleanup ownership event revalidation", () => {
     ),
   );
 
-  it.live.each(["owner visit", "owner unarchived"] as const)(
-    "revalidates dependency ownership after late %s in native removal",
+  it.live.each(["owner visit", "owner unarchived", "workspace hold"] as const)(
+    "revalidates dependency eligibility after late %s in native removal",
     (change) =>
       runCleanupTest(
         Effect.gen(function* () {
@@ -2482,6 +2484,10 @@ describe("cleanup ownership event revalidation", () => {
           });
           fixture.setThreads([owner]);
           inject = Effect.gen(function* () {
+            if (change === "workspace hold") {
+              fixture.protectSavedWorkspace(fixture.worktree, "Keep workspace is enabled.");
+              return;
+            }
             const latest = change === "owner unarchived" ? { ...owner, archivedAt: null } : owner;
             fixture.setThreads([latest]);
             yield* append(
@@ -2496,7 +2502,7 @@ describe("cleanup ownership event revalidation", () => {
             report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
           ).toMatchObject([{ outcome: change === "owner visit" ? "removed" : "kept" }]);
           expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(
-            change === "owner unarchived",
+            change !== "owner visit",
           );
           expect(report.counts.failed).toBe(0);
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -6650,7 +6656,7 @@ describe("one initial process observation per storage sweep", () => {
   );
 });
 
-it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () => {
+it.effect("bounds SQL and registry reads in quiet dependency sweeps", () => {
   const outputPasses: Tracer.Span[] = [];
   const dependencySpans: Tracer.Span[] = [];
   const tracer = Tracer.make({
@@ -6670,12 +6676,15 @@ it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () =>
       yield* TestClock.setTime(NOW_MS);
       const sql = yield* SqlClient.SqlClient;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
+        Effect.provide(SuspensionRegistry.layer),
+      );
       let mountInspectionAvailable = false;
       const fixture = yield* cleanupFixture(
         undefined,
         undefined,
         undefined,
-        undefined,
+        registry,
         undefined,
         undefined,
         undefined,
@@ -6779,6 +6788,8 @@ it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () =>
           commit: spansNamed("COMMIT"),
           providerChecks: spansNamed("StorageCleanup.hasLiveProviderSession"),
           savedWorkspaceChecks: spansNamed("StorageCleanup.savedWorkspaceProtection"),
+          registryReads: spansNamed("WorktreeSuspensionRegistry.read"),
+          registrySnapshots: spansNamed("WorktreeSuspensionRegistry.snapshotWorktreeProtection"),
           providerEventReads,
           ownershipEventReads,
         });
@@ -6789,6 +6800,10 @@ it.effect("bounds repeated SQL work in quiet automatic dependency sweeps", () =>
         }
       }
       for (const counts of measurements) {
+        expect(counts.registrySnapshots, JSON.stringify(measurements)).toBe(1);
+        expect(counts.registryReads, JSON.stringify(measurements)).toBeLessThanOrEqual(
+          1 + 2 * oldInstallCount,
+        );
         expect(counts.statements, JSON.stringify(measurements)).toBeLessThanOrEqual(31);
         expect(counts.transactions).toBeLessThanOrEqual(1 + oldInstallCount);
         expect(counts.providerEventReads).toBeLessThanOrEqual(1 + 3 * oldInstallCount);

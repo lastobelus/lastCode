@@ -162,6 +162,7 @@ const isRegistryError = Schema.is(SuspensionRegistryError);
 
 type WorktreeProtection = (
   workspacePath: string,
+  resource?: "worktree" | "dependencies",
 ) => Effect.Effect<string | null, SuspensionRegistryError>;
 
 export class WorktreeSuspensionRegistry extends Context.Service<
@@ -488,7 +489,7 @@ const make = Effect.gen(function* () {
           entry.summary.keepWorkspace ||
           operationProtectsWorktree(entry),
       );
-      return (workspacePath) => automaticProtection(workspacePath, "worktree", protective);
+      return (workspacePath, resource) => automaticProtection(workspacePath, resource, protective);
     }),
     Effect.withSpan("WorktreeSuspensionRegistry.snapshotWorktreeProtection"),
   );
