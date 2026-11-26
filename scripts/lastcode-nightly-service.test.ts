@@ -375,15 +375,20 @@ it("validates the persisted schedule read during installation", () => {
   ).toThrow("invalid IANA time zone");
 });
 
-it("persists the Project Action trust allowlist without discarding recovery delivery", () => {
+it("updates Project Action trust while preserving recovery delivery and the post-publish command", () => {
   expect(
     nextCheckpointSupervisorConfig(
-      { schemaVersion: 1, recoveryThreadId: "thread-maintenance" },
+      {
+        schemaVersion: 1,
+        recoveryThreadId: "thread-maintenance",
+        postPublishCommand: ["checkpoint-verify", "--refresh"],
+      },
       { trustedProjectActionIds: ["lc-wait-for-checkpoint"] },
     ),
   ).toEqual({
     schemaVersion: 1,
     recoveryThreadId: "thread-maintenance",
+    postPublishCommand: ["checkpoint-verify", "--refresh"],
     trustedProjectActionIds: ["lc-wait-for-checkpoint"],
   });
   expect(

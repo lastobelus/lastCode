@@ -37,7 +37,7 @@ export interface CheckpointRunRecord extends CheckpointAttemptFields {
   readonly checkpointCommit?: string;
   readonly checkpointTag?: string;
   readonly error?: string;
-  readonly failurePhase?: "publication" | "rebase" | "smoke";
+  readonly failurePhase?: "publication" | "post-publish" | "rebase" | "smoke";
   readonly localTagRetained?: boolean;
   readonly recoveryBranch?: string;
   readonly recoveryFingerprint?: string;
@@ -133,7 +133,9 @@ function failureStepNames(input: {
         ? "Checkpoint validation"
         : input.failurePhase === "publication"
           ? "Checkpoint publication"
-          : "Checkpoint attempt",
+          : input.failurePhase === "post-publish"
+            ? "Checkpoint post-publish command"
+            : "Checkpoint attempt",
   ];
 }
 
@@ -153,6 +155,7 @@ function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
     isOptionalString(candidate.error) &&
     (candidate.failurePhase === undefined ||
       candidate.failurePhase === "publication" ||
+      candidate.failurePhase === "post-publish" ||
       candidate.failurePhase === "rebase" ||
       candidate.failurePhase === "smoke") &&
     isOptionalBoolean(candidate.localTagRetained) &&
@@ -181,7 +184,7 @@ export function checkpointFailureRecord(
   input: CheckpointAttemptFields & {
     readonly commitsRebased: number;
     readonly error: unknown;
-    readonly failurePhase?: "publication" | "rebase" | "smoke";
+    readonly failurePhase?: CheckpointRunRecord["failurePhase"];
     readonly localTagRetained?: boolean;
     readonly recoveryBranch?: string;
     readonly recoveryFingerprint?: string;

@@ -249,7 +249,7 @@ describe("pinned checkpoint revisions", () => {
     }
   });
 
-  it("publishes a revision without touching a newer retained repair or selection", () => {
+  it("retries a pinned revision hook while preserving a newer retained repair", () => {
     const { fixture, source, merged, environment } = historicalFixture();
     try {
       const { repo } = fixture;
@@ -292,13 +292,29 @@ describe("pinned checkpoint revisions", () => {
         true,
       );
       assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selection);
-      const result = checkpoint(
-        fixture,
-        ["--revision-only", NIGHTLY_A, "--push-tags", "--promote"],
-        environment,
+      const ready = NodePath.join(fixture.root, "post-publish-ready");
+      write(
+        fixture.home,
+        ".lastcode/automation/checkpoint-supervisor.json",
+        JSON.stringify({
+          postPublishCommand: [
+            process.execPath,
+            "-e",
+            'if (!require("node:fs").existsSync(process.argv[1])) process.exitCode = 7;',
+            ready,
+          ],
+        }),
       );
-      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const args = ["--revision-only", NIGHTLY_A, "--push-tags", "--promote"];
+      const failed = checkpoint(fixture, args, environment);
+      assert.equal(failed.status, 75, failed.stderr || failed.stdout);
       const revision = `refs/tags/lastcode/revision/${NIGHTLY_A}.1`;
+      const publishedTag = git(fixture.origin, ["rev-parse", revision]);
+      assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selection);
+      NodeFS.writeFileSync(ready, "");
+      const result = checkpoint(fixture, args, environment);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(git(fixture.origin, ["rev-parse", revision]), publishedTag);
       const built = remoteCommit(fixture.origin, revision);
       assert.notEqual(gitResult(repo, ["merge-base", "--is-ancestor", NIGHTLY_B, built]).status, 0);
       assert.equal(

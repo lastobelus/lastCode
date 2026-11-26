@@ -9,6 +9,7 @@ import * as NodeOS from "node:os";
 import { acquirePortableLock } from "./lastcode-lock.mjs";
 
 import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
+import { readCheckpointPostPublishPending } from "./lib/lastcode-checkpoint-service-run-now.mjs";
 import { resolveExistingBuild } from "./lastcode-local-update.mjs";
 import type { IntelBuildTriggerResult } from "./lib/lastcode-intel-build-trigger.mjs";
 
@@ -88,6 +89,14 @@ export function selectLocalBuild(
   const commit = deps.git(repoRoot, ["rev-parse", `${selected}^{commit}`]);
   if (!/^[0-9a-f]{40}$/u.test(commit))
     throw new Error("Selected build returned an invalid commit.");
+  const commonDirectory = deps.git(repoRoot, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  if (readCheckpointPostPublishPending(commonDirectory)?.tag === selected) {
+    throw new Error(`Checkpoint ${selected} is waiting for its post-publish command.`);
+  }
   if (!TOKEN.test(token)) throw new Error("Invalid local build request token.");
   const request = { schemaVersion: 1 as const, tag: selected, commit, requestToken: token };
   deps.writeRequest(request);

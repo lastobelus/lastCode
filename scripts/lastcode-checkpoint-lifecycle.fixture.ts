@@ -47,6 +47,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-carry-set.json",
   "scripts/lastcode-carry-set.ts",
   "scripts/lastcode-checkpoint-history.ts",
+  "scripts/lastcode-checkpoint-post-publish.ts",
   "scripts/lastcode-checkpoint.ts",
   "scripts/lastcode-quiet-references.ts",
   "scripts/lastcode-migration-history.ts",
@@ -56,6 +57,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-build-mac.ts",
   "scripts/lastcode-nightly.ts",
   "scripts/lib/lastcode-git.ts",
+  "scripts/lib/lastcode-checkpoint-service-run-now.mjs",
   "scripts/lib/lastcode-upstream-conflicts.ts",
   "scripts/lib/lastcode-installable-tag.ts",
 ] as const;

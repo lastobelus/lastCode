@@ -218,6 +218,18 @@ completed GitHub merge. Service admission still owns schedule and batch spacing.
 
 ### Waiting for the checkpoint service
 
+The checkpoint supervisor configuration accepts an optional `postPublishCommand`
+argv array. It runs directly from the automation checkout after each new
+checkpoint or revision tag reaches the push remote. The command receives the
+full tag name in `LASTCODE_CHECKPOINT_TAG` and its full commit SHA in
+`LASTCODE_CHECKPOINT_SHA`.
+
+A nonzero exit fails the run during `post-publish` and leaves the published tag
+in place. The next publishing run verifies that exact tag and commit on the
+remote and retries the command before proceeding. Commands must tolerate
+repeating the same tag and commit. Local update selection and checkpoint status
+hold that version back until the command succeeds.
+
 After an authorized service run has started, use the independent **Wait for
 Checkpoint** Project Action (`lc-wait-for-checkpoint`) to observe its completion.
 List Actions, launch the eligible returned ID with
