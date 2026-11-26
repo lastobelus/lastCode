@@ -342,6 +342,7 @@ export function DraftHeroHeadline({
       <TriageDraftHero
         machineLabel={environment?.label ?? null}
         serverVersion={environment?.serverConfig?.environment.serverVersion ?? null}
+        cliCommand={environment?.serverConfig?.triageCliCommand ?? null}
       />
     );
   }

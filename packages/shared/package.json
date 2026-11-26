@@ -51,6 +51,10 @@
       "types": "./src/textDirection.ts",
       "import": "./src/textDirection.ts"
     },
+    "./desktopDistribution": {
+      "types": "./src/desktopDistribution.ts",
+      "import": "./src/desktopDistribution.ts"
+    },
     "./projectFavicon": {
       "types": "./src/projectFavicon.ts",
       "import": "./src/projectFavicon.ts"
@@ -690,6 +694,10 @@
     "./assistantInsights": {
       "types": "./src/assistantInsights.ts",
       "import": "./src/assistantInsights.ts"
+    },
+    "./dependencyActivity": {
+      "types": "./src/dependencyActivity.ts",
+      "import": "./src/dependencyActivity.ts"
     }
   },
   "scripts": {

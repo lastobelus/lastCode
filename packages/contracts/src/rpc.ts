@@ -1,4 +1,13 @@
 import {
+  BuildReviewError,
+  BuildReviewTarget,
+  BuildReviewTargetsInput,
+  BuildReviewPreview,
+  BuildReviewPreviewInput,
+  BuildReviewSelectInput,
+  BuildReviewSelectionResult,
+} from "./generatedBuildReview.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -60,6 +69,13 @@ import {
   ProviderSetupError,
   ProviderSetupInput,
 } from "./providerSetup.ts";
+import {
+  UpdateDrainCancelInput,
+  UpdateDrainCommandReceipt,
+  UpdateDrainError,
+  UpdateDrainStartInput,
+  UpdateDrainState,
+} from "./updateDrain.ts";
 
 import {
   AcpRegistryAcceptUrlAuthInput,
@@ -609,6 +625,9 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverRunStorageCleanup: "server.runStorageCleanup",
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
+  serverGetBuildReviewTargets: "server.getBuildReviewTargets",
+  serverPreviewBuildReview: "server.previewBuildReview",
+  serverSelectBuildReview: "server.selectBuildReview",
   serverGetDatabaseStorage: "server.getDatabaseStorage",
   serverReclaimDatabaseSpace: "server.reclaimDatabaseSpace",
   peerLinksList: "peerLinks.list",
@@ -649,6 +668,9 @@ export const WS_METHODS = {
   serverReportClientActivity: "server.reportClientActivity",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+  serverStartUpdateDrain: "server.startUpdateDrain",
+  serverCancelUpdateDrain: "server.cancelUpdateDrain",
+  serverGetUpdateDrainStatus: "server.getUpdateDrainStatus",
 
   workflowsSubscribe: "workflows.subscribe",
   workflowsCounts: "workflows.counts",
@@ -958,6 +980,22 @@ const WsServerGetStorageCleanupReportRpc = Rpc.make(WS_METHODS.serverGetStorageC
   error: EnvironmentAuthorizationError,
 });
 
+const WsServerGetBuildReviewTargetsRpc = Rpc.make(WS_METHODS.serverGetBuildReviewTargets, {
+  payload: BuildReviewTargetsInput,
+  success: Schema.Array(BuildReviewTarget),
+  error: Schema.Union([BuildReviewError, EnvironmentAuthorizationError]),
+});
+const WsServerPreviewBuildReviewRpc = Rpc.make(WS_METHODS.serverPreviewBuildReview, {
+  payload: BuildReviewPreviewInput,
+  success: BuildReviewPreview,
+  error: Schema.Union([BuildReviewError, EnvironmentAuthorizationError]),
+});
+const WsServerSelectBuildReviewRpc = Rpc.make(WS_METHODS.serverSelectBuildReview, {
+  payload: BuildReviewSelectInput,
+  success: BuildReviewSelectionResult,
+  error: Schema.Union([BuildReviewError, EnvironmentAuthorizationError]),
+});
+
 const WsServerGetDatabaseStorageRpc = Rpc.make(WS_METHODS.serverGetDatabaseStorage, {
   payload: Schema.Struct({}),
   success: Schema.NullOr(DatabaseStorageStatus),
@@ -1223,6 +1261,24 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
 const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
   payload: ClientActivityReportInput,
   error: EnvironmentAuthorizationError,
+});
+
+export const WsServerStartUpdateDrainRpc = Rpc.make(WS_METHODS.serverStartUpdateDrain, {
+  payload: UpdateDrainStartInput,
+  success: UpdateDrainCommandReceipt,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpdateDrain, {
+  payload: UpdateDrainCancelInput,
+  success: UpdateDrainCommandReceipt,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
+  payload: Schema.Struct({}),
+  success: UpdateDrainState,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
 const PullRequestRpcError = Schema.Union([
@@ -2556,6 +2612,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerRunStorageCleanupRpc,
   WsServerGetStorageCleanupReportRpc,
+  WsServerGetBuildReviewTargetsRpc,
+  WsServerPreviewBuildReviewRpc,
+  WsServerSelectBuildReviewRpc,
   WsServerGetDatabaseStorageRpc,
   WsServerGetSettingsRpc,
   WsServerReclaimDatabaseSpaceRpc,
@@ -2616,6 +2675,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,
+  WsServerStartUpdateDrainRpc,
+  WsServerCancelUpdateDrainRpc,
+  WsServerGetUpdateDrainStatusRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,

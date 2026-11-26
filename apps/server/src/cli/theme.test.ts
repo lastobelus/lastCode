@@ -12,6 +12,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
+import type { QuitError } from "effect/Terminal";
+import type { CliError } from "effect/cli/CliError";
 import { vi } from "vite-plus/test";
 
 import { cli } from "../binCli.ts";
@@ -23,8 +25,17 @@ vi.mock("node:fs", { spy: true });
 // Windows chmod cannot force these directory or file permission failures.
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 
-const runCli = (args: ReadonlyArray<string>) =>
-  Command.runWith(cli, { version: "0.0.0" })(args).pipe(
+const runCommand: (
+  args: ReadonlyArray<string>,
+) => Effect.Effect<
+  void,
+  Exclude<Command.Error<typeof cli>, QuitError> | CliError,
+  NodeServices.NodeServices | Layer.Success<typeof NodeCrypto.layer> | NetService.NetService
+> = Command.runWith(cli, { version: "0.0.0" });
+const runCli = (
+  args: ReadonlyArray<string>,
+): Effect.Effect<void, Effect.Error<ReturnType<typeof runCommand>>> =>
+  runCommand(args).pipe(
     Effect.provide(
       Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer, TestConsole.layer),
     ),
