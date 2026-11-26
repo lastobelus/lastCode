@@ -1,6 +1,15 @@
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
+import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
+import {
+  resolveThreadWorkingStartedAt,
+  threadShellIsCleanupRecovery,
+  threadShellIsVisible,
+} from "@t3tools/client-runtime/state/models";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
@@ -19,6 +28,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-search";
 import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
 import {
+  isListedThreadLineage,
   type ContextMenuItem,
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
@@ -27,6 +37,7 @@ import {
 } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/reactivity";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
   effectiveSnoozed,
   hasUnseenRunFailure,
@@ -547,11 +558,11 @@ type ScopedSidebarProject = SidebarProject & {
   environmentId: string;
 };
 
-type ScopedSidebarThread = ThreadSortInput & {
-  environmentId: string;
-  projectId: string;
-  archivedAt: string | null;
-};
+type ScopedSidebarThread = ThreadSortInput &
+  Pick<SidebarThreadSummary, "archivedAt" | "deletedAt" | "worktreeCleanup"> & {
+    environmentId: string;
+    projectId: string;
+  };
 
 type LogicalSidebarProject = SidebarProject & {
   projectKey: string;
@@ -590,12 +601,89 @@ export async function deleteSelectedThreadEntries<
   return { deletedThreadKeys, firstFailure };
 }
 
+export async function archiveSelectedThreadEntries<
+  TEntry extends { readonly threadKey: string },
+  TResult extends { readonly _tag: "Success" | "Failure" },
+>(input: {
+  entries: readonly TEntry[];
+  archive: (entry: TEntry, onArchived: () => void) => Promise<TResult>;
+}): Promise<{
+  archivedThreadKeys: readonly string[];
+  mutationFailure: Extract<TResult, { readonly _tag: "Failure" }> | null;
+  followupFailures: readonly Extract<TResult, { readonly _tag: "Failure" }>[];
+}> {
+  const archivedThreadKeys: string[] = [];
+  const followupFailures: Extract<TResult, { readonly _tag: "Failure" }>[] = [];
+
+  for (const entry of input.entries) {
+    let didArchive = false;
+    const result = await input.archive(entry, () => {
+      didArchive = true;
+    });
+    if (didArchive || result._tag === "Success") archivedThreadKeys.push(entry.threadKey);
+    if (result._tag === "Success") continue;
+    const failure = result as Extract<TResult, { readonly _tag: "Failure" }>;
+    if (didArchive) {
+      followupFailures.push(failure);
+      continue;
+    }
+    return { archivedThreadKeys, mutationFailure: failure, followupFailures };
+  }
+
+  return { archivedThreadKeys, mutationFailure: null, followupFailures };
+}
+
+export function buildMultiSelectThreadContextMenuItems(input: {
+  count: number;
+}): readonly ContextMenuItem<"mark-unread" | "mark-read" | "archive" | "delete">[] {
+  return [
+    { id: "mark-unread", label: m(msg("Mark unread ({count})", { count: input.count })) },
+    { id: "mark-read", label: m(msg("Mark read ({count})", { count: input.count })) },
+    {
+      id: "archive",
+      label: m(msg("Archive ({count})", { count: input.count })),
+    },
+    { id: "delete", label: m(msg("Delete ({count})", { count: input.count })), destructive: true },
+  ];
+}
+
+export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "lineage">): boolean {
+  return thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true;
+}
+
+export function isSidebarHiddenThread(thread: Pick<SidebarThreadSummary, "lineage">): boolean {
+  return thread.lineage.independent !== true && !isListedThreadLineage(thread.lineage);
+}
+
+// Subagent and side-chat threads have no sidebar row, so an open one is represented by
+// its nearest listed ancestor. A broken chain (missing parent, cycle,
+// other environment) resolves to the thread itself, which then matches no row.
+export function resolveSidebarRowThreadId(
+  threadId: ThreadId,
+  environmentId: EnvironmentId,
+  threads: readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage">[],
+): ThreadId {
+  const findThread = (id: ThreadId) =>
+    threads.find((thread) => thread.id === id && thread.environmentId === environmentId);
+  const visited = new Set<ThreadId>();
+  let thread = findThread(threadId);
+  while (thread !== undefined && isSidebarHiddenThread(thread)) {
+    if (thread.lineage.parentThreadId === null || visited.has(thread.id)) return threadId;
+    visited.add(thread.id);
+    thread = findThread(thread.lineage.parentThreadId);
+  }
+  return thread?.id ?? threadId;
+}
+
 /**
  * `delegatedUnderParent` holds the tasks linked environments run for a thread
  * the sidebar lists, by thread key; they show under that thread, as subagents do.
  */
 export function filterSidebarV2VisibleThreads<
-  T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {
+  T extends Pick<
+    SidebarThreadSummary,
+    "archivedAt" | "deletedAt" | "worktreeCleanup" | "lineage" | "archivePending" | "environmentId" | "id"
+  > & {
     projectId: string;
   },
 >(
@@ -603,14 +691,18 @@ export function filterSidebarV2VisibleThreads<
   scopedProjectKeys: ReadonlySet<string> | null,
   delegatedUnderParent: ReadonlySet<string>,
 ): T[] {
+  const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   return threads.filter(
     (thread) =>
-      thread.archivedAt === null &&
-      !isShownUnderParent(
-        { environmentId: thread.environmentId, threadId: thread.id },
-        thread.lineage,
-        delegatedUnderParent,
-      ) &&
+      threadShellIsVisible(thread) &&
+      (threadShellIsCleanupRecovery(thread) ||
+        archiveRecoveryRows.has(thread) ||
+        thread.lineage.independent === true ||
+        !isShownUnderParent(
+          { environmentId: thread.environmentId, threadId: thread.id },
+          thread.lineage,
+          delegatedUnderParent,
+        )) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
@@ -641,13 +733,157 @@ export function buildBulkUnpinContextMenuItem(input: {
   return { id: "unpin", label: m(msg("Unpin ({count})", { count: input.pinnedCount })) };
 }
 
+export function buildBulkThreadDeleteContextMenuItem(input: {
+  count: number;
+  hasPersistentThread: boolean;
+}): ContextMenuItem<"delete"> {
+  return {
+    id: "delete",
+    label: input.hasPersistentThread
+      ? m(msg("Delete ({count}) (disable persistence first)", { count: input.count }))
+      : m(msg("Delete ({count})", { count: input.count })),
+    destructive: true,
+    disabled: input.hasPersistentThread,
+  };
+}
+
+export function collectUnprotectedBulkThreadEntries<
+  TEntry extends { readonly thread: { readonly persistent?: boolean | undefined } },
+>(input: {
+  threadKeys: readonly string[];
+  getEntry: (threadKey: string) => TEntry | undefined;
+}): readonly TEntry[] | null {
+  const entries = input.threadKeys.flatMap((threadKey) => {
+    const entry = input.getEntry(threadKey);
+    return entry ? [entry] : [];
+  });
+  return entries.some((entry) => entry.thread.persistent === true) ? null : entries;
+}
 export interface ThreadStatusPill {
   /** A `msg()` string; render it through `useMessages()`. */
   label: string;
+  description?: string;
+  marker?: "?";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
 }
+
+const THREAD_STATUS_PRIORITY = {
+  "Pending Approval": {
+    priority: 7,
+    presentation: {
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      pulse: false,
+    },
+  },
+  "Awaiting Input": {
+    priority: 6,
+    presentation: {
+      colorClass: "text-indigo-600 dark:text-indigo-300/90",
+      dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
+      pulse: false,
+    },
+  },
+  Question: {
+    priority: 5,
+    presentation: {
+      colorClass: "text-violet-600 dark:text-violet-300/90",
+      dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      marker: "?" as const,
+      pulse: false,
+    },
+  },
+  "Guest Request": {
+    priority: 3.75,
+    presentation: {
+      colorClass: "text-guest-foreground",
+      dotClass: "bg-guest",
+      pulse: false,
+    },
+  },
+  Failed: {
+    priority: 3.5,
+    presentation: {
+      colorClass: "text-red-600 dark:text-red-300/90",
+      dotClass: "bg-red-500 dark:bg-red-300/90",
+      pulse: false,
+    },
+  },
+  Working: {
+    priority: 3,
+    presentation: {
+      colorClass: "text-sky-600 dark:text-sky-300/80",
+      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: true,
+    },
+  },
+  Connecting: {
+    priority: 3,
+    presentation: {
+      colorClass: "text-sky-600 dark:text-sky-300/80",
+      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: true,
+    },
+  },
+  Waiting: {
+    priority: 2.5,
+    presentation: {
+      colorClass: "text-sidebar-muted-foreground",
+      dotClass: "bg-sidebar-muted-foreground",
+      pulse: false,
+    },
+  },
+  "Plan Ready": {
+    priority: 2,
+    presentation: {
+      colorClass: "text-violet-600 dark:text-violet-300/90",
+      dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      pulse: false,
+    },
+  },
+  Completed: {
+    priority: 1,
+    presentation: {
+      colorClass: "text-emerald-600 dark:text-emerald-300/90",
+      dotClass: "bg-emerald-500 dark:bg-emerald-300/90",
+      pulse: false,
+    },
+  },
+  Deleting: { priority: 7 },
+  "Deleting (Queued)": { priority: 7 },
+  "Cleanup failed": { priority: 8 },
+  "Not responding": { priority: 8 },
+  "Needs repair": { priority: 8 },
+  "Archiving…": { priority: 7 },
+  "Archive failed": { priority: 8 },
+} satisfies Record<
+  ThreadStatusPill["label"],
+  { priority: number; presentation?: Omit<ThreadStatusPill, "label"> }
+>;
+
+// Only downstream operational labels are excluded, so a new upstream status is
+// automatically offered without maintaining another list of upstream labels.
+const LASTCODE_OPERATIONAL_STATUS_LABELS = new Set<string>([
+  "Deleting",
+  "Deleting (Queued)",
+  "Cleanup failed",
+  "Not responding",
+  "Needs repair",
+  "Archiving…",
+  "Archive failed",
+]);
+
+export const configurableThreadStatuses = Object.entries(THREAD_STATUS_PRIORITY)
+  .filter(([label]) => !LASTCODE_OPERATIONAL_STATUS_LABELS.has(label))
+  .map(([label, entry]) => ({
+    label,
+    colorClass: "text-sidebar-muted-foreground",
+    dotClass: "bg-sidebar-muted-foreground",
+    pulse: false,
+    ...("presentation" in entry ? entry.presentation : {}),
+  }));
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
@@ -659,7 +895,12 @@ type ThreadStatusInput = Pick<
   | "interactionMode"
   | "latestRun"
   | "runtime"
+  | "actionResume"
+  | "worktreeCleanup"
+  | "recovery"
+  | "archivePending"
 > & {
+  attention?: { readonly kind: "question"; readonly raisedAt: string } | null | undefined;
   lastVisitedAt?: string | null | undefined;
   pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
   blockedOnThreadWait?: boolean | undefined;
@@ -917,14 +1158,22 @@ export function resolveAdjacentThreadId<T>(input: {
 }
 
 export type SidebarThreadStatus =
+  | "archiving"
+  | "archive-failed"
   | "approval"
   | "input"
   | "request"
   | "preparing"
+  | "question"
   | "working"
   | "waiting"
   | "failed"
   | "limited"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed"
+  | "not-responding"
+  | "needs-repair"
   | "ready";
 
 export function shouldRecedeSidebarThread(input: {
@@ -938,6 +1187,7 @@ export function shouldRecedeSidebarThread(input: {
     input.isActive ||
     input.isSelected ||
     input.status === "input" ||
+    input.status === "question" ||
     input.status === "request"
   ) {
     return false;
@@ -959,15 +1209,28 @@ type SidebarThreadStatusInput = Pick<
   | "pendingGuestMessageCount"
   | "runtime"
   | "blockedOnThreadWait"
->;
+  | "actionResume"
+  | "worktreeCleanup"
+  | "recovery"
+  | "archivePending"
+> &
+  Pick<ThreadStatusInput, "attention" | "pendingBackgroundTasks">;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+  const archive = presentThreadArchive(thread);
+  if (archive) return archive.status;
+  if (thread.worktreeCleanup?.status === "failed") return "cleanup-failed";
+  if (thread.worktreeCleanup?.status === "queued") return "cleanup-queued";
+  if (thread.worktreeCleanup?.status === "deleting") return "cleanup-deleting";
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel) return recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding";
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
   }
   if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
     return "input";
   }
+  if (thread.attention?.kind === "question") return "question";
   // A guest is waiting on the owner; the agent's own requests come first.
   if ((thread.pendingGuestMessageCount ?? 0) > 0) {
     return "request";
@@ -984,12 +1247,16 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   ) {
     return "working";
   }
-  if (thread.runtime?.status === "idle") {
-    return "waiting";
-  }
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
   }
+  if (
+    thread.actionResume?.outcome === "running" &&
+    (thread.pendingBackgroundTasks?.length ?? 0) === 0
+  ) {
+    return actionRunningPresentation(thread.actionResume).state;
+  }
+  if (thread.runtime?.status === "idle") return "waiting";
   return "ready";
 }
 
@@ -1037,6 +1304,7 @@ export function resolveSidebarFolderDot(
     statuses.has("input") ||
     statuses.has("approval") ||
     statuses.has("request") ||
+    statuses.has("question") ||
     statuses.has("limited")
   ) {
     return "attention";
@@ -1102,6 +1370,8 @@ export function groupSidebarThreadsByProject<
 }
 
 export type SidebarV2TopStatusKind =
+  | "archiving"
+  | "archive-failed"
   | "approval"
   | "done"
   | "failed"
@@ -1110,7 +1380,48 @@ export type SidebarV2TopStatusKind =
   | "request"
   | "waiting"
   | "woke"
-  | "working";
+  | "working"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed"
+  | "not-responding"
+  | "needs-repair";
+
+export function resolveSidebarV2TopStatus(input: {
+  readonly status: SidebarThreadStatus;
+  readonly isUnread: boolean;
+  readonly isWoke: boolean;
+}): SidebarV2TopStatusKind | null {
+  if (
+    input.status === "archiving" ||
+    input.status === "archive-failed" ||
+    input.status === "not-responding" ||
+    input.status === "needs-repair" ||
+    input.status === "cleanup-deleting" ||
+    input.status === "cleanup-queued" ||
+    input.status === "cleanup-failed"
+  )
+    return input.status;
+  if (input.status === "working") {
+    return "working";
+  }
+  if (input.status === "waiting") {
+    return "waiting";
+  }
+  if (input.status === "approval") {
+    return "approval";
+  }
+  if (input.status === "input" || input.status === "request") {
+    return input.status;
+  }
+  if (input.status === "failed" || input.status === "limited") {
+    return input.status;
+  }
+  if (input.isWoke) {
+    return "woke";
+  }
+  return input.isUnread ? "done" : null;
+}
 
 export function firstValidTimestampMs(
   ...candidates: ReadonlyArray<string | null | undefined>
@@ -1235,22 +1546,71 @@ export function resolveThreadStatusPill(input: {
 }): ThreadStatusPill | null {
   const { thread } = input;
 
-  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
+  const archive = presentThreadArchive(thread);
+  if (archive)
     return {
-      label: msg("Pending Approval"),
-      colorClass: "text-amber-600 dark:text-amber-300/90",
-      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      label: archive.status === "archiving" ? msg("Archiving…") : msg("Archive failed"),
+      description: archive.description,
+      colorClass:
+        archive.status === "archive-failed"
+          ? "text-amber-600 dark:text-amber-300/90"
+          : "text-sidebar-muted-foreground",
+      dotClass:
+        archive.status === "archive-failed"
+          ? "bg-amber-500 dark:bg-amber-300/90"
+          : "bg-sidebar-muted-foreground",
+      pulse: false,
+    };
+
+  if (thread.worktreeCleanup?.status === "failed") {
+    return {
+      label: msg("Cleanup failed"),
+      colorClass: "text-red-700 dark:text-red-300",
+      dotClass: "bg-red-600 dark:bg-red-300",
       pulse: false,
     };
   }
 
-  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
+  if (thread.worktreeCleanup?.status === "queued") {
     return {
-      label: msg("Awaiting Input"),
-      colorClass: "text-indigo-600 dark:text-indigo-300/90",
-      dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
+      label: msg("Deleting (Queued)"),
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
       pulse: false,
     };
+  }
+
+  if (thread.worktreeCleanup?.status === "deleting") {
+    return {
+      label: msg("Deleting"),
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
+      pulse: false,
+    };
+  }
+
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel)
+    return {
+      label: recoveryLabel === "Needs repair" ? msg("Needs repair") : msg("Not responding"),
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      pulse: false,
+    };
+
+  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
+    return {
+      label: msg("Pending Approval"),
+      ...THREAD_STATUS_PRIORITY["Pending Approval"].presentation,
+    };
+  }
+
+  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
+    return { label: msg("Awaiting Input"), ...THREAD_STATUS_PRIORITY["Awaiting Input"].presentation };
+  }
+
+  if (thread.attention?.kind === "question") {
+    return { label: msg("Question"), ...THREAD_STATUS_PRIORITY.Question.presentation };
   }
 
   if ((thread.pendingGuestMessageCount ?? 0) > 0) {
@@ -1266,12 +1626,7 @@ export function resolveThreadStatusPill(input: {
     (thread.runtime?.status === "running" && thread.blockedOnThreadWait !== true) ||
     thread.runtime?.status === "waiting"
   ) {
-    return {
-      label: msg("Working"),
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
-      pulse: true,
-    };
+    return { label: msg("Working"), ...THREAD_STATUS_PRIORITY["Working"].presentation };
   }
 
   if (
@@ -1279,30 +1634,18 @@ export function resolveThreadStatusPill(input: {
     thread.runtime?.status === "starting" ||
     thread.runtime?.status === "queued"
   ) {
-    return {
-      label: msg("Connecting"),
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
-      pulse: true,
-    };
+    return { label: msg("Connecting"), ...THREAD_STATUS_PRIORITY["Connecting"].presentation };
   }
 
   const waiting = {
     label: msg("Waiting"),
-    colorClass: "text-sidebar-muted-foreground",
-    dotClass: "bg-sidebar-muted-foreground",
-    pulse: false,
+    ...THREAD_STATUS_PRIORITY["Waiting"].presentation,
   };
   if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) return waiting;
 
   // A failed run goes to the inbox even while background work holds the thread.
   if (hasUnseenRunFailure(thread)) {
-    return {
-      label: msg("Failed"),
-      colorClass: "text-red-600 dark:text-red-300/90",
-      dotClass: "bg-red-500 dark:bg-red-300/90",
-      pulse: false,
-    };
+    return { label: msg("Failed"), ...THREAD_STATUS_PRIORITY["Failed"].presentation };
   }
 
   if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) return waiting;
@@ -1313,24 +1656,50 @@ export function resolveThreadStatusPill(input: {
     isLatestRunSettled(thread.latestRun, thread.runtime) &&
     thread.hasActionableProposedPlan;
   if (hasPlanReadyPrompt) {
+    return { label: msg("Plan Ready"), ...THREAD_STATUS_PRIORITY["Plan Ready"].presentation };
+  }
+
+  if (thread.actionResume?.outcome === "running") {
+    const action = actionRunningPresentation(thread.actionResume);
     return {
-      label: msg("Plan Ready"),
-      colorClass: "text-violet-600 dark:text-violet-300/90",
-      dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      label: action.state === "working" ? msg("Working") : msg("Waiting"),
+      colorClass:
+        action.state === "working"
+          ? "text-sky-600 dark:text-sky-300/80"
+          : "text-yellow-700 dark:text-yellow-300/90",
+      dotClass:
+        action.state === "working"
+          ? "bg-sky-500 dark:bg-sky-300/80"
+          : "bg-yellow-500 dark:bg-yellow-300/90",
       pulse: false,
     };
   }
 
   if (hasUnseenCompletion(thread)) {
-    return {
-      label: msg("Completed"),
-      colorClass: "text-emerald-600 dark:text-emerald-300/90",
-      dotClass: "bg-emerald-500 dark:bg-emerald-300/90",
-      pulse: false,
-    };
+    return { label: msg("Completed"), ...THREAD_STATUS_PRIORITY["Completed"].presentation };
   }
 
   return null;
+}
+
+export function resolveProjectStatusIndicator(
+  statuses: ReadonlyArray<ThreadStatusPill | null>,
+): ThreadStatusPill | null {
+  const priorities: Readonly<Record<string, { priority: number } | undefined>> =
+    THREAD_STATUS_PRIORITY;
+  let highestPriorityStatus: ThreadStatusPill | null = null;
+  let highestPriority = -1;
+
+  for (const status of statuses) {
+    if (status === null) continue;
+    const priority = priorities[status.label]?.priority ?? 0;
+    if (priority > highestPriority) {
+      highestPriorityStatus = status;
+      highestPriority = priority;
+    }
+  }
+
+  return highestPriorityStatus;
 }
 
 export function getFallbackThreadIdAfterDelete<
@@ -1437,7 +1806,7 @@ export function sortLogicalProjectsForSidebar<
   );
   const threadsByProjectKey = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) continue;
+    if (!threadShellIsVisible(thread)) continue;
     const projectKey = groupKeyByProjectRef.get(`${thread.environmentId}\0${thread.projectId}`);
     if (!projectKey) continue;
     const existing = threadsByProjectKey.get(projectKey);
@@ -1460,7 +1829,7 @@ export function sortLogicalProjectsForSidebar<
 export function sortSidebarV2ProjectGroups<
   TProject extends LogicalSidebarProject,
   TThread extends ScopedSidebarThread &
-    Pick<SidebarThreadSummary, "environmentId" | "id" | "lineage">,
+    Pick<SidebarThreadSummary, "environmentId" | "id" | "lineage" | "archivePending">,
 >(
   projects: readonly TProject[],
   threads: readonly TThread[],
@@ -1474,6 +1843,11 @@ export function sortSidebarV2ProjectGroups<
   );
 }
 
+/**
+ * Sorts the cross-environment project collection used by landing surfaces.
+ * Project ids are only unique within an environment. Ordinary archived threads
+ * do not count as activity, but unfinished deletion cleanup remains reachable.
+ */
 export function sortScopedProjectsForSidebar<
   TProject extends ScopedSidebarProject,
   TThread extends ScopedSidebarThread,
@@ -1486,7 +1860,7 @@ export function sortScopedProjectsForSidebar<
     `${environmentId}\u0000${projectId}`;
   const threadsByProject = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) {
+    if (!threadShellIsVisible(thread)) {
       continue;
     }
     const key = scopedKey(thread.environmentId, thread.projectId);

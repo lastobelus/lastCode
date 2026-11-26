@@ -1,5 +1,8 @@
 import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import {
+  DEFAULT_RESOLVED_KEYBINDINGS,
+  compileResolvedKeybindingsConfig,
+} from "@t3tools/shared/keybindings";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -478,5 +481,42 @@ describe("root reopen shortcut", () => {
         ].map((command) => expect.objectContaining({ command })),
       ),
     );
+  });
+  it("always forwards the layout toggles out of a focused desktop browser", async () => {
+    setup();
+    state.keybindings = [
+      ...DEFAULT_RESOLVED_KEYBINDINGS,
+      ...compileResolvedKeybindingsConfig([{ key: "mod+shift+b", command: "sidebar.mode.toggle" }]),
+    ];
+    await using _view = await renderShortcut();
+    expect(state.setShortcuts).toHaveBeenLastCalledWith([
+      expect.objectContaining({
+        command: "workspace.focusNext",
+        shortcut: expect.objectContaining({ key: "f6", modKey: true, shiftKey: false }),
+      }),
+      expect.objectContaining({
+        command: "workspace.focusNext",
+        shortcut: expect.objectContaining({ key: "f6", modKey: false, shiftKey: false }),
+      }),
+      expect.objectContaining({
+        command: "workspace.focusPrevious",
+        shortcut: expect.objectContaining({ key: "f6", modKey: true, shiftKey: true }),
+      }),
+      expect.objectContaining({
+        command: "workspace.focusPrevious",
+        shortcut: expect.objectContaining({ key: "f6", modKey: false, shiftKey: true }),
+      }),
+      expect.objectContaining({ command: "sidebar.toggle" }),
+      expect.objectContaining({
+        command: "sidebar.mode.toggle",
+        shortcut: expect.objectContaining({ key: "b", modKey: true, shiftKey: true }),
+      }),
+      expect.objectContaining({ command: "rightPanel.toggle" }),
+      expect.objectContaining({ command: "preview.focusUrl" }),
+      expect.objectContaining({
+        command: "preview.find",
+        shortcut: expect.objectContaining({ key: "f", modKey: true, shiftKey: false }),
+      }),
+    ]);
   });
 });
