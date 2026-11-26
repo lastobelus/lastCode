@@ -16,6 +16,7 @@ import {
 import { useSettingsScope } from "./SettingsScopeContext";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { readLocalApi } from "../../localApi";
+import { derivePhysicalProjectKey } from "../../logicalProject";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { RelativeTime } from "../RelativeTime";
 import { Button } from "../ui/button";
@@ -88,21 +89,26 @@ export function ArchivedThreadsPanel() {
   const searchableSetting = useSearchableSetting();
   const gt = useGT();
   const m = useMessages();
-  const { scope, groups: projectGroups, environments } = useSettingsScope();
+  const { scope, groups: projectGroups, environments, isReady: isScopeReady } = useSettingsScope();
+  // Archive reads need a connection, not the server config required by settings writes.
+  const environmentIds = environments
+    .filter((environment) => environment.connection.phase === "connected")
+    .map((environment) => environment.environmentId);
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const pendingActionsRef = useRef(new Set<string>());
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(() => new Set());
   const {
     snapshots: archivedSnapshots,
     error: archiveError,
-    isLoading: isLoadingArchive,
+    isLoading: isLoadingSnapshots,
     refresh: refreshArchivedThreads,
-  } = useArchivedThreadSnapshots(scope.environmentIds);
+  } = useArchivedThreadSnapshots(environmentIds);
+  const isLoadingArchive = !isScopeReady || isLoadingSnapshots;
 
   const { groups: archivedGroups, hasMultipleEnvironments } = (() => {
     const selectedProjectKeys =
       scope.kind === "project" || scope.kind === "checkout"
-        ? new Set(scope.members.map((member) => `${member.environmentId}:${member.id}`))
+        ? new Set(scope.members.map((member) => member.physicalProjectKey))
         : null;
     const projectsByEnvironmentAndId = new Map(
       archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
@@ -110,7 +116,7 @@ export function ArchivedThreadsPanel() {
           .filter(
             (project) =>
               selectedProjectKeys === null ||
-              selectedProjectKeys.has(`${environmentId}:${project.id}`),
+              selectedProjectKeys.has(derivePhysicalProjectKey({ ...project, environmentId })),
           )
           .map(
             (project) => [`${environmentId}:${project.id}`, { ...project, environmentId }] as const,
@@ -145,6 +151,14 @@ export function ArchivedThreadsPanel() {
       ),
     );
 
+    const threadsByProject = new Map<string, Array<(typeof threads)[number]>>();
+    for (const thread of threads) {
+      const key = `${thread.environmentId}:${thread.projectId}`;
+      const projectThreads = threadsByProject.get(key);
+      if (projectThreads) projectThreads.push(thread);
+      else threadsByProject.set(key, [thread]);
+    }
+
     const archivedProjects = Array.from(projectsByEnvironmentAndId.values());
     const groups = new Map<
       string,
@@ -155,13 +169,8 @@ export function ArchivedThreadsPanel() {
       }
     >();
     for (const project of archivedProjects) {
-      const projectThreads: Array<(typeof threads)[number]> = [];
-      for (const thread of threads) {
-        if (thread.projectId === project.id && thread.environmentId === project.environmentId) {
-          projectThreads.push(thread);
-        }
-      }
-      if (projectThreads.length > 0) {
+      const projectThreads = threadsByProject.get(`${project.environmentId}:${project.id}`);
+      if (projectThreads && projectThreads.length > 0) {
         const physicalProjectKey = `${project.environmentId}:${project.id}` as const;
         const logicalGroup = hasMultipleEnvironments
           ? logicalGroupsByProjectKey.get(physicalProjectKey)
@@ -225,7 +234,15 @@ export function ArchivedThreadsPanel() {
     const result = await settlePromise(async () => {
       const result = await (action === "unarchive"
         ? unarchiveThread(target)
-        : confirmAndDeleteThread(target, thread.title));
+        : confirmAndDeleteThread(target, {
+            archivedThreads: archivedSnapshots
+              .filter((entry) => entry.environmentId === thread.environmentId)
+              .flatMap(({ environmentId, snapshot }) =>
+                snapshot.threads.map((archivedThread) =>
+                  presentThreadShell(environmentId, archivedThread),
+                ),
+              ),
+          }));
       if (result._tag === "Success") refreshArchivedThreads();
       return result;
     }).finally(() => {
@@ -332,13 +349,18 @@ export function ArchivedThreadsPanel() {
                   ? gt("Loading archived threads")
                   : archiveError
                     ? gt("Could not load archived threads")
-                    : gt("No archived threads")}
+                    : environmentIds.length === 0
+                      ? gt("No connected environments")
+                      : gt("No archived threads")}
               </span>
             }
             description={
               isLoadingArchive
                 ? gt("Checking connected environments.")
-                : (archiveError ?? gt("Archived threads will appear here."))
+                : (archiveError ??
+                  (environmentIds.length === 0
+                    ? gt("Connect an environment in this scope to view archived threads.")
+                    : gt("Archived threads will appear here.")))
             }
           />
         </SettingsSection>

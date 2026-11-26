@@ -1399,7 +1399,12 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const { thread, target, ref } = yield* locate(input);
         const checks = yield* pullRequests
-          .rerunChecks({ ...ref, ...(input.check === undefined ? {} : { check: input.check }) })
+          .rerunChecks({
+            ...ref,
+            ...(input.check === undefined ? {} : { check: input.check }),
+            ...(input.runId === undefined ? {} : { runId: input.runId }),
+            ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
+          })
           .pipe(Effect.mapError(forgeFailure));
         // Like a push, a rerun makes a watch's finished checks stale, so the thread keeps working
         // until a read sees them run. The rerun already happened, so a failed reopen only logs.

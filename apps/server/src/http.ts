@@ -122,7 +122,11 @@ export function assetResponseHeaders(
     readonly mimeType?: string;
   },
 ): Record<string, string> {
-  const base = { "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff" };
+  // Effect compression drops file Content-Type: https://github.com/Effect-TS/effect/issues/8146
+  const base = {
+    "Cache-Control": "private, max-age=3600, no-transform",
+    "X-Content-Type-Options": "nosniff",
+  };
   if (options?.download) {
     return {
       ...base,
@@ -233,7 +237,7 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   const isMedia = /^(?:audio|video)\//i.test(asset.mimeType ?? "");
   if (isMedia) {
     // Without file identity, validators cannot guarantee byte equality; attachments must also expire with their URL.
-    headers["Cache-Control"] = "private, no-store";
+    headers["Cache-Control"] = "private, no-store, no-transform";
   }
   let status = 200;
   let offset = 0n;

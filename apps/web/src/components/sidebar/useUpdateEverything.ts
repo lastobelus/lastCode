@@ -1,7 +1,7 @@
-import { msg, useMessages } from "gt-react";
 import { useAtomValue } from "@effect/atom-react";
 import { connectionErrorText } from "@t3tools/client-runtime/connection";
 import { PROVIDER_DISPLAY_NAMES } from "@t3tools/contracts";
+import { useMessages } from "gt-react";
 
 import { APP_VERSION } from "~/branding";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
@@ -23,6 +23,7 @@ import {
   collectUpdateEverythingResult,
   describeUpdateEverything,
   runUpdateEverything,
+  SKIPPED_SERVER_UPDATE,
   type UpdateRunMachine,
 } from "./updateEverything.logic";
 import {
@@ -165,13 +166,9 @@ export function useUpdateEverything(
             const runs = await providers.updateAll({ quiet: true });
             const outcomes = runs.map((run) => {
               const runOutcome = getProviderUpdateRunOutcome(run);
-              if (runOutcome.status !== "updated") {
-                providerFailures.set(
-                  run.environmentId,
-                  runOutcome.status === "failed"
-                    ? runOutcome.line
-                    : resolve(msg("Provider update interrupted")),
-                );
+              // An interrupted command proves nothing about the update, so only failures count.
+              if (runOutcome.status === "failed") {
+                providerFailures.set(run.environmentId, runOutcome.line);
               }
               return runOutcome;
             });
@@ -220,14 +217,22 @@ export function useUpdateEverything(
             const runs = servers.map(async (server) => {
               await staged.get(server.environmentId);
               const serverOutcome = await updateServer(server, { quiet: true });
+              const providerFailure = providerFailures.get(server.environmentId) ?? null;
+              // Skipped is unfinished, not done: keep the server for the retry action. Track
+              // switches retry through their own planner, so a skip there stays as before.
+              const skipped = serverOutcome.status === "skipped" && !channelSwitch;
               settleUpdateRunMachine(
                 server.environmentId,
                 serverOutcome.status === "failed"
                   ? serverOutcome.message
-                  : (providerFailures.get(server.environmentId) ?? null),
+                  : skipped
+                    ? [resolve(SKIPPED_SERVER_UPDATE), providerFailure].filter(Boolean).join(" ")
+                    : providerFailure,
                 {
-                  serverUpdated: serverOutcome.status !== "failed",
-                  providerFailure: providerFailures.get(server.environmentId) ?? null,
+                  serverUpdated:
+                    serverOutcome.status === "updated" ||
+                    (!skipped && serverOutcome.status === "skipped"),
+                  providerFailure,
                 },
               );
               const finished = { label: server.serverLabel, outcome: serverOutcome };
@@ -246,7 +251,9 @@ export function useUpdateEverything(
           collectUpdateEverythingResult({
             localVersion: null,
             localFailures,
-            servers: finished,
+            servers: channelSwitch
+              ? finished.filter(({ outcome }) => outcome.status !== "skipped")
+              : finished,
             providers: outcome.providers,
           });
         if (outcome.localReady && installLocal) {

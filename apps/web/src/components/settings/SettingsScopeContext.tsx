@@ -5,6 +5,9 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { useMessages } from "gt-react";
 import { createContext, type ReactNode, useContext } from "react";
 
+import { useClientSettingsHydrated } from "../../hooks/useSettings";
+import { isHostedStaticApp } from "../../hostedPairing";
+import { useAllEnvironmentProjectSnapshotsReady } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFilesQueryState";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
@@ -63,7 +66,9 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
 
 function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironment: boolean) {
   const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const { environments: availableEnvironments, isReady: environmentsReady } = useEnvironments();
+  const settingsHydrated = useClientSettingsHydrated();
+  const projectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const m = useMessages();
   const search = singleEnvironment
@@ -77,6 +82,8 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
   const scope = resolveSettingsScope(search, groups, availableEnvironments, m);
   const projectFiles = useMemberProjectFiles(scope);
   const pendingWrites = useAtomValue(pendingScopedWritesAtom);
+  const isReady =
+    environmentsReady && settingsHydrated && (isHostedStaticApp() || primaryEnvironmentId !== null);
   const selected = selectScopedSettingsEnvironments(
     scope,
     availableEnvironments,
@@ -91,7 +98,7 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
     targets.find((candidate) => candidate.environmentId === selected.environment?.environmentId) ??
     targets[0] ??
     null;
-  return { scope, groups, search, ...selected, targets, target };
+  return { scope, groups, search, ...selected, targets, target, isReady, projectSnapshotsReady };
 }
 
 const SettingsScopeContext = createContext<

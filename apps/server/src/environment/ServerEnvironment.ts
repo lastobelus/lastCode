@@ -307,6 +307,9 @@ export const make = Effect.gen(function* () {
       shellThreadFamilies: true,
       shellOlderSettled: true,
       agentFeedback: true,
+      localDesktopBrowser:
+        serverConfig.desktopBrowserFd !== undefined &&
+        serverConfig.desktopBrowserControlFd !== undefined,
     },
   };
 

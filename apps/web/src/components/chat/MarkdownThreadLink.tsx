@@ -1,24 +1,28 @@
+import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { useNavigate } from "@tanstack/react-router";
-import { useGT, useMessages } from "gt-react";
-import { MessagesSquareIcon } from "lucide-react";
 import {
   formatHostedThreadLink,
   guessThreadLinkRef,
+  resolveThreadLinkReference,
   threadLinkCandidates,
-  type ThreadLink,
+  type ThreadLinkReference,
 } from "@t3tools/shared/threadLinks";
 import { unknownThreadLinkLabel } from "@t3tools/shared/threadLinksCopy";
-import { resolveLinkedThreadOpen } from "@t3tools/client-runtime/linked-thread";
+import { useNavigate } from "@tanstack/react-router";
+import { AsyncResult, Atom } from "effect/reactivity";
+import { useGT, useMessages } from "gt-react";
+import { MessagesSquareIcon } from "lucide-react";
+import { useMemo } from "react";
 
-import { configuredHostedAppUrl } from "../../hostedPairing";
-import { useThreadRefs, useThreadShell } from "../../state/entities";
-import { useConnectedEnvironmentIds, useEnvironmentIdentities } from "../../state/environments";
 import { useSideThreadTrigger } from "../../hooks/useSideThreadTrigger";
+import { configuredHostedAppUrl } from "../../hostedPairing";
 import { openLinkedThreadRead } from "../../lib/sideChatPane";
-import { useLinkedEnvironments } from "../../state/peerLinks";
+import { useConnectedEnvironmentIds } from "../../state/environments";
 import { orchestrationEnvironment } from "../../state/orchestration";
-import { useEnvironmentQuery } from "../../state/query";
+import { useLinkedEnvironments } from "../../state/peerLinks";
+import { environmentSummaries } from "../../state/presentation";
+import { environmentThreadShells } from "../../state/threads";
 import { ContextChip, ContextChipLabel } from "../ContextChip";
 import { UnresolvedChip } from "../contextChipParts";
 import { ThreadContextChip } from "../ThreadContextChip";
@@ -29,7 +33,7 @@ export function MarkdownThreadLink(props: {
   readonly environmentId: EnvironmentId;
   /** The thread the link is written in; a linked environment's thread can open in its right panel. */
   readonly threadRef?: ScopedThreadRef | undefined;
-  readonly link: ThreadLink;
+  readonly reference: ThreadLinkReference;
   readonly label: string | null;
 }) {
   const gt = useGT();
@@ -37,56 +41,91 @@ export function MarkdownThreadLink(props: {
   const navigate = useNavigate();
   const trigger = useSideThreadTrigger();
   const panelRef = props.threadRef ?? null;
-  const candidates = threadLinkCandidates(props.link, props.environmentId);
-  const writtenRef = candidates[0]!;
-  const written = useThreadShell(writtenRef);
-  const saved = useEnvironmentIdentities().some(
-    (environment) => environment.environmentId === writtenRef.environmentId,
-  );
-  const connected = useConnectedEnvironmentIds().includes(writtenRef.environmentId);
-  // A thread on a machine this client is not connected to still reads through the one that links to it.
+  const {
+    threadId: linkedThreadId,
+    environmentId: linkedEnvironmentId,
+    version,
+    legacyThreadId,
+  } = props.reference;
+  const messageEnvironmentId = props.environmentId;
+  const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const linkedLabel = useLinkedEnvironments(
-    connected || writtenRef.environmentId === props.environmentId ? null : props.environmentId,
-    writtenRef.environmentId,
-  ).get(writtenRef.environmentId);
-  // A shell cached from an earlier connection does not make the thread open there now.
-  const linked =
-    resolveLinkedThreadOpen({
-      environmentId: writtenRef.environmentId,
-      viaEnvironmentId: props.environmentId,
-      own: saved ? { connected } : undefined,
-      linked: linkedLabel !== undefined,
-    }) === "linked";
-  const reachable = saved && !linked;
-  const lookup = useEnvironmentQuery(
-    written === null && reachable
-      ? orchestrationEnvironment.threadLinkMetadata({
-          environmentId: writtenRef.environmentId,
-          input: { threadIds: candidates.map((ref) => ref.threadId) },
-        })
-      : null,
+    linkedEnvironmentId === undefined ||
+      linkedEnvironmentId === messageEnvironmentId ||
+      connectedEnvironmentIds.includes(linkedEnvironmentId)
+      ? null
+      : messageEnvironmentId,
+    linkedEnvironmentId,
+  ).get(linkedEnvironmentId ?? messageEnvironmentId);
+  const viaLinkedEnvironment = linkedLabel === undefined ? undefined : linkedEnvironmentId;
+
+  const resolvedAtom = useMemo(
+    () =>
+      Atom.make((get) => {
+        const reference = {
+          threadId: linkedThreadId,
+          environmentId: linkedEnvironmentId,
+          version,
+          legacyThreadId,
+        };
+        const link = { ...reference, environmentId: linkedEnvironmentId ?? null };
+        const candidates = threadLinkCandidates(link, messageEnvironmentId);
+        let settled = true;
+        const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) => {
+          const owner = environmentId ?? messageEnvironmentId;
+          const shell = get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId)));
+          if (shell !== null) return shell;
+          // A linked machine without a client connection is read through the message's environment.
+          if (owner === viaLinkedEnvironment) return undefined;
+          const saved = get(environmentSummaries.identitiesAtom).some(
+            (environment) => environment.environmentId === owner,
+          );
+          if (!saved) return undefined;
+          const lookup = get(
+            orchestrationEnvironment.threadLinkMetadata({
+              environmentId: owner,
+              input: {
+                threadIds: candidates
+                  .filter((candidate) => candidate.environmentId === owner)
+                  .map((candidate) => candidate.threadId),
+              },
+            }),
+          );
+          settled = settled && lookup._tag === "Success" && !lookup.waiting;
+          return AsyncResult.getOrElse(lookup, () => null)?.[threadId];
+        });
+        const missing = resolved.value === undefined && settled;
+        if (!missing || version === 2) return { ...resolved, missing };
+        const target = guessThreadLinkRef(
+          link,
+          get(environmentThreadShells.threadRefsAtom).filter(
+            (ref) => !candidates.some((candidate) => candidate.environmentId === ref.environmentId),
+          ),
+        );
+        return target === null
+          ? { ...resolved, missing }
+          : {
+              ...target,
+              value: get(environmentThreadShells.threadShellAtom(target)) ?? undefined,
+              missing,
+            };
+      }),
+    [
+      legacyThreadId,
+      linkedEnvironmentId,
+      linkedThreadId,
+      messageEnvironmentId,
+      version,
+      viaLinkedEnvironment,
+    ],
   );
-  const settled = lookup.isSuccess && !lookup.isPending;
-  const target =
-    written !== null
-      ? { ref: writtenRef, metadata: written }
-      : (candidates.flatMap((ref) => {
-          const metadata = lookup.data?.[ref.threadId];
-          return metadata ? [{ ref, metadata }] : [];
-        })[0] ?? null);
-  const missing = target === null && (settled || !reachable);
-  const guess = missing && props.link.environmentId === null;
-  const refs = useThreadRefs(guess);
-  const remoteRef = guess
-    ? guessThreadLinkRef(
-        props.link,
-        refs.filter((ref) => ref.environmentId !== writtenRef.environmentId),
-      )
-    : null;
-  const remote = useThreadShell(remoteRef);
-  const resolved = target ?? (remoteRef && remote ? { ref: remoteRef, metadata: remote } : null);
-  if (linked && linkedLabel !== undefined) {
-    const knownTitle = props.label ?? written?.title ?? null;
+  const resolved = useAtomValue(resolvedAtom);
+  const metadata = resolved.value;
+  const environmentId = resolved.environmentId ?? messageEnvironmentId;
+  const ref = { environmentId, threadId: resolved.threadId };
+
+  if (linkedLabel !== undefined && environmentId === viaLinkedEnvironment) {
+    const knownTitle = props.label ?? metadata?.title ?? null;
     const title = knownTitle ?? gt("Thread on {label}", { label: linkedLabel });
     return (
       <Tooltip>
@@ -102,8 +141,8 @@ export function MarkdownThreadLink(props: {
                       openLinkedThreadRead({
                         panelRef,
                         target: {
-                          viaEnvironmentId: props.environmentId,
-                          ...writtenRef,
+                          viaEnvironmentId: messageEnvironmentId,
+                          ...ref,
                           label: linkedLabel,
                           title: knownTitle,
                         },
@@ -128,16 +167,19 @@ export function MarkdownThreadLink(props: {
       </Tooltip>
     );
   }
-  if (missing && resolved === null) {
-    const unknown = unknownThreadLinkLabel(props.link, props.environmentId, messages);
+  if (resolved.missing && metadata === undefined) {
+    const unknown = unknownThreadLinkLabel(
+      { environmentId: resolved.environmentId ?? null, threadId: resolved.threadId },
+      messageEnvironmentId,
+      messages,
+    );
     return <UnresolvedChip label={props.label ?? unknown} tooltip={unknown} />;
   }
-  const ref = resolved?.ref ?? writtenRef;
-  const title = resolved?.metadata.title.trim() || props.label || gt("Thread");
+  const title = metadata?.title.trim() || props.label || gt("Thread");
   return (
     <ThreadContextChip
       record={{ ...ref, title }}
-      projectId={resolved?.metadata.projectId ?? null}
+      projectId={metadata?.projectId ?? null}
       copyMarkdown={formatHostedThreadLink(ref, title, configuredHostedAppUrl())}
     />
   );

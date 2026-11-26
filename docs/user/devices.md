@@ -85,9 +85,10 @@ taps build a small test runner on first use, which takes a couple of minutes
 once per server. Restart an existing agent session after granting access so it
 receives the device CLI environment.
 
-To keep agents away from simulators, turn off **Agents can use devices** in
-**Settings → Devices**. This hides the device tools from agents
-started from then on; your own Device panel is unaffected.
+To keep agents away from simulators, turn off **Agents can use devices** for their
+project. The default is in **Settings → Devices**; projects can
+override it. Revoking access blocks running agents' device tools and previously
+issued CLI commands on their next request. Your own Device panel is unaffected.
 
 ## Remote connections
 

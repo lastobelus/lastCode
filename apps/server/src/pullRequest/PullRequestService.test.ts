@@ -1512,6 +1512,77 @@ it.effect(
     }),
 );
 
+it.effect("reruns only the failed namesake and refuses an ambiguous selection", () =>
+  Effect.gen(function* () {
+    const urls = [
+      "https://github.com/acme/web/actions/runs/10/job/11",
+      "https://github.com/acme/web/actions/runs/20/job/21",
+    ] as const;
+    let bothFail = false;
+    const selected: Array<string | null> = [];
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakePullRequestProvider(SourceControlProviderKind.make("github"), {
+          getChangeRequestChecks: () =>
+            Effect.succeed({
+              state: "open",
+              checks: urls.map((url, index) => ({
+                name: "CI Gate",
+                status: index === 1 || bothFail ? ("failure" as const) : ("success" as const),
+                description: null,
+                url,
+              })),
+            }),
+          rerunChecks: ({ checks }) =>
+            Effect.sync(() => {
+              selected.push(...checks.map(({ url }) => url));
+              return checks.map(({ name }) => ({ name, rerun: true, detail: null }));
+            }),
+        }),
+      ],
+    });
+    const ref = {
+      projectId: "p1" as ProjectId,
+      repository: "acme/web",
+      number: 1,
+      check: "CI Gate",
+    };
+    yield* service.rerunChecks(ref);
+    assert.deepStrictEqual(selected, [urls[1]]);
+    bothFail = true;
+    const error = yield* service.rerunChecks(ref).pipe(Effect.flip);
+    for (const url of urls) assert.include(error.message, url);
+    assert.deepStrictEqual(selected, [urls[1]]);
+  }),
+);
+
+it.effect("strict detail reads see an external merge immediately", () =>
+  Effect.gen(function* () {
+    let merged = false;
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakePullRequestProvider(SourceControlProviderKind.make("github"), {
+          getChangeRequest: () =>
+            Effect.sync(() => ({
+              ...hostedChangeRequest("body"),
+              state: merged ? ("merged" as const) : ("open" as const),
+              mergedAt: merged ? "2026-07-03T00:00:00Z" : null,
+            })),
+        }),
+      ],
+    });
+    const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+    assert.strictEqual((yield* service.detail(ref)).state, "open");
+    merged = true;
+    const detail = yield* service.detail({ ...ref, allowStale: false });
+    assert.strictEqual(detail.state, "merged");
+    assert.strictEqual(detail.mergedAt, "2026-07-03T00:00:00Z");
+    assert.strictEqual((yield* service.detail(ref)).state, "merged");
+  }),
+);
+
 it.effect.each([false, true])(
   "re-reads checks after a rerun instead of serving the failed ones (rerun fails: %s)",
   (failAfterRerun) =>

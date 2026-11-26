@@ -71,6 +71,10 @@ through `/api/preview/tunnel` on the environment's own origin:
 ## Access and process ownership are separate
 
 - Tailscale supplies an endpoint for normal pairing; auth remains the environment's responsibility.
+  T3 reuses only an exact root handler for its loopback target, refuses to replace any other
+  configured handler, and checks that a handler still exactly matches the target before requesting
+  removal. Applications should not concurrently change the same HTTPS port because the status check
+  and removal command are separate Tailscale operations.
 - [SSH cleanup](../../packages/ssh/src/tunnel.ts) stops a remote server only if the launcher started
   it; a server discovered already running must survive client disconnect.
 - Remote servers outlive client releases. Clients negotiate features via advertised capabilities
