@@ -76,35 +76,13 @@ function formatResult(action: LastCodeWrappedAction["kind"], result: StepResult)
   const outcome = report?.outcome ?? (exitCode === 0 ? "success" : "attention");
   const summary = report?.summary ?? error ?? (exitCode === 0 ? "Completed." : "Command failed.");
   const reason = report?.reason;
-  const reportPath = report?.facts?.reportPath;
-  const reportLine =
-    outcome !== "success" && typeof reportPath === "string" && reportPath !== ""
-      ? `Report: ${reportPath}`
-      : undefined;
-  // Keep the exact path in stdout even when it would push the result past the wake's tail.
-  const longReportPath = reportLine !== undefined && Buffer.byteLength(reportLine) > 400;
-  const detailLocation =
-    reportLine === undefined
-      ? "Any available details are in this output."
-      : longReportPath
-        ? "Read the report path in the full command output."
-        : "Read the report below.";
-  const guidance =
-    outcome === "success"
-      ? ""
-      : `. ${outcome === "blocked" ? "Could not proceed." : "Needs attention."} ${detailLocation}`;
-  const detail = report?.facts?.dmgPath ?? reportPath ?? report?.facts?.diagnostic;
-  const lines = [
-    `[lc-run] ${action}: ${outcome} (exit ${exitCode})${typeof reason === "string" ? ` [${compact(reason, 64)}]` : ""}${guidance}`,
+  const detail = report?.facts?.dmgPath ?? report?.facts?.reportPath ?? report?.facts?.diagnostic;
+  return [
+    `[lc-run] ${action}: ${outcome} (exit ${exitCode})${typeof reason === "string" ? ` [${compact(reason, 64)}]` : ""}`,
     compact(summary, 320),
-  ];
-  if (reportLine !== undefined) {
-    if (longReportPath) lines.unshift(reportLine);
-    else lines.push(reportLine);
-  } else if (typeof detail === "string") {
-    lines.push(compact(detail, 400));
-  }
-  return lines.join("\n") + "\n";
+    ...(typeof detail === "string" ? [compact(detail, 400)] : []),
+    "",
+  ].join("\n");
 }
 
 async function runStep(
