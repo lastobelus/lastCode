@@ -2625,8 +2625,10 @@ const make = Effect.gen(function* () {
         return false;
       };
       const cleanOwnerless = Effect.gen(function* () {
-        const consumerReason = Effect.fnUntraced(function* () {
-          const savedProtection = yield* savedWorkspaceProtection(cwd, protectionResource);
+        const consumerReason = Effect.fnUntraced(function* (
+          checkProtection: typeof readWorkspaceProtection = readWorkspaceProtection,
+        ) {
+          const savedProtection = yield* checkProtection(cwd);
           if (savedProtection !== null) return savedProtection;
           if (processCwds === null) return "Could not check running processes safely";
           if (processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd)))
@@ -2640,7 +2642,7 @@ const make = Effect.gen(function* () {
             return "A project uses this worktree as its main workspace";
           return null;
         });
-        const protectedReason = yield* consumerReason();
+        const protectedReason = yield* consumerReason(screenWorkspaceProtection);
         const observation = yield* observe(
           input,
           now,
@@ -2651,6 +2653,7 @@ const make = Effect.gen(function* () {
           ) ?? false,
           true,
           automaticWork !== undefined ? days : undefined,
+          screenWorkspaceProtection,
         );
         if (protectedReason !== null) return keep(protectedReason);
         if (observation === null) return keep(unrecognizedReason());

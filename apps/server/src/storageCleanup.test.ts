@@ -6729,6 +6729,7 @@ it.effect("bounds SQL and registry reads in quiet dependency sweeps", () => {
             true,
           );
         }
+        if (index === installCount - 1) continue;
         const threadId = ThreadId.make(`quiet-owner-${index}`);
         const thread = shell({ id: threadId, projectId, branch, worktreePath: cwd });
         yield* projections.apply({
@@ -6754,6 +6755,14 @@ it.effect("bounds SQL and registry reads in quiet dependency sweeps", () => {
           (entry) => entry.worktreeResource === "dependencies",
         );
         expect(dependencies).toHaveLength(installCount);
+        expect(dependencies).toContainEqual(
+          expect.objectContaining({
+            path: installPaths.at(-1),
+            threadId: null,
+            outcome: "kept",
+            reason: expect.stringContaining("inactivity period"),
+          }),
+        );
         expect(
           dependencies.filter((entry) => entry.reason?.includes("inactivity period")),
         ).toHaveLength(installCount - oldInstallCount);
@@ -6804,13 +6813,12 @@ it.effect("bounds SQL and registry reads in quiet dependency sweeps", () => {
         expect(counts.registryReads, JSON.stringify(measurements)).toBeLessThanOrEqual(
           1 + 2 * oldInstallCount,
         );
-        expect(counts.statements, JSON.stringify(measurements)).toBeLessThanOrEqual(31);
+        // The ownerless install needs one current provider-session query.
+        expect(counts.statements, JSON.stringify(measurements)).toBeLessThanOrEqual(32);
         expect(counts.transactions).toBeLessThanOrEqual(1 + oldInstallCount);
-        expect(counts.providerEventReads).toBeLessThanOrEqual(1 + 3 * oldInstallCount);
+        expect(counts.providerEventReads).toBeLessThanOrEqual(2 + 3 * oldInstallCount);
         expect(counts.ownershipEventReads).toBeLessThanOrEqual(2 * oldInstallCount);
-        expect(counts.savedWorkspaceChecks).toBeLessThanOrEqual(
-          2 * (installCount + oldInstallCount),
-        );
+        expect(counts.savedWorkspaceChecks).toBeLessThanOrEqual(2 * oldInstallCount);
       }
       mountInspectionAvailable = true;
       const manual = yield* fixture.service.runNow;
