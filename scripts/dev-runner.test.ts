@@ -22,6 +22,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 import { vi } from "vite-plus/test";
 
+import * as PreviewSettings from "../apps/server/scripts/prepare-preview-settings.ts";
 import {
   checkPortAvailabilityOnHosts,
   createDevRunnerEnv,
@@ -440,6 +441,124 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("runDevRunnerWithInput", () => {
+    it.effect("rejects incomplete preview preference sources before starting a process", () => {
+      let spawned = false;
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => {
+          spawned = true;
+          return Effect.succeed(mockProcess(0));
+        }),
+      );
+
+      return Effect.gen(function* () {
+        const error = yield* runDevRunnerWithInput(devServerInput).pipe(
+          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, {
+            T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+          }),
+          Effect.flip,
+        );
+
+        assert.equal(error._tag, "DevRunnerConfigurationError");
+        if (error._tag !== "DevRunnerConfigurationError") return;
+        assert.deepStrictEqual(error.configKeys, ["T3CODE_PREVIEW_BROWSER_PROFILE"]);
+        assert.equal(spawned, false);
+      });
+    });
+
+    it.effect.each([undefined, "", "   "])(
+      "rejects a missing preview origin (%s) before preparation",
+      (origin) =>
+        Effect.gen(function* () {
+          using prepare = vi
+            .spyOn(PreviewSettings, "preparePreviewSettings")
+            .mockRejectedValue(new Error("Preparation must not run without an origin"));
+          let spawned = false;
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => {
+              spawned = true;
+              return Effect.succeed(mockProcess(0));
+            }),
+          );
+          const error = yield* runDevRunnerWithInput(devServerInput).pipe(
+            Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+            Effect.provideService(HostProcess.Platform, "linux"),
+            Effect.provideService(HostProcess.Environment, {
+              T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+              T3CODE_PREVIEW_BROWSER_PROFILE: "/saved-app/profile",
+              ...(origin === undefined ? {} : { T3CODE_PREVIEW_SETTINGS_ORIGIN: origin }),
+            }),
+            Effect.flip,
+          );
+          assert.equal(error._tag, "DevRunnerConfigurationError");
+          if (error._tag !== "DevRunnerConfigurationError") return;
+          assert.deepStrictEqual(error.configKeys, ["T3CODE_PREVIEW_SETTINGS_ORIGIN"]);
+          assert.equal(prepare.mock.calls.length, 0);
+          assert.equal(spawned, false);
+        }),
+    );
+
+    it.effect.each([undefined, "~/.t3"])(
+      "rejects preview preference copying without an isolated home (%s)",
+      (t3Home) =>
+        Effect.gen(function* () {
+          using prepare = vi
+            .spyOn(PreviewSettings, "preparePreviewSettings")
+            .mockRejectedValue(new Error("Preparation requires an isolated home"));
+          const error = yield* runDevRunnerWithInput({
+            ...devServerInput,
+            mode: "dev:web",
+            t3Home,
+          }).pipe(
+            Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer)),
+            Effect.provideService(HostProcess.WorkingDirectory, NodeOS.tmpdir()),
+            Effect.provideService(HostProcess.HomeDirectory, devServerHome),
+            Effect.provideService(HostProcess.Environment, {
+              T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+              T3CODE_PREVIEW_BROWSER_PROFILE: "/saved-app/profile",
+              T3CODE_PREVIEW_SETTINGS_ORIGIN: "lastcode-dev://app",
+            }),
+            Effect.flip,
+          );
+          assert.equal(error._tag, "DevRunnerConfigurationError");
+          if (error._tag !== "DevRunnerConfigurationError") return;
+          assert.deepStrictEqual(error.configKeys, ["T3CODE_HOME"]);
+          assert.equal(prepare.mock.calls.length, 0);
+        }),
+    );
+
+    it.effect.each(["lastcode-dev://app", " \tlastcode-dev://app \n"])(
+      "normalizes the explicit preview origin (%s)",
+      (origin) =>
+        Effect.gen(function* () {
+          using prepare = vi.spyOn(PreviewSettings, "preparePreviewSettings").mockResolvedValue({
+            id: "00000000-0000-4000-8000-000000000001",
+            settingsPath: "/preview/userdata/preview-settings.json",
+            copiedFiles: [],
+            browserPreferenceCount: 1,
+          });
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => Effect.succeed(mockProcess(0))),
+          );
+          yield* runDevRunnerWithInput(devServerInput).pipe(
+            Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+            Effect.provideService(HostProcess.Platform, "linux"),
+            Effect.provideService(HostProcess.Environment, {
+              T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+              T3CODE_PREVIEW_BROWSER_PROFILE: "/saved-app/profile",
+              T3CODE_PREVIEW_SETTINGS_ORIGIN: origin,
+            }),
+          );
+          assert.equal(prepare.mock.calls.length, 1);
+          assert.equal(prepare.mock.calls[0]?.[0].sourceOrigin, "lastcode-dev://app");
+          assert.equal(prepare.mock.calls[0]?.[0].targetHome, NodePath.resolve(devServerHome));
+        }),
+    );
+
     it.effect("preserves process spawn context and the exact platform cause", () => {
       const cause = PlatformError.systemError({
         _tag: "NotFound",

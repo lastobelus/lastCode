@@ -20,6 +20,8 @@ export class DesktopState extends Context.Service<
     readonly quitting: Ref.Ref<boolean>;
     // Set by DesktopUpdates.configure, which runs before the first backend start.
     readonly canInstallUpdates: Ref.Ref<boolean>;
+    /** An install has committed and closed its windows; its quit already warned about running work. */
+    readonly installQuitCommitted: Ref.Ref<boolean>;
     readonly primaryBackendStartup: SubscriptionRef.SubscriptionRef<PrimaryBackendStartup>;
     readonly databaseMigrationProgress: Ref.Ref<DatabaseMigrationProgress | null>;
   }
@@ -29,6 +31,7 @@ const make = Effect.all({
   backendReady: Ref.make(false),
   quitting: Ref.make(false),
   canInstallUpdates: Ref.make(false),
+  installQuitCommitted: Ref.make(false),
   primaryBackendStartup: SubscriptionRef.make<PrimaryBackendStartup>({ _tag: "Starting" }),
   databaseMigrationProgress: Ref.make<DatabaseMigrationProgress | null>(null),
 });

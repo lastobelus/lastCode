@@ -37,12 +37,71 @@ Configure worktrees in **Settings → Worktrees** (environment default or projec
 
 Enable automatic cleanup in **Settings → Worktrees → Cleanup** (off by default; runs on startup, on change, and hourly). Projects can set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
 
-- **Triggers**: Inactive days, days after settlement (`0` = next cleanup), merged PRs (including GitHub squash/rebase merges into the default branch), or settled/archived threads with no commits beyond the default branch.
-- **Safety**: Active sessions and shared worktrees are never removed. **Keep worktrees with local changes** defaults to **Uncommitted changes** (protects tracked edits and untracked files; removes ignored files like `.env`/build output). Choose **Any local files** (also protects ignored files except `node_modules`) or **Edited tracked files** (protects tracked edits only).
-- **Delete with deleted threads**: Enable **Delete worktrees with deleted threads** to automatically clean up safe worktrees once their last thread is deleted.
-- **Scratch folders**: Inactive and settled rules also apply to [no-project scratch folders](./thread-sidebar.md#start-without-a-project) (skipped if they contain a Git repo or enabled scheduled task). Because scratch files aren't in Git, deleted files cannot be recovered.
-- **Manual run**: Click **Delete now** to run rules immediately and inspect what was removed, kept, or orphaned (untracked folders are listed but never auto-deleted).
-- **Captures and logs**: Browser captures and rotated logs have separate machine-wide retention periods.
+When **Delete inactive worktrees** is enabled, clean archived checkouts are eligible
+immediately. Unarchived checkouts use the delay configured in settings. Worktrees can also
+be removed after a thread settles, after merging, or when they have no commits beyond the
+default branch and their thread is settled or archived. Set settled retention to 0 days to remove an eligible checkout at the next
+cleanup after settlement. In repositories without remotes,
+unchanged-worktree cleanup compares against the branch checked out in the project workspace;
+if that checkout has a detached HEAD, the worktree is kept. Only
+registered linked worktrees in configured cleanup locations are eligible. Active consumers
+prevent removal. Shared families qualify only when every owner is archived and every owner
+has cleanup enabled. Edits, untracked files and unknown ignored files—including notes, `.env`
+and local runtime state—always preserve a checkout. Branches and thread history stay;
+starting another turn recreates the checkout.
+Merge cleanup requires a merged pull request whose commits are included in the remote default
+branch. A squash or rebase merge on GitHub also counts when the pull request targeted the default
+branch and the worktree is still at the pull request's last commit.
+
+Enable **Delete worktrees with deleted threads** to remove safe worktrees after their last
+thread is deleted, including archived threads and worktrees left by earlier deletions. The
+server waits for sessions and terminals to stop and retries skipped worktrees after restart.
+Existing prompts for deleting a worktree manually remain available when this policy is off.
+
+Choose **Delete now** to run the enabled rules immediately. The latest results show which
+worktrees were removed or kept and why, plus any failures.
+Results also list folders in the worktree folder that no thread uses, with their sizes; cleanup never removes them, so remove them manually if you want.
+
+The inactive and settled retention periods also apply to the folders of
+[threads without a project](./thread-sidebar.md#start-without-a-project). Those folders are not
+Git repositories, so their files are deleted with them and cannot be recovered; the thread stays,
+and its next turn starts in a new, empty folder. A folder is kept when it has a Git repository
+anywhere inside it or when its thread has an enabled scheduled task. Every file in such a folder
+counts as untracked, so only **Edited tracked files** removes a folder that holds anything other
+than `node_modules`; the other two rules remove only empty folders. Folders that no thread uses
+are listed here too.
+
+Enable **Remove inactive dependencies and build outputs** to reclaim recognized npm or
+pnpm `node_modules` installations and unchanged build files recorded by the compiler runners.
+This existing dependency rule also governs verified app `dist` and resource-monitor debug
+outputs; source checkouts remain subject to the separate whole-worktree rule. Additions,
+notes and research files are kept. Archived threads are eligible immediately when this rule is enabled. For shared
+worktrees, every owner must be archived and have cleanup enabled; an unarchived or active
+owner, or an owner whose project policy is Off, keeps the install.
+
+Unarchived and ownerless installs use the delay configured in settings, measured from actual
+dependency or compiled-output use. This includes registered manual and QA worktrees in configured cleanup
+locations when their repository maps to one project. Dependency preparation and the
+dependency-backed development and CI runners renew that clock; status conversations and
+simply opening a terminal do not. Recognized installs with uncertain usage start a full
+configured interval when first observed. Folder timestamps alone never prove usage.
+
+Active agents, sessions, terminals, previews, processes, and runtime protection prevent
+cleanup. Only unchanged compiler-recorded or explicitly approved files are removed from build
+folders; arbitrary additions and edited outputs remain. Other generated folders and vendored sources
+are kept. Reinstall dependencies or rebuild outputs before continuing work. This rule is off by default and follows the project's Inherit, Off,
+or Custom policy. Dependency cleanup is available on macOS and Linux and keeps worktrees
+when consumers cannot be checked reliably. On mobile, open **Settings → Maintenance** to
+configure cleanup for an environment or project.
+
+For older builds, choose **Settings → Storage → Review older builds** on web or desktop.
+Choose an environment and build root, then explicitly select the files to approve. Saving
+does not delete files or enable cleanup; the existing policy and delay still apply. New,
+changed, recreated and unselected files stay. Clearing approval keeps the build root protected.
+Each review supports up to 1,000 files and 512 MiB per root.
+
+Browser captures and rotated logs have separate retention periods. Expired capture links stop
+working. Current logs, message attachments, and browser profiles are kept.
 
 ## Keep the default branch current
 

@@ -5,10 +5,12 @@ import * as NodeOS from "node:os";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
+import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
 import { SHARED_DEV_LOOPBACK_HOST } from "@t3tools/shared/devProxy";
 import { resolveGitWorktreePath, resolveWorktreeT3Home } from "@t3tools/shared/devHome";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -25,6 +27,7 @@ import { defaultDevMemoryLimitBytes, enforceDevMemoryLimit } from "./lib/dev-mem
 import { acquireDevRunnerLock } from "./lib/dev-runner-lock.ts";
 import { type DevShareError, shareDevServer, unshareDevServer } from "./lib/dev-share.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
+import { preparePreviewSettings } from "../apps/server/scripts/prepare-preview-settings.ts";
 
 Object.assign(process.env, loadRepoEnv());
 
@@ -109,6 +112,11 @@ const DEV_RUNNER_MODES = Object.keys(MODE_ARGS) as Array<DevMode>;
 export function isBrowserAllowedPort(port: number): boolean {
   return !FETCH_BAD_PORTS.has(port);
 }
+
+class DevRunnerDependencyUseError extends Schema.TaggedError<DevRunnerDependencyUseError>()(
+  "DevRunnerDependencyUseError",
+  { cause: Schema.Defect() },
+) {}
 
 export class DevRunnerConfigurationError extends Schema.TaggedError<DevRunnerConfigurationError>()(
   "DevRunnerConfigurationError",
@@ -824,6 +832,39 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     return;
   }
 
+  const settingsSource = hostEnvironment.T3CODE_PREVIEW_SETTINGS_SOURCE?.trim();
+  let previewSettingsInput: Parameters<typeof preparePreviewSettings>[0] | undefined;
+  if (settingsSource) {
+    const browserProfile = hostEnvironment.T3CODE_PREVIEW_BROWSER_PROFILE?.trim();
+    if (!browserProfile) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_BROWSER_PROFILE"],
+        cause: "A browser profile is required when copying preview settings.",
+      });
+    }
+    const settingsOrigin = hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN?.trim();
+    if (!settingsOrigin) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_SETTINGS_ORIGIN"],
+        cause: "An explicit browser origin is required when copying preview settings.",
+      });
+    }
+    // The default dev home shares its root with the live userdata directory.
+    const targetHome = env.T3CODE_HOME;
+    if (!targetHome) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_HOME"],
+        cause: "Missing isolated preview home",
+      });
+    }
+    previewSettingsInput = {
+      sourceStateDir: settingsSource,
+      sourceBrowserProfile: browserProfile,
+      sourceOrigin: settingsOrigin,
+      targetHome,
+    };
+  }
+
   // Same state directory as the server's deriveServerPaths, so `dev:web` (no server) skips it.
   if (input.mode !== "dev:web") {
     const path = yield* Path.Path;
@@ -831,6 +872,22 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
       env.T3CODE_HOME ? path.join(env.T3CODE_HOME, "userdata") : path.join(baseDir, "dev"),
       `pid ${String(process.pid)}, ${input.mode}, server port ${String(env.T3CODE_PORT)}, web port ${String(env.PORT)}`,
     );
+  }
+
+  if (previewSettingsInput) {
+    const options = previewSettingsInput;
+    yield* Effect.tryPromise({
+      try: () => preparePreviewSettings(options),
+      catch: (cause) =>
+        new DevRunnerConfigurationError({
+          configKeys: [
+            "T3CODE_PREVIEW_SETTINGS_SOURCE",
+            "T3CODE_PREVIEW_BROWSER_PROFILE",
+            "T3CODE_PREVIEW_SETTINGS_ORIGIN",
+          ],
+          cause,
+        }),
+    });
   }
 
   const sharedWebPort = BASE_WEB_PORT + webOffset;
@@ -933,6 +990,17 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     argumentCount: args.length,
     shell: spawnCommand.shell,
   } as const;
+  // This runner is a concrete dependency-backed execution, unlike opening a
+  // terminal or asking an agent for status. Renew again after its child stops.
+  const usageCwd = yield* HostProcess.WorkingDirectory;
+  const noteDependencyUse = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    yield* Effect.try({
+      try: () => recordDependencyUse(usageCwd, now),
+      catch: (cause) => new DevRunnerDependencyUseError({ cause }),
+    }).pipe(Effect.catch(() => Effect.logDebug("Could not record development dependency use")));
+  });
+  yield* Effect.acquireRelease(noteDependencyUse, () => noteDependencyUse);
   const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {
     stdin: "inherit",
     stdout: "inherit",

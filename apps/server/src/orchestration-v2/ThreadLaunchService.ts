@@ -611,6 +611,7 @@ const make = Effect.gen(function* () {
     input: PreparationInput,
     threadId: ThreadId,
     runId: RunId | null,
+    requestId: CommandId,
     releaseWorkspace: Effect.Effect<void>,
   ) {
     const project = yield* projects.getById(input.projectId).pipe(
@@ -623,6 +624,13 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+    const initialThread = yield* threads
+      .getThreadShell(threadId)
+      .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+    if (initialThread === null)
+      return yield* mapError(input, "update-thread", threadId)("Thread no longer exists.");
+    const expectedWorktreePath = initialThread.worktreePath;
 
     const reused = input.reusedWorktree;
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
@@ -958,9 +966,12 @@ const make = Effect.gen(function* () {
       if (reused === undefined) {
         yield* threads
           .dispatch({
-            type: "thread.metadata.update",
+            type: "thread.workspace.complete",
             commandId: CommandId.make(`${input.commandId}:workspace`),
             threadId,
+            requestId,
+            runId,
+            expectedWorktreePath,
             branch,
             worktreePath,
           })
@@ -1024,9 +1035,11 @@ const make = Effect.gen(function* () {
             Effect.gen(function* () {
               yield* threads
                 .dispatch({
-                  type: "thread.metadata.update",
+                  type: "thread.workspace.complete",
                   commandId: CommandId.make(`${input.commandId}:branch-rename`),
                   threadId,
+                  requestId,
+                  runId,
                   branch: renamed.branch,
                   worktreePath: worktreeCwd,
                   expectedBranch: oldBranch,
@@ -1275,9 +1288,11 @@ const make = Effect.gen(function* () {
               yield* remove;
               yield* threads
                 .dispatch({
-                  type: "thread.metadata.update",
+                  type: "thread.workspace.complete",
                   commandId: CommandId.make(`${input.commandId}:cancel-workspace`),
                   threadId,
+                  requestId,
+                  runId,
                   expectedWorktreePath: workspaceRecorded ? removedPath : null,
                   worktreePath: null,
                   branch: null,
@@ -1396,13 +1411,14 @@ const make = Effect.gen(function* () {
     input: PreparationInput,
     threadId: ThreadId,
     runId: RunId | null,
+    requestId: CommandId,
   ) {
     const preparation = Effect.gen(function* () {
       const prepare = Effect.acquireUseRelease(
         input.workspaceStrategy.type === "worktree"
           ? setupTracker.holdWorkspace(threadId)
           : Effect.succeed(Effect.void),
-        (release) => prepareInBackground(input, threadId, runId, release),
+        (release) => prepareInBackground(input, threadId, runId, requestId, release),
         (release) => release,
       );
       if (
@@ -1691,6 +1707,7 @@ const make = Effect.gen(function* () {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
         }
         let runId: RunId | null = null;
+        let preparationRequestId = input.commandId;
         let messageSequence: number | undefined;
         if (dispatched !== undefined) {
           // A concurrent retry can read no receipt and still replay the dispatch.
@@ -1700,6 +1717,7 @@ const make = Effect.gen(function* () {
             (stored) => stored.event.type === "run.created",
           );
           runId = runCreated?.event.type === "run.created" ? runCreated.event.payload.id : null;
+          preparationRequestId = runCreated?.commandId ?? messageCommandId;
           if (runId === null) {
             return yield* mapError(
               input,
@@ -1776,6 +1794,7 @@ const make = Effect.gen(function* () {
               },
               threadId,
               runId,
+              preparationRequestId,
             );
           }).pipe(Effect.onError(() => releasePreparation(input.commandId)));
         }
@@ -1884,6 +1903,7 @@ const make = Effect.gen(function* () {
       },
       input.threadId,
       run.id,
+      input.commandId,
     );
   });
 
