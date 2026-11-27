@@ -14,6 +14,7 @@ import {
   git,
   gitResult,
   write,
+  commit,
   checkpoint,
   remoteCommit,
   remoteMissing,
@@ -21,7 +22,43 @@ import {
   historicalFixture,
 } from "./lastcode-checkpoint-lifecycle.fixture.ts";
 
+const UPSTREAM_PINS_PATH = "scripts/lastcode-upstream-imports.json";
+const UPSTREAM_PINS = JSON.stringify([
+  {
+    upstreamRepo: "example/upstream",
+    pullRequest: 12,
+    pinnedHead: "a".repeat(40),
+    trackingRepo: "example/downstream",
+    trackingIssue: 34,
+  },
+]);
+
 describe("checkpoint publication with open PRs", () => {
+  it("checks pins from the publishing source and still publishes when GitHub is unavailable", () => {
+    const { fixture, queryMarker, environment } = historicalFixture();
+    try {
+      write(fixture.repo, UPSTREAM_PINS_PATH, UPSTREAM_PINS);
+      const source = commit(fixture.repo, "record an upstream import");
+      git(fixture.repo, ["push", "--quiet", "origin", `${source}:refs/heads/lastcode/main`]);
+      write(fixture.repo, UPSTREAM_PINS_PATH, "uncommitted manifest");
+
+      const preview = checkpoint(fixture, ["--dry-run", "--push-tags"], environment);
+      assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+      assert.equal(NodeFS.existsSync(queryMarker), false);
+
+      const result = checkpoint(fixture, ["--push-tags"], environment);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stderr, /Cannot report example\/upstream\/12/u);
+      assert.equal(NodeFS.existsSync(queryMarker), true);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
+        false,
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("retries a failed post-publish command for the already published immutable tag", () => {
     const { fixture, source, environment } = historicalFixture();
     try {
@@ -725,8 +762,15 @@ exec "$FIXTURE_REAL_GIT" "$@"
     })),
   )("selected repair: $name", ({ phase }) => {
     const concurrentMerge = phase !== "none";
-    const { fixture, source, merged, queryMarker, environment, raceEnvironment } =
-      historicalFixture(true);
+    const {
+      fixture,
+      source,
+      merged: fixtureMerge,
+      queryMarker,
+      environment,
+      raceEnvironment,
+    } = historicalFixture(true);
+    let merged = fixtureMerge;
     try {
       const failed = checkpoint(fixture, ["--push-tags", "--promote"], environment);
       assert.notEqual(failed.status, 0);
@@ -752,7 +796,13 @@ exec "$FIXTURE_REAL_GIT" "$@"
       );
       assert.equal(NodeFS.existsSync(selectionPath), true);
       if (phase === "selected") {
-        git(fixture.origin, ["update-ref", "refs/heads/lastcode/main", merged, source]);
+        git(fixture.repo, ["switch", "--detach", merged]);
+        write(fixture.repo, UPSTREAM_PINS_PATH, UPSTREAM_PINS);
+        git(fixture.repo, ["add", UPSTREAM_PINS_PATH]);
+        git(fixture.repo, ["commit", "--amend", "--no-edit"]);
+        merged = git(fixture.repo, ["rev-parse", "HEAD"]);
+        git(fixture.repo, ["push", "--quiet", "origin", `${merged}:refs/heads/lastcode/main`]);
+        git(fixture.repo, ["switch", "lastcode-source"]);
       }
       const result = checkpoint(
         fixture,
@@ -760,6 +810,11 @@ exec "$FIXTURE_REAL_GIT" "$@"
         phase === "smoke" || phase === "push"
           ? { ...raceEnvironment, FIXTURE_MERGE_PHASE: phase }
           : environment,
+      );
+      assert.equal(
+        NodeFS.existsSync(queryMarker),
+        false,
+        "recovery must use the selected source's pins",
       );
       const tag = `lastcode/checkpoint/${NIGHTLY_B}`;
       if (concurrentMerge) {
@@ -797,6 +852,8 @@ exec "$FIXTURE_REAL_GIT" "$@"
           assert.equal(reselected.status, 0, reselected.stderr || reselected.stdout);
           const resumed = checkpoint(fixture, ["--push-tags", "--promote"], environment);
           assert.equal(resumed.status, 0, resumed.stderr || resumed.stdout);
+          assert.match(resumed.stderr, /Cannot report example\/upstream\/12/u);
+          assert.equal(NodeFS.existsSync(queryMarker), true);
           assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), incorporated);
           assert.equal(
             remoteCommit(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_B}.1`),
@@ -822,7 +879,6 @@ exec "$FIXTURE_REAL_GIT" "$@"
         assert.equal(NodeFS.existsSync(retained), false);
         assert.equal(NodeFS.existsSync(selectionPath), false);
       }
-      assert.equal(NodeFS.existsSync(queryMarker), false, "recovery must not query the PR queue");
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }

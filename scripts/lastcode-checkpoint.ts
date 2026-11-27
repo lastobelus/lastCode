@@ -61,6 +61,7 @@ import {
   type CheckpointRunRecord,
 } from "./lastcode-checkpoint-history.ts";
 import { runCarrySetShadowCheck, type CarrySetShadowResult } from "./lastcode-carry-set.ts";
+import { reportUpstreamImportDrift } from "./lastcode-upstream-import-drift.ts";
 import {
   checkpointTagFromNightlyTag,
   compareLastCodeInstallableTags,
@@ -278,6 +279,7 @@ function run(
     readonly environment?: NodeJS.ProcessEnv;
     readonly maxBuffer?: number;
     readonly failureStep?: string;
+    readonly timeout?: number;
   } = {},
 ): string {
   const result = NodeChildProcess.spawnSync(command, args, {
@@ -285,6 +287,7 @@ function run(
     encoding: "utf8",
     ...(options.environment ? { env: options.environment } : {}),
     ...(options.maxBuffer ? { maxBuffer: options.maxBuffer } : {}),
+    ...(options.timeout ? { timeout: options.timeout } : {}),
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
@@ -2728,6 +2731,19 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       throw new Error("Recovery source changed; incorporate new main commits and select again.");
     }
     assertRecoverySelection(automationWorktree(), selection, selection.sourceCommit);
+  }
+  if (options.pushTags && !options.dryRun) {
+    reportUpstreamImportDrift({
+      sourceCommit: selection?.sourceCommit ?? sourceCommit,
+      git: (args) => git(repoRoot, args),
+      api: (args) =>
+        run(repoRoot, "gh", ["api", "--hostname", "github.com", ...args], {
+          capture: true,
+          timeout: 30_000,
+        }),
+      log: (message) => console.log(`[lastcode:checkpoint] ${message}`),
+      warn: (message) => console.warn(`[lastcode:checkpoint] ${message}`),
+    });
   }
   const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, sourceCommit);
   const sourceNightlyTags = splitLines(
