@@ -22,6 +22,7 @@ export type ThreadActionMenuId =
   | "unsnooze"
   | "rename"
   | "regenerate-title"
+  | "cancel-action"
   | "mark-unread"
   | "share-guest"
   | "copy"
@@ -115,6 +116,7 @@ export interface ThreadActionMenuState {
   readonly isRunning: boolean;
   /** The server marks unread against the latest run's completion, so in-flight runs cannot be. */
   readonly hasCompletedRun: boolean;
+  readonly hasRunningAction: boolean;
   readonly supports: {
     readonly settlement: boolean;
     readonly autoSettleOptOut: boolean;
@@ -240,6 +242,15 @@ export function buildThreadActionMenuItems(
               : resolve(msg("Regenerate title")),
             icon: "refresh-cw",
             disabled: state.isRegeneratingTitle,
+          },
+        ]
+      : []),
+    ...(state.hasRunningAction
+      ? [
+          {
+            id: "cancel-action" as const,
+            label: resolve(msg("Cancel running Action")),
+            destructive: true,
           },
         ]
       : []),
