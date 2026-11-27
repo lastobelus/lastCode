@@ -584,6 +584,8 @@ const runnerSource = () => {
     snoozedUntil: null,
     settledOverride: null,
     settledAt: null,
+    archivedAt: null,
+    deletedAt: null,
   };
   const thread = rawThread as never;
   const limits: number[] = [];
@@ -602,7 +604,8 @@ const runnerSource = () => {
         ],
         threads: [thread],
       },
-      getThread: (_threadId: ThreadId, limit: number) => {
+      getThread: (threadId: ThreadId, limit: number) => {
+        if (threadId !== rawThread.id) return Effect.succeed(null);
         limits.push(limit);
         return Effect.succeed({
           thread: rawThread,
@@ -692,6 +695,52 @@ it.effect("runs current, list, and bounded read outputs and rejects missing curr
     assert.deepStrictEqual(limits, [1, 7]);
     assert.strictEqual(missing._tag, "Failure");
   }),
+);
+
+it.effect(
+  "reads an exact archived ID before trying active prefixes and keeps lists active-only",
+  () =>
+    Effect.gen(function* () {
+      const { source } = runnerSource();
+      const archivedId = ThreadId.make("thread-run");
+      const archivedAt = DateTime.makeUnsafe("2026-01-02T00:00:00.000Z");
+      const archivedSource: ThreadReadSource = {
+        ...source,
+        getThread: (id, limit) =>
+          id === archivedId
+            ? source
+                .getThread(ThreadId.make("thread-runner"), limit)
+                .pipe(
+                  Effect.map((detail) =>
+                    detail === null
+                      ? null
+                      : { ...detail, thread: { ...detail.thread, id, archivedAt } },
+                  ),
+                )
+            : source.getThread(id, limit),
+      };
+
+      const archived = yield* readThreadOutput(archivedSource, archivedId, 5);
+      assert.include(archived, {
+        kind: "read",
+        threadId: archivedId,
+        title: "Runner thread",
+        archived: true,
+      });
+      const active = yield* readThreadOutput(archivedSource, "thread-ru", 5);
+      assert.include(active, {
+        kind: "read",
+        threadId: "thread-runner",
+      });
+      assert.notProperty(active, "archived");
+      assert.include(yield* readThreadOutput(archivedSource, "missing", 5), {
+        kind: "not-found",
+      });
+      assert.deepStrictEqual(
+        (yield* listThreadsOutput(archivedSource)).threads.map(({ threadId }) => threadId),
+        ["thread-runner"],
+      );
+    }),
 );
 
 it.effect("caps thread lists deterministically and reports truncation", () =>

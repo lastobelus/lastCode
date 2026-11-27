@@ -164,6 +164,7 @@ export const ThreadListResult = Schema.Struct({
 export const ThreadReadResult = Schema.Struct({
   kind: Schema.Literal("read"),
   ...ThreadIdentity.fields,
+  archived: Schema.optional(Schema.Literal(true)),
   title: Schema.String,
   persistent: Schema.Boolean,
   lifecycle: Schema.String,
@@ -504,7 +505,7 @@ export function threadLifecycle(
 
 function projectForThread(
   snapshot: OrchestrationV2ShellSnapshot,
-  thread: OrchestrationV2ThreadShell,
+  thread: Pick<OrchestrationV2ThreadShell, "id" | "projectId">,
 ): OrchestrationProjectShell {
   const project = snapshot.projects.find(({ id }) => id === thread.projectId);
   if (!project)
@@ -516,11 +517,18 @@ function projectOutput(project: OrchestrationProjectShell) {
   return { id: project.id, title: project.title, workspaceRoot: project.workspaceRoot };
 }
 
-function workspaceOutput(project: OrchestrationProjectShell, thread: OrchestrationV2ThreadShell) {
+function workspaceOutput(
+  project: OrchestrationProjectShell,
+  thread: Pick<OrchestrationV2ThreadShell, "worktreePath" | "branch">,
+) {
   return { root: thread.worktreePath ?? project.workspaceRoot, branch: thread.branch };
 }
 
-function providerOutput(thread: OrchestrationV2ThreadShell, projection?: ThreadCliProjection) {
+function providerOutput(
+  thread: Pick<OrchestrationV2ThreadShell, "activeProviderThreadId" | "providerInstanceId"> &
+    Partial<Pick<OrchestrationV2ThreadShell, "status">>,
+  projection?: ThreadCliProjection,
+) {
   const providerThread = projection?.providerThreads.find(
     ({ id }) => id === thread.activeProviderThreadId,
   );
@@ -530,7 +538,7 @@ function providerOutput(thread: OrchestrationV2ThreadShell, projection?: ThreadC
   return {
     name: providerThread?.driver ?? null,
     instanceId: thread.providerInstanceId,
-    status: session?.status ?? thread.status,
+    status: session?.status ?? thread.status ?? null,
     ...(providerThread?.driver === "codex" && providerThread.nativeThreadRef?.nativeId
       ? { codexThreadId: providerThread.nativeThreadRef.nativeId }
       : {}),
@@ -544,7 +552,7 @@ export interface ThreadReadSource {
   readonly getThread: (
     threadId: ThreadId,
     turnLimit: number,
-  ) => Effect.Effect<ThreadCliProjection, ThreadCliError>;
+  ) => Effect.Effect<ThreadCliProjection | null, ThreadCliError>;
 }
 
 export interface ThreadSendSource {
@@ -662,6 +670,12 @@ export const currentThreadOutput = Effect.fn("currentThreadOutput")(function* (
   }
   const project = projectForThread(source.shell, target);
   const detail = yield* source.getThread(target.id, 1);
+  if (detail === null) {
+    return yield* new ThreadCliError({
+      operation: "current context lookup",
+      cause: new Error(`Current LastCode thread '${currentId}' was not found.`),
+    });
+  }
   return yield* decodeThreadCurrentResult({
     kind: "current",
     environmentId: source.descriptor.environmentId,
@@ -770,23 +784,43 @@ export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
   identifier: string,
   turnLimitInput: number,
 ) {
-  const resolution = resolveThreadTarget(source.shell.threads, identifier);
-  if (resolution.kind !== "resolved")
-    return { ...resolution, environmentId: source.descriptor.environmentId };
+  const normalized = identifier.trim();
+  const { environmentId } = source.descriptor;
+  const notFound = { kind: "not-found" as const, identifier: normalized, environmentId };
+  if (normalized.length === 0) return notFound;
+
   const turnLimit = validateThreadTurnLimit(turnLimitInput);
-  const detail = yield* source.getThread(resolution.thread.id, turnLimit);
-  const project = projectForThread(source.shell, resolution.thread);
+  const exact = yield* source.getThread(ThreadId.make(normalized), turnLimit);
+  const resolution = resolveThreadTarget(source.shell.threads, normalized);
+  if (exact === null && resolution.kind !== "resolved") return { ...resolution, environmentId };
+
+  const target = resolution.kind === "resolved" ? resolution.thread : undefined;
+  const detail =
+    exact ??
+    (target && target.id !== normalized ? yield* source.getThread(target.id, turnLimit) : null);
+  if (detail === null || detail.thread.deletedAt !== null) return notFound;
+  const archived = detail.thread.archivedAt !== null;
+  if (archived && exact === null) return notFound;
+
+  const shellThread = target?.id === detail.thread.id ? target : undefined;
+  const thread = shellThread ?? detail.thread;
+  const project = projectForThread(source.shell, thread);
   const presentation = projectThreadCliPresentation(detail, turnLimit);
   return yield* decodeThreadReadResult({
     kind: "read",
-    environmentId: source.descriptor.environmentId,
-    threadId: resolution.thread.id,
-    title: resolution.thread.title,
-    persistent: resolution.thread.persistent === true,
-    lifecycle: threadLifecycle(resolution.thread, { now: DateTime.formatIso(yield* DateTime.now) }),
+    environmentId,
+    threadId: thread.id,
+    ...(archived ? { archived: true } : {}),
+    title: thread.title,
+    persistent: thread.persistent === true,
+    lifecycle: archived
+      ? "archived"
+      : shellThread === undefined
+        ? "active"
+        : threadLifecycle(shellThread, { now: DateTime.formatIso(yield* DateTime.now) }),
     project: projectOutput(project),
-    workspace: workspaceOutput(project, resolution.thread),
-    provider: providerOutput(resolution.thread, detail),
+    workspace: workspaceOutput(project, thread),
+    provider: providerOutput(thread, detail),
     latestRun: presentation.latestRun,
     messages: presentation.messages,
     activities: presentation.activities.map(({ id, kind, tone, summary, runId, createdAt }) => ({
@@ -904,6 +938,12 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
                 client.orchestration.threadSnapshot({ params: { threadId }, headers }).pipe(
                   Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
                   Effect.map(({ projection }) => projection),
+                  Effect.catchTags({
+                    EnvironmentResourceNotFoundError: (cause) =>
+                      cause.reason === "thread_not_found"
+                        ? Effect.succeed(null)
+                        : Effect.fail(cause),
+                  }),
                   Effect.mapError(
                     (cause) => new ThreadCliError({ operation: "live detail read", cause }),
                   ),
@@ -977,6 +1017,9 @@ const runThreadRead = Effect.fn("runThreadRead")(function* (
             })
             .pipe(
               Effect.map(({ projection }) => projection),
+              Effect.catchTags({
+                ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+              }),
               Effect.mapError(
                 (cause) => new ThreadCliError({ operation: "offline detail read", cause }),
               ),
@@ -1307,14 +1350,16 @@ const readCommand = Command.make("read", {
   ...threadLocationFlags,
   json: threadJsonFlag,
   thread: Argument.String("thread").pipe(
-    Argument.withDescription("Exact LastCode thread id or unambiguous id prefix."),
+    Argument.withDescription("Exact active or archived thread ID, or unique active thread prefix."),
   ),
   turnLimit: Flag.Int("turn-limit").pipe(
     Flag.withDescription(`Recent user-turn window (1-${THREAD_READ_MAX_TURN_LIMIT}).`),
     Flag.withDefault(THREAD_READ_DEFAULT_TURN_LIMIT),
   ),
 }).pipe(
-  Command.withDescription("Read a bounded recent transcript for one thread."),
+  Command.withDescription(
+    'Read a bounded recent transcript. An exact archived ID returns kind: "read" with archived: true.',
+  ),
   Command.withHandler((flags) =>
     runThreadRead(flags, (source) =>
       readThreadOutput(source, flags.thread, flags.turnLimit).pipe(

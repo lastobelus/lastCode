@@ -1,7 +1,7 @@
 # Codex thread tools
 
 On supported hosts, LastCode adds `lastcode-thread` to the `PATH` of Codex sessions it starts.
-The command identifies the current LastCode thread, reads active threads, and sends a
+The command identifies the current LastCode thread, reads thread history, and sends a
 user-directed message to a live thread owned by the same LastCode environment:
 
 ```sh
@@ -13,13 +13,17 @@ lastcode-thread send <thread-id-or-unique-prefix> --message <text> --wait --time
 lastcode-thread wait '<compact-json-wait-handle>' --timeout '10 minutes' --json
 ```
 
-Thread IDs are resolved locally. An exact ID always wins; a prefix must identify exactly one
+Thread IDs are resolved locally. An exact ID wins, and a prefix must identify exactly one
 active thread. Ambiguous resolution includes a small sorted candidate list and reports when
-additional matches were omitted. Archived and deleted threads are not included.
+additional matches were omitted.
 
 `list` returns at most the 50 most recently updated active threads, with thread ID as
 a deterministic tie-breaker. When more exist, its JSON includes `threadsTruncated: true`
 and `originalThreadCount`.
+
+`read` accepts an archived thread's exact ID. It returns the usual thread data with
+`"kind": "read"` and a top-level `"archived": true`. Active reads omit the `archived` field.
+A missing or deleted thread returns `"kind": "not-found"` when the ID has no active prefix match.
 
 `read` bounds recent message text and activity summaries to one 64,000-character output
 budget and caps activity records. Unresolved approval and user-input requests are retained,
@@ -30,7 +34,7 @@ activity counts were truncated.
 It uses the target thread's current runtime and interaction settings. A successful response is
 `{"kind":"accepted","environmentId":"...","threadId":"...","messageId":"..."}`: this
 confirms that LastCode persisted the request, not that the provider finished it. Blank or
-oversized messages, missing or ambiguous targets, authorization failures, and rejected dispatches
+oversized messages, missing, archived, or ambiguous targets, authorization failures, and rejected dispatches
 fail without reporting acceptance.
 
 Messages sent from one LastCode thread to another appear in the target conversation as agent
