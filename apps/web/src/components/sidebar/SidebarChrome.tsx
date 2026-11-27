@@ -39,6 +39,7 @@ import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
 import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { SidebarModeToggle } from "./SidebarModeToggle";
 import { EnvironmentPauseControl } from "./EnvironmentPauseControl";
+import { SidebarBrandCheckpoint } from "./SidebarBrandCheckpoint";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
@@ -78,8 +79,8 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
         />
         <SidebarModeToggle onBackdrop={backdropVariant !== null} />
       </div>
-      <div className="relative z-10 flex h-8 min-w-0 flex-1 flex-wrap content-start items-center gap-x-2 overflow-hidden py-0.5">
-        <div className="flex shrink-0 items-center gap-1">
+      <div className="relative z-10 flex h-full min-w-0 flex-1 flex-wrap content-start items-center gap-x-2 overflow-hidden">
+        <div className="flex h-full shrink-0 items-center gap-1">
           <SidebarBrand onBackdrop={backdropVariant !== null} />
           {isElectron ? (
             <div className="hidden items-center md:flex">
@@ -175,16 +176,19 @@ function HistoryNavigationButton({
 function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
   const gt = useGT();
   return (
-    <Link
-      aria-label={gt("T3 Code home")}
-      className={cn(
-        "relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
-        onBackdrop ? "text-white" : "text-foreground",
-      )}
-      to="/"
-    >
-      <LastCodeWordmark onBackdrop={onBackdrop} />
-    </Link>
+    <div className="relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden shrink-0 md:block">
+      <Link
+        aria-label={gt("T3 Code home")}
+        className={cn(
+          "flex h-7 items-center rounded-md outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset",
+          onBackdrop ? "text-white" : "text-foreground",
+        )}
+        to="/"
+      >
+        <LastCodeWordmark onBackdrop={onBackdrop} />
+      </Link>
+      <SidebarBrandCheckpoint onBackdrop={onBackdrop} />
+    </div>
   );
 }
 
