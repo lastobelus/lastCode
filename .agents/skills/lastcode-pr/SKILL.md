@@ -163,6 +163,9 @@ current GitHub thread and review-query mechanics.
    findings even while another gate is pending; otherwise end the turn and let
    the watch continue. Call `unwatch_pull_request` before handing the work back.
 
+   Rerun failed jobs only in the PR's newest full CI run because rerunning a job
+   from an older full run can cancel the newer one.
+
    Act on the check's `attention` reasons:
    - `observation-failed` (a GitHub read failed, or the PR or evidence changed
      during the check) or `mergeability-unknown`: rerun the check once, and
