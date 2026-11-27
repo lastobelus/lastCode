@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import {
   STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
   emptyStorageCleanupInventoryTrace,
+  type StorageCleanupWalkReason,
   type StorageCleanupWalkTrigger,
 } from "../observability/StorageCleanupInventoryTrace.ts";
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
@@ -21,7 +22,7 @@ const MAX_INVENTORY_BYTES = 16 * 1024 * 1024;
 const MAX_PROCESS_PATHS = 100_000;
 const MAX_TARGET_OBJECTS = 1_000_000;
 const MAX_DIAGNOSTIC_PROCESS_NAME_LENGTH = 64;
-const MAX_TRACE_WALK_TRIGGERS = 32;
+const MAX_TRACE_WALK_TRIGGERS = 2_048;
 const nativeIdentities = Symbol("captured vnode identities");
 const nativeProcesses = Symbol("captured process names");
 type ObjectIdentity = { readonly device: bigint | null; readonly inode: bigint };
@@ -33,6 +34,7 @@ type CapturedPaths = ReadonlyArray<string> & {
 };
 // @effect-diagnostics-next-line extendsNativeError:off -- Native Promise inventory throws this sentinel; worktreeConsumerReason maps it into the Effect failure channel.
 class ObjectProofUnavailable extends Error {}
+class MissingObjectIdentity extends ObjectProofUnavailable {}
 const decodeRuntime = Schema.decodeUnknownSync(Schema.fromJsonString(PersistedServerRuntimeState));
 const gone = (error: unknown) =>
   ["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "");
@@ -628,6 +630,7 @@ const measureProcessCapture = (
 
 const inventorySnapshot = (sweep: SweepInventory) => ({
   ...sweep.measurement,
+  walkReasons: { ...sweep.measurement.walkReasons },
   uniquePaths: sweep.resolvedPaths.size,
   walkTriggers: [...sweep.walkTriggerCounts.values()]
     .toSorted(
@@ -895,6 +898,7 @@ const targetEvidence = async (
   collectIdentities: boolean,
   observation?: TargetObservation,
   walkTriggers: ReadonlyArray<WalkTrigger> = [],
+  walkReasons?: ReadonlySet<StorageCleanupWalkReason>,
 ): Promise<TargetEvidence> => {
   const sweep = observation?.sweep;
   const measurement = sweep?.measurement;
@@ -903,6 +907,10 @@ const targetEvidence = async (
     const { measurement, walkTriggerCounts } = sweep;
     const start = performance.now();
     measurement.treeWalks++;
+    if (walkReasons !== undefined) {
+      for (const reason of walkReasons)
+        measurement.walkReasons[reason] = (measurement.walkReasons[reason] ?? 0) + 1;
+    }
     for (const trigger of walkTriggers) {
       const key = `${trigger.kind}\0${trigger.process}`;
       const previous = walkTriggerCounts.get(key);
@@ -955,7 +963,7 @@ const targetEvidence = async (
       if (entry.unavailable) throw entry.cause;
       evidence = await entry.proof;
       if (collectIdentities && !entry.collectIdentities)
-        return targetEvidence(root, paths, true, observation, walkTriggers);
+        return targetEvidence(root, paths, true, observation, walkTriggers, walkReasons);
     }
     return evidence;
   } catch (cause) {
@@ -977,6 +985,7 @@ const scanProcessPaths = async (
   const capturedProcesses = (paths as CapturedPaths)[nativeProcesses];
   const unresolved: ObjectIdentity[] = [];
   const walkTriggers = collectWalkTriggers ? new Map<string, WalkTrigger>() : null;
+  const walkReasons = collectWalkTriggers ? new Set<StorageCleanupWalkReason>() : undefined;
   const noteWalkTrigger = (kind: WalkTrigger["kind"], index: number) => {
     if (walkTriggers === null) return;
     const process = capturedProcesses?.[index] ?? "unknown";
@@ -996,6 +1005,7 @@ const scanProcessPaths = async (
           unresolved,
           vanishedSocket,
           walkTriggers: walkTriggers === null ? [] : [...walkTriggers.values()],
+          walkReasons,
         };
       matched = true;
       continue;
@@ -1014,34 +1024,34 @@ const scanProcessPaths = async (
             unresolved,
             vanishedSocket,
             walkTriggers: walkTriggers === null ? [] : [...walkTriggers.values()],
+            walkReasons,
           };
         matched = true;
       }
     } catch (error) {
-      if (
-        !gone(error) &&
-        !["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")
-      )
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ESRCH" && code !== "EACCES" && code !== "EPERM")
         throw error;
       if (captured === undefined) {
-        if (!gone(error)) throw error;
+        if (code === "EACCES" || code === "EPERM") throw error;
         continue;
       }
       const identity = captured[index];
       if (!identity)
-        throw new ObjectProofUnavailable("Unresolved process object identity is unavailable", {
+        throw new MissingObjectIdentity("Unresolved process object identity is unavailable", {
           cause: error,
         });
       if (identity === "unix-socket") {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+        if (code !== "ENOENT")
           throw new ObjectProofUnavailable("Unix socket evidence is not a vanished pathname", {
             cause: error,
           });
         vanishedSocket = true;
+        walkReasons?.add("vanished-socket");
         noteWalkTrigger("socket", index);
         continue;
       }
-      if (identity.device === null && (error as NodeJS.ErrnoException).code !== "ENOENT")
+      if (identity.device === null && code !== "ENOENT")
         throw new ObjectProofUnavailable(
           "Device-unknown FIFO evidence is not a vanished pathname",
           {
@@ -1049,6 +1059,7 @@ const scanProcessPaths = async (
           },
         );
       unresolved.push(identity);
+      walkReasons?.add(`vnode-${code}`);
       noteWalkTrigger("vnode", index);
     }
   }
@@ -1057,6 +1068,7 @@ const scanProcessPaths = async (
     unresolved,
     vanishedSocket,
     walkTriggers: walkTriggers === null ? [] : [...walkTriggers.values()],
+    walkReasons,
   };
 };
 
@@ -1077,22 +1089,28 @@ export const processPathsUseRoot = async (
   const scan = (resolvePath: (path: string) => Promise<PathResolution>) =>
     scanProcessPaths(canonicalRoot, paths, completeProof, resolvePath, sweep !== undefined);
   let evidence;
-  if (sweep === undefined || captures === undefined) {
-    evidence = await scan((path) => resolveProcessPath(path, sweep));
-  } else {
-    const resolver = makeProcessPathResolver(paths, sweep, captures);
-    const first = await scan(resolver.resolve).then(
-      (value) => ({ value }),
-      (error: unknown) => ({ error }),
-    );
-    if (!(await resolver.isStillValid())) {
-      evidence = await scan(makeProcessPathResolver(paths, sweep, captures, false).resolve);
+  try {
+    if (sweep === undefined || captures === undefined) {
+      evidence = await scan((path) => resolveProcessPath(path, sweep));
     } else {
-      if ("error" in first) throw first.error;
-      evidence = first.value;
+      const resolver = makeProcessPathResolver(paths, sweep, captures);
+      const first = await scan(resolver.resolve).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      if (!(await resolver.isStillValid())) {
+        evidence = await scan(makeProcessPathResolver(paths, sweep, captures, false).resolve);
+      } else {
+        if ("error" in first) throw first.error;
+        evidence = first.value;
+      }
     }
+  } catch (error) {
+    if (sweep !== undefined && error instanceof MissingObjectIdentity)
+      sweep.measurement.missingIdentityChecks++;
+    throw error;
   }
-  const { matched, unresolved, vanishedSocket, walkTriggers } = evidence;
+  const { matched, unresolved, vanishedSocket, walkTriggers, walkReasons } = evidence;
   if (matched && !completeProof) return true;
   if (unresolved.length === 0 && !vanishedSocket) return matched;
   const { found } = await targetEvidence(
@@ -1101,6 +1119,7 @@ export const processPathsUseRoot = async (
     unresolved.length > 0,
     observation,
     walkTriggers,
+    walkReasons,
   ).catch((cause: unknown) => {
     throw new ObjectProofUnavailable("Consumer target inventory could not be verified", { cause });
   });

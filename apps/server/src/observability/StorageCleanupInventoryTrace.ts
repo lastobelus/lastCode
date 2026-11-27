@@ -10,6 +10,12 @@ const StorageCleanupWalkTrigger = Schema.Struct({
 });
 
 export type StorageCleanupWalkTrigger = typeof StorageCleanupWalkTrigger.Type;
+export type StorageCleanupWalkReason =
+  | "vnode-ENOENT"
+  | "vnode-ESRCH"
+  | "vnode-EACCES"
+  | "vnode-EPERM"
+  | "vanished-socket";
 
 const StorageCleanupInventoryCounters = Schema.Struct({
   processCaptures: Schema.Finite,
@@ -27,6 +33,8 @@ const StorageCleanupInventoryCounters = Schema.Struct({
   targetRevalidations: Schema.Finite,
   targetRevalidationMs: Schema.Finite,
   skippedRecentUsageChecks: Schema.optional(Schema.Finite),
+  walkReasons: Schema.optional(Schema.Record(Schema.String, Schema.Finite)),
+  missingIdentityChecks: Schema.optional(Schema.Finite),
   walkTriggers: Schema.optional(Schema.Array(StorageCleanupWalkTrigger)),
 });
 
@@ -51,6 +59,8 @@ export const emptyStorageCleanupInventoryTrace = () => ({
   targetRevalidations: 0,
   targetRevalidationMs: 0,
   skippedRecentUsageChecks: 0,
+  walkReasons: {} as Partial<Record<StorageCleanupWalkReason, number>>,
+  missingIdentityChecks: 0,
 });
 
 const decodeInventory = Schema.decodeUnknownOption(StorageCleanupInventoryTrace);
@@ -83,6 +93,17 @@ export const formatStorageCleanupInventory = (
     `Cached path checks       ${inventory.cachedPathChecks} in ${formatMs(inventory.cachedPathCheckMs)}`,
     `Directory checks         ${inventory.directoryChecks} in ${formatMs(inventory.directoryCheckMs)}`,
     `Tree walks               ${inventory.treeWalks} visiting ${inventory.objectsVisited} objects in ${formatMs(inventory.treeWalkMs)}`,
+    ...(inventory.walkReasons && Object.keys(inventory.walkReasons).length > 0
+      ? [
+          `Walk reasons             ${Object.entries(inventory.walkReasons)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([reason, walks]) => `${reason} (${walks})`)
+            .join(", ")}`,
+        ]
+      : []),
+    ...(inventory.missingIdentityChecks
+      ? [`Missing identity checks  ${inventory.missingIdentityChecks}`]
+      : []),
     ...(inventory.walkTriggers && inventory.walkTriggers.length > 0
       ? [
           `Walk triggers            ${inventory.walkTriggers

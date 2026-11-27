@@ -38,6 +38,8 @@ it("shows inventory for completed sweeps and retains all sweep spans", () => {
         processCaptures: 2,
         pathResolutions: 123,
         skippedRecentUsageChecks: 4,
+        walkReasons: { "vanished-socket": 2, "vnode-EACCES": 3 },
+        missingIdentityChecks: 1,
         walkTriggers: [
           { kind: "socket", process: "worker", walks: 2 },
           { kind: "vnode", process: "node", walks: 3 },
@@ -93,6 +95,8 @@ it("shows inventory for completed sweeps and retains all sweep spans", () => {
   assert.include(formatted, "Cached path checks       400 in 582ms");
   assert.include(formatted, "Directory checks         16 in 114ms");
   assert.include(formatted, "Tree walks               5 visiting 50000 objects in 3s");
+  assert.include(formatted, "Walk reasons             vanished-socket (2), vnode-EACCES (3)");
+  assert.include(formatted, "Missing identity checks  1");
   assert.include(formatted, "Walk triggers            socket worker (2), vnode node (3)");
   assert.include(formatted, "Recent-use skips         4");
   assert.include(formatted, "Target revalidations     3 in 225ms");

@@ -583,6 +583,117 @@ const targetFixture = (fileInode = 9007199254740993n) => {
 
 const objectProofReason = "Process object identity or target inventory could not be verified.";
 
+describe("Walk reason diagnostics", () => {
+  const root = "/workspace/example";
+  const cwd = "fcwd\0tDIR\0n/workspace/elsewhere\0\n";
+
+  it.effect("counts each walk reason once when a root walk is reused", () =>
+    Effect.gen(function* () {
+      targetFixture();
+      darwinFixture(
+        "p123\0cworker\0\n" +
+          cwd +
+          "f4\0tREG\0D0x12\0i12\0n/system/example/deleted\0\n" +
+          "f5\0tREG\0D0x12\0i12\0n/system/example/deleted\0\n" +
+          "f6\0tREG\0D0x12\0i13\0n/system/example/denied\0\n" +
+          "f7\0tREG\0D0x12\0i14\0n/system/example/protected\0\n" +
+          "f8\0tREG\0D0x12\0i15\0n/system/example/gone\0\n" +
+          "f9\0tunix\0n/system/example/socket\0\n",
+      );
+      const codes = new Map([
+        ["/system/example/deleted", "ENOENT"],
+        ["/system/example/denied", "EACCES"],
+        ["/system/example/protected", "EPERM"],
+        ["/system/example/gone", "ESRCH"],
+        ["/system/example/socket", "ENOENT"],
+      ]);
+      native.realpath.mockImplementation(async (path: string) => {
+        const code = codes.get(path);
+        if (code !== undefined) throw Object.assign(new Error("unresolved"), { code });
+        return path;
+      });
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      yield* Effect.promise(async () => {
+        expect(await WorktreeConsumers.processPathsUseRoot(root, paths, sweep.targets)).toBe(false);
+        expect(await WorktreeConsumers.processPathsUseRoot(root, paths, sweep.targets)).toBe(false);
+      });
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        treeWalks: 1,
+        walkReasons: {
+          "vnode-ENOENT": 1,
+          "vnode-EACCES": 1,
+          "vnode-EPERM": 1,
+          "vnode-ESRCH": 1,
+          "vanished-socket": 1,
+        },
+        missingIdentityChecks: 0,
+      });
+    }).pipe(Effect.withSpan("walk reasons fixture")),
+  );
+
+  it.effect("counts a missing identity without starting a walk", () =>
+    Effect.gen(function* () {
+      vnodeFixture("");
+      targetFixture();
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      yield* Effect.promise(() =>
+        expect(WorktreeConsumers.processPathsUseRoot(root, paths, sweep.targets)).rejects.toThrow(
+          "Unresolved process object identity is unavailable",
+        ),
+      );
+      expect(native.opendir).not.toHaveBeenCalled();
+      yield* sweep.annotate;
+      expect(
+        (yield* Effect.currentSpan).attributes.get(STORAGE_CLEANUP_INVENTORY_ATTRIBUTE),
+      ).toMatchObject({
+        treeWalks: 0,
+        walkReasons: {},
+        missingIdentityChecks: 1,
+      });
+    }).pipe(Effect.withSpan("missing vnode identity fixture")),
+  );
+
+  it.effect("keeps up to 2,048 distinct walk triggers", () =>
+    Effect.gen(function* () {
+      targetFixture();
+      const output = Array.from(
+        { length: 2_050 },
+        (_, index) =>
+          "p" +
+          (index + 1) +
+          "\0cprocess-" +
+          index +
+          "\0\n" +
+          cwd +
+          "ftxt\0tREG\0D0x12\0i11\0n/system/example/deleted\0\n",
+      ).join("");
+      darwinFixture(output);
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === "/system/example/deleted") throw missing();
+        return path;
+      });
+      const sweep = yield* WorktreeConsumers.makeSweepObservation(inventory("darwin"));
+      const paths = (yield* sweep.paths)!;
+      expect(
+        yield* Effect.promise(() =>
+          WorktreeConsumers.processPathsUseRoot(root, paths, sweep.targets),
+        ),
+      ).toBe(false);
+      yield* sweep.annotate;
+      const metrics = (yield* Effect.currentSpan).attributes.get(
+        STORAGE_CLEANUP_INVENTORY_ATTRIBUTE,
+      );
+      expect(metrics).toHaveProperty("walkTriggers.length", 2_048);
+      expect(metrics).toMatchObject({ treeWalks: 1, walkReasons: { "vnode-ENOENT": 1 } });
+    }).pipe(Effect.withSpan("walk trigger bound fixture")),
+  );
+});
+
 describe("Captured vnode identity proof", () => {
   it.effect("retains vnode evidence through the helper capture", () =>
     Effect.gen(function* () {
