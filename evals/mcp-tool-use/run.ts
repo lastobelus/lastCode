@@ -52,7 +52,7 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import { THEME_GUIDE } from "@t3tools/shared/themeCss";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../../apps/server/src/provider/CodexDeveloperInstructions.ts";
-import { pullRequestLinkingInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
 import { makeSideChatContext } from "../../apps/server/src/orchestration-v2/ContextHandoffService.ts";
 import { withInlineContext } from "../../apps/server/src/orchestration-v2/ContextHandoffDelivery.ts";
 import { ActionResumeToolkit } from "../../apps/server/src/mcp/toolkits/actionResume/tools.ts";
@@ -611,10 +611,8 @@ const forgeToolNames = new Set(
   ),
 );
 /** T3's text for an arm: `raw` drops the PR linking block that names T3's PR tools. */
-const forArm = (value: string, arm: Arm | undefined, actionLaunchDisabled = false) =>
-  arm === "raw"
-    ? value.replace(`\n\n${pullRequestLinkingInstructions(actionLaunchDisabled)}`, "")
-    : value;
+const forArm = (value: string, arm: Arm | undefined) =>
+  arm === "raw" ? value.replace(`\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`, "") : value;
 const visibleT3Tools = (options: {
   readonly subagent?: boolean;
   readonly links?: boolean;
@@ -936,7 +934,7 @@ const buildCodexBase = (
   );
   input.push(
     ...Object.entries(context).map(([key, entry]) =>
-      message(`<${key}>${forArm(entry.value, options.arm, options.codexBackgroundWait)}</${key}>`),
+      message(`<${key}>${forArm(entry.value, options.arm)}</${key}>`),
     ),
   );
   const nativeTools = input

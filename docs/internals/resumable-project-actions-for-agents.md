@@ -1,5 +1,9 @@
 # Agent Implementation Guide to Resumable Project Actions
 
+This guide describes legacy agent launches with `lastcodeBackgroundWaitEnabled`
+turned off. Agents working in LastCode checkouts use
+[`lc-run`](../../AGENTS.md#dev-servers-and-test-data) in either setting.
+
 Use a resumable Project Action when a workflow has reached a passive or uninterrupted command that
 may take long enough that keeping an agent turn open would be wasteful. The Action runs in a
 dedicated terminal. When it exits, LastCode queues one automated follow-up in the same thread for

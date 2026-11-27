@@ -59,22 +59,16 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
    local gate with parallel TypeScript processes.
 3. Rebase onto the latest `origin/lastcode/main` before publishing.
 4. Local Quick CI is optional; GitHub CI remains required. In the default
-   Automatic mode, run the independent **Run Quick CI** Project Action. It uses
-   free local capacity immediately or defers to GitHub without queuing. After
-   resume, verify the exact clean head and workstream base. Launch it only from
-   the clean exact checkout being validated: a shell's working directory and a
-   `--pr` gate check don't change the saved Action's checkout. Prefer the
-   repository-managed `lc-local-ci` over the older saved `run-quick-ci` if both
-   exist, and never run Quick CI synchronously as a fallback. A local pass needs
+   Automatic mode, run `./scripts/lc-run ci --quick` from the exact clean
+   checkout being validated. It prepares dependencies, then uses free local
+   capacity immediately or defers to GitHub without queuing. Follow the wrapper's
+   wait instructions in [AGENTS.md](../../../AGENTS.md#dev-servers-and-test-data).
+   When the result arrives, verify the exact clean head and workstream base. A local pass needs
    a receipt matching the head, base ref, base commit and Quick-gate version, and
    records a reusable receipt; a `validation: github-only` result permits publishing but
    is not a local pass. In GitHub-only mode, publish without requiring the local
-   Action. The ordinary pre-push hook follows the same policy; keep it enabled.
-   Always local mode waits for capacity, and `--require-local` explicitly forces
-   local Quick CI. Settings → LastCode → Local CI selects the mode. A delegated
-   child task hands this and every other Action in this workflow to its parent
-   unless its brief says it owns its Actions;
-   see [Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
+   run. The ordinary pre-push hook follows the same policy; keep it enabled.
+   Always local mode waits for capacity. Settings → LastCode → Local CI selects the mode.
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
    Before it goes up for review, follow the global `review-loop` skill's rule
    for requested PRs, even when the user named no review.
@@ -239,8 +233,8 @@ general repository CI polling rule does not require agent-side sleeps or
 repeated queries. Stop at the requested ready/merged state or a real blocker.
 
 Do not build or install an Intel package after merge unless the user asks for
-an Intel update separately. Then use the **Build Intel package (macOS)** Project
-Action for the merged change's exact installable tag, and leave installation or
+an Intel update separately. Then use the [Intel build command](../../../docs/lastcode/release.md#intel-dmg-build-publication)
+for the merged change's exact installable tag, and leave installation or
 restart as a later explicit decision.
 
 ## Handoff

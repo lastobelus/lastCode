@@ -35,7 +35,7 @@ import {
 
 const defaultCodexSettings = Schema.decodeSync(CodexSettings)({});
 
-it.effect("advertises background wait only to opted-in Codex sessions", () =>
+it.effect("advertises background wait by default and honors the Codex session opt-out", () =>
   Effect.gen(function* () {
     const settings = yield* ServerSettings.ServerSettingsService;
     const adapter = yield* makeCodexAdapterV2({
@@ -118,6 +118,8 @@ it.effect("advertises background wait only to opted-in Codex sessions", () =>
         capabilities: mcpCapabilities(yield* configuredSupport),
       });
     });
+    NodeAssert.equal(yield* configuredToolVisible, true);
+    yield* settings.updateSettings({ lastcodeBackgroundWaitEnabled: false });
     NodeAssert.equal(yield* configuredToolVisible, false);
     yield* prepareCredential;
     yield* settings.updateSettings({ lastcodeBackgroundWaitEnabled: true });
@@ -163,8 +165,8 @@ it.effect("advertises background wait only to opted-in Codex sessions", () =>
       );
       const claudeText = prompt.append ?? "";
       for (const text of [codexText, claudeText]) {
-        NodeAssert.equal(text.includes("appOwnedActionContinuationVersion"), !enabled);
-        NodeAssert.equal(text.includes("run_project_action_and_resume"), !enabled);
+        NodeAssert.equal(text.includes("appOwnedActionContinuationVersion"), false);
+        NodeAssert.equal(text.includes("run_project_action_and_resume"), false);
         NodeAssert.equal(text.includes("Project Action launch tools are unavailable"), enabled);
         NodeAssert.ok(text.includes("watch_pull_request"));
       }

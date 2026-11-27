@@ -84,7 +84,7 @@ export function codexBackgroundWaitHook(
 
 export function codexBackgroundWaitInstructions(enabled: boolean): string {
   return enabled
-    ? "\n\nFor a needed background result, call `t3_background_wait` with its exec session ID string in `taskIds` unless `lc-run` reports a registered wake. End your turn without polling."
+    ? "\n\nFor a needed background result, call `t3_background_wait` with its exec session ID string in `taskIds` unless `lc-run` reports a registered wake. End your turn without polling. If `lc-run` says LastCode already registered the wake, end your turn without another tool call."
     : "";
 }
 

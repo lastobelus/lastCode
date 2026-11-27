@@ -10,21 +10,17 @@ Nightly source tracking is documented separately in
 ## Worktree preparation
 
 Worktrees created by LastCode initially contain source and linked environment files.
-When tests, development, or a build need dependencies, run the **Prepare Dependencies**
-Project Action in that worktree. Grant agent resume permission before first use;
-managed installations use `--trusted-project-action lc-prepare-dependencies`
-as described in the [setup trust instructions](setup.md#clone-and-bootstrap).
-It requires the exact pnpm version pinned by that
-worktree's `package.json` and installs from its lockfile without building or warming
-web caches. **Run Quick CI** includes this preparation
-automatically. For a saved Full CI Action, copy the **Run Quick CI** command from
-`t3.json` and change its final `--quick` argument to `--full`. The Node launcher
-resolves the primary preparation helper while preserving the target worktree cwd,
-and stops before CI if preparation fails. It works without shell-specific environment
-expansion or command chaining. Repeat preparation after dependency
-cleanup. A successful install does not verify every file inside existing packages: if a tool
-still reports missing package files, diagnose the affected installation before retrying or
-removing anything.
+When tests, development, or a build need dependencies, run `./scripts/lc-run prepare`
+in that checkout. It installs from the checkout's lockfile with its pinned pnpm.
+Repeat preparation after dependency cleanup. `./scripts/lc-run ci --quick` and
+`./scripts/lc-run ci --full` prepare dependencies before running CI.
+Follow [the wrapper's wait instructions](../../AGENTS.md#dev-servers-and-test-data)
+for all `lc-run` commands. If a tool still reports missing package files, diagnose
+the affected installation before retrying or removing anything.
+
+To opt out of automatic background waits, set `lastcodeBackgroundWaitEnabled`
+to `false` in the LastCode server settings. In new sessions, use the same wrapper
+commands and collect their results through the shell.
 
 ## Pull Request CI
 
@@ -51,7 +47,7 @@ Always local waits for capacity; GitHub only skips local checks. Set the mode in
 Settings → LastCode → Local CI, or use `pnpm lastcode:ci:quick -- --require-local`
 for an explicitly local run. Full CI always runs locally and waits for capacity.
 
-Agents can run the independent **Run Quick CI** Project Action before a push.
+Agents can run `./scripts/lc-run ci --quick` from the clean checkout before a push.
 A local pass records the exact head and the selected workstream base ref and
 commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
 `origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
@@ -62,7 +58,7 @@ head and base without recording a passing receipt. Do not recreate deferred
 checks with direct parallel workspace typechecks.
 
 Local CI shares a resource budget across worktrees and independent clones on the
-same machine. Explicit local runs wait in their existing Action or terminal and
+same machine. Explicit local runs wait in their terminal and
 can be cancelled. Settings → LastCode → Local CI controls each environment's run
 limit, package concurrency, native TypeScript compiler CPU limit, and background priority;
 mobile exposes the same controls in Maintenance. Defaults allow one CI run and
@@ -230,13 +226,14 @@ remote and retries the command before proceeding. Commands must tolerate
 repeating the same tag and commit. Local update selection and checkpoint status
 hold that version back until the command succeeds.
 
-After an authorized service run has started, use the independent **Wait for
-Checkpoint** Project Action (`lc-wait-for-checkpoint`) to observe its completion.
-List Actions, launch the eligible returned ID with
-`run_project_action_and_resume`, and end the turn immediately. Do not poll
-`launchctl`, processes, dashboard output, or log tails while it runs.
+After an authorized service run has started, run `./scripts/lc-run wait-checkpoint`
+to observe its completion. Follow the wrapper's wait instructions.
+If the maintenance checkout predates `lc-run`, use the wrapper from the current
+primary LastCode checkout and keep the maintenance checkout as your shell's
+working directory. Use the wrapper's literal absolute path so LastCode can
+recognize the command and register its wake.
 
-The action observes the active local macOS checkpoint service. It does not start
+The command observes the active local macOS checkpoint service. It does not start
 a checkpoint, rebuild, recover, install, or restart anything. It captures the
 active process and launch count, waits for it to finish, and reports the terminal
 state whose recorded launchd PID matches that process (the scheduler for daily
@@ -247,16 +244,9 @@ the supervisor is still delivering notifications is accepted after exit. The
 installed supervisor must include this PID field. A missing active run,
 unavailable service, replaced run, missing matching
 result, or one-hour timeout requires attention; an old success is not proof of
-the requested checkpoint. Cancelling the action leaves the service running.
-After resume, inspect the result and use `lastcode-checkpoints --verbose` once
+the requested checkpoint. Cancelling the command leaves the service running.
+After it returns, inspect the result and use `lastcode-checkpoints --verbose` once
 for the concrete next recovery or verification step.
-
-The importable declaration is in `t3.json`. As with the PR action, the owning
-environment must import it and grant resume permission. Managed installations
-use the `lc-wait-for-checkpoint` trust entry. The command loads from
-`T3CODE_PROJECT_ROOT`, so an older maintenance-thread worktree can use the
-updated observer after the primary checkout is refreshed. If the action is missing or
-disabled, report that setup problem rather than reverting to a sleep loop.
 
 ### Resuming a repaired checkpoint
 
@@ -304,13 +294,17 @@ the retained worktree, regenerate the derived files with this command, and
 commit any changes with `Carry-Group: incubator` so they replay after every group's inputs:
 
 ```bash
-pnpm --config.verify-deps-before-run=false lastcode:regenerate-derived --upstream <replay-upstream-head>
+./scripts/lc-run prepare-checkpoint --upstream <replay-upstream-head>
 ```
+
+If the retained checkout predates `lc-run`, use the current primary LastCode
+checkout's wrapper by its literal absolute path. Keep the retained checkout as
+your shell's working directory and pass the same full upstream SHA.
 
 1. Run the gate and client QA in one separate checkout, always; the service
    validates the retained recovery worktree, so neither runs there. Create the
    separate checkout at the completed retained HEAD before preparing dependencies
-   once through the owning Project Action,
+   once with `./scripts/lc-run prepare`,
    and prepare again only if a repair changes dependency manifests or the lockfile.
    Name it `lastcode-checkpoint-<build>-qa`. After each successful service run, the
    supervisor force-removes such worktrees whose HEAD commit is more than seven days
@@ -415,10 +409,10 @@ validation or be automatically superseded. A changed head,
 or a main that no longer descends from the selected source, requires inspection
 and selection again. Failed validation retains the worktree and selection.
 
-Once concurrent QA and other useful work are finished, use **Wait for Checkpoint**
-for a service run that is still active, then end the turn; do not poll its status.
-After publication, use **Build Local Package** on the exact new
-installable tag; selection and publication do not install or restart the app.
+Once concurrent QA and other useful work are finished, run
+`./scripts/lc-run wait-checkpoint` if the service run is still active. After
+publication, run `./scripts/lc-run package --tag <exact-installable-tag>` for the new
+tag. Installation and restart require separate authorization.
 Selected recovery processes only its selected nightly. Later nightlies belong
 to a separately admitted run after the selected repair is reconciled.
 If publication succeeded but cleanup was interrupted, a retry recognizes the
@@ -430,8 +424,8 @@ republishing.
 `run-now` requests another pass without interrupting the current one. Selection
 shares the checkpoint operation lock, so a running pass cannot be superseded by
 selecting a different head. If QA or another check finds a defect, let the active
-pass finish untouched and wait on it with **Wait for Checkpoint**; its retained
-checkout stays unedited while it validates. What happens next depends on the result:
+pass finish untouched and wait on it with `./scripts/lc-run wait-checkpoint`. Its
+retained checkout stays unedited while it validates. What happens next depends on the result:
 
 - **Failed without publishing:** fix and commit the defect in the retained worktree
   with its owning `Carry-Group`, and update the path list. If step 2's
@@ -469,7 +463,7 @@ history directory so they do not replace the nightly recovery record. Retrying
 after an interrupted publication cleans up only a clean revision worktree that
 matches the published commit; changed repairs remain available for inspection.
 
-After publication, select the exact revision tag for **Build Local Package**.
+After publication, pass the exact revision tag to `./scripts/lc-run package --tag <tag>`.
 Publishing or building does not install or restart the app.
 
 ### Validating a checkpoint manually
@@ -513,36 +507,22 @@ expires. An interrupted report is incomplete evidence.
 
 ### Resumable local builds
 
-For an authorized local Apple Silicon build, first select one exact installable
-checkpoint or revision in the requesting thread's worktree:
+For an authorized local Apple Silicon build, pass the exact installable
+checkpoint or revision tag to the wrapper in the requesting thread's worktree:
 
 ```bash
-MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.13.1 -- node "$T3CODE_PROJECT_ROOT/scripts/lastcode-build-local-package.ts" select \
-  --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
+./scripts/lc-run package --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
 ```
 
-`T3CODE_PROJECT_ROOT` must identify the primary repository checkout; when invoking
-this outside a Project Action, substitute that checkout's absolute path if the
-variable is unset. Selection records the tag and full commit for this worktree.
-Then list Project Actions, launch the eligible **Build Local Package** action
-(`lc-build-local-package`) with `run_project_action_and_resume`, and end the turn
-immediately. Do not run the helper directly, tail logs, or poll the action.
+If that worktree predates `lc-run`, use the current primary LastCode checkout's
+wrapper by its literal absolute path. Keep the requesting worktree as your
+shell's working directory and pass the same exact tag.
 
-The action runs the existing local-update build helper, including its build lock,
-checkpoint validation, full CI, and packaging. It returns the selected tag and
-commit plus the resulting artifact location, or a concrete failure requiring
-attention. It does not install or restart the application. It starts its own
-build operation and cannot attach to a build previously launched in a terminal.
-Each selection permits one attempt. Inspect a failed or interrupted result before
-selecting the tag again for a deliberate retry.
-
-The `t3.json` declaration loads from the primary checkout so maintenance threads
-with older worktrees can use it. Import the action and grant resume permission in
-the owning environment; managed installations use the `lc-build-local-package`
-trust entry. If a previous Action is running or awaiting continuation delivery,
-preserve the next step and end the turn so its result can arrive. After delivery,
-list Actions again. For other disabled reasons, report the specific blocker;
-do not substitute a synchronous build or a polling loop.
+The command runs the existing local-update build helper, including its build lock,
+checkpoint validation, full CI, and packaging. It reports the selected tag and
+commit plus the artifact location, or a concrete failure requiring attention.
+Installation and restart require separate authorization. The command starts a new
+build, so inspect a failed or interrupted result before retrying.
 
 ### Direct builder
 
@@ -572,7 +552,7 @@ until LastCode intentionally publishes compatible releases.
 
 ## Intel DMG build publication
 
-The resumable **Build Intel package (macOS)** Project Action attaches to or dispatches the manual
+The Intel build command attaches to or dispatches the manual
 **LastCode Intel artifact** workflow for one exact
 `lastcode/checkpoint/...` or `lastcode/revision/...` tag and its full advertised
 commit. It rejects moving refs and tag/commit mismatches. The Intel job runs no
@@ -590,13 +570,8 @@ pnpm lastcode:intel-build select \
   --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
 ```
 
-Then run the imported **Build Intel package (macOS)** Project Action. The
-LastCode environment hosting the project and Action terminal must run on macOS;
-the connected client may run anywhere, and that environment need not be an Intel
-builder. The actual x64 build runs on GitHub's hosted Intel runner. For
-agent-triggered
-one-shot continuation, enable **Allow Codex and Claude to run and resume** on that
-Action in Project Settings. The Action follows the selected build's request token
+Then run `pnpm lastcode:intel-build run` on macOS. The actual x64 build runs on
+GitHub's hosted Intel runner. The command follows the selected build's request token
 and run ID, and returns to the thread on
 success, workflow failure or cancellation, missing workflow configuration, or a
 run-registration timeout. It reports both the workflow-run URL and immutable
@@ -612,7 +587,7 @@ automation files match current `origin/lastcode/main` or its package build has
 succeeded, saving its token and run ID without dispatching again. It cancels
 outdated builds without a successful package for the selected or older tags,
 preserving newer targets, current-workflow builds, and packages being published. Before dispatching
-a replacement, the Action waits for active same-tag runs to finish cancellation.
+a replacement, the command waits for active same-tag runs to finish cancellation.
 
 The Action only builds and publishes. It never stages, installs, promotes,
 restarts, or updates an Intel artifact-consumer node. Those remain separate

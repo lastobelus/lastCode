@@ -1,6 +1,6 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
 import { t3CodeMcpInstructions } from "@t3tools/provider-core/server/orchestrationInstructions";
-import { pullRequestLinkingInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
@@ -28,7 +28,7 @@ const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
 const ACTION_LAUNCH_DISABLED_ENV = ${JSON.stringify(T3_PI_ACTION_LAUNCH_DISABLED_ENV)};
 const T3_INSTRUCTIONS = ${JSON.stringify(
   [false, true].map((disabled) =>
-    [t3CodeMcpInstructions(disabled), pullRequestLinkingInstructions(disabled)].join("\n\n"),
+    [t3CodeMcpInstructions(disabled), PULL_REQUEST_LINKING_INSTRUCTIONS].join("\n\n"),
   ),
 )};
 const SERVICE_TIER_COMMAND = ${JSON.stringify(PI_T3_SERVICE_TIER_COMMAND)};

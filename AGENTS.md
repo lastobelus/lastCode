@@ -92,10 +92,10 @@ LastCode supports macOS and Linux only. Windows is unsupported and will stay tha
 
 See [00_development.md](docs/operations/00_development.md) for setup, ports, seeding (`vp run migrate-dev-db`), and [reusable dev auth](docs/operations/00_development.md#reusable-dev-credential). Agent-specific rules:
 
-- Worktree setup only links environment files. Inspect the task and actual branch/PR base before preparing dependencies; Git, docs, and thread research do not need an install. When tests, dev, or builds need packages, list Project Actions, launch **Prepare Dependencies** (`lc-prepare-dependencies`) with `run_project_action_and_resume`, and end the turn immediately. Resume after its result, then run the intended work. The Action uses the target checkout's cwd and lockfile, including on older branches, and may be repeated after cleanup. **Run Quick CI** prepares dependencies before CI. For a saved Full CI Action, copy the **Run Quick CI** command from `t3.json` and change its final `--quick` argument to `--full`. Its Node launcher resolves the primary helper from `process.env.T3CODE_PROJECT_ROOT`, keeps the target cwd, and runs CI only after preparation succeeds, without shell-specific environment expansion or chaining. Do not assume tests or dev entry points install packages themselves. Preparation does not warm web caches or build outputs.
-- In a delegated child task, every resumable Action this repository's guidance names, including **Prepare Dependencies**, **Run Quick CI**, checkpoint waits, and package builds, goes to your parent as a handoff request; your parent launches it. The exception is a brief stating that your parent verified child Action ownership for this environment; then you launch it yourself and end your turn. Ordinary top-level threads launch their own. See [Parent-mediated Actions](docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
+- As the main agent of a LastCode thread, including a delegated child thread, run `./scripts/lc-run` as a simple command in that checkout. If the shell reports it running in the background and the wrapper tells you to end your turn, end it immediately. Continue when LastCode delivers the result. If the shell backgrounds it without a registered wake, collect its exit result through the shell in the same turn.
+- Dependencies for tests, dev, or builds: inspect the task and base, then run `./scripts/lc-run prepare`. It uses the checkout's lockfile and can be repeated after cleanup. For local CI, run `./scripts/lc-run ci --quick` or `./scripts/lc-run ci --full`; both prepare dependencies first. Worktree setup only links environment files. Git, docs, and thread research need no install. Preparation does not warm web caches or build outputs.
 - Need a second checkout? Get one a thread owns: `delegate_task` with `isolation:"worktree"`, or a new thread with a worktree `workspaceStrategy` when the user asks for one. Storage cleanup can remove a worktree a thread owns; one no thread owns stays on disk until someone removes it. Reading another ref needs no checkout: `git show <ref>:<path>`. If you must run code at another ref yourself, `git worktree add` it next to this worktree and `git worktree remove` it before you report your result.
-- Prepare Dependencies only prepares the checkout of the thread that launches it. A checkout no thread owns, such as one you `git worktree add` or an eval's historical base, is prepared by whoever uses it, delegated children included: run `node scripts/prepare-dependencies.ts` from inside it, or `pnpm install --frozen-lockfile` with its pinned pnpm where that checkout has no such script.
+- If an older checkout lacks `lc-run`, run its `node scripts/prepare-dependencies.ts`, or use its pinned `pnpm install --frozen-lockfile` if it lacks that script too. For local CI in that checkout, use its documented CI command after preparation.
 
 - **Process lifecycle:** Start dev servers, Metro, and builds from your own shell so they exit with your session—never detach with `systemd-run`, `nohup`, `setsid`, or `tmux` unless asked. Stop background tasks with your harness's own stop (`vp` does not forward SIGTERM to child Vite/server processes).
 - **Sharing (`vp run dev --share`):** Wait for `pairingUrl:` and hand the full URL to the user. Never wire `tailscale serve` by hand, open the URL yourself, or consume the user's one-time pairing link. Mint another with `node apps/server/src/bin.ts pair` if needed.
@@ -122,18 +122,10 @@ check and record any manual pairing separately from automatic authentication.
 
 When the user has asked for native mobile verification, a missing or outdated native client is an install step, not a blocker. Run `vp run mobile:install <ios|android> [device-id]` on the device host before starting Metro; it targets the only booted simulator or connected Android device when the id is omitted. It installs the dev client for this checkout's native fingerprint from the shared cache in seconds and builds only when no machine has built it yet, so prefer it over `expo run:*`, `xcodebuild`, or `gradlew`, which rebuild from scratch. Its stdout is one JSON line; build output goes to the log it names. See `test-t3-mobile` for the full workflow.
 
-For an already-started LastCode checkpoint service run, use the resumable
-**Wait for Checkpoint** action instead of agent-side sleep/status loops. Follow
-the action handoff and result rules in `docs/lastcode/release.md`; this action
-does not start or repair the service.
-
-For an authorized local Apple Silicon package build, select the exact installable
-tag and use the resumable **Build Local Package** action (`lc-build-local-package`)
-as described in `docs/lastcode/release.md`. End the turn after launch; do not run
-the build helper directly or poll build logs. The action builds only; installation
-and restart remain separate decisions. If another Action continuation is pending,
-end the turn so its result can arrive, then list Actions again. An automated
-message alone does not make Actions unavailable; use the actual disabled reason.
+- Checkpoint replay dependencies: run `./scripts/lc-run prepare-checkpoint --upstream <upstream-commit>` with the replay's full upstream SHA.
+- An active checkpoint service run: run `./scripts/lc-run wait-checkpoint`. Use the result to continue the recovery or verification in [Checkpoint CI](docs/lastcode/release.md#checkpoint-ci).
+- An authorized Apple Silicon package build: run `./scripts/lc-run package --tag <exact-installable-tag>`. Installation and restart require separate authorization.
+- For checkpoint replay preparation, checkpoint waits, or package builds from a checkout that predates `lc-run`, use the primary checkout's wrapper as described in [Checkpoint CI](docs/lastcode/release.md#checkpoint-ci).
 
 ## Evals
 

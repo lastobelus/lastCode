@@ -1630,9 +1630,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  /** Enables LastCode background waits, currently for Codex. Applies to new provider sessions. */
+  /** Enables LastCode background waits in new provider sessions. */
   lastcodeBackgroundWaitEnabled: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   lastcodePullRequestWatchQuietMinutes: LastCodePullRequestWatchQuietMinutes.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES)),

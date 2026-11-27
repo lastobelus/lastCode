@@ -43,7 +43,6 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
-import { projectActionLaunchDisabled } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import { museModelCapabilities, resolveMuseReasoningEffort } from "./modelCatalog.ts";
 import {
   MuseApproval,
@@ -2214,9 +2213,6 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                     text: buildRuntimeInstructions({
                       agentFeedback: hasT3Mcp ? (turnInput.agentFeedback ?? "off") : "off",
                       harness: "Muse Code",
-                      projectActionLaunchDisabled: projectActionLaunchDisabled(
-                        (yield* mcpSessions.read(turnInput.threadId))?.capabilities,
-                      ),
                       model: session.model ?? undefined,
                       reasoningEffort: effort,
                       runtimePolicy: turnInput.runtimePolicy,
