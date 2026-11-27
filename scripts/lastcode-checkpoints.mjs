@@ -100,9 +100,10 @@ export function persistentThreadRepairStatus(config, threads) {
     typeof config?.recoveryThreadId === "string" ? config.recoveryThreadId : undefined;
   if (!configuredId) return { kind: "disabled" };
   if (threads === null) return { kind: "unavailable", configuredId };
-  const configuredThread = threads.find((thread) => thread.threadId === configuredId);
+  const activeThreads = threads.filter((thread) => thread.archived !== true);
+  const configuredThread = activeThreads.find((thread) => thread.threadId === configuredId);
   if (configuredThread?.persistent === true) return { kind: "healthy", configuredId };
-  const replacement = threads.find((thread) => thread.persistent === true);
+  const replacement = activeThreads.find((thread) => thread.persistent === true);
   return {
     kind: configuredThread ? "not-persistent" : "stale",
     configuredId,
