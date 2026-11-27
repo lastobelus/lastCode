@@ -1109,7 +1109,7 @@ const scanRootProcessPaths = async (
   return evidence;
 };
 
-export type ScreenedProcessUse = "used" | "unused" | "inconclusive";
+type ScreenedProcessUse = "used" | "unused" | "inconclusive";
 
 export const screenProcessPathsUseRoot = async (
   canonicalRoot: string,

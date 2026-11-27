@@ -324,6 +324,12 @@ const make = Effect.gen(function* () {
       if (!(yield* validate(input, root))) continue;
       let clock = yield* activity(input.worktreePath, root).pipe(Effect.orElseSucceed(() => null));
       const legacy = clock === null;
+      if (legacy)
+        clock = yield* Effect.try({
+          try: () => observeLegacyBuild(input.worktreePath, root, now, persist),
+          catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
+        }).pipe(Effect.orElseSucceed(() => null));
+      if (!clock) continue;
       const output = NodePath.join(input.worktreePath, root);
       // Read-only revalidation reads the durable token/clock. Writing observation
       // shares the sweep snapshot, while removal guards still capture fresh evidence.
@@ -334,23 +340,13 @@ const make = Effect.gen(function* () {
       }
       if (persist && paths === null) return null;
       const captured = paths;
-      const use =
-        persist && captured != null
-          ? yield* io(input.worktreePath, () =>
-              WorktreeConsumers.screenProcessPathsUseRoot(output, captured, observationTargets),
-            )
-          : "unused";
-      if (legacy)
-        clock = yield* (
-          use === "inconclusive"
-            ? legacyActivity(input.worktreePath, root)
-            : Effect.try({
-                try: () => observeLegacyBuild(input.worktreePath, root, now, persist),
-                catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
-              })
-        ).pipe(Effect.orElseSucceed(() => null));
-      if (!clock) continue;
-      if (use === "used") {
+      const used =
+        persist &&
+        captured != null &&
+        (yield* io(input.worktreePath, () =>
+          WorktreeConsumers.screenProcessPathsUseRoot(output, captured, observationTargets),
+        )) === "used";
+      if (used) {
         const updated = yield* Effect.try({
           try: () => {
             const compiled = recordGeneratedBuildUse(input.worktreePath, root, now);

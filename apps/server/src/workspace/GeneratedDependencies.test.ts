@@ -417,7 +417,7 @@ it.effect("walks each consumer root at most once per native inventory during rem
 );
 
 it.effect(
-  "leaves the usage clock alone during inconclusive screening and keeps the install at removal",
+  "starts an unverified inactivity clock during inconclusive screening and keeps the used install at removal",
   () =>
     Effect.gen(function* () {
       const { fs, path, cleanup, input, dependencyPath, runGit } = yield* fixture();
@@ -440,12 +440,17 @@ it.effect(
       );
       const opendir = vi.mocked(NodeFSP.opendir);
       opendir.mockClear();
-      const uninitialized = dependencyActivitySnapshot(input.worktreePath);
-      assert.isNull(yield* cleanup.observe(input, NOW));
-      assert.equal(dependencyActivitySnapshot(input.worktreePath), uninitialized);
-
       const earlier = NOW - 30 * day;
-      observeDependencyActivity(gitDir, input.worktreePath, earlier, true);
+      assert.deepEqual(yield* cleanup.observe(input, earlier), {
+        lastUsedAt: earlier,
+        renewed: true,
+      });
+      const record = JSON.parse(
+        yield* fs.readFileString(path.join(gitDir, "t3-dependency-activity.json")),
+      );
+      assert.equal(record.lastUsedAt, earlier);
+      assert.notProperty(record, "verifiedUseAt");
+
       const before = dependencyActivitySnapshot(input.worktreePath);
       assert.deepEqual(yield* cleanup.observe(input, NOW), { lastUsedAt: earlier, renewed: false });
       assert.equal(dependencyActivitySnapshot(input.worktreePath), before);
@@ -3061,8 +3066,6 @@ it.effect(
       const agedActive = yield* addWorktree("aged-active");
       const agedIdle = yield* addWorktree("aged-idle");
       observeDependencyActivity(recent.gitDir, recent.worktreePath, NOW - 23 * HOUR_MS, true);
-      observeDependencyActivity(agedActive.gitDir, agedActive.worktreePath, NOW - 30 * day, true);
-      observeDependencyActivity(agedIdle.gitDir, agedIdle.worktreePath, NOW - 30 * day, true);
       const agedStat = yield* Effect.promise(() =>
         NodeFSP.stat(f.path.join(agedActive.dependencyPath, "package/index.js"), { bigint: true }),
       );
@@ -3073,6 +3076,13 @@ it.effect(
           "p102\0cpython\0\nfcwd\0tDIR\0n/\0\n" +
           "f6\0tunix\0n/t3-absent/vanished.sock\0\n",
       );
+      for (const { input } of [agedActive, agedIdle]) {
+        const firstSeenAt = NOW - 30 * day;
+        assert.deepEqual(yield* f.cleanup.observe(input, firstSeenAt), {
+          lastUsedAt: firstSeenAt,
+          renewed: true,
+        });
+      }
       const threads = [recent, agedActive, agedIdle].map((entry, index) => ({
         ...makeShell(entry.worktreePath),
         id: ThreadId.make(`skip-thread-${index}`),

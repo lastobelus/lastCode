@@ -2,7 +2,6 @@ import { generatedBuildReviewProtection } from "@t3tools/shared/generatedBuildOw
 import { isGeneratedDependencyPath } from "@t3tools/shared/regenerableIgnoredPath";
 import {
   observeDependencyActivity,
-  knownDependencyActivity,
   recentVerifiedDependencyActivity,
   recordDependencyUse,
   dependencyActivitySnapshot,
@@ -418,7 +417,7 @@ const make = Effect.gen(function* () {
         return recent;
       }
     }
-    let consumed: WorktreeConsumers.ScreenedProcessUse = "unused";
+    let consumed = false;
     // Read-only eligibility compares durable metadata only. Unsaved OS evidence
     // must be captured by a writing observer or the native removal guards.
     if (persist) {
@@ -426,26 +425,24 @@ const make = Effect.gen(function* () {
       const paths = yield* capture;
       if (paths === null) return null;
       consumed = yield* Effect.tryPromise({
-        try: () =>
-          WorktreeConsumers.screenProcessPathsUseRoot(
+        try: async () =>
+          (await WorktreeConsumers.screenProcessPathsUseRoot(
             current.dependencyPath,
             paths,
             observationTargets,
-          ),
+          )) === "used",
         catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
       });
     }
     return yield* Effect.try({
       try: () =>
-        !used && consumed === "inconclusive"
-          ? knownDependencyActivity(worktreeGitDir, current.worktreePath)
-          : observeDependencyActivity(
-              worktreeGitDir,
-              current.worktreePath,
-              now,
-              used || consumed === "used",
-              persist,
-            ),
+        observeDependencyActivity(
+          worktreeGitDir,
+          current.worktreePath,
+          now,
+          used || consumed,
+          persist,
+        ),
       catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
     });
   });
