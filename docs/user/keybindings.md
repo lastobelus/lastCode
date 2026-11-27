@@ -86,6 +86,12 @@ The last matching rule in `keybindings.json` wins, even across different command
 - `navigation.back` (`mod+[`) / `navigation.forward` (`mod+]`): Moves through visited pages.
 - `chat.new` / `chat.newLocal` / `chat.newWithoutProject` (`mod+alt+n`): Start new threads using your [new-thread defaults](./thread-sidebar.md#start-a-thread) or [without a project](./thread-sidebar.md#start-without-a-project).
 
+`sidebar.mode.toggle` has no default shortcut; add one in **Settings → Keybindings**
+under **Sidebar: Toggle Presentation**. With **Settings → LastCode → Appearance →
+LastCode sidebar** enabled, it switches between LastCode and the v2 sidebar for this
+session without changing the setting. With LastCode off, it turns that setting on.
+The tree button uses the same behavior.
+
 ## Reserved and platform shortcuts
 
 - `mod+w` (desktop) closes the focused terminal, the selected range of right-panel tabs, or the active tab if there is no range. On web, browsers intercept `mod+w`. Rebind `rightPanel.close` and `terminal.close` to a shortcut such as `alt+w`.

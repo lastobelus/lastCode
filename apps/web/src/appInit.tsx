@@ -94,6 +94,9 @@ function startClientAppearance(): void {
     if (previous?.htmlPreviewWidth !== settings.htmlPreviewWidth) {
       root.dataset.htmlPreviewWidth = settings.htmlPreviewWidth;
     }
+    if (previous?.roundedProjectIcons !== settings.roundedProjectIcons) {
+      root.toggleAttribute("data-rounded-project-icons", settings.roundedProjectIcons);
+    }
     if (previous?.appearanceContrast !== settings.appearanceContrast) {
       applyAppearanceContrast(root, settings.appearanceContrast);
     }

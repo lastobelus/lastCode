@@ -1,5 +1,7 @@
 import { pipe } from "effect/Function";
 import { changeRequestTermKind, type ChangeRequestTermKind } from "./pullRequest/changeRequestTerm";
+import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
+import { ThreadStatusGlyph } from "./ThreadStatusGlyph";
 import {
   scopeProjectRef,
   scopedThreadKey,
@@ -19,7 +21,7 @@ import {
   type VcsStatusResult,
 } from "@t3tools/contracts";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
-import { TerminalIcon } from "lucide-react";
+import { FolderGit2Icon, TerminalIcon } from "lucide-react";
 import { m, type MessageResolver } from "../i18n/messages";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
@@ -60,6 +62,7 @@ import {
 } from "./Sidebar.logic";
 
 import type { SidebarThreadSummary } from "../types";
+import { formatWorktreePathForDisplay } from "../worktreeCleanup";
 import { SharedTooltipTrigger } from "./ui/shared-tooltip";
 import {
   PULL_REQUEST_STATE_PRESENTATION,
@@ -799,7 +802,7 @@ export function terminalStatusFromRunningIds(
   };
 }
 
-function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
+export function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
   if (event.animationName !== "status-pulse") return;
 
   for (const animation of event.currentTarget.getAnimations()) {
@@ -858,53 +861,91 @@ export function ThreadTerminalStatusButton({
   );
 }
 
-function ThreadStatusLabel({
-  status,
-  compact = false,
+export function ThreadWorktreeIndicator({
+  thread,
 }: {
-  status: ThreadStatusPill;
-  compact?: boolean;
+  thread: Pick<SidebarThreadSummary, "id" | "branch" | "worktreePath">;
 }) {
-  const m = useMessages();
-  const label = m(status.label);
-  if (compact) {
-    return (
-      <SharedTooltipTrigger
-        render={
-          <span
-            role="img"
-            aria-label={label}
-            className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
-          />
-        }
-        label={label}
-      >
-        <span
-          className={`size-[9px] rounded-full ${status.dotClass} ${
-            status.pulse ? "motion-safe:animate-status-pulse" : ""
-          }`}
-        />
-      </SharedTooltipTrigger>
-    );
+  const gt = useGT();
+  const worktreePath = thread.worktreePath?.trim();
+  if (!worktreePath) {
+    return null;
   }
+
+  const displayPath = formatWorktreePathForDisplay(worktreePath);
+  const tooltip = thread.branch
+    ? gt("Worktree: {path} ({branch})", { path: displayPath, branch: thread.branch })
+    : gt("Worktree: {path}", { path: displayPath });
 
   return (
     <SharedTooltipTrigger
       render={
         <span
           role="img"
-          aria-label={label}
-          className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
+          aria-label={tooltip}
+          data-testid={`thread-worktree-${thread.id}`}
+          className="inline-flex items-center justify-center"
         />
       }
-      label={label}
+      label={tooltip}
     >
-      <span
-        className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
-          status.pulse ? "motion-safe:animate-status-pulse" : ""
-        }`}
-      />
-      <span className="hidden md:inline">{label}</span>
+      <FolderGit2Icon className="size-3.5 shrink-0 text-icon-muted" />
+    </SharedTooltipTrigger>
+  );
+}
+
+export function ThreadStatusLabel({
+  status,
+  compact = false,
+  icon,
+}: {
+  status: ThreadStatusPill;
+  compact?: boolean;
+  icon?: LastCodeStatusIcon | undefined;
+}) {
+  const m = useMessages();
+  const label = m(status.label);
+  const accessibleLabel = status.description ? `${label}. ${status.description}` : label;
+  return (
+    <SharedTooltipTrigger
+      render={
+        <span
+          role="img"
+          aria-label={accessibleLabel}
+          className={cn(
+            compact
+              ? "inline-flex size-3.5 shrink-0 items-center justify-center"
+              : "inline-flex items-center gap-1 text-3xs",
+            !compact && icon && "min-w-0 max-w-full",
+            status.colorClass,
+          )}
+        />
+      }
+      label={status.description ?? label}
+    >
+      {status.marker ? (
+        <span
+          aria-hidden
+          data-lastcode-sidebar-unscaled-content
+          className="shrink-0 font-semibold leading-none"
+        >
+          {status.marker}
+        </span>
+      ) : icon ? (
+        <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+      ) : (
+        <span
+          data-lastcode-sidebar-unscaled-content
+          className={cn(
+            "size-1.5 rounded-full",
+            status.dotClass,
+            status.pulse && "motion-safe:animate-status-pulse",
+          )}
+        />
+      )}
+      {compact ? null : (
+        <span className={cn("hidden md:inline", icon && "min-w-0 truncate")}>{label}</span>
+      )}
     </SharedTooltipTrigger>
   );
 }

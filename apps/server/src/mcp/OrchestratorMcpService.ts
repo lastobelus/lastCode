@@ -1032,6 +1032,8 @@ function listItemFromShell(
     link: threadLinkFor(scope, shell.id, shell.title),
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
+    ...(shell.creatorThreadId === undefined ? {} : { creatorThreadId: shell.creatorThreadId }),
+    ...(shell.creatorGrouping === undefined ? {} : { creatorGrouping: shell.creatorGrouping }),
     status: listedThreadStatus(shell),
     latestRunId: shell.latestRunId,
     providerInstanceId: shell.modelSelection.instanceId,
@@ -1072,6 +1074,12 @@ function threadDetail(
     link: threadLinkFor(scope, projection.thread.id, projection.thread.title),
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
+    ...(projection.thread.creatorThreadId === undefined
+      ? {}
+      : { creatorThreadId: projection.thread.creatorThreadId }),
+    ...(projection.thread.creatorGrouping === undefined
+      ? {}
+      : { creatorGrouping: projection.thread.creatorGrouping }),
     status: threadStatus(active?.status, latest?.status ?? "idle", shell.pendingBackgroundTasks),
     latestRunId: latest?.id ?? null,
     activeRunId: active?.id ?? null,
@@ -3567,6 +3575,7 @@ const make = Effect.gen(function* () {
                 type: "thread.create",
                 createdBy: "agent",
                 creationSource: "mcp",
+                creatorThreadId: scope.thread.threadId,
                 commandId,
                 threadId,
                 projectId: parent.thread.projectId,
@@ -3701,6 +3710,12 @@ const make = Effect.gen(function* () {
                 title: projection.thread.title,
                 createdBy: projection.thread.createdBy,
                 creationSource: projection.thread.creationSource,
+                ...(projection.thread.creatorThreadId === undefined
+                  ? {}
+                  : { creatorThreadId: projection.thread.creatorThreadId }),
+                ...(projection.thread.creatorGrouping === undefined
+                  ? {}
+                  : { creatorGrouping: projection.thread.creatorGrouping }),
                 providerInstanceId: resolvedModelSelection.instanceId,
                 model: resolvedModelSelection.model,
               } satisfies OrchestratorMcpCreatedThread;

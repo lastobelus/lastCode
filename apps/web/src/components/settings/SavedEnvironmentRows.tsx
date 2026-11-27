@@ -1,4 +1,5 @@
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
+import { ConnectedEnvironmentIcon } from "../../environmentIcons";
 import { SessionPermissions } from "./SessionPermissions";
 import {
   ChevronRightIcon,
@@ -267,6 +268,15 @@ export function SavedBackendListRow({
   return (
     <EnvironmentRow
       kind={machineKind}
+      icon={
+        <ConnectedEnvironmentIcon
+          environmentId={environmentId}
+          fallbackDescriptor={lastDescriptor}
+          context="settings"
+          aria-hidden
+          className="size-4"
+        />
+      }
       label={environment.label}
       dimmed={!enabled}
       subtitle={

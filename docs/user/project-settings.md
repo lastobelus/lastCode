@@ -29,6 +29,16 @@ environments instead of editable controls. Offline environments keep their curre
 - **Icons**: In **Settings → Projects**, set an icon, emoji, monogram, or image (applies across checkouts). Without one, T3 Code generates a two-character monogram (or single CJK character) from the project name.
 - **Multiple repositories**: See [Projects with several repositories](./multi-repo-projects.md).
 
+## Choose the icon shape
+
+Project icons keep the shape of their source image by default. To round their corners in the web
+or desktop app, open **Settings → LastCode** and enable **Rounded project icons**. This preference
+is saved in the current LastCode profile.
+
+T3 Code Mobile stores the same preference separately on each device. Open
+**Settings → Appearance** and enable **Rounded project icons** on every mobile device where you
+want rounded corners.
+
 ## Worktree settings
 
 Configure worktrees in **Settings → Worktrees** (environment default or project override):
@@ -135,6 +145,7 @@ output line.
 
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
+
 
 ## Keep the default branch current
 

@@ -520,6 +520,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           ...(linkOrigin === undefined || input.workflowRun === undefined
             ? {}
             : { workflowRun: input.workflowRun }),
+          ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
         }).pipe(
           Effect.provideService(ThreadReadAuthorization, {
             authorize: (targetThreadId, targetMessageId) =>

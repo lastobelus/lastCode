@@ -1,4 +1,5 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { withThreadReadPermissions } from "./threadReadActions";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import { openGuestShareDialog } from "../components/chat/guestShareDialogState";
@@ -97,6 +98,7 @@ export function useThreadActionMenu(input: {
     deleteThread,
     markThreadUnread,
     turnThreadIntoProject,
+    markThreadRead,
   } = useThreadActions();
   const regenerateThreadTitle = useOrchestrationCommand(threadEnvironment.regenerateTitle, {
     reportFailure: false,
@@ -305,6 +307,9 @@ export function useThreadActionMenu(input: {
           }
           return;
         }
+        case "mark-read":
+          markThreadRead(threadRef);
+          return;
         case "copy-path": {
           const workspacePath = thread.worktreePath ?? projectCwd;
           if (!workspacePath) {
@@ -384,7 +389,7 @@ export function useThreadActionMenu(input: {
           return;
       }
     };
-    return { items, run };
+    return { items: withThreadReadPermissions(items, [threadRef]), run };
   };
 
   const openMenu = (position: { x: number; y: number }, source?: ContextMenuSource) => {

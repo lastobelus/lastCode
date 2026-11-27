@@ -22,6 +22,7 @@ function deferred<T>() {
 const state = vi.hoisted(() => ({
   granted: new Set<string>(),
   serverConfigLoaded: true,
+  visitedTracking: true,
   effects: [] as string[],
   latestRun: null as { readonly status: string; readonly completedAt: string | null } | null,
   completed: deferred<void>(),
@@ -57,6 +58,19 @@ vi.mock("../state/session", () => ({
     scope === AuthOrchestrationOperateScope && state.granted.has(environmentId),
   readEnvironmentScopeDenied: (environmentId: string) => !state.granted.has(environmentId),
 }));
+vi.mock("../state/server", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const config = {
+    environment: {
+      capabilities: {
+        get threadVisitedTracking() {
+          return state.visitedTracking;
+        },
+      },
+    },
+  };
+  return { environmentServerConfigsAtom: Atom.make(new Map([["secondary", config]])) };
+});
 vi.mock("../state/entities", () => ({
   readEnvironmentServerConfigLoaded: () => state.serverConfigLoaded,
   readEnvironmentSupportsAutoSettleOptOut: () => true,
@@ -204,6 +218,7 @@ const createMenu = (options: { readonly onFind?: (threadRef: typeof target) => v
 
 beforeEach(() => {
   state.serverConfigLoaded = true;
+  state.visitedTracking = true;
   state.granted = new Set(["primary"]);
   state.effects = [];
   state.latestRun = null;
@@ -247,6 +262,7 @@ describe("thread menu permissions", () => {
     ["mark-read", "mark-read"],
   ] as const)("keeps %s available without task permission", async (action, effect) => {
     state.serverConfigLoaded = false;
+    state.visitedTracking = false;
     state.show.mockResolvedValue(action);
     createMenu().openMenu(position);
     await state.completed.promise;
