@@ -310,6 +310,9 @@ export type ThreadTargetResolution =
     }
   | { readonly kind: "not-found"; readonly identifier: string };
 
+const isActiveThreadShell = (thread: OrchestrationV2ThreadShell) =>
+  thread.archivedAt === null && thread.deletedAt === null;
+
 export function resolveThreadTarget(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
   identifier: string,
@@ -317,8 +320,14 @@ export function resolveThreadTarget(
   const normalized = identifier.trim();
   if (normalized.length === 0) return { kind: "not-found", identifier: normalized };
   const exact = threads.find((thread) => thread.id === normalized);
-  if (exact) return { kind: "resolved", thread: exact };
-  const matches = threads.filter((thread) => thread.id.startsWith(normalized));
+  if (exact) {
+    return isActiveThreadShell(exact)
+      ? { kind: "resolved", thread: exact }
+      : { kind: "not-found", identifier: normalized };
+  }
+  const matches = threads.filter(
+    (thread) => isActiveThreadShell(thread) && thread.id.startsWith(normalized),
+  );
   if (matches.length === 1) return { kind: "resolved", thread: matches[0]! };
   if (matches.length > 1) {
     const candidates = matches
@@ -337,6 +346,24 @@ export function resolveThreadTarget(
   }
   return { kind: "not-found", identifier: normalized };
 }
+
+const resolveActiveThreadTarget = Effect.fn("ThreadCli.resolveActiveThreadTarget")(function* (
+  source: ThreadTargetSource,
+  identifier: string,
+): Effect.fn.Return<ThreadTargetResolution, ThreadCliError> {
+  const normalized = identifier.trim();
+  const resolution = resolveThreadTarget(source.shell.threads, normalized);
+  if (
+    resolution.kind === "not-found" ||
+    (resolution.kind === "resolved" && resolution.thread.id === normalized)
+  ) {
+    return resolution;
+  }
+  // The roster omits archived threads and deleted IDs whose cleanup has finished.
+  return (yield* source.hasThreadRecord(ThreadId.make(normalized)))
+    ? { kind: "not-found", identifier: normalized }
+    : resolution;
+});
 
 export function validateThreadTurnLimit(value: number): number {
   if (!Number.isInteger(value) || value < 1 || value > THREAD_READ_MAX_TURN_LIMIT) {
@@ -545,19 +572,22 @@ function providerOutput(
   };
 }
 
-export interface ThreadReadSource {
+interface ThreadTargetSource {
+  readonly shell: OrchestrationV2ShellSnapshot;
+  readonly hasThreadRecord: (threadId: ThreadId) => Effect.Effect<boolean, ThreadCliError>;
+}
+
+export interface ThreadReadSource extends ThreadTargetSource {
   readonly descriptor: ExecutionEnvironmentDescriptor;
   readonly home: string;
-  readonly shell: OrchestrationV2ShellSnapshot;
   readonly getThread: (
     threadId: ThreadId,
     turnLimit: number,
   ) => Effect.Effect<ThreadCliProjection | null, ThreadCliError>;
 }
 
-export interface ThreadSendSource {
+export interface ThreadSendSource extends ThreadTargetSource {
   readonly descriptor: ExecutionEnvironmentDescriptor;
-  readonly shell: OrchestrationV2ShellSnapshot;
   readonly dispatch: (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
   ) => Effect.Effect<unknown, ThreadCliError | ThreadDispatchUnknownError>;
@@ -576,7 +606,7 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
     readonly rejectWaitForThreadId?: ThreadId;
   },
 ) {
-  const resolution = resolveThreadTarget(source.shell.threads, input.identifier);
+  const resolution = yield* resolveActiveThreadTarget(source, input.identifier);
   if (resolution.kind !== "resolved") {
     return yield* new ThreadSendTargetError({
       reason: resolution.kind,
@@ -661,7 +691,9 @@ export const currentThreadOutput = Effect.fn("currentThreadOutput")(function* (
       cause: new Error(`Current LastCode home '${contextHome}' does not match '${source.home}'.`),
     });
   }
-  const target = source.shell.threads.find(({ id }) => id === currentId);
+  const target = source.shell.threads.find(
+    (thread) => thread.id === currentId && isActiveThreadShell(thread),
+  );
   if (!target) {
     return yield* new ThreadCliError({
       operation: "current context lookup",
@@ -691,12 +723,14 @@ export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
   source: ThreadReadSource,
 ) {
   const now = DateTime.formatIso(yield* DateTime.now);
-  const sortedThreads = source.shell.threads.toSorted(
-    (left, right) =>
-      Number(right.persistent === true) - Number(left.persistent === true) ||
-      DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt) ||
-      left.id.localeCompare(right.id),
-  );
+  const sortedThreads = source.shell.threads
+    .filter(isActiveThreadShell)
+    .sort(
+      (left, right) =>
+        Number(right.persistent === true) - Number(left.persistent === true) ||
+        DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt) ||
+        left.id.localeCompare(right.id),
+    );
   const threadsTruncated = sortedThreads.length > THREAD_LIST_MAX_RESULTS;
   return yield* decodeThreadListResult({
     kind: "list",
@@ -791,7 +825,10 @@ export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
 
   const turnLimit = validateThreadTurnLimit(turnLimitInput);
   const exact = yield* source.getThread(ThreadId.make(normalized), turnLimit);
-  const resolution = resolveThreadTarget(source.shell.threads, normalized);
+  const resolution =
+    exact === null
+      ? yield* resolveActiveThreadTarget(source, normalized)
+      : resolveThreadTarget(source.shell.threads, normalized);
   if (exact === null && resolution.kind !== "resolved") return { ...resolution, environmentId };
 
   const target = resolution.kind === "resolved" ? resolution.thread : undefined;
@@ -852,6 +889,23 @@ const ThreadCliOfflineRuntimeLive = Layer.mergeAll(ProjectionStore.layer, Projec
       }),
     ),
   ),
+);
+
+const threadRecordLookupError = (cause: unknown) =>
+  new ThreadCliError({ operation: "exact thread lookup", cause });
+
+const hasThreadRecord = Effect.fn("ThreadCli.hasThreadRecord")((threadId: ThreadId) =>
+  ProjectionStore.ProjectionStoreV2.use((store) => store.findThread(threadId)).pipe(
+    Effect.map((thread) => thread !== null),
+  ),
+);
+
+const hasLocalThreadRecord = Effect.fn("ThreadCli.hasLocalThreadRecord")(
+  (config: ServerConfig.ServerConfig["Service"], threadId: ThreadId) =>
+    hasThreadRecord(threadId).pipe(
+      Effect.provide(ThreadCliOfflineRuntimeLive.pipe(Layer.provide(ServerConfig.layer(config)))),
+      Effect.mapError(threadRecordLookupError),
+    ),
 );
 
 const THREAD_CLI_LIVE_TIMEOUT = Duration.seconds(3);
@@ -934,6 +988,7 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
               descriptor: descriptorResult.success,
               home: config.baseDir,
               shell: sourceResult.success,
+              hasThreadRecord: (threadId) => hasLocalThreadRecord(config, threadId),
               getThread: (threadId, _turnLimit) =>
                 client.orchestration.threadSnapshot({ params: { threadId }, headers }).pipe(
                   Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
@@ -1009,6 +1064,11 @@ const runThreadRead = Effect.fn("runThreadRead")(function* (
         },
         home: config.baseDir,
         shell,
+        hasThreadRecord: (threadId) =>
+          hasThreadRecord(threadId).pipe(
+            Effect.provideService(ProjectionStore.ProjectionStoreV2, query),
+            Effect.mapError(threadRecordLookupError),
+          ),
         getThread: (threadId, turnLimit) =>
           query
             .getThreadSnapshotWindow(threadId, {
@@ -1099,20 +1159,18 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
                 ),
               ),
           );
-          const resolution = resolveThreadTarget(shell.threads, identifier);
-          if (resolution.kind === "resolved") {
-            waitHandle = {
-              kind: "wait-handle",
-              environmentId: descriptor.environmentId,
-              threadId: resolution.thread.id,
-              messageId,
-            };
-          }
           return yield* sendThreadOutput(
             {
               descriptor,
               shell,
+              hasThreadRecord: (threadId) => hasLocalThreadRecord(config, threadId),
               dispatch: (command) => {
+                waitHandle = {
+                  kind: "wait-handle",
+                  environmentId: descriptor.environmentId,
+                  threadId: command.threadId,
+                  messageId,
+                };
                 const dispatch = client.orchestration
                   .dispatch({
                     headers,

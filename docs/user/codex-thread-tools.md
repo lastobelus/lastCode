@@ -13,9 +13,10 @@ lastcode-thread send <thread-id-or-unique-prefix> --message <text> --wait --time
 lastcode-thread wait '<compact-json-wait-handle>' --timeout '10 minutes' --json
 ```
 
-Thread IDs are resolved locally. An exact ID wins, and a prefix must identify exactly one
-active thread. Ambiguous resolution includes a small sorted candidate list and reports when
-additional matches were omitted.
+Thread IDs are resolved locally. `read` and `send --message` try a prefix only when the
+identifier has no exact thread record. A prefix must identify exactly one active thread.
+Ambiguous resolution includes a small sorted candidate list and reports when additional
+matches were omitted.
 
 `list` returns at most the 50 most recently updated active threads, with thread ID as
 a deterministic tie-breaker. When more exist, its JSON includes `threadsTruncated: true`
@@ -23,7 +24,7 @@ and `originalThreadCount`.
 
 `read` accepts an archived thread's exact ID. It returns the usual thread data with
 `"kind": "read"` and a top-level `"archived": true`. Active reads omit the `archived` field.
-A missing or deleted thread returns `"kind": "not-found"` when the ID has no active prefix match.
+A deleted ID or an identifier with no match returns `"kind": "not-found"`.
 
 `read` bounds recent message text and activity summaries to one 64,000-character output
 budget and caps activity records. Unresolved approval and user-input requests are retained,
