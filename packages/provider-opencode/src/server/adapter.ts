@@ -3525,7 +3525,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               orchestrationSystemPrompt,
               buildRuntimeInstructions({
                 harness: "OpenCode",
-                projectActionLaunchDisabled: projectActionLaunchDisabled(mcpSession?.capabilities),
                 model: turn.modelSelection.model,
                 agentFeedback: hasT3Mcp ? turn.agentFeedback : "off",
                 runtimePolicy: turn.runtimePolicy,

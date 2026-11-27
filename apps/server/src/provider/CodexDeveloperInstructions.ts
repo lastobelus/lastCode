@@ -62,7 +62,6 @@ export function buildCodexAdditionalContext(
   const availability = normalizeAvailability(toolsAvailable);
   const [runtimeInstructions, previewHandoffs] = buildRuntimeInstructionSections({
     harness: "Codex",
-    projectActionLaunchDisabled: availability.projectActionLaunchDisabled,
     ...runtime,
   });
   // Split values to fit per-entry caps; number keys because Codex emits them in key order.

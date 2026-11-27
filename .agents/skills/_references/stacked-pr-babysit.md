@@ -50,11 +50,12 @@ chain, so a parent push or retarget surfaces then. A `stacked-ready` result
 covers only the parent revision it captured. Unwatch a member once it merges or
 is no longer being driven.
 
-Before taking on fixes or restacking, establish that the thread's Action
-checkout can safely become the intended clean validation checkout. Preserve
+Before taking on fixes or restacking, establish that this thread's checkout
+can safely become the intended clean validation checkout, because
+`./scripts/lc-run ci --quick` validates the checkout it runs in. Preserve
 unrelated dirty work. If it cannot, report the specific checkout blocker or
-hand the fixing step to its already-authorized owner; a second shell worktree
-does not redirect Quick CI. Remote waiting alone does not require this change.
+hand the fixing step to its already-authorized owner. Remote waiting alone does
+not require this change.
 
 ## Drive one member at a time
 
@@ -87,10 +88,10 @@ does not redirect Quick CI. Remote waiting alone does not require this change.
    Propagate changed ancestor boundaries through the remaining descendants.
    Repeat until every authorized member is verified merged.
 
-If a pending Action continuation, such as Quick CI, blocks the next launch,
-retain the next member and end the turn so delivery can occur. A successful
-process does not imply its continuation was delivered. For an interrupted continuation requiring
-Resume, report that specific blocker. Do not use manual polling as a fallback.
+If the shell backgrounds Quick CI and the wrapper tells you to end your turn,
+record the next member and end the turn as
+[AGENTS.md](../../../AGENTS.md#dev-servers-and-test-data) describes. Continue
+the stack from that member when the result arrives.
 
 In babysit-only mode, visit each requested member sequentially, then refresh all
 members before reporting completion. Any changed head or base invalidates that

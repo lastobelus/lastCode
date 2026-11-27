@@ -1,14 +1,14 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 import type { McpToolExposureMode } from "./mcpSession.ts";
 
-import {
-  PROJECT_ACTION_ORCHESTRATION_INSTRUCTIONS,
-  projectActionOrchestrationSections,
-} from "./lastcodeProjectActions.ts";
+import { projectActionLaunchInstructions } from "./lastcodeProjectActions.ts";
 import { LASTCODE_THREAD_INSTRUCTIONS } from "./lastcodeThreadInstructions.ts";
 
 // Codex truncates entries over 4,000 bytes; keep each section self-contained and below that limit.
-const baseOrchestrationSections = (nativeSubagents: boolean): ReadonlyArray<string> => [
+const baseOrchestrationSections = (
+  nativeSubagents: boolean,
+  projectActionLaunchDisabled: boolean,
+): ReadonlyArray<string> => [
   `## T3 Code orchestration
 
 Ordinary coding tasks need no T3 tools.
@@ -31,7 +31,7 @@ Ordinary coding tasks need no T3 tools.
 - A login, token, PIN, pairing code or sudo password only the user can give: call \`request_secret\`, not a chat ask or a handoff. Not for access you have. Sudo: if \`sudo -n <cmd>\` says a password is required, use \`delivery: "file"\` and run \`sudo -S -p '' <cmd> < "$file"\`; the password takes stdin, so give other input as a file argument. When asked only to schedule, \`schedule_task\` without running its prompt.
 - T3 tools may load late. Try the name once before you call it absent.`,
   `- Whoever you brief is a peer. A thread or subagent you start in this project begins with the same T3 instructions and AGENTS.md that you have, and is as careful as you are. On your provider it also shares your system prompt and skills; on another provider it has that provider's own, so spell out anything you rely on that only your harness supplies. Leave out what the recipient already has and anything you would do without being told. Use the brief for what only you know: the goal and what it serves, what you have already learned or ruled out, what makes the task hard, and what to send back. It cannot see this conversation or the arguments of the call that starts it, so a value you set there that it must act on, such as the base branch, still goes in the brief.`,
-  PROJECT_ACTION_ORCHESTRATION_INSTRUCTIONS,
+  projectActionLaunchInstructions(projectActionLaunchDisabled),
   `### Find mentioned threads
 
 When the user mentions or pastes another thread, finding it is your job; they should not have to track which environment owns it. Thread IDs are opaque. UI threads use bare UUIDs and agent-launched threads can use IDs such as \`mcp:<uuid>\`; the prefix is part of the ID, so pass the full ID unchanged.
@@ -55,11 +55,7 @@ export const t3CodeOrchestrationSections = ({
 }: {
   readonly nativeSubagents?: boolean | undefined;
   readonly projectActionLaunchDisabled?: boolean | undefined;
-} = {}) =>
-  projectActionOrchestrationSections(
-    baseOrchestrationSections(nativeSubagents),
-    projectActionLaunchDisabled,
-  );
+} = {}) => baseOrchestrationSections(nativeSubagents, projectActionLaunchDisabled);
 
 export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 

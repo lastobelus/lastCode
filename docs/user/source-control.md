@@ -81,7 +81,7 @@ Threads can link multiple PRs (even across repos on the same host). Creating a P
   - A reaction-only review result, such as a reviewer bot's 👍 on a review request, therefore still wakes the agent. Reactions carry no time, so ones already present can be reported once when watching starts. A reaction on a review, an inline review comment, or an older comment of a busy pull request can take up to about 30 minutes to notice.
   - Watched threads stay in the **Working** section while checks run (or until merge/close if the agent is waiting to act) and never auto-settle.
   - Watching stops automatically on merge/close, Stop, settle/archive, 10 wakes that bring only comments or reactions in a row, or 8 consecutive read failures.
-  - The parent thread watches for its subagents unless a LastCode child can [own its PR watch](../internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
+  - The parent thread watches for its subagents unless a LastCode child can [own its PR watch](../internals/resumable-project-actions-setup.md#pr-watches-for-delegated-children).
 
 ## GitHub stacks
 

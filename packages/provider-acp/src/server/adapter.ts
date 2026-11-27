@@ -10091,7 +10091,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const runtimeInstructions = buildRuntimeInstructions({
             agentFeedback: instructionState.hasT3Mcp ? (turnInput.agentFeedback ?? "off") : "off",
             harness: flavor.runtimeHarness ?? driver,
-            projectActionLaunchDisabled: instructionState.projectActionLaunchDisabled,
             model: turnInput.modelSelection.model,
             runtimePolicy: turnInput.runtimePolicy,
             pullRequestLinking:

@@ -17,5 +17,5 @@ T3 Code supports running parallel agents—either spawned natively by a provider
 - **Side panel vs. main view**: On web and desktop, subagents open as a tab in the right panel by default (`Cmd`/`Ctrl`-click or middle-click opens in the main view). Change the default in **Settings → Chat → Open subagents and side chats in**.
 - **Stopping & archiving**: Pressing **Stop** on a parent thread also stops its delegated subagents. Wait for or cancel active delegated tasks before archiving the parent thread.
 - **Permissions**: A delegated subagent can never exceed its parent thread's [permission mode](./permission-modes.md).
-- **PR watching**: The parent thread watches for its subagents unless a LastCode child can [own its PR watch](../internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
+- **PR watching**: The parent thread watches for its subagents unless a LastCode child can [own its PR watch](../internals/resumable-project-actions-setup.md#pr-watches-for-delegated-children).
 - **Linked machines**: Delegating to a linked machine runs a regular thread on that host and wakes the parent when done; you can watch it live (read-only) without pairing directly ([Read a linked machine's threads](./remote-access.md#read-a-linked-machines-threads)).
