@@ -12,6 +12,12 @@ Use the **"Applying settings for …"** selector at the top of Settings (web/des
 - Click the **layers icon** beside a server setting to inspect its inheritance chain, jump to overriding projects, or **Reset all** back to the environment default.
 - **Per-project providers**: With a project selected in **Settings → Providers**, toggling a provider enables or disables it for that project only (in either direction). Running turns finish; no new turns start on a disabled provider.
 
+In LastCode, **Settings → LastCode → Local CI** uses the same page selector. These preferences
+apply to all projects on an environment. With a project selected, the Local CI section offers
+connected environments that support it; choosing one switches to that environment's defaults.
+If any selected connected environment does not support Local CI, the section offers supporting
+environments instead of editable controls. Offline environments keep their current settings.
+
 ## Pin and archive projects
 
 - **Pin**: Pinned projects sort first in project pickers, the command palette, the sidebar filter, and mobile (`mod+shift+p` on a highlighted row, or **Settings → Projects**).

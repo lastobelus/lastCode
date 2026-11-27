@@ -11,6 +11,10 @@
   that pnpm copies into its virtual store. Gradle and CocoaPods compile the worktree directly, but
   Metro bundles the pnpm copy—run `vp i` after editing a local module's TypeScript or changes will
   not appear on device.
+- Delivery snapshots delegates under the lock and invokes them after releasing it. Pending-response replay removes
+  only the responses in its snapshot, preserving responses received during callbacks. Changes to
+  the [expo-notifications patch](../../patches/expo-notifications@58.1.9.patch) require reinstalling
+  dependencies and rebuilding the iOS app.
 
 ## React Compiler
 
