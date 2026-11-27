@@ -65,9 +65,10 @@ Disabled by default. In **Settings → Environments → Pull request sharing** (
 Threads can link multiple PRs (even across repos on the same host). Creating a PR via Git actions, `gh pr create`, `glab mr create`, or an agent's `link_pull_request` links it automatically; manage links from **Linked items** or the command palette.
 
 - **Agent PR tools**: Agents can read, open, update, comment on, and merge PRs in the thread's repo using your configured sign-in (refusing merges if the head moved since last read).
-- **Watch / babysit a PR**: Ask an agent to watch or babysit a PR (or toggle it in **Linked items** / click the eye icon in thread details). The server polls every 2 minutes and wakes the agent on failed checks, passed required checks, new comments/reviews from others, conflicts, merge-queue drops, or merge/close.
+- **Watch / babysit a PR**: Ask an agent to watch or babysit a PR (or toggle it in **Linked items** / click the eye icon in thread details). The server polls every 2 minutes and wakes the agent on failed checks, passed required checks, new comments/reviews from others, reactions to your comments, conflicts, merge-queue drops, or merge/close.
+  - A reaction-only review result, such as a reviewer bot's 👍 on a review request, therefore still wakes the agent. Reactions carry no time, so ones already present can be reported once when watching starts. A reaction on an older comment of a busy pull request can take up to about 30 minutes to notice.
   - Watched threads stay in the **Working** section while checks run (or until merge/close if the agent is waiting to act) and never auto-settle.
-  - Watching stops automatically on merge/close, Stop, settle/archive, 10 comment-only wakes in a row, or 8 consecutive read failures. Subagents cannot watch PRs—the parent thread watches instead.
+  - Watching stops automatically on merge/close, Stop, settle/archive, 10 wakes that bring only comments or reactions in a row, or 8 consecutive read failures. Subagents cannot watch PRs—the parent thread watches instead.
 
 ## GitHub stacks
 

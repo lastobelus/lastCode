@@ -29,6 +29,10 @@ const EXTERNAL_SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/;
 
 const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+|-\d+)?$/;
 
+const POSITION_SUFFIX_CAPTURE_PATTERN = /:(\d+)(?::(\d+)|-(\d+))?$/;
+
+const POSITION_HASH_PATTERN = /^#L(\d+)(?:C(\d+)|-L?(\d+))?$/i;
+
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+|-\d+)?$/;
 
 const INLINE_CODE_WHITESPACE_PATTERN = /\s/;
@@ -353,43 +357,59 @@ export function shouldRenderMarkdownImageAsFileLink(
 }
 
 export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
-  const destination = parseMarkdownFileLink(href);
-  if (!destination) return false;
-  const normalize = (path: string) =>
-    path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  const target = parseMarkdownFileLink(href);
+  if (!target) return false;
   const trimmed = label.trim();
-  const isWindowsDestination = isWindowsAbsolutePath(destination.path);
-  const destinationPath = isWindowsDestination
-    ? normalize(destination.path).toLowerCase()
-    : normalize(destination.path);
-  const matchesLabelPosition = (labelPosition: FilePathPosition): boolean => {
-    if (
-      (labelPosition.line !== undefined && labelPosition.line !== destination.line) ||
-      (labelPosition.column !== undefined && labelPosition.column !== destination.column) ||
-      (labelPosition.endLine !== undefined && labelPosition.endLine !== destination.endLine)
-    ) {
-      return false;
-    }
-    let labelPath = normalize(labelPosition.path);
-    if (labelPath.length === 0) return true;
-    if (isWindowsDestination) {
-      labelPath = labelPath.toLowerCase();
-    }
-    return destinationPath === labelPath || destinationPath.endsWith(`/${labelPath}`);
+  if (!trimmed) return true;
+  const windows = isWindowsAbsolutePath(target.path);
+  const normalizePath = (path: string) => {
+    const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/([^/:])\/+$/, "$1");
+    return windows ? normalized.toLowerCase() : normalized;
   };
-  const hashIndex = trimmed.lastIndexOf("#");
-  if (hashIndex >= 0) {
-    const path = trimmed.slice(0, hashIndex);
-    const anchored = splitFilePathPosition(path, trimmed.slice(hashIndex));
-    // A `:line` suffix before the hash wins in splitFilePathPosition; only a position from the anchor counts here.
-    if (anchored.line !== undefined && anchored.path === path && matchesLabelPosition(anchored)) {
-      return true;
-    }
+  const targetPath = normalizePath(target.path);
+  const matchesPath = (path: string) => {
+    const normalized = normalizePath(path);
+    return normalized === targetPath || targetPath.endsWith(`/${normalized}`);
+  };
+  const matchesPosition = (position: FilePathPosition) =>
+    (position.line === undefined || position.line === target.line) &&
+    (position.column === undefined || position.column === target.column) &&
+    (position.endLine === undefined || position.endLine === target.endLine);
+
+  // A decoded filename can contain whitespace, a position delimiter, or a query marker.
+  if (matchesPath(label)) return true;
+  const suffix = label.match(POSITION_SUFFIX_CAPTURE_PATTERN);
+  const hashIndex = label.lastIndexOf("#");
+  const hash = hashIndex < 0 ? "" : safeDecodeURIComponent(label.slice(hashIndex));
+  const anchor = hash.match(POSITION_HASH_PATTERN);
+  if (
+    [suffix, anchor].some((match) =>
+      match?.slice(1).some((part) => part !== undefined && Number(part) === 0),
+    )
+  ) {
+    return false;
   }
-  return (
-    matchesLabelPosition(splitFilePathPosition(trimmed)) ||
-    (trimmed.length > 0 && matchesLabelPosition(splitFilePathPosition(label)))
-  );
+  const literalPosition = splitFilePathPosition(label);
+  if (matchesPath(literalPosition.path)) return matchesPosition(literalPosition);
+  if (anchor !== null) {
+    const path = label.slice(0, hashIndex);
+    const position = splitFilePathPosition(path, hash);
+    // A colon suffix must not stand in for the label's anchor.
+    if (position.path !== path || position.line === undefined) return false;
+    if (matchesPath(path)) return matchesPosition(position);
+  }
+  if (
+    label !== trimmed ||
+    label.includes("?") ||
+    (hashIndex >= 0 &&
+      !POSITION_HASH_PATTERN.test(safeDecodeURIComponent(label.slice(label.indexOf("#")))))
+  ) {
+    return false;
+  }
+  // Angle brackets wrap Markdown destinations, but are literal in rendered labels.
+  if (label.startsWith("<") && label.endsWith(">")) return false;
+  const position = parseMarkdownFileLink(label);
+  return position !== null && matchesPath(position.path) && matchesPosition(position);
 }
 
 export function isRelativeFilePath(path: string): boolean {

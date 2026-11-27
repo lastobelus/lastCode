@@ -26,6 +26,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import { withCommandMetrics } from "../observability/Metrics.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
@@ -39,7 +40,6 @@ import {
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
-import * as ServerSettings from "../serverSettings.ts";
 import { deletedProjectOverridePatch } from "../provider/ProjectSettingsOverrideSweep.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -125,6 +125,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "list-projects",
       "list-threads",
       "delete-thread",
+      "delete-project-settings",
       "dispatch-project-command",
     ]),
     projectId: Schema.optional(ProjectId),
@@ -133,6 +134,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
   },
 ) {
   override get message(): string {
+    if (this.operation === "delete-project-settings")
+      return `Project deletion committed, but settings cleanup failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}. Retry using the original command ID to finish cleanup.`;
     return `Project operation '${this.operation}' failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}.`;
   }
 }
@@ -155,7 +158,10 @@ export class ProjectService extends Context.Service<
       ProjectServiceError
     >;
     readonly update: (input: ProjectUpdateInput) => Effect.Effect<Project, ProjectServiceError>;
-    readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly delete: (
+      input: ProjectDeleteInput,
+      onCommitted?: Effect.Effect<void>,
+    ) => Effect.Effect<Project, ProjectServiceError>;
     readonly getById: (
       projectId: ProjectId,
       options?: { readonly includeDeleted?: boolean },
@@ -194,6 +200,7 @@ const FOLDER_SYNC_INTERVAL_MS = 30_000;
 
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
@@ -201,7 +208,6 @@ export const make = Effect.gen(function* () {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
-  const serverSettings = yield* ServerSettings.ServerSettingsService;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
@@ -209,6 +215,8 @@ export const make = Effect.gen(function* () {
     Effect.provide(ProcessRunner.layer),
   );
   const scope = yield* Effect.scope;
+  // Commands for one project run in order. Commands that claim a workspace root
+  // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const workspaceLocks = yield* KeyedLock.make<string>();
 
@@ -793,27 +801,8 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  // Best-effort cleanup releases disabled instances kept alive by overrides; crashes have no replay to revisit deletion.
-  const clearProjectSettingsOverrides = (projectId: ProjectId) =>
-    serverSettings.getSettings.pipe(
-      Effect.flatMap(({ projectSettingsOverrides }) =>
-        serverSettings.updateSettings({
-          projectSettingsOverrides: {
-            [projectId]: deletedProjectOverridePatch(projectSettingsOverrides[projectId]),
-          },
-        }),
-      ),
-      Effect.asVoid,
-      Effect.catchCause((cause) =>
-        Effect.logWarning(
-          `Failed to clear settings overrides for deleted project ${projectId}.`,
-          cause,
-        ),
-      ),
-    );
-
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
-    function* (input) {
+    function* (input, onCommitted = Effect.void) {
       const { projectId } = input;
       // Read deleted rows so retries replay receipts and other command ids fail as not found.
       const existing = yield* readRow(projectId, { includeDeleted: true });
@@ -826,10 +815,27 @@ export const make = Effect.gen(function* () {
         yield* deleteChildThreads(input);
       }
       yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
-      if (isFirstDelete) {
-        yield* clearProjectSettingsOverrides(projectId);
-      }
+      yield* onCommitted;
       yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
+      // Remove provider overrides and access grants; receipt replay retries interrupted cleanup.
+      yield* settings.getSettings.pipe(
+        Effect.flatMap(({ projectSettingsOverrides }) =>
+          settings.updateSettings({
+            projectSettingsOverrides: {
+              [projectId]: deletedProjectOverridePatch(projectSettingsOverrides[projectId]),
+            },
+          }),
+        ),
+        Effect.retry({ times: 2 }),
+        Effect.mapError(
+          (cause) =>
+            new ProjectOperationError({
+              operation: "delete-project-settings",
+              projectId,
+              cause,
+            }),
+        ),
+      );
       return yield* readCommitted(projectId);
     },
   );

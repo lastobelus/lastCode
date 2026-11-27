@@ -28,7 +28,14 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
-import { HttpBody, HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/http";
+import {
+  FetchHttpClient,
+  HttpBody,
+  HttpClient,
+  HttpClientRequest,
+  HttpRouter,
+  HttpServer,
+} from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 
 import * as ProjectService from "../project/ProjectService.ts";
@@ -279,6 +286,31 @@ it.effect.each([
             }),
           ),
           Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+          Layer.provide(
+            Layer.mock(ProjectStore.ProjectStoreV2)({
+              get: (projectId) =>
+                Effect.succeedSome({
+                  projectId,
+                  title: "Device test project",
+                  workspaceRoot: "/test/project",
+                  defaultModelSelection: null,
+                  defaultThreadEnvMode: null,
+                  autoPull: false,
+                  pinnedAt: null,
+                  archivedAt: null,
+                  faviconPath: null,
+                  projectIcon: null,
+                  scripts: [],
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                  deletedAt: null,
+                }),
+            }),
+          ),
+          Layer.provide(McpToolAccessTestkit.liveThreadProjectionsLayer),
+          Layer.provide(
+            ServerSettings.layerTest({ enableDeviceSupport: true, enableAgentDeviceAccess: true }),
+          ),
           Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-device-mcp-test-" })),
           Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         ),
@@ -443,9 +475,8 @@ it.effect.each([
           tabId: alternateTabId,
           threadId,
         });
-        expect(event.request.input).toEqual(
-          images && requests !== 7 ? {} : { pixelsRequired: false },
-        );
+        const capture = requests > 6 || images;
+        expect(event.request.input).toEqual(images && requests !== 7 ? {} : { includeImage: false });
         return broker.respond({
           clientId: "mcp-image-option-client",
           connectionId: event.connectionId,
@@ -454,8 +485,7 @@ it.effect.each([
           result: {
             ...page,
             title: `Snapshot ${requests}`,
-            screenshot:
-              images || requests === 7 ? { ...screenshot, data: png } : { width: 1, height: 1 },
+            ...(capture ? { screenshot: { ...screenshot, data: png } } : {}),
           },
         });
       }).pipe(Effect.forkScoped);
@@ -471,7 +501,7 @@ it.effect.each([
             Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
             Effect.provideService(McpSchema.McpServerClient, client),
           );
-        const metadata = { ...page, title: `Snapshot ${call}`, screenshot };
+        const metadata = { ...page, title: `Snapshot ${call}`, ...(images ? { screenshot } : {}) };
         const { accessibilityTree: _tree, ...boundedMetadata } = metadata;
         expect(snapshot.isError).toBe(false);
         expect(snapshot.structuredContent).toEqual({
@@ -2199,10 +2229,23 @@ it.effect(
             }),
           ),
         );
-        yield* HttpRouter.serve(serverLayer, { disableListenLog: true, disableLogger: true }).pipe(
-          Layer.build,
+        const web = yield* Effect.acquireRelease(
+          Effect.sync(() => HttpRouter.toWebHandler(serverLayer, { disableLogger: true })),
+          (web) => Effect.promise(() => web.dispose()),
         );
-        const httpClient = yield* HttpClient.HttpClient;
+        const clientContext = yield* Layer.build(
+          FetchHttpClient.layer.pipe(
+            Layer.provide(
+              Layer.succeed(FetchHttpClient.Fetch)((input, init) =>
+                web.handler(new Request(input, init)),
+              ),
+            ),
+          ),
+        );
+        const httpClient = HttpClient.mapRequest(
+          Context.get(clientContext, HttpClient.HttpClient),
+          HttpClientRequest.prependUrl("http://mcp.example"),
+        );
         const decodeOutcome = Schema.decodeUnknownEffect(
           Schema.fromJsonString(
             Schema.Struct({
@@ -2279,7 +2322,7 @@ it.effect(
         expect(yield* start("auto/default/extra")).toBe(400);
         expect(yield* start("root/default")).toBe(400);
       }),
-    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    ),
 );
 
 it.effect("lists optional tools to a deferring client only after tool_search loads them", () =>

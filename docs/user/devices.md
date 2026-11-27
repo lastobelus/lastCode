@@ -17,7 +17,7 @@ Devices run on the environment's server machine (or an SSH/Simlock device host):
 
 - **iOS Simulators**: macOS with Xcode.
 - **Android Emulators**: Android SDK Platform-Tools, Android Emulator, Command-line Tools (latest), an AVD created in Android Studio, and `ffmpeg` with `libx264` on `PATH` (or `SERVE_EMU_FFMPEG`). Set `ANDROID_HOME` for custom SDK paths.
-- **Physical Android devices**: SDK Platform-Tools only (no `ffmpeg`). Enable **USB debugging** (and **USB debugging (Security settings)** on Xiaomi devices), or pair wirelessly via `adb pair <addr>:<pairing-port>` then `adb connect <addr>:<port>`.
+- **Physical Android devices on the environment server**: SDK Platform-Tools only (no `ffmpeg`). Enable **USB debugging** (and **USB debugging (Security settings)** on Xiaomi devices), or pair wirelessly via `adb pair <addr>:<pairing-port>` then `adb connect <addr>:<port>`.
 
 Restart the environment server after installing SDK tools or changing `PATH` / `SERVE_EMU_FFMPEG`.
 
@@ -26,6 +26,11 @@ Restart the environment server after installing SDK tools or changing `PATH` / `
 Enable **Settings → Devices → Agents can use devices** so agents can drive devices through `agent-device` (restart existing agent sessions after enabling). First iOS tap builds a small test runner once per server (~2 minutes).
 
 When an agent opens a device, it floats over chat by default (disable **Settings → Browser → Auto-show floating preview** to open in the right panel instead). On mobile, tap the device button above the composer to watch and interact.
+
+To revoke agent access, turn off **Agents can use devices** for the project.
+The default is in **Settings → Devices**. Projects can override it.
+Revoking access blocks running agents' device tools and previously issued
+CLI commands on their next request. Your own Device panel is unaffected.
 
 ## Remote connections
 
@@ -36,7 +41,7 @@ Device video streams through the environment server (works over LAN, Tailscale, 
 Use simulators/emulators on another macOS or Linux machine (e.g., a Mac build host from Linux/Windows):
 
 1. Open **Settings → Devices → Add source → Machine over SSH** and enter an SSH alias or `user@host` (uses the environment server's SSH config/keys; no password prompts).
-2. Run **Test connection** to verify SSH, Node.js 22.12+, npm, and SDK tools (Android on SSH hosts requires full SDK tools + `ffmpeg` for emulators).
+2. Run **Test connection** to verify SSH, Node.js 22.12+, npm, and SDK tools. On SSH hosts, both physical Android devices and emulators require SDK Platform-Tools, Android Emulator, and Command-line Tools (latest). Emulators also need `ffmpeg`.
 3. First listing installs pinned device helpers on the SSH host.
 
 > Note: Remote simulators cannot reach `localhost` dev servers (like Metro) on your main host without port forwarding or a reachable network address.

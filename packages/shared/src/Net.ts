@@ -1,4 +1,5 @@
 import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
 
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,6 +8,7 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { isWildcardHost, listensOnLoopback, normalizeHostname } from "./hostClassification.ts";
+import * as HostProcess from "./HostProcess.ts";
 
 const WILDCARD_PORT_ATTEMPTS = 8;
 
@@ -171,6 +173,23 @@ export const make = () => {
     return yield* canListenOnHost(port, host);
   });
 
+  const isPortAvailableOnLanIpv4 = Effect.fn("Net.isPortAvailableOnLanIpv4")(function* (
+    port: number,
+  ) {
+    // On macOS, SO_REUSEADDR lets wildcard binds coexist with listeners on specific addresses.
+    if ((yield* HostProcess.Platform) !== "darwin") return true;
+
+    for (const entry of Object.values(NodeOS.networkInterfaces()).flat()) {
+      if (entry?.family === "IPv4" && !entry.internal) {
+        const available = yield* probeListenOnHost(port, entry.address).pipe(
+          Effect.orElseSucceed(() => true),
+        );
+        if (!available) return false;
+      }
+    }
+    return true;
+  });
+
   const reserveLoopbackPort = (host = "127.0.0.1"): Effect.Effect<number, NetError> =>
     Effect.callback<number, NetError>((resume) => {
       const probe = NodeNet.createServer();
@@ -217,7 +236,9 @@ export const make = () => {
       if (
         preferred > 0 &&
         (yield* isPortAvailableForHost(preferred, host)) &&
-        (wildcardHost === undefined || (yield* canListenOnHost(preferred, wildcardHost)))
+        (wildcardHost === undefined ||
+          ((yield* canListenOnHost(preferred, wildcardHost)) &&
+            (yield* isPortAvailableOnLanIpv4(preferred))))
       ) {
         return preferred;
       }
@@ -225,10 +246,12 @@ export const make = () => {
         return yield* reserveLoopbackPort(listensOnLoopback(host) ? undefined : host);
       }
 
-      // A wildcard bind can succeed while another address family owns the localhost port.
+      // A wildcard bind can succeed while a loopback or LAN listener owns the port.
       for (let attempt = 0; attempt < WILDCARD_PORT_ATTEMPTS; attempt += 1) {
         const port = yield* reserveLoopbackPort(wildcardHost);
-        if (yield* isPortAvailableOnLoopback(port)) return port;
+        if ((yield* isPortAvailableOnLoopback(port)) && (yield* isPortAvailableOnLanIpv4(port))) {
+          return port;
+        }
       }
       return yield* new NetError({ message: "Failed to find an available wildcard port" });
     }),

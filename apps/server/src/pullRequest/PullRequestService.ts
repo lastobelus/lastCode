@@ -289,7 +289,11 @@ export class PullRequestService extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<ProviderCheckLog>, PullRequestError>;
     /** Re-runs the failing checks, or only the named check. */
     readonly rerunChecks: (
-      input: PullRequestRef & { readonly check?: string },
+      input: PullRequestRef & {
+        readonly check?: string;
+        readonly runId?: number;
+        readonly jobId?: number;
+      },
     ) => Effect.Effect<ReadonlyArray<ProviderCheckRerun>, PullRequestError>;
     readonly update: (input: PullRequestUpdateInput) => Effect.Effect<void, PullRequestError>;
     readonly comment: (input: PullRequestCommentInput) => Effect.Effect<void, PullRequestError>;
@@ -3559,7 +3563,11 @@ export const make = Effect.gen(function* () {
   const detail: PullRequestService["Service"]["detail"] = (input) => {
     const key = refCacheKey(input);
     // Skip reads older than strict summaries; caching them would preserve regressions without asking the host again.
-    const read = Cache.get(detailCache, key).pipe(
+    const read = (
+      input.allowStale === false
+        ? detailUncached(input).pipe(Effect.tap((value) => Cache.set(detailCache, key, value)))
+        : Cache.get(detailCache, key)
+    ).pipe(
       Effect.tap((value) => {
         if (value.state === "merged") noteMerged(input);
         const summary = summaryFromDetail(value, lastGoodSummary.peek(key));
@@ -3956,6 +3964,16 @@ export const make = Effect.gen(function* () {
         detail: `No check is named ${input.check}. Checks: ${checks.map((check) => check.name).join(", ") || "none"}.`,
       });
     }
+    if (operation === "rerunChecks" && matches.length > 1) {
+      const failed = matches.filter(
+        (check) => check.status === "failure" || check.status === "cancelled",
+      );
+      if (failed.length === 1) return failed.map(({ name, url }) => ({ name, url }));
+      return yield* new PullRequestOperationError({
+        operation,
+        detail: `Several checks are named ${input.check}. Specify runId or jobId. Candidates: ${matches.map((check) => `${check.name} (${check.status}): ${check.url ?? "no URL"}`).join(", ")}.`,
+      });
+    }
     return matches.map(({ name, url }) => ({ name, url }));
   });
 
@@ -4007,8 +4025,21 @@ export const make = Effect.gen(function* () {
         detail: "This host cannot re-run checks.",
       });
     }
-    const checks = yield* selectChecks(project, input, "rerunChecks");
-    if (checks.length === 0) return [];
+    const explicit = input.runId !== undefined || input.jobId !== undefined;
+    if ([input.check, input.runId, input.jobId].filter((value) => value !== undefined).length > 1) {
+      return yield* new PullRequestOperationError({
+        operation: "rerunChecks",
+        detail: "Choose only one of check, runId or jobId.",
+      });
+    }
+    if (explicit && project.api.kind !== "github") {
+      return yield* new PullRequestOperationError({
+        operation: "rerunChecks",
+        detail: "Run and job IDs are supported only for GitHub Actions.",
+      });
+    }
+    const checks = explicit ? [] : yield* selectChecks(project, input, "rerunChecks");
+    if (checks.length === 0 && !explicit) return [];
     const ref = yield* canonicalRef(input);
     // A failure can follow a run that already restarted, so readers refresh either way.
     return yield* rerun({
@@ -4016,6 +4047,8 @@ export const make = Effect.gen(function* () {
       repository: project.repository,
       host: project.host,
       checks,
+      ...(input.runId === undefined ? {} : { runId: input.runId }),
+      ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
     }).pipe(
       Effect.mapError(toPullRequestError("rerunChecks")),
       Effect.ensuring(

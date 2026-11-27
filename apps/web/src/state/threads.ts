@@ -34,16 +34,18 @@ export const threadEnvironment = createThreadEnvironmentAtoms(
   threadFamilies.snapshotAtom,
   environmentShell.statusAtom,
 );
-const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
-export const environmentThreadStateAtom = environmentThreads.stateAtom;
-export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
-  environmentThreads.stateAtom,
-);
 export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   snapshotAtom: threadEnvironment.snapshotAtom,
   hiddenThreadTagsAtom: serverEnvironment.hiddenThreadTagsAtom,
 });
+const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime, (ref) =>
+  Atom.map(environmentThreadShells.threadShellAtom(ref), (thread) => thread !== null),
+);
+export const environmentThreadStateAtom = environmentThreads.stateAtom;
+export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
+  environmentThreads.stateAtom,
+);
 export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
   childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
   pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,

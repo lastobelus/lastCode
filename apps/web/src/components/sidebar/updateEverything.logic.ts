@@ -695,6 +695,10 @@ export interface UpdateEverythingResult {
   readonly restarting: ReadonlyArray<string>;
 }
 
+/** A skipped server was not updated: it was already updating, was interrupted, or lost permission. */
+export const SKIPPED_SERVER_UPDATE =
+  "Not updated: it was already updating, the update was interrupted, or this session can no longer update it.";
+
 export function collectUpdateEverythingResult(input: {
   readonly localVersion: string | null;
   readonly localFailures: ReadonlyArray<string>;
@@ -715,7 +719,11 @@ export function collectUpdateEverythingResult(input: {
     failures: [
       ...input.localFailures.map((failure) => m(msg("This app: {failure}", { failure }))),
       ...input.servers.flatMap(({ label, outcome }) =>
-        outcome.status === "failed" ? [`${label}: ${outcome.message}`] : [],
+        outcome.status === "failed"
+          ? [`${label}: ${outcome.message}`]
+          : outcome.status === "skipped"
+            ? [`${label}: ${SKIPPED_SERVER_UPDATE}`]
+            : [],
       ),
       ...input.providers.flatMap((outcome) => (outcome.status === "failed" ? [outcome.line] : [])),
     ],

@@ -1334,9 +1334,29 @@ const make = Effect.gen(function* () {
 
   // A directory watch follows the directory's inode, so when the target's
   // directory is renamed away and another takes its path, watch the new one.
-  const watchLinkTargetChanges = (linkTargetPath: string, ready: Deferred.Deferred<void>) =>
-    watchDirectoryReplacements(
-      (parentReady) => watchFileChanges(pathService.dirname(linkTargetPath), parentReady),
+  const watchLinkTargetChanges = (linkTargetPath: string, ready: Deferred.Deferred<void>) => {
+    const targetDirectory = pathService.dirname(linkTargetPath);
+    const directoryIdentity = fs.stat(targetDirectory).pipe(
+      Effect.map((info) => `${info.dev}:${info.ino.valueOrUndefined}`),
+      Effect.orElseSucceed(() => null),
+    );
+    return watchDirectoryReplacements(
+      (parentReady) =>
+        Stream.unwrap(
+          Effect.map(directoryIdentity, (initialIdentity) =>
+            Stream.merge(
+              watchFileChanges(targetDirectory, parentReady),
+              // macOS can miss replacements immediately after registering a native watch.
+              Stream.make(initialIdentity).pipe(
+                Stream.concat(
+                  Stream.tick("1 second").pipe(Stream.mapEffect(() => directoryIdentity)),
+                ),
+                Stream.changes,
+                Stream.drop(1),
+              ),
+            ),
+          ),
+        ),
       Stream.unwrap(
         Effect.gen(function* () {
           const registered = yield* Deferred.make<void>();
@@ -1353,6 +1373,7 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+  };
 
   const startWatcher = Effect.gen(function* () {
     const settingsDir = pathService.dirname(settingsPath);

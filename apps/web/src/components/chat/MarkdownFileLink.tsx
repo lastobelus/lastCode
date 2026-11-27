@@ -7,9 +7,15 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import type { ContextMenuSource, EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { memo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useGT } from "gt-react";
 import { FolderIcon } from "lucide-react";
+import {
+  isValidElement,
+  memo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 
 import { contextMenuSourceOf, openContextMenuFromKeyboard } from "../../contextMenuSource";
 import { readLocalApi } from "../../localApi";
@@ -20,6 +26,7 @@ import { documentChipKindForFileName } from "../../pierre-icons";
 import { ContextChip } from "../ContextChip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SharedTooltipTrigger, useSharedTooltip, withSharedTooltip } from "../ui/shared-tooltip";
+import { nodeToPlainText } from "./MarkdownCodeBlock.logic";
 import { FileTagChipContent } from "./FileTagChip";
 import {
   hasMarkdownFilePrimaryAction,
@@ -31,6 +38,7 @@ import { WorkspaceEntryTooltip } from "./WorkspaceEntryIcon";
 
 interface MarkdownFileLinkProps {
   environmentId: EnvironmentId | null;
+  children?: ReactNode;
   href: string;
   targetPath: string;
   iconPath: string;
@@ -55,8 +63,16 @@ interface MarkdownFileLinkProps {
 
 const MARKDOWN_FILE_LINK_CLASS_NAME = "chat-markdown-file-link";
 
+function nodeImageCount(node: ReactNode): number {
+  if (Array.isArray(node)) return node.reduce((count, child) => count + nodeImageCount(child), 0);
+  if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(node)) return 0;
+  if (node.type === "img" || node.props.node?.tagName === "img") return 1;
+  return nodeImageCount(node.props.children);
+}
+
 export const MarkdownFileLink = memo(function MarkdownFileLink({
   environmentId,
+  children,
   href,
   targetPath,
   iconPath,
@@ -337,17 +353,40 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   );
   const sharedTooltip = useSharedTooltip({
     render: () => tooltipContent,
-    contentKey: `${iconPath}\u0000${targetPath}`,
+    contentKey: `${environmentId ?? ""}\u0000${iconPath}\u0000${targetPath}`,
     variant: "code",
   });
-  const chip = hasPrimaryAction ? (
-    <ContextChip
+  const chip = (
+    <FileTagChipContent
+      icon={
+        isAppBundle ? <AppBundleIcon environmentId={environmentId} path={iconPath} /> : undefined
+      }
+      path={iconPath}
+      environmentId={environmentId}
+      label={label}
+      theme={theme}
+    />
+  );
+  const content = children ? (
+    <>
+      {children} (
+      <ContextChip kind={chipKind} dir="ltr">
+        {chip}
+      </ContextChip>
+      )
+    </>
+  ) : (
+    chip
+  );
+
+  const link = hasPrimaryAction ? (
+    <a
       {...nativeDrag}
-      kind={chipKind}
-      dir="ltr"
-      render={<a href={href} />}
-      className={MARKDOWN_FILE_LINK_CLASS_NAME}
+      href={href}
+      className={cn(children ? "text-left" : undefined, MARKDOWN_FILE_LINK_CLASS_NAME)}
       data-markdown-copy={copyMarkdown}
+      data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
+      data-markdown-copy-text={children ? `${nodeToPlainText(children)} (${label})` : undefined}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -364,45 +403,32 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
       onContextMenu={handleContextMenu}
       onKeyDown={openContextMenuFromKeyboard}
     >
-      <FileTagChipContent
-        icon={
-          isAppBundle ? <AppBundleIcon environmentId={environmentId} path={iconPath} /> : undefined
-        }
-        path={iconPath}
-        environmentId={environmentId}
-        label={label}
-        theme={theme}
-      />
-    </ContextChip>
+      {content}
+    </a>
   ) : (
-    <ContextChip
+    <button
       {...nativeDrag}
-      kind={chipKind}
-      dir="ltr"
-      render={<button type="button" />}
-      aria-label={gt("File options for {label}", { label })}
+      type="button"
+      aria-label={children ? undefined : gt("File options for {label}", { label })}
       aria-haspopup="menu"
-      className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
+      className={cn(children ? "text-left" : undefined, MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
       data-markdown-copy={copyMarkdown}
+      data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
+      data-markdown-copy-text={children ? `${nodeToPlainText(children)} (${label})` : undefined}
       onClick={handleContextMenu}
       onContextMenu={handleContextMenu}
       onKeyDown={openContextMenuFromKeyboard}
     >
-      <FileTagChipContent
-        icon={
-          isAppBundle ? <AppBundleIcon environmentId={environmentId} path={iconPath} /> : undefined
-        }
-        path={iconPath}
-        environmentId={environmentId}
-        label={label}
-        theme={theme}
-      />
-    </ContextChip>
+      {content}
+    </button>
   );
-  if (sharedTooltip) return withSharedTooltip(chip, sharedTooltip);
+
+  const trigger = children ? link : <ContextChip kind={chipKind} dir="ltr" render={link} />;
+
+  if (sharedTooltip) return withSharedTooltip(trigger, sharedTooltip);
   return (
     <SharedTooltipTrigger
-      render={chip}
+      render={trigger}
       label={tooltipContent}
       variant="code"
       className="pointer-events-auto"
@@ -415,6 +441,7 @@ function areMarkdownFileLinkPropsEqual(
   next: Readonly<MarkdownFileLinkProps>,
 ): boolean {
   return (
+    previous.children === next.children &&
     previous.href === next.href &&
     previous.targetPath === next.targetPath &&
     previous.iconPath === next.iconPath &&

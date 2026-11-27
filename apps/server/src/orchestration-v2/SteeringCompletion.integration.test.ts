@@ -1483,8 +1483,9 @@ it.effect.each(["complete", "stop-before-end"] as const)(
           threadDisposition: "reusable",
         });
         yield* Fiber.join(settled);
-        yield* worker.drain();
         if (timing === "stop-before-end") {
+          // Check the steer after its effect requeues it, before checkpoint finalization can promote it.
+          yield* worker.runOnce();
           const queued = (yield* orchestrator.getThreadProjection(threadId)).runs
             .filter((run) => run.status === "queued")
             .toSorted((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0));
@@ -1495,8 +1496,10 @@ it.effect.each(["complete", "stop-before-end"] as const)(
               [MessageId.make("message:queued-later"), false],
             ],
           );
+          yield* worker.drain();
           return;
         }
+        yield* worker.drain();
         yield* orchestrator.resumeQueuedRuns;
         yield* worker.drain();
 
@@ -1521,6 +1524,156 @@ it.effect.each(["complete", "stop-before-end"] as const)(
         );
       }).pipe(Effect.provide(layer));
     }),
+);
+
+it.effect("starts a steer that missed the turn on the saved next-turn selection", () =>
+  Effect.gen(function* () {
+    const { events, started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
+      "steering-selection-follow-up",
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = yield* startFirstTurn;
+      const first = started[0]!;
+      const senderThreadId = ThreadId.make("thread:late-steer-sender");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:late-steer-sender"),
+        threadId: senderThreadId,
+        projectId: ProjectId.make("project:steering-selection-follow-up"),
+        title: "Late steer sender",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("steer"),
+        threadId,
+        messageId: MessageId.make("message:steer"),
+        text: "late steer",
+        senderThreadId,
+        attachments: [],
+        modelSelection: composerSelection,
+        dispatchMode: { type: "steer_active", targetRunId: first.runId },
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("archive:late-steer-sender"),
+        threadId: senderThreadId,
+      });
+      assert.isNotNull(
+        (yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt,
+      );
+      const accepted = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+        (message) => message.id === MessageId.make("message:steer"),
+      )!;
+      const beforeRejectedSend = yield* orchestrator.getThreadProjection(threadId);
+      const alterations = [
+        {},
+        { text: "new content after archive" },
+        {
+          attachments: [
+            {
+              type: "file" as const,
+              id: ChatAttachmentId.make("attachment_changed_steer"),
+              name: "changed.txt",
+              mimeType: "text/plain",
+              sizeBytes: 1,
+            },
+          ],
+        },
+        { context: { version: 1 as const, records: [] } },
+        { dispatchMode: { type: "steer_active" as const, targetRunId: first.runId } },
+        { deliveryIntent: "steer" as const },
+      ];
+      for (const [index, alteration] of alterations.entries()) {
+        const error = yield* orchestrator
+          .dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`changed-steer:${index}`),
+            threadId,
+            messageId: accepted.id,
+            senderThreadId,
+            text: accepted.text,
+            attachments: accepted.attachments,
+            createdBy: accepted.createdBy,
+            creationSource: accepted.creationSource,
+            dispatchMode: { type: "start_immediately" },
+            ...alteration,
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, Orchestrator.OrchestratorDispatchError);
+        assert.deepEqual(yield* orchestrator.getThreadProjection(threadId), beforeRejectedSend);
+      }
+      // The turn ends before the worker delivers the steer, so the steer
+      // becomes a follow-up turn.
+      const settled = yield* orchestrator.streamDomainEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "run.updated" &&
+            event.payload.id === first.runId &&
+            event.payload.status === "waiting",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      const turn = (yield* orchestrator.getThreadProjection(threadId)).providerTurns[0]!;
+      yield* Queue.offer(events, {
+        type: "provider_turn.updated",
+        driver,
+        providerTurn: { ...turn, status: "completed", completedAt: yield* DateTime.now },
+      });
+      yield* Queue.offer(events, {
+        type: "turn.terminal",
+        driver,
+        providerThreadId: turn.providerThreadId,
+        providerTurnId: turn.id,
+        runOrdinal: first.runOrdinal,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      yield* Fiber.join(settled);
+      yield* worker.drain();
+      yield* orchestrator.resumeQueuedRuns;
+      yield* worker.drain();
+
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(steered, []);
+      assert.equal(started.length, 2);
+      assert.equal(started[1]?.message.messageId, MessageId.make("message:steer"));
+      assert.equal(started[1]?.message.senderThreadId, senderThreadId);
+      assert.equal(
+        projection.messages.find((item) => item.id === MessageId.make("message:steer"))
+          ?.senderThreadId,
+        senderThreadId,
+      );
+      assert.deepEqual(started[1]?.modelSelection, composerSelection);
+      assert.deepEqual(projection.thread.modelSelection, composerSelection);
+      const message = projection.turnItems.find(
+        (item) =>
+          item.type === "user_message" && item.messageId === MessageId.make("message:steer"),
+      );
+      assert.equal(message?.runId, started[1]!.runId);
+      assert.isAbove(
+        message!.ordinal,
+        Math.max(
+          ...projection.turnItems
+            .filter((item) => item.runId === first.runId)
+            .map((item) => item.ordinal),
+        ),
+      );
+    }).pipe(Effect.provide(layer));
+  }),
 );
 
 const declinedSteerTimings = [
