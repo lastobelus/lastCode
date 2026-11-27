@@ -15,20 +15,28 @@ export function ComposerAttachmentButton(props: {
   readonly disabled?: boolean;
   readonly size?: "regular" | "large";
   readonly supportsFiles: boolean;
+  readonly onPickPromptSnippet?: () => void;
   readonly onPickMedia: () => Promise<void>;
   readonly onPickFiles: () => Promise<void>;
 }) {
   const gt = useGT();
   const m = useMessages();
   const { scale } = useAndroidControlSizing();
+  const accessibilityLabel = props.onPickPromptSnippet
+    ? gt("Add to message")
+    : gt("Add attachment");
   const button = (
     <Pressable
-      accessibilityLabel={gt("Add attachment")}
+      accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
       accessibilityState={{ disabled: props.disabled }}
       className="size-[44px] shrink-0 items-center justify-center rounded-full active:opacity-70 disabled:opacity-50"
       disabled={props.disabled}
-      onPress={props.supportsFiles ? undefined : () => void props.onPickMedia()}
+      onPress={
+        !props.supportsFiles && !props.onPickPromptSnippet
+          ? () => void props.onPickMedia()
+          : undefined
+      }
     >
       <SymbolView
         name="plus"
@@ -40,18 +48,28 @@ export function ComposerAttachmentButton(props: {
     </Pressable>
   );
 
-  if (props.disabled || !props.supportsFiles) {
+  if (props.disabled || (!props.supportsFiles && !props.onPickPromptSnippet)) {
     return button;
   }
 
   return (
     <Menu
       accessible
-      accessibilityLabel={gt("Add attachment")}
+      accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
-      actions={ATTACHMENT_MENU_ACTIONS.map((action) => ({ ...action, title: m(action.title) }))}
+      actions={[
+        ...(props.supportsFiles
+          ? ATTACHMENT_MENU_ACTIONS
+          : ATTACHMENT_MENU_ACTIONS.filter((action) => action.id === "photos")
+        ).map((action) => ({ ...action, title: m(action.title) })),
+        ...(props.onPickPromptSnippet
+          ? [{ id: "prompt-snippets", title: gt("Common Prompts"), image: "text.bubble" }]
+          : []),
+      ]}
       onPressAction={({ nativeEvent }) => {
-        if (nativeEvent.event === "photos") {
+        if (nativeEvent.event === "prompt-snippets") {
+          props.onPickPromptSnippet?.();
+        } else if (nativeEvent.event === "photos") {
           void props.onPickMedia();
         } else if (nativeEvent.event === "files") {
           void props.onPickFiles();

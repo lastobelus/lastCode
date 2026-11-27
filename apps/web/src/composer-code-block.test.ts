@@ -17,7 +17,7 @@ import StarterKit from "@tiptap/starter-kit";
 import {
   ComposerCodeBlockExtension,
   ComposerListExtensions,
-  serializeEditorDoc,
+  structuredSerializeEditorDoc as serializeEditorDoc,
 } from "./composer-rich-text-doc";
 import {
   COMPOSER_UNDO_GROUP_DELAY,

@@ -53,7 +53,7 @@ export const storeRoot = (path: Path.Path, gitCommonDir: string) =>
 /** Removes the capture indexes of scopes whose refs were deleted. */
 export const removeForScopes = Effect.fn("GitVcsDriver.checkpoints.removeCaptureIndexes")(
   function* (
-    fileSystem: FileSystem.FileSystem,
+    fileSystem: Pick<FileSystem.FileSystem, "readDirectory" | "remove">,
     path: Path.Path,
     gitCommonDir: string,
     scopeRefPrefixes: Iterable<string>,

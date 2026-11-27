@@ -155,7 +155,7 @@ vi.mock("../state/terminalSessions", async () => {
         threadId: thread.threadId,
         terminalId: "term-1",
         ...(type === "closed"
-          ? { type }
+          ? { type, deleteHistory: false }
           : {
               type,
               snapshot: {

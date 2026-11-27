@@ -117,7 +117,6 @@ export function runNeedsRecovery(
   );
 }
 
-
 export function resolveMessageDispatch(
   projection: OrchestrationV2ThreadProjection,
   message: Pick<

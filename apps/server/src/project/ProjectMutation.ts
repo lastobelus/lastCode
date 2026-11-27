@@ -4,7 +4,10 @@ import * as Effect from "effect/Effect";
 import { type ProjectCloneTracker } from "./ProjectCloneTracker.ts";
 import { type ProjectService } from "./ProjectService.ts";
 
-type ProjectMutations = Pick<ProjectService["Service"], "create" | "delete" | "update">;
+type ProjectMutations = Pick<
+  ProjectService["Service"],
+  "create" | "delete" | "update" | "reconcileScripts"
+>;
 
 export const projectMutationOperation = Effect.fn("projectMutationOperation")(function* (
   projects: ProjectMutations,
@@ -55,6 +58,15 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
           : { untrackFolders: mutation.untrackFolders }),
         ...(mutation.pinned === undefined ? {} : { pinned: mutation.pinned }),
         ...(mutation.archived === undefined ? {} : { archived: mutation.archived }),
+        ...(mutation.keepTemporary === undefined ? {} : { keepTemporary: mutation.keepTemporary }),
+      });
+
+    case "project.scripts.reconcile":
+      return yield* projects.reconcileScripts({
+        commandId: mutation.commandId,
+        projectId: mutation.projectId,
+        expectedScripts: mutation.expectedScripts,
+        scripts: mutation.scripts,
       });
 
     case "project.delete":
@@ -63,6 +75,9 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
           commandId: mutation.commandId,
           projectId: mutation.projectId,
           ...(mutation.force === undefined ? {} : { force: mutation.force }),
+          ...(mutation.savedWorkspace === undefined
+            ? {}
+            : { savedWorkspace: mutation.savedWorkspace }),
         },
         afterDelete?.(mutation.projectId),
       );
@@ -77,8 +92,7 @@ export const mutateProjectWithClone = Effect.fn("mutateProjectWithClone")(functi
 ) {
   if (mutation.type !== "project.delete")
     return yield* projectMutationOperation(projects, mutation);
-  return yield* projectMutationOperation(projects, mutation).pipe(
-    Effect.tap(() => clones.discard(mutation.projectId)),
+  return yield* projectMutationOperation(projects, mutation, clones.discard).pipe(
     Effect.uninterruptible,
   );
 });

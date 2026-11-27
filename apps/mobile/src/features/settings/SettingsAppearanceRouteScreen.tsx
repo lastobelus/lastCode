@@ -1,11 +1,12 @@
 import { useGT } from "gt-react-native";
 import { Platform } from "react-native";
 import { AndroidNavigationAppearanceSection } from "./appearance/sections/AndroidNavigationAppearanceSection";
-import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
-import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
+import { mobilePreferencesAtom, saveMobilePreferences } from "../../state/preferences";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -21,7 +22,7 @@ export function SettingsAppearanceRouteScreen() {
   const gt = useGT();
   const insets = useSafeAreaInsets();
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
-  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const savePreferences = useAtomCommand(saveMobilePreferences);
   const preferencesReady = AsyncResult.isSuccess(preferencesResult) && !preferencesResult.waiting;
   const roundedProjectIcons =
     AsyncResult.isSuccess(preferencesResult) &&
@@ -40,14 +41,16 @@ export function SettingsAppearanceRouteScreen() {
       >
         <ThemeAppearanceSection />
         {Platform.OS === "android" ? <AndroidNavigationAppearanceSection /> : null}
-        <SettingsSection title="Project icons">
+        <SettingsSection title={gt("Project icons")}>
           <SettingsSwitchRow
             disabled={!preferencesReady}
             icon="folder"
-            label="Rounded project icons"
-            subtitle="Round favicon corners instead of preserving each icon's original shape."
+            label={gt("Rounded project icons")}
+            subtitle={gt("Round favicon corners instead of preserving each icon's original shape.")}
             value={roundedProjectIcons}
-            onValueChange={(value) => savePreferences({ roundedProjectIcons: value })}
+            onValueChange={(value) => {
+              void savePreferences({ roundedProjectIcons: value });
+            }}
           />
         </SettingsSection>
         <TextAppearanceSection />

@@ -18,6 +18,7 @@ export interface ProviderContinuationRequest {
   readonly driver: ProviderDriverKind;
   readonly detail: string | null;
   readonly notification?: OrchestrationV2Notification;
+  readonly backgroundResultContinuation?: import("@t3tools/contracts").OrchestrationV2Run["backgroundResultContinuation"];
   readonly delegatedCompletion?: {
     readonly parentRunId: RunId;
     readonly generation: number;

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off -- Host launchd setup uses the platform filesystem and process APIs.
 import * as NodeChildProcess from "node:child_process";
@@ -6,7 +7,6 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
 import {
@@ -35,7 +35,24 @@ function xml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
+function validateLauncherPrefix(value: unknown): ReadonlyArray<string> {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every(
+      (argument): argument is string => typeof argument === "string" && !argument.includes("\0"),
+    ) ||
+    !NodePath.isAbsolute(value[0] ?? "")
+  ) {
+    throw new Error(
+      "launcherPrefix must be a nonempty string array starting with an absolute executable path; arguments cannot contain NUL.",
+    );
+  }
+  return value;
+}
+
 export function renderLaunchAgentPlist(input: {
+  readonly launcherPrefix?: ReadonlyArray<string>;
   readonly logDirectory: string;
   readonly nodePath: string;
   readonly repoRoot: string;
@@ -43,16 +60,24 @@ export function renderLaunchAgentPlist(input: {
   readonly scheduleHelperPath: string;
   readonly supervisorPath: string;
 }): string {
-  const programArguments =
+  const commandArguments =
     input.schedule.kind === "interval"
-      ? `<string>${xml(input.supervisorPath)}</string>
-    <string>run</string>`
-      : `<string>${xml(input.scheduleHelperPath)}</string>
-    <string>run</string>
-    <string>--daily-at</string>
-    <string>${xml(input.schedule.dailyAt)}</string>
-    <string>--time-zone</string>
-    <string>${xml(input.schedule.timeZone)}</string>`;
+      ? [input.supervisorPath, "run"]
+      : [
+          input.scheduleHelperPath,
+          "run",
+          "--daily-at",
+          input.schedule.dailyAt,
+          "--time-zone",
+          input.schedule.timeZone,
+        ];
+  const programArguments = [
+    ...(input.launcherPrefix === undefined ? [] : validateLauncherPrefix(input.launcherPrefix)),
+    input.nodePath,
+    ...commandArguments,
+  ]
+    .map((argument) => `<string>${xml(argument)}</string>`)
+    .join("\n    ");
   const intervalSeconds = input.schedule.kind === "interval" ? input.schedule.intervalSeconds : 60;
   const runAtLoad = input.schedule.kind === "interval" ? "  <key>RunAtLoad</key>\n  <true/>\n" : "";
   // Background throttles every CI descendant; local CI already limits capacity and priority.
@@ -64,7 +89,6 @@ export function renderLaunchAgentPlist(input: {
   <string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${xml(input.nodePath)}</string>
     ${programArguments}
   </array>
   <key>WorkingDirectory</key>
@@ -89,10 +113,12 @@ ${runAtLoad}  <key>StartInterval</key>
 
 export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   readonly command: "configure-schedule" | "install" | "run-now" | "status" | "uninstall";
+  readonly clearLauncherPrefix?: boolean;
   readonly clearRecoveryThread?: boolean;
   readonly dailyAt?: string;
   readonly ifInstalled?: boolean;
   readonly intervalSeconds?: number;
+  readonly launcherPrefix?: ReadonlyArray<string>;
   readonly recoveryThreadId?: string;
   readonly timeZone?: string;
   readonly trustedProjectActionIds?: ReadonlyArray<string>;
@@ -106,7 +132,7 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
     command !== "uninstall"
   ) {
     throw new Error(
-      "Usage: pnpm lastcode:checkpoint:service configure-schedule (--interval-seconds <seconds> | --daily-at <HH:MM> --time-zone <IANA-zone>) | install [--interval-seconds <seconds> | --daily-at <HH:MM> --time-zone <IANA-zone>] [--recovery-thread <thread-id> | --no-recovery-thread] [--trusted-project-action <lc-id>]... | run-now [--if-installed] | <status|uninstall>",
+      "Usage: pnpm lastcode:checkpoint:service configure-schedule [--interval-seconds <seconds> | --daily-at <HH:MM> --time-zone <IANA-zone>] [--launcher-prefix-json <JSON> | --clear-launcher-prefix] | install [--interval-seconds <seconds> | --daily-at <HH:MM> --time-zone <IANA-zone>] [--launcher-prefix-json <JSON> | --clear-launcher-prefix] [--recovery-thread <thread-id> | --no-recovery-thread] [--trusted-project-action <lc-id>]... | run-now [--if-installed] | <status|uninstall>",
     );
   }
   if (command !== "install" && command !== "configure-schedule") {
@@ -118,14 +144,35 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
     }
     return { command } as const;
   }
+  let clearLauncherPrefix = false;
   let clearRecoveryThread = false;
   let dailyAt: string | undefined;
   let intervalSeconds: number | undefined;
+  let launcherPrefix: ReadonlyArray<string> | undefined;
   let recoveryThreadId: string | undefined;
   let timeZone: string | undefined;
   const trustedProjectActionIds: string[] = [];
   for (let index = 1; index < argv.length; index += 1) {
     const option = argv[index];
+    if (option === "--launcher-prefix-json" || option === "--clear-launcher-prefix") {
+      if (clearLauncherPrefix || launcherPrefix !== undefined) {
+        throw new Error("Configure either one launcher prefix or --clear-launcher-prefix.");
+      }
+      if (option === "--clear-launcher-prefix") {
+        clearLauncherPrefix = true;
+      } else {
+        const value = argv[index + 1];
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(value ?? "");
+        } catch {
+          throw new Error("--launcher-prefix-json requires valid JSON.");
+        }
+        launcherPrefix = validateLauncherPrefix(parsed);
+        index += 1;
+      }
+      continue;
+    }
     if (option === "--interval-seconds") {
       const value = Number(argv[index + 1]);
       if (!Number.isSafeInteger(value) || value <= 0) {
@@ -206,11 +253,21 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   if ((dailyAt === undefined) !== (timeZone === undefined)) {
     throw new Error("A daily schedule requires both --daily-at and --time-zone.");
   }
-  if (command === "configure-schedule" && intervalSeconds === undefined && dailyAt === undefined) {
-    throw new Error("configure-schedule requires an interval or daily schedule.");
+  if (
+    command === "configure-schedule" &&
+    intervalSeconds === undefined &&
+    dailyAt === undefined &&
+    launcherPrefix === undefined &&
+    !clearLauncherPrefix
+  ) {
+    throw new Error(
+      "configure-schedule requires an interval or daily schedule, or a launcher prefix change.",
+    );
   }
   return {
     command,
+    ...(clearLauncherPrefix ? { clearLauncherPrefix: true } : {}),
+    ...(launcherPrefix ? { launcherPrefix } : {}),
     ...(dailyAt ? { dailyAt } : {}),
     ...(intervalSeconds ? { intervalSeconds } : {}),
     ...(timeZone ? { timeZone } : {}),
@@ -255,9 +312,30 @@ export function checkpointScheduleFromConfig(value: unknown): CheckpointSchedule
 }
 
 export function nextCheckpointScheduleConfig(
-  schedule: CheckpointSchedule,
-): Record<string, unknown> {
-  return { schemaVersion: 1, schedule };
+  schedule: CheckpointSchedule | undefined,
+  current: unknown,
+  options: {
+    readonly clearLauncherPrefix?: boolean;
+    readonly launcherPrefix?: ReadonlyArray<string>;
+  } = {},
+): {
+  readonly schemaVersion: 1;
+  readonly schedule: CheckpointSchedule;
+  readonly launcherPrefix?: ReadonlyArray<string>;
+} {
+  const previous = current && typeof current === "object" ? current : {};
+  const launcherPrefix = options.clearLauncherPrefix
+    ? undefined
+    : options.launcherPrefix !== undefined
+      ? validateLauncherPrefix(options.launcherPrefix)
+      : "launcherPrefix" in previous
+        ? validateLauncherPrefix(previous.launcherPrefix)
+        : undefined;
+  return {
+    schemaVersion: 1,
+    schedule: schedule ?? checkpointScheduleFromConfig(current),
+    ...(launcherPrefix ? { launcherPrefix } : {}),
+  };
 }
 
 export function writeJsonAtomic(path: string, value: unknown): void {
@@ -286,6 +364,9 @@ export function nextCheckpointSupervisorConfig(
   return {
     schemaVersion: 1,
     ...(recoveryThreadId ? { recoveryThreadId } : {}),
+    ...("postPublishCommand" in previous
+      ? { postPublishCommand: previous.postPublishCommand }
+      : {}),
     trustedProjectActionIds: [...options.trustedProjectActionIds],
   };
 }
@@ -339,11 +420,13 @@ function run(
 
 function main(argv: ReadonlyArray<string>): void {
   const {
+    clearLauncherPrefix,
     clearRecoveryThread,
     command,
     dailyAt,
     ifInstalled,
     intervalSeconds,
+    launcherPrefix,
     recoveryThreadId,
     timeZone,
     trustedProjectActionIds = [],
@@ -352,7 +435,7 @@ function main(argv: ReadonlyArray<string>): void {
     !shouldRunNightlyServiceCommand(
       command,
       ifInstalled === true,
-      Effect.runSync(HostProcessPlatform),
+      Effect.runSync(HostProcess.Platform),
     )
   )
     return;
@@ -365,9 +448,21 @@ function main(argv: ReadonlyArray<string>): void {
     : dailyAt && timeZone
       ? { kind: "daily", dailyAt, timeZone }
       : undefined;
+  const scheduleConfig =
+    command === "install" || command === "configure-schedule"
+      ? nextCheckpointScheduleConfig(
+          configuredSchedule,
+          NodeFS.existsSync(scheduleConfigPath)
+            ? (JSON.parse(NodeFS.readFileSync(scheduleConfigPath, "utf8")) as unknown)
+            : null,
+          {
+            ...(clearLauncherPrefix ? { clearLauncherPrefix: true } : {}),
+            ...(launcherPrefix ? { launcherPrefix } : {}),
+          },
+        )
+      : undefined;
   if (command === "configure-schedule") {
-    if (!configuredSchedule) throw new Error("Schedule configuration was not resolved.");
-    writeJsonAtomic(scheduleConfigPath, nextCheckpointScheduleConfig(configuredSchedule));
+    writeJsonAtomic(scheduleConfigPath, scheduleConfig);
     console.log(`[lastcode:service] Saved ${scheduleConfigPath}.`);
     console.log("[lastcode:service] The running service was not changed or started.");
     return;
@@ -439,15 +534,10 @@ function main(argv: ReadonlyArray<string>): void {
     clearNightlyServiceState(logDirectory);
     return;
   }
-  const schedule = configuredSchedule
-    ? configuredSchedule
-    : checkpointScheduleFromConfig(
-        NodeFS.existsSync(scheduleConfigPath)
-          ? (JSON.parse(NodeFS.readFileSync(scheduleConfigPath, "utf8")) as unknown)
-          : null,
-      );
-  if (configuredSchedule) {
-    writeJsonAtomic(scheduleConfigPath, nextCheckpointScheduleConfig(configuredSchedule));
+  if (!scheduleConfig) throw new Error("Schedule configuration was not resolved.");
+  const { schedule } = scheduleConfig;
+  if (configuredSchedule || launcherPrefix || clearLauncherPrefix) {
+    writeJsonAtomic(scheduleConfigPath, scheduleConfig);
   }
 
   run("git", [
@@ -492,6 +582,7 @@ function main(argv: ReadonlyArray<string>): void {
   NodeFS.writeFileSync(
     plistPath,
     renderLaunchAgentPlist({
+      ...(scheduleConfig.launcherPrefix ? { launcherPrefix: scheduleConfig.launcherPrefix } : {}),
       logDirectory,
       nodePath: process.execPath,
       repoRoot: automationWorktree,

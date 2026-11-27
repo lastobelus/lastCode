@@ -6,7 +6,7 @@ Drive T3 Code from your phone, browser (`app.t3.codes`), or another desktop app 
 
 T3 Connect links your host to your other devices without router port-forwarding.
 
-- **Desktop host**: Open **Settings → Sharing & access**, sign in, and turn on **T3 Connect** (note: closing the desktop app's last window stops its local server—use the [background service](./background-service.md) for unattended access).
+- **Desktop host**: Sign in under **Settings → T3 Connect**, then turn on **T3 Connect** under **Settings → Sharing & access** (note: closing the desktop app's last window stops its local server—use the [background service](./background-service.md) for unattended access).
 - **CLI / headless host**: Run `t3 up` (or `t3 connect` / `t3 up --connect --lan --yes` for non-interactive scripts) and complete the printed sign-in link on any device. Check status with `t3 status [--json]`.
 - **Other devices**: Sign in to the same T3 Connect account and pick the environment.
 
@@ -16,7 +16,7 @@ By default, any device signed into your T3 Connect account can connect. Turn on 
 
 ### More machines with T3 Chat
 
-Free T3 Connect accounts can link up to **3 host machines** (phones and browsers don't count). Link a paid T3 Chat account from your account menu → **T3 Chat → Link T3 Chat** to raise the limit to **10** (Pro) or **100** (Premier).
+Free T3 Connect accounts can link up to **3 host machines** (phones and browsers don't count). Link a paid T3 Chat account from **Settings → T3 Connect → Manage account → T3 Chat → Link T3 Chat** to raise the limit to **10** (Pro) or **100** (Premier).
 
 ## Pair over a LAN or private network
 
@@ -63,6 +63,8 @@ Browser tabs belong to the host environment so you and your agents share them fr
 - **Take control**: Click **Take control** before typing into an agent's tab, and release control when done.
 - **Local servers**: T3 Code lists listening ports from your terminals and agents as `http://localhost:<port>` (set a script's **Preview URL** for HTTPS or subpaths). Disable discovery with `T3CODE_PORT_DISCOVERY=0`.
 
+Click a thread link to open that thread in the app without leaving the Browser page.
+
 ### Browser host setup
 
 The first server browser tab downloads ~120 MB headless Chromium (shared with [HTML renders](./html-renders.md)). On Ubuntu 23.10+ or minimal Linux containers, run the one-time setup command on the host:
@@ -93,8 +95,13 @@ Open a delegated task or thread link on a linked machine to follow it live (read
 Manage pairing links and active client sessions in **Settings → Sharing & access** or via `t3 auth --help`.
 
 - **Scoped tokens**: Pass `--scope <scope>` (repeatable) to `t3 pair`, `t3 auth pairing create`, or `t3 auth session issue` to restrict permissions (e.g. `orchestration:read`, `source-control:write`, `filesystem:read`, `filesystem:write`, `terminal:operate`, `relay:configure`). Re-pair with a fresh link to change an existing client's scopes.
-- **Deregister from T3 Connect**: Open your account menu → **T3 Connect → Deregister** (or `t3 connect unlink` / `t3 connect logout` on CLI hosts). Idle tunnels are automatically cleaned up after 5–10 minutes offline and recreated on reconnect (hosts on older versions offline for 7+ days need an update first).
+- **Deregister from T3 Connect**: Open **Settings → T3 Connect → Manage account** on web or desktop, or **Settings → T3 Connect** on mobile, and choose **Deregister** (or run `t3 connect unlink` / `t3 connect logout` on CLI hosts). Idle tunnels are automatically cleaned up after 5–10 minutes offline and recreated on reconnect (hosts on older versions offline for 7+ days need an update first).
 - Treat pairing URLs and codes as passwords—never paste them into logs or screenshots.
+
+Conversation readers can open individual files an assistant links in visible
+messages or proposed plans, including reports and images, without host-file
+browsing permission. This also covers linked files saved outside the project workspace.
+Opening other files or browsing their folders requires `filesystem:read`.
 
 ## Desktop app as a remote only
 

@@ -15,6 +15,7 @@ import type {
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
+  RunId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -70,6 +71,8 @@ export function makeSubagentChildThread(input: {
   const {
     delegatedFrom: _delegatedFrom,
     creatorThreadId: _creatorThreadId,
+    creatorOrigin: _creatorOrigin,
+    scheduledTaskOrigin: _scheduledTaskOrigin,
     creatorGrouping: _creatorGrouping,
     ...inherited
   } = input.parentThread;
@@ -87,7 +90,6 @@ export function makeSubagentChildThread(input: {
     providerInstanceId: input.providerInstanceId,
     modelSelection: input.modelSelection,
     activeProviderThreadId: input.activeProviderThreadId,
-    dashboardItems: [],
     actionResume: null,
     persistent: false,
     annotation: null,
@@ -343,6 +345,17 @@ function resultOfRun(
   readonly messageId: OrchestrationV2ConversationMessage["id"] | null;
   readonly turnItemId: OrchestrationV2TurnItem["id"] | null;
 } {
+  if (
+    (run.status === "interrupted" &&
+      run.actionObligations?.some((row) => row.state === "disposed")) ||
+    ((run.status === "interrupted" || run.status === "cancelled") &&
+      run.pullRequestWatchObligations?.some((row) => row.state === "disposed"))
+  )
+    return {
+      text: `Child task ended with status ${run.status}.`,
+      messageId: null,
+      turnItemId: null,
+    };
   const turnItem =
     projection.turnItems
       .filter(
@@ -439,24 +452,64 @@ export function delegatedTaskProgress(
       >
     >;
     readonly providerThreads: ReadonlyArray<
-      Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
+      Pick<
+        OrchestrationV2ThreadProjection["providerThreads"][number],
+        "pendingBackgroundTasks" | "owedBackgroundResults"
+      >
     >;
   },
-  options?: { readonly unsettled?: boolean },
+  options?: {
+    readonly unsettled?: boolean | undefined;
+    readonly ownedRunIds?: ReadonlySet<RunId> | undefined;
+  },
 ) {
   const terminal = (status: string) =>
     ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(status);
   const monitorRuns = monitorUpdateRunIds(
     projection.messages,
-    options?.unsettled === true
-      ? projection.runs.filter((run) => run.status === "queued")
-      : projection.runs,
+    projection.runs.filter((run) => {
+      if (options?.unsettled === true && run.status !== "queued") return false;
+      if (run.backgroundResultContinuation !== undefined) return false;
+      const watch = run.pullRequestWatchContinuation;
+      return (
+        watch === undefined ||
+        watch.messageId !== run.userMessageId ||
+        !projection.runs.some(
+          (source) =>
+            source.id === watch.owner.sourceRunId &&
+            source.pullRequestWatchObligations?.some(
+              (row) =>
+                row.generation === watch.generation && row.owner.taskId === watch.owner.taskId,
+            ),
+        )
+      );
+    }),
   );
   const workRuns = projection.runs.filter(
     (run) => !monitorRuns.has(run.id) && run.status !== "rolled_back",
   );
   const held = (run: OrchestrationV2Run) => run.status === "queued" && run.queueHeld === true;
-  const active = workRuns.some((run) => !terminal(run.status) && !held(run));
+  const actionContinuations = new Set(
+    workRuns.flatMap(
+      (run) =>
+        run.actionObligations?.flatMap((obligation) =>
+          obligation.state === "transferred" && obligation.continuationRunId !== undefined
+            ? [obligation.continuationRunId]
+            : [],
+        ) ?? [],
+    ),
+  );
+  const active = workRuns.some(
+    (run) =>
+      (!terminal(run.status) &&
+        (!held(run) ||
+          actionContinuations.has(run.id) ||
+          run.pullRequestWatchContinuation !== undefined)) ||
+      run.actionObligations?.some((row) => row.state === "waiting") === true ||
+      run.pullRequestWatchObligations?.some(
+        (row) => row.state === "active" || row.state === "terminal-pending",
+      ) === true,
+  );
   // Held wakes wait on nobody, but a held message the user wrote is the child's next work.
   const userRunIds = new Set(
     projection.messages.flatMap((message) =>
@@ -470,11 +523,44 @@ export function delegatedTaskProgress(
     projection.subagents.some(
       (task) => task.ownershipReleased !== true && subagentHoldsCompletion(task),
     ) ||
-    projection.providerThreads.some((thread) =>
-      backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []),
+    projection.providerThreads.some(
+      (thread) =>
+        backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) ||
+        thread.owedBackgroundResults?.some(
+          (owed) =>
+            workRuns.some(
+              (run) =>
+                run.id === owed.originRunId &&
+                !["cancelled", "interrupted", "failed", "rolled_back"].includes(run.status),
+            ) &&
+            !projection.runs.some(
+              (run) =>
+                run.backgroundResultContinuation !== undefined &&
+                run.backgroundResultContinuation.originRunId === owed.originRunId &&
+                run.backgroundResultContinuation.taskIds.includes(owed.taskId),
+            ),
+        ) === true,
     );
+  // Admitting a result run transfers the logical outcome, including an explicit
+  // queued cancellation. A late checkpoint on its origin cannot restore success.
+  const transferredOrigins = new Set(
+    workRuns.flatMap((run) =>
+      run.backgroundResultContinuation === undefined
+        ? []
+        : [run.backgroundResultContinuation.originRunId],
+    ),
+  );
   const resultRun = workRuns
-    .filter((run) => terminal(run.status) && (run.startedAt !== null || run.ordinal === 1))
+    .filter(
+      (run) =>
+        terminal(run.status) &&
+        !transferredOrigins.has(run.id) &&
+        (run.startedAt !== null ||
+          run.ordinal === 1 ||
+          options?.ownedRunIds?.has(run.id) === true ||
+          run.backgroundResultContinuation !== undefined ||
+          run.pullRequestWatchContinuation !== undefined),
+    )
     .toSorted((a, b) => (runRanAfter(a, b) ? -1 : runRanAfter(b, a) ? 1 : 0))[0];
   return {
     state:
@@ -487,6 +573,41 @@ export function delegatedTaskProgress(
     /** Working only because of a held message the user wrote, which a cancel does not wait for. */
     onlyAwaitsUserRun: awaitsUserRun && !active && resultRun !== undefined,
   };
+}
+
+export function delegatedTaskRoundProgress(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "runs" | "messages" | "subagents" | "providerThreads"
+  >,
+  taskId: NodeId,
+) {
+  const runs = projection.runs.filter((run) => run.delegatedTaskId === taskId);
+  const runIds = new Set(runs.map((run) => run.id));
+  // An unstarted round cannot own a shared provider thread's background work.
+  const providerThreadIds = new Set(
+    runs.filter((run) => run.startedAt !== null).map((run) => run.providerThreadId),
+  );
+  return delegatedTaskProgress(
+    {
+      runs,
+      messages: projection.messages.filter(
+        (message) => message.runId !== null && runIds.has(message.runId),
+      ),
+      subagents: projection.subagents.filter(
+        (task) => task.runId !== null && runIds.has(task.runId),
+      ),
+      providerThreads: projection.providerThreads
+        .filter((thread) => providerThreadIds.has(thread.id))
+        .map((thread) => ({
+          ...thread,
+          pendingBackgroundTasks: (thread.pendingBackgroundTasks ?? []).filter(
+            (task) => task.runId !== undefined && runIds.has(task.runId),
+          ),
+        })),
+    },
+    { ownedRunIds: runIds },
+  );
 }
 
 function writtenIds(

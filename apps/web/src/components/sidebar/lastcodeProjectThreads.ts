@@ -1,7 +1,11 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
-import { sortThreads } from "../../lib/threadSort";
+import {
+  resolveThreadActivityTimestamp,
+  sortThreads,
+  toSortableTimestamp,
+} from "@t3tools/client-runtime/state/thread-sort";
 import type { SidebarThreadSummary } from "../../types";
 import {
   resolveProjectStatusIndicator,
@@ -10,16 +14,25 @@ import {
 } from "../Sidebar.logic";
 import {
   lastcodeSidebarInheritedStatus,
+  lastcodeSidebarThreadKey,
   projectLastCodeSidebarFamilies,
 } from "../lastcodeSidebarFamilies.logic";
-import { getThreadSortTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 
 export function projectLastCodeProjectThreads(
   threads: readonly SidebarThreadSummary[],
   sortOrder: SidebarThreadSortOrder,
   options: Omit<Parameters<typeof projectLastCodeSidebarFamilies>[0], "threads">,
 ) {
-  const visibleThreads = sortThreads(threads.filter(threadShellIsVisible), sortOrder);
+  const hidden = options.ownership?.hiddenThreadKeys;
+  const visibleThreads = sortThreads(
+    threads.filter((thread) => {
+      if (!threadShellIsVisible(thread)) return false;
+      if (!hidden?.size) return true;
+      const key = lastcodeSidebarThreadKey(thread);
+      return key === options.activeThreadKey || !hidden.has(key);
+    }),
+    sortOrder,
+  );
   const familyProjection = projectLastCodeSidebarFamilies({
     ...options,
     threads: visibleThreads,
@@ -28,7 +41,12 @@ export function projectLastCodeProjectThreads(
   const inheritedStatusForThread = (thread: SidebarThreadSummary) =>
     lastcodeSidebarInheritedStatus(thread, statusForThread(thread));
   const latestTimestamp = visibleThreads.reduce(
-    (latest, thread) => Math.max(latest, getThreadSortTimestamp(thread, "updated_at")),
+    (latest, thread) =>
+      Math.max(
+        latest,
+        toSortableTimestamp(resolveThreadActivityTimestamp(thread) ?? undefined) ??
+          Number.NEGATIVE_INFINITY,
+      ),
     Number.NEGATIVE_INFINITY,
   );
   return {

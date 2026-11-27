@@ -54,6 +54,7 @@ import {
   ChevronRight,
   FileDiff,
   Files,
+  History,
   Globe2,
   MessagesSquare,
   Plus,
@@ -125,6 +126,8 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
 import { surfaceShortcutKey } from "~/lib/surfaceShortcutKey";
 import { SharedTooltipTrigger } from "~/components/ui/shared-tooltip";
+import { HandoffsMenu } from "./handoffs/HandoffsMenu";
+import { dashboardsMenuActions } from "./lastcodeDashboardsEntry";
 
 export interface RightPanelTabsHandle {
   closeSelectedTabs: () => boolean;
@@ -173,6 +176,10 @@ export interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddHandoffs?: (() => void) | undefined;
+  /** Absent in projects without a "Dashboards" Action. */
+  onAddDashboards?: (() => void) | undefined;
+  threadRef?: import("@t3tools/contracts").ScopedThreadRef | undefined;
   onAddDevice: () => void;
   /** Absent where side chats are not offered. */
   onAddSideChat?: (() => void) | undefined;
@@ -355,6 +362,10 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddHandoffs?: (() => void) | undefined;
+  /** Absent in projects without a "Dashboards" Action. */
+  onAddDashboards?: (() => void) | undefined;
+  threadRef?: import("@t3tools/contracts").ScopedThreadRef | undefined;
   onAddDevice: () => void;
   /** Absent where side chats are not offered. */
   onAddSideChat?: (() => void) | undefined;
@@ -381,6 +392,11 @@ function RightPanelEmptyState(props: {
       disabledReason: messages(SURFACE_UNAVAILABLE_HINTS.browser),
       onClick: props.onAddBrowser,
     },
+    ...dashboardsMenuActions(
+      props.onAddDashboards,
+      props.browserAvailable,
+      messages(SURFACE_UNAVAILABLE_HINTS.browser),
+    ),
     {
       label: msg("Terminal"),
       icon: TerminalSquare,
@@ -633,6 +649,8 @@ function surfaceTitle(
     case "issue":
       // A git host numbers its issues; a tracker with keys of its own, such as Linear, names them.
       return /^\d+$/.test(surface.key) ? `#${surface.key}` : surface.key;
+    case "handoffs":
+      return resolve(msg("Handoffs"));
     case "device":
       return surface.title ?? surface.target?.name ?? resolve(msg("Device"));
     case "thread":
@@ -737,6 +755,8 @@ function SurfaceIcon({
       return <SideChatTabIcon environmentId={environmentId} threadId={surface.threadId} />;
     case "linked-thread":
       return <MessagesSquare className="size-3 shrink-0" />;
+    case "handoffs":
+      return <History className="size-3 shrink-0" />;
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />
@@ -1276,6 +1296,11 @@ export function RightPanelTabs({ ref, ...props }: RightPanelTabsProps) {
       disabledReason: messages(SURFACE_DISABLED_REASONS.browser),
       onClick: props.onAddBrowser,
     },
+    ...dashboardsMenuActions(
+      props.onAddDashboards,
+      props.browserAvailable,
+      messages(SURFACE_DISABLED_REASONS.browser),
+    ),
     {
       label: msg("Terminal"),
       icon: TerminalSquare,
@@ -1701,6 +1726,7 @@ export function RightPanelTabs({ ref, ...props }: RightPanelTabsProps) {
                   align="start"
                   side="bottom"
                   sideOffset={6}
+                  className="max-h-96 overflow-y-auto"
                   onKeyDownCapture={handleAddSurfaceMenuKeyDown}
                 >
                   {addSurfaceActions.map((action) => {
@@ -1753,6 +1779,15 @@ export function RightPanelTabs({ ref, ...props }: RightPanelTabsProps) {
                       </SurfaceMenuItem>
                     );
                   })}
+                  {props.threadRef ? (
+                    <HandoffsMenu
+                      threadRef={props.threadRef}
+                      onShowAll={() => {
+                        setAddSurfaceMenuOpen(false);
+                        props.onAddHandoffs?.();
+                      }}
+                    />
+                  ) : null}
                 </MenuPopup>
               </Menu>
             ) : null}
@@ -1830,6 +1865,7 @@ export function RightPanelTabs({ ref, ...props }: RightPanelTabsProps) {
             onAddPullRequests={props.onAddPullRequests}
             onAddDevice={props.onAddDevice}
             onAddSideChat={props.onAddSideChat}
+            onAddDashboards={props.onAddDashboards}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}

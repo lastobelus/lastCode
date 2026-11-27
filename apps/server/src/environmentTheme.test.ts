@@ -396,11 +396,12 @@ describe("environment theme", () => {
             // The next listing succeeds, then the tree moves before its files are opened.
             moveAfterListing = Effect.orDie(fs.rename(active, previous));
             holdProbes = true;
+            assert.deepEqual(yield* service.current, []);
+            assert.deepEqual(yield* Queue.take(snapshots), []);
             yield* fs.writeFileString(
-              path.join(target, "nightfall.json"),
+              path.join(previous, "shared", "themes", "nightfall.json"),
               encodeThemeFile(NIGHTFALL_THEME),
             );
-            assert.deepEqual(yield* Queue.take(snapshots), []);
             yield* fs.rename(previous, active);
             yield* Deferred.succeed(resumeProbes, undefined);
             assert.deepEqual(yield* Queue.take(snapshots), ["Nightfall", "Shared Light"]);
@@ -476,6 +477,8 @@ describe("environment theme", () => {
               path.join(previous, "shared", "themes", "nightfall.json"),
               encodeThemeFile(NIGHTFALL_THEME),
             );
+            // Read during the gap even if the native watch misses the ancestor rename.
+            assert.deepEqual(yield* service.current, []);
             assert.deepEqual(yield* Queue.take(snapshots), []);
             yield* fs.rename(previous, active);
             yield* Deferred.succeed(resumeProbes, undefined);

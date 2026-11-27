@@ -25,7 +25,7 @@ import {
   remarkKeepLeadingWhitespace,
 } from "./markdownLeadingWhitespace.ts";
 import { remarkCodexDirectives } from "./codexMarkdownDirectives.ts";
-import { absoluteFilePathMatches } from "./markdownLinks.ts";
+import { absoluteFilePathMatches, parseMarkdownFileLink } from "./markdownLinks.ts";
 import { isWindowsAbsolutePath } from "./path.ts";
 import {
   CHAT_MARKDOWN_SANITIZE_SCHEMA,
@@ -603,6 +603,10 @@ function remarkPreserveCodeMeta() {
   };
 }
 
+/**
+ * Encode filename position colons before sanitization and tag inline code.
+ * Code inside links stays untagged to avoid nested anchors.
+ */
 function remarkNormalizeLinksAndTagInlineCode() {
   return (tree: MarkdownAstNode) => {
     const visit = (node: MarkdownAstNode, insideLink: boolean) => {
@@ -610,6 +614,11 @@ function remarkNormalizeLinksAndTagInlineCode() {
         const path = node.url.replace(/%5C/gi, "\\");
         if (/^[A-Za-z]:[\\/]/.test(path)) {
           node.url = `file:///${path.replaceAll("\\", "/")}`;
+        } else if (/^[^/\\?#]*:/.test(node.url)) {
+          const target = parseMarkdownFileLink(node.url);
+          if (target && !/[\\/]/.test(target.path)) {
+            node.url = node.url.replaceAll(":", "%3A");
+          }
         }
       }
       if (node.type === "inlineCode" && !insideLink) {

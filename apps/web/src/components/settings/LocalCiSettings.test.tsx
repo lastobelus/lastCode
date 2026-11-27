@@ -1,3 +1,5 @@
+import { createElement, type ReactNode } from "react";
+import { GTProvider, initializeGT } from "gt-react";
 import {
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
@@ -10,6 +12,12 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { LocalCiSettingsSection } from "./LocalCiSettings";
 import { SettingsPageContainer } from "./settingsLayout";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
+
+function renderWithI18n(node: ReactNode) {
+  return renderToStaticMarkup(
+    createElement(GTProvider, { locale: "en", translations: { en: {} }, children: node }),
+  );
+}
 
 function environment(id: string, supported = true, connected = true) {
   return {
@@ -37,6 +45,11 @@ const state = vi.hoisted(() => ({
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({ environments: state.environments }),
   usePrimaryEnvironmentId: () => state.environments[0]?.environmentId ?? null,
+  usePrimaryEnvironment: () => state.environments[0] ?? null,
+}));
+vi.mock("../../state/entities", () => ({
+  useServerConfigs: () =>
+    new Map(state.environments.map((entry) => [entry.environmentId, entry.serverConfig])),
 }));
 vi.mock("../../state/session", () => ({
   useEnvironmentScope: (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>
@@ -55,6 +68,8 @@ vi.mock("../../hooks/useSettings", () => ({
 vi.mock("@tanstack/react-router", () => ({
   useLocation: ({ select }: { select: (location: object) => unknown }) =>
     select({ pathname: "/settings/lastcode", hash: "", state: {} }),
+  useMatches: ({ select }: { select: (matches: readonly { pathname: string }[]) => unknown }) =>
+    select([{ pathname: "/settings" }, { pathname: "/settings/lastcode" }]),
   useNavigate: () => vi.fn(),
 }));
 vi.mock("./SettingsScopeSentence", () => ({
@@ -83,7 +98,7 @@ vi.mock("./useScopedSettings", () => ({
 }));
 
 function page() {
-  return renderToStaticMarkup(
+  return renderWithI18n(
     <SettingsPageContainer>
       <LocalCiSettingsSection />
     </SettingsPageContainer>,
@@ -91,6 +106,7 @@ function page() {
 }
 
 beforeEach(() => {
+  initializeGT({ defaultLocale: "en" });
   state.kind = "all";
   state.environments = [environment("managed-server")];
   state.selected = state.environments;
@@ -151,7 +167,7 @@ describe("Local CI settings scope", () => {
   });
 
   it("retains the full-page scope selector for standalone recovery notices", () => {
-    const markup = renderToStaticMarkup(
+    const markup = renderWithI18n(
       <SettingsScopeNotice target="environment">Choose an environment.</SettingsScopeNotice>,
     );
     expect(markup.match(/Applying settings for/g)).toHaveLength(1);

@@ -363,7 +363,10 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   if (!trimmed) return true;
   const windows = isWindowsAbsolutePath(target.path);
   const normalizePath = (path: string) => {
-    const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/([^/:])\/+$/, "$1");
+    const normalized = path
+      .replaceAll("\\", "/")
+      .replace(/^\.\//, "")
+      .replace(/([^/:])\/+$/, "$1");
     return windows ? normalized.toLowerCase() : normalized;
   };
   const targetPath = normalizePath(target.path);

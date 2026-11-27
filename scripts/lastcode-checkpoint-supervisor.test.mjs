@@ -12,6 +12,8 @@ import {
 import {
   boundedCommandDiagnostic,
   checkpointEnvironment,
+  checkpointSchedulerPid,
+  CommandFailure,
   checkpointFailureMessage,
   checkpointIncidentFingerprint,
   changedGitlinks,
@@ -30,6 +32,7 @@ import {
   writeIncidentRecord,
 } from "./lastcode-checkpoint-supervisor.mjs";
 import { refreshPrimaryCheckoutTransaction } from "./lastcode-primary-checkout-transaction.mjs";
+import { waitForCheckpoint } from "./lastcode-wait-for-checkpoint.ts";
 
 function fixture(overrides = {}) {
   const activities = [];
@@ -38,6 +41,7 @@ function fixture(overrides = {}) {
   let state = overrides.state ?? null;
   let now = 0;
   const dependencies = {
+    collectEpisode: vi.fn(),
     latestFailedCheckpointRun: () => ({
       status: "failed",
       upstreamTag: "v0.0.35-nightly.20260826.1195",
@@ -365,12 +369,51 @@ describe("LastCode interval checkpoint requests", () => {
 });
 
 describe("LastCode checkpoint supervisor", () => {
+  it("only accepts the actual scheduler parent identity", () => {
+    expect(checkpointSchedulerPid({}, 42)).toBeUndefined();
+    expect(checkpointSchedulerPid({ LASTCODE_CHECKPOINT_SCHEDULER_PID: "42" }, 42)).toBe(42);
+    for (const value of ["", "0", "-1", "42.5", "042", "43", "bad"]) {
+      expect(() =>
+        checkpointSchedulerPid({ LASTCODE_CHECKPOINT_SCHEDULER_PID: value }, 42),
+      ).toThrow("parent process");
+    }
+  });
+
+  it("records daily scheduler identity on success and failure", () => {
+    for (const failing of [false, true]) {
+      const test = fixture({
+        dependencies: {
+          runPhase: vi.fn(() => {
+            if (failing) throw new Error("failed");
+          }),
+        },
+      });
+      const run = () =>
+        runCheckpointSupervisor(
+          {
+            environment: {
+              LASTCODE_CHECKPOINT_SCHEDULER_PID: String(process.ppid),
+            },
+          },
+          test.dependencies,
+        );
+      if (failing) expect(run).toThrow("failed");
+      else run();
+      expect(test.state).toMatchObject({
+        supervisorPid: process.pid,
+        launchdPid: process.ppid,
+        status: failing ? "failed" : "success",
+      });
+    }
+  });
+
   it("runs the complete checkpoint pipeline and records terminal success", () => {
     const test = fixture();
 
     expect(runCheckpointSupervisor({}, test.dependencies)).toMatchObject({
       status: "success",
       supervisorPid: process.pid,
+      launchdPid: process.pid,
       phase: "complete",
     });
     expect(test.dependencies.runPhase.mock.calls.map(([phase]) => phase)).toEqual([
@@ -382,11 +425,57 @@ describe("LastCode checkpoint supervisor", () => {
     expect(test.dependencies.runPhase.mock.calls.at(-1)?.[2]).toContain(
       "--supersede-failed-recovery",
     );
+    expect(test.dependencies.runPhase.mock.calls.at(-1)?.[2]).toContain("--promote");
+    expect(test.dependencies.runPhase.mock.calls.at(-1)?.[2]).not.toContain(
+      "--promote-if-no-open-prs",
+    );
     expect(test.dependencies.refreshSupervisor).toHaveBeenCalledOnce();
     expect(test.dependencies.refreshPrimaryCheckout).toHaveBeenCalledOnce();
     expect(test.dependencies.reconcileProjectActions).toHaveBeenCalledWith(undefined, []);
     expect(test.messages).toEqual([]);
     expect(test.states.at(-1)).toMatchObject({ status: "success", phase: "complete" });
+  });
+
+  it("only resolves post-publish recovery and the waiter after a successful retry", async () => {
+    let shouldFail = true;
+    const runPhase = vi.fn((phase) => {
+      if (phase !== "checkpoint") return;
+      expect(test.state?.status).toBe(shouldFail ? undefined : "failed");
+      expect(test.messages.some(({ message }) => message.includes("resolved alert"))).toBe(false);
+      if (shouldFail) throw new CommandFailure(phase, "node", 75, "post-publish command failed");
+    });
+    const test = fixture({ dependencies: { runPhase, latestFailedCheckpointRun: () => null } });
+    for (const runs of [1, 2]) {
+      let serviceRunning = true;
+      const nextObservation = Promise.withResolvers();
+      const wait = waitForCheckpoint({
+        daemonStatus: () =>
+          serviceRunning ? { state: "running", pid: process.pid, runs } : { state: "idle", runs },
+        readState: () => test.state,
+        readProcesses: () => [],
+        now: () => 0,
+        sleep: () => nextObservation.promise,
+      });
+      let waiterCompleted = false;
+      void wait.then(() => {
+        waiterCompleted = true;
+      });
+      const run = () => runCheckpointSupervisor({}, test.dependencies);
+      if (shouldFail) expect(run).toThrow("exit code 75");
+      else run();
+      const status = shouldFail ? "failed" : "success";
+      const phase = shouldFail ? "post-publish" : "complete";
+      expect(test.state).toMatchObject({ status, phase });
+      expect(waiterCompleted).toBe(false);
+      serviceRunning = false;
+      nextObservation.resolve();
+      await expect(wait).resolves.toMatchObject({ status, phase });
+      shouldFail = false;
+    }
+    expect(test.messages.map(({ message }) => message)).toEqual([
+      expect.stringContaining("failed during post-publish"),
+      expect.stringContaining("resolved alert"),
+    ]);
   });
 
   it("keeps running when the activity journal cannot be written", () => {
@@ -2104,7 +2193,7 @@ describe("LastCode checkpoint supervisor", () => {
     // A new watch ignores comments posted before it starts, so the gate check must follow it.
     expect(message).toContain("call watch_pull_request");
     expect(message.indexOf("call watch_pull_request")).toBeLessThan(
-      message.indexOf("run pnpm lastcode:pr-gates"),
+      message.indexOf("run pnpm --config.verify-deps-before-run=false lastcode:pr-gates"),
     );
   });
 
@@ -2323,4 +2412,20 @@ describe("LastCode checkpoint supervisor", () => {
 
     NodeFS.rmSync(directory, { recursive: true });
   });
+});
+
+it("keeps a successful checkpoint successful when episode collection fails", () => {
+  const test = fixture({
+    dependencies: {
+      collectEpisode: () => {
+        throw new Error("unavailable");
+      },
+    },
+  });
+  expect(
+    runCheckpointSupervisor(
+      { home: "/fixture", repoRoot: "/repo", environment: {} },
+      test.dependencies,
+    ).status,
+  ).toBe("success");
 });

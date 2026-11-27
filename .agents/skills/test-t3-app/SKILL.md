@@ -101,7 +101,7 @@ selects the backend, not the browser-facing web listener. If a port is taken
 between resolution and launch, resolve a free pair again.
 
 For an authenticated T3 dev handoff, configure the reusable dev credential
-using `docs/operations/development.md#reusable-dev-credential`. Reuse an existing
+using `docs/operations/00_development.md#reusable-dev-credential`. Reuse an existing
 configured value; otherwise generate one value once for this isolated setup and
 retain it as `T3CODE_DEV_AUTH_TOKEN` in the managed launch's environment. Supply
 `browserAuth: "t3-dev"` to `preview_host`. The app then renews browser access when
@@ -201,6 +201,19 @@ end; explicit stop or thread deletion cancels its future reopening.
 When sharing is requested, start with `vp run dev --share` and give the user
 a fresh complete pairing URL that you have not consumed. Keep other credentials
 out of screenshots, commits, and replies.
+
+Before giving the user a credential-free link or a `t3-dev` handoff, open that
+exact link in a background tab on the browser host the user will open it from
+(`browserHost: "desktop"` when the tool advertises the selector) and confirm
+with `preview_snapshot` that the app's UI has fully rendered, not a pairing,
+error, or blank page. For a one-time pairing URL, open only its published
+origin and confirm reachability; a rendered pairing page passes that check
+without consuming the user's token. Checks in an
+`"environment"` tab or on a loopback URL prove the app works, not that the user
+can reach it. When the user's desktop is on another machine, the link is the
+shared recipe's published HTTPS origin, still launched through `preview_host`
+with the isolated home and the configured dev credential. This check is routine
+background QA; run it without asking the user.
 
 When manual QA is requested, prepare the scenario and a clean integrated-browser
 link without asking the user to begin a QA window. Leave the result ready even

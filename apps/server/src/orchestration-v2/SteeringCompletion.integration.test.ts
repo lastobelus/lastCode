@@ -1569,9 +1569,7 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         commandId: CommandId.make("archive:late-steer-sender"),
         threadId: senderThreadId,
       });
-      assert.isNotNull(
-        (yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt,
-      );
+      assert.isNotNull((yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt);
       const accepted = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
         (message) => message.id === MessageId.make("message:steer"),
       )!;
@@ -1615,17 +1613,21 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
       }
       // The turn ends before the worker delivers the steer, so the steer
       // becomes a follow-up turn.
-      const settled = yield* orchestrator.streamDomainEvents.pipe(
-        Stream.filter(
-          (event) =>
-            event.type === "run.updated" &&
-            event.payload.id === first.runId &&
-            event.payload.status === "waiting",
-        ),
-        Stream.take(1),
-        Stream.runDrain,
-        Effect.forkScoped,
-      );
+      const eventSink = yield* EventSink.EventSinkV2;
+      const afterSequence = yield* eventSink.latestSequence();
+      const settled = yield* eventSink
+        .stream({ afterSequence, threadId, eventType: "run.updated" })
+        .pipe(
+          Stream.filter(
+            ({ event }) =>
+              event.type === "run.updated" &&
+              event.payload.id === first.runId &&
+              event.payload.status === "completed",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
       const turn = (yield* orchestrator.getThreadProjection(threadId)).providerTurns[0]!;
       yield* Queue.offer(events, {
         type: "provider_turn.updated",
@@ -1984,9 +1986,12 @@ it.effect("queues a delegated completion wake whose steer the provider declined"
       const effects = yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(
         CommandId.make("wake"),
       );
-      assert.deepEqual(
+      assert.sameDeepMembers(
         effects.map((effect) => [effect.request.type, effect.status]),
-        [["provider-turn.steer", "succeeded"]],
+        [
+          ["provider-turn.steer", "succeeded"],
+          ["incoming-message.summarize", "succeeded"],
+        ],
         "the declined steer's queue fallback was rejected",
       );
       const pending = yield* orchestrator.getThreadProjection(threadId);
@@ -2332,6 +2337,21 @@ it.effect("delivers agent messages queued behind /compact before a later one ste
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       const threadId = yield* startFirstTurn;
+      const senderThreadId = ThreadId.make("thread:orchestrator");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:orchestrator"),
+        threadId: senderThreadId,
+        projectId: ProjectId.make("project:agent-order-after-compact"),
+        title: "Orchestrator",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
       const nextRunning = Effect.fn("nextRunning")(function* () {
         return yield* orchestrator.streamDomainEvents.pipe(
           Stream.filter(
@@ -2414,7 +2434,7 @@ it.effect("delivers agent messages queued behind /compact before a later one ste
             deliveryIntent: "auto",
             createdBy: "agent",
             creationSource: "mcp",
-            senderThreadId: ThreadId.make("thread:orchestrator"),
+            senderThreadId,
           });
           yield* worker.drain();
         });
@@ -2455,6 +2475,24 @@ it.effect("an agent's automatic send steers past another sender's queued message
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       const threadId = yield* startFirstTurn;
+      const firstSenderId = ThreadId.make("thread:sender-a");
+      const urgentSenderId = ThreadId.make("thread:sender-c");
+      for (const senderThreadId of [firstSenderId, urgentSenderId]) {
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create:${senderThreadId}`),
+          threadId: senderThreadId,
+          projectId: ProjectId.make("project:agent-steer-past-other-sender"),
+          title: "Sender",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+      }
       const active = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
         (run) => run.status === "running",
       )!;
@@ -2468,7 +2506,7 @@ it.effect("an agent's automatic send steers past another sender's queued message
         dispatchMode: { type: "queue_after_active" },
         createdBy: "agent",
         creationSource: "mcp",
-        senderThreadId: ThreadId.make("thread:sender-a"),
+        senderThreadId: firstSenderId,
       });
       yield* worker.drain();
       yield* orchestrator.dispatch({
@@ -2482,7 +2520,7 @@ it.effect("an agent's automatic send steers past another sender's queued message
         deliveryIntent: "auto",
         createdBy: "agent",
         creationSource: "mcp",
-        senderThreadId: ThreadId.make("thread:sender-c"),
+        senderThreadId: urgentSenderId,
       });
       yield* worker.drain();
 
@@ -3896,7 +3934,7 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
         runId: started[0]!.runId,
         holdQueue: true,
       });
-      // The provider has not stopped yet, so a plain send still resolves to a steer.
+      // Stop has not reached the provider yet; plain send must queue instead of steering.
       yield* send("sent", "auto");
       // Once the stop settles, the run-update reactor promotes the queue on
       // its own fiber, so read the queue while the provider is still stopping.
@@ -4755,9 +4793,25 @@ it.effect("an agent's auto send steers past its own explicitly queued message", 
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       const manager = yield* ThreadManagementService.ThreadManagementService;
       const threadId = yield* startFirstTurn;
+      const projectId = ProjectId.make(`project:${name}`);
+      const senderThreadId = ThreadId.make("thread:sender");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`create:${senderThreadId}`),
+        threadId: senderThreadId,
+        projectId,
+        title: "Sender",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
       const send = (text: string, mode: "auto" | "queue") =>
         manager.sendToThread({
-          projectId: ProjectId.make(`project:${name}`),
+          projectId,
           threadId,
           commandId: CommandId.make(text),
           messageId: MessageId.make(text),
@@ -4766,7 +4820,7 @@ it.effect("an agent's auto send steers past its own explicitly queued message", 
           mode,
           createdBy: "agent",
           creationSource: "mcp",
-          senderThreadId: ThreadId.make("thread:sender"),
+          senderThreadId,
         });
       const later = yield* send("later", "queue");
       const now = yield* send("now", "auto");

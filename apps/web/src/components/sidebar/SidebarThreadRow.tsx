@@ -1,6 +1,11 @@
+import { isThreadAnnotationRevealUnseen } from "@t3tools/shared/threadAnnotation";
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
-import { ThreadHoverCardTrigger } from "../ThreadHoverCard";
+import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
+import {
+  usePreviewProcessControlsSupported,
+  useThreadPreviewLeases,
+} from "../../state/previewHosting";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { contextMenuSourceOf } from "../../contextMenuSource";
@@ -155,6 +160,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { terminalEnvironment } from "../../state/terminal";
 import { useTerminalUiStateStore } from "../../terminalUiStateStore";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { SidebarThreadHover } from "./SidebarThreadHover";
 import { useThreadIntentPrefetch } from "./useThreadIntentPrefetch";
 
 // The fields thread rows show. Provider status pushes refresh `checkedAt`,
@@ -529,6 +535,7 @@ type SidebarThreadRowProps = {
     threadRef: ScopedThreadRef,
     position: { x: number; y: number },
     source: ContextMenuSource,
+    hasStoppableProcesses: boolean,
   ) => void;
   onSettle: (threadRef: ScopedThreadRef) => void;
   onActionSweepStart: (
@@ -653,6 +660,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds, messages);
   const terminalProcessCount = runningTerminalIds.length;
+  const previews = useThreadPreviewLeases(threadRef);
+  const supportsProcessControls = usePreviewProcessControlsSupported(thread.environmentId);
+  const hasStoppableProcesses =
+    supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   const hasUnsentDraft = useThreadHasUnsentDraft(threadRef) && !props.isRouteThread;
   const handleDiscardDraftClick = (event: ReactMouseEvent) => {
     event.preventDefault();
@@ -716,8 +727,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
     : null;
 
-  const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
+  const isRevealUnread = isThreadAnnotationRevealUnseen(thread.annotation, lastVisitedAt);
+  const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt }) || isRevealUnread;
   const status = resolveSidebarRowStatus({ ...thread, lastVisitedAt });
+  const archiveStatus = presentThreadArchive(thread, messages);
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
   const wokeAtDate = props.wokeAt === null ? null : parseTimestampDate(props.wokeAt);
   const isWoke =
@@ -732,20 +745,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isSelected,
   });
   const topStatus = (() => {
-    if (
-      status === "archiving" ||
-      status === "archive-failed" ||
-      status === "not-responding" ||
-      status === "needs-repair"
-    ) {
-      const presentation = resolveThreadStatusPill({ thread });
-      if (presentation)
-        return {
-          label: messages(presentation.label),
-          icon: status === "archiving" ? ("cleanup" as const) : ("failed" as const),
-          className: presentation.colorClass,
-        };
-    }
+    if (archiveStatus)
+      return {
+        label: archiveStatus.label,
+        icon:
+          archiveStatus.status === "archive-failed" ? ("failed" as const) : ("waiting" as const),
+        className:
+          archiveStatus.status === "archive-failed" ? "text-warning" : "text-muted-foreground",
+      };
     if (status === "cleanup-deleting" || status === "cleanup-queued")
       return {
         label: status === "cleanup-queued" ? gt("Deleting (Queued)") : gt("Deleting"),
@@ -757,6 +764,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         label: gt("Cleanup failed"),
         icon: "failed" as const,
         className: "text-error-foreground",
+      };
+    if (status === "not-responding" || status === "needs-repair")
+      return {
+        label: status === "needs-repair" ? gt("Needs repair") : gt("Not responding"),
+        icon: "failed" as const,
+        className: "text-warning-foreground",
       };
     if (status === "approval")
       return {
@@ -819,13 +832,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       };
     return isUnread
       ? {
-          label: gt("Done", { $context: "thread status" }),
+          label: isRevealUnread ? gt("Unread") : gt("Done", { $context: "thread status" }),
           icon: "done" as const,
           className: "text-success-foreground",
         }
       : null;
   })();
   const actionIsPrimary =
+    archiveStatus === null &&
     actionPresentation !== null &&
     (status === "working" || status === "waiting") &&
     (thread.runtime === null ||
@@ -836,7 +850,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     !thread.hasPendingUserInput &&
     (thread.pendingGuestMessageCount ?? 0) === 0 &&
     !thread.pendingSubagentRequest &&
-    thread.attention?.kind !== "question" &&
     thread.pendingBackgroundTasks.length === 0 &&
     cleanup === null;
   const isWokeStatus = topStatus?.icon === "woke";
@@ -872,10 +885,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         null)
       : null;
 
+  const handlePrClick = (event: ReactMouseEvent<HTMLElement>, targetUrl?: string) => {
+    const url = targetUrl ?? pr?.url ?? currentLinkedPr?.url;
+    if (!url) return;
+    const showInRightPanel = targetUrl !== undefined || readOpensPullRequestsInRightPanel();
+    const openedInRightPanel = openPrLink(event, url, showInRightPanel ? threadRef : undefined);
+    if (openedInRightPanel && showInRightPanel && !props.isRouteThread) {
+      onThreadActivate(threadRef);
+    }
+  };
+
   const detailsTooltip = (
     <SidebarThreadHoverContent
       thread={checkoutThread}
-      threadStatus={resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } })}
+      threadStatus={resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } }, messages)}
       projectTitle={props.project?.title ?? null}
       projectCwd={props.project?.workspaceRoot ?? null}
       projectFaviconPath={props.project?.faviconPath ?? null}
@@ -892,6 +915,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       terminalStatus={terminalStatus}
       terminalProcessCount={terminalProcessCount}
       cleanupBlockerTitle={cleanupBlockerTitle}
+      onOpenPullRequest={(event, url) => handlePrClick(event, url)}
     />
   );
 
@@ -917,7 +941,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const handleContextMenu = (event: ReactMouseEvent) => {
     event.preventDefault();
     if (cleanup !== null) return;
-    onContextMenu(threadRef, { x: event.clientX, y: event.clientY }, contextMenuSourceOf(event));
+    onContextMenu(
+      threadRef,
+      { x: event.clientX, y: event.clientY },
+      contextMenuSourceOf(event),
+      hasStoppableProcesses,
+    );
   };
   const handleKeyDown = (event: ReactKeyboardEvent) => {
     if (event.target !== event.currentTarget) return;
@@ -1020,28 +1049,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   if (snoozeGateOpened && snoozeGateOpensAt !== null) {
     setSnoozeGateClock({ thread, now: new Date(snoozeGateOpensAt).toISOString() });
   }
-  const showSnoozeButton =
-    canTriageThread &&
-    cleanup === null &&
-    props.snoozeSupported &&
-    canSnooze(thread, { now: snoozeGateNow });
-  const showSettleButton = canTriageThread && cleanup === null && props.settlementSupported;
-  const showWakeButton = canTriageThread && cleanup === null && props.snoozeSupported;
-  const showHoverActions = showSettleButton || showSnoozeButton || hasUnsentDraft;
+  const canTriageRow = canTriageThread && cleanup === null && archiveStatus === null;
+  const showWakeButton = canTriageRow && props.snoozeSupported;
+  const showSnoozeButton = showWakeButton && canSnooze(thread, { now: snoozeGateNow });
+  const showSettleButton = canTriageRow && props.settlementSupported;
+  const showHoverActions =
+    archiveStatus === null && (showSettleButton || showSnoozeButton || hasUnsentDraft);
   // Closing here, not just masking, keeps the menu from reopening when the button returns.
   if (snoozeMenuOpenRaw && !showSnoozeButton) setSnoozeMenuOpen(false);
   const snoozeMenuOpen = snoozeMenuOpenRaw && showSnoozeButton;
   const jumpHintLabel = snoozeMenuOpen ? null : props.jumpLabel;
-  const handlePrClick = (event: ReactMouseEvent<HTMLElement>, targetUrl?: string) => {
-    const url = targetUrl ?? pr?.url ?? currentLinkedPr?.url;
-    if (!url) return;
-    const showInRightPanel = targetUrl !== undefined || readOpensPullRequestsInRightPanel();
-    const openedInRightPanel = openPrLink(event, url, showInRightPanel ? threadRef : undefined);
-    if (openedInRightPanel && showInRightPanel && !props.isRouteThread) {
-      onThreadActivate(threadRef);
-    }
-  };
-
   const rowSurfaceClassName = cn(
     "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
     variantAction === "unsettle" &&
@@ -1099,7 +1116,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
-    statusLabel: pendingSync ? gt("Pending") : (topStatus?.label ?? null),
+    statusLabel: archiveStatus
+      ? `${archiveStatus.label}. ${archiveStatus.description}`
+      : pendingSync
+        ? gt("Pending")
+        : (topStatus?.label ?? null),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
@@ -1293,7 +1314,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const providerBadge = props.providerBadgePreferences;
   const environmentIcon =
     providerBadge.enabled ||
-    (thread.lineage.relationshipToParent !== "subagent" &&
+    ((thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true) &&
       showV2ThreadCardEnvironmentIcon(isPrimaryEnvironment, props.showLocalEnvironmentIcon)) ? (
       <SidebarEnvironmentIcon
         aria-hidden
@@ -1376,9 +1397,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           sortable?.isDragging && "relative z-20",
         )}
       >
-        <ThreadHoverCardTrigger
-          card={detailsTooltip}
+        <SidebarThreadHover
           disabled={isRenaming || sortable?.isDragging}
+          content={detailsTooltip}
           render={
             <div
               ref={rowRef}
@@ -1474,7 +1495,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       "group-any-hover/sidebar-row:opacity-0",
                   )}
                 >
-                  {pendingSync ? (
+                  {archiveStatus ? (
+                    <SharedTooltipTrigger
+                      render={
+                        <span role="status" className={cn("text-xs", topStatus?.className)} />
+                      }
+                      label={archiveStatus.description}
+                    >
+                      {archiveStatus.label}
+                    </SharedTooltipTrigger>
+                  ) : pendingSync ? (
                     <span className="text-xs">
                       <PendingSyncLabel />
                     </span>
@@ -1596,7 +1626,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {props.sweepAction !== null ? dragDestination : null}
           </div>
           {multiline ? metaLine : null}
-        </ThreadHoverCardTrigger>
+        </SidebarThreadHover>
         <WorktreeCleanupFailureDialog
           thread={thread}
           open={cleanupFailureOpen}
@@ -1619,9 +1649,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         sortable?.isDragging && "relative z-20",
       )}
     >
-      <ThreadHoverCardTrigger
-        card={detailsTooltip}
+      <SidebarThreadHover
         disabled={isRenaming || snoozeMenuOpen || sortable?.isDragging}
+        content={detailsTooltip}
         render={
           <div
             ref={rowRef}
@@ -1687,19 +1717,38 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     snoozeMenuOpen && "pointer-events-none absolute right-0 opacity-0",
                   )}
                 >
-                  {pendingSync ? (
+                  {pendingSync && archiveStatus === null ? (
                     <PendingSyncLabel />
                   ) : topStatus ? (
-                    actionIsPrimary && actionResume !== null && actionPresentation !== null ? (
+                    archiveStatus ? (
+                      <SharedTooltipTrigger
+                        render={
+                          <span
+                            role="status"
+                            className={cn("inline-flex font-medium", topStatus.className)}
+                          />
+                        }
+                        label={archiveStatus.description}
+                      >
+                        {archiveStatus.label}
+                      </SharedTooltipTrigger>
+                    ) : actionIsPrimary && actionResume !== null && actionPresentation !== null ? (
                       <Popover>
                         <PopoverTrigger
                           render={
                             <button
                               type="button"
-                              aria-label={`${actionPresentation.label} on Action: ${actionResume.actionName}. ${actionPresentation.summary}`}
+                              aria-label={gt(
+                                "{state, select, working {Working on Action:} other {Waiting on Action:}} {actionName}. {summary}",
+                                {
+                                  state: actionPresentation.state,
+                                  actionName: actionResume.actionName,
+                                  summary: actionPresentation.summary,
+                                },
+                              )}
                               onClick={(event) => event.stopPropagation()}
                               className={cn(
-                                "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring",
+                                "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                                 topStatus.className,
                               )}
                             />
@@ -1730,14 +1779,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                             <div className="flex justify-end gap-2">
                               <Button size="sm" variant="outline" onClick={openActionTerminal}>
                                 <TerminalIcon className="size-3.5" />
-                                Open Terminal
+                                <T>Open Terminal</T>
                               </Button>
                               <Button
                                 size="sm"
                                 variant="destructive-outline"
                                 onClick={cancelAction}
                               >
-                                Cancel Action
+                                <T>Cancel Action</T>
                               </Button>
                             </div>
                           </div>
@@ -1778,7 +1827,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           <SharedTooltipTrigger
                             render={
                               <span
-                                aria-label={`Waiting for ${actionResume.actionName}. ${actionPresentation.summary}`}
+                                aria-label={gt("Waiting for {actionName}. {summary}", {
+                                  actionName: actionResume.actionName,
+                                  summary: actionPresentation.summary,
+                                })}
                                 className="inline-flex shrink-0 items-center text-warning-foreground"
                               />
                             }
@@ -1897,7 +1949,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           </div>
           {metaLine}
         </div>
-      </ThreadHoverCardTrigger>
+      </SidebarThreadHover>
       <WorktreeCleanupFailureDialog
         thread={thread}
         open={cleanupFailureOpen}
@@ -1944,6 +1996,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
     threadRef: ScopedThreadRef,
     position: { x: number; y: number },
     source: ContextMenuSource,
+    hasStoppableProcesses: boolean,
   ) => void;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
 }) {
@@ -1957,6 +2010,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
     isActive: props.isRouteActive,
   });
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+  const openPrLink = useOpenPrLink();
   // Results only drag out as chat context; the row keeps its own listbox attributes.
   const { listeners: dragListeners, setNodeRef: setDragNodeRef } = useDraggable({
     id: scopedThreadKey(threadRef),
@@ -2014,6 +2068,10 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
     threadId: thread.id,
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds, messages);
+  const supportsProcessControls = usePreviewProcessControlsSupported(thread.environmentId);
+  const previews = useThreadPreviewLeases(supportsProcessControls ? threadRef : null);
+  const hasStoppableProcesses =
+    supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const onFileDropThreads = props.onFileDropThreads;
   const fileDropHandlers = makeWorkspaceFileDropHandlers({
@@ -2030,8 +2088,10 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
       className="list-none"
       {...fileDropHandlers}
     >
-      <ThreadHoverCardTrigger
-        card={
+      <SidebarThreadHover
+        id={props.resultId}
+        nativeButton
+        content={
           <SidebarThreadHoverContent
             thread={checkoutThread}
             projectTitle={props.project?.title ?? null}
@@ -2049,6 +2109,9 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
             branchMismatch={branchMismatch}
             terminalStatus={terminalStatus}
             terminalProcessCount={runningTerminalIds.length}
+            onOpenPullRequest={(event, url) => {
+              if (openPrLink(event, url, threadRef) && !props.isRouteActive) props.onSelect();
+            }}
           />
         }
         render={
@@ -2078,6 +2141,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
                 threadRef,
                 { x: event.clientX, y: event.clientY },
                 contextMenuSourceOf(event),
+                hasStoppableProcesses,
               );
             }}
             className={cn(
@@ -2158,7 +2222,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
             />
           ) : null}
         </span>
-      </ThreadHoverCardTrigger>
+      </SidebarThreadHover>
     </li>
   );
 });

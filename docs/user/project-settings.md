@@ -51,7 +51,63 @@ Configure worktrees in **Settings → Worktrees** (environment default or projec
 
 ### Storage cleanup
 
-Enable automatic cleanup in **Settings → Worktrees → Cleanup** (off by default; runs on startup, on change, and hourly). Projects can set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
+Open **Settings → Worktrees → Cleanup** to enable automatic cleanup on one machine or all connected
+environments. Rules start off. The server runs enabled rules on a schedule and after relevant
+policy or worktree changes. Offline machines keep their existing policies.
+
+Use **Settings → Maintenance → Automatic cleanup** to set the minutes between scheduled runs.
+The default is a full sweep every 60 minutes. Turn on **Alternate what gets cleaned** to run
+dependency and build cleanup on one scheduled run and the rest on the next. On macOS,
+**Wait for Time Machine** delays automatic cleanup while a backup is running or macOS cannot
+report its status. LastCode checks again every five minutes. **Delete now** runs a full sweep
+when you ask for it.
+
+#### Suspend worktrees
+
+Use **Suspend inactive worktrees** to save local work and put away a checkout without archiving
+its conversation. Choose a delay and which threads may suspend: subagents, untouched
+agent-created children, or other threads. These choices start Off. A separate child checkout
+can suspend while its parent remains open; a shared checkout stays until every owner qualifies.
+The delay starts from settlement or the last workspace use or restore, whichever is later. An
+archived thread that never settled counts from its archive time instead of settlement.
+Automatic suspension closes the eligible owners' previews before saving the workspace.
+If another process is still using the checkout, or its safety cannot be verified, the checkout stays in place.
+Project **Off** pauses automatic suspension as well as cleanup.
+
+You can also choose **Suspend worktree** from a thread's menu. Staged changes, unstaged changes
+and supported local files, including ignored notes, are saved before the checkout is removed.
+Active work and unsupported or oversized workspaces are kept. Suspension does not change any
+existing permanent deletion rule; those rules remain under **Permanent deletion**.
+
+Continuing work restores the current saved copy first. Manual **Restore worktree** also enables
+**Keep workspace**, which protects it from automatic suspension, dependency/build cleanup and
+permanent worktree cleanup. Release that hold separately when you are ready for the configured
+rules to apply again. Releasing a hold does not restart an already elapsed cleanup delay.
+
+Open **Saved workspaces** on this page to restore or deliberately discard saved copies.
+Archive keeps them; **Archive and discard saved workspace** combines both choices. Thread and
+project deletion let you discard saved data or keep it for recovery. Discarding a current copy
+does not require restoring it first, and permanently loses its saved uncommitted work and notes.
+Git branches and ordinary checkpoints remain. After discarding, use **Create fresh worktree**
+to continue from Git rather than recover the discarded changes.
+For a discarded scratch copy, **Create fresh worktree** creates an empty scratch folder.
+Copies kept after deleting their threads remain in Saved workspaces; an environment administrator
+can release their hold and discard them there.
+
+Saved workspaces have no automatic expiry. They are local recovery, not a backup: restoration
+of a saved scratch workspace needs only this environment's saved data. A saved Git worktree
+also needs the repository's Git data.
+
+On Linux, suspension needs `getfattr`, `getfacl`, and `lsattr` to check file metadata before
+removing a checkout. Install your distribution's `attr`, `acl`, and `e2fsprogs` packages if
+these commands are missing. The checkout is kept when its metadata cannot be verified.
+
+#### Permanent deletion and generated files
+
+Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
+Inherit follows each machine's rules; Off disables automatic worktree deletion and dependency
+removal for that project. Custom applies separate worktree rules to the selected project or checkout.
+Browser captures and log retention remain machine-wide.
 
 When **Delete inactive worktrees** is enabled, clean archived checkouts are eligible
 immediately. Unarchived checkouts use the delay configured in settings. Worktrees can also
@@ -74,18 +130,13 @@ thread is deleted, including archived threads and worktrees left by earlier dele
 server waits for sessions and terminals to stop and retries skipped worktrees after restart.
 Existing prompts for deleting a worktree manually remain available when this policy is off.
 
-Choose **Delete now** to run the enabled rules immediately. The latest results show which
+The latest cleanup results show which
 worktrees were removed or kept and why, plus any failures.
 Results also list folders in the worktree folder that no thread uses, with their sizes; cleanup never removes them, so remove them manually if you want.
 
-The inactive and settled retention periods also apply to the folders of
-[threads without a project](./thread-sidebar.md#start-without-a-project). Those folders are not
-Git repositories, so their files are deleted with them and cannot be recovered; the thread stays,
-and its next turn starts in a new, empty folder. A folder is kept when it has a Git repository
-anywhere inside it or when its thread has an enabled scheduled task. Every file in such a folder
-counts as untracked, so only **Edited tracked files** removes a folder that holds anything other
-than `node_modules`; the other two rules remove only empty folders. Folders that no thread uses
-are listed here too.
+[Scratch workspaces](./thread-sidebar.md#start-without-a-project) are eligible after every thread
+using the folder is archived or deleted and the inactivity delay has passed. Their contents are
+saved first and can be restored from Saved workspaces.
 
 Enable **Remove inactive dependencies and build outputs** to reclaim recognized npm or
 pnpm `node_modules` installations and unchanged build files recorded by the compiler runners.
@@ -145,7 +196,6 @@ output line.
 
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
-
 
 ## Keep the default branch current
 

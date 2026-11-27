@@ -11,13 +11,17 @@ import * as Stream from "effect/Stream";
 import { expect, vi } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import { makeWithOptions } from "./Manager.ts";
 
 const node = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
+const services = Layer.mergeAll(
+  node,
+  ProcessRunner.layer.pipe(Layer.provide(node)),
+  WorkspaceAcquisitionTestkit.layer,
+);
 
-it.layer(Layer.mergeAll(node, ProcessRunner.layer.pipe(Layer.provide(node))), {
-  excludeTestServices: true,
-})("TerminalManager clear", (it) => {
+it.layer(services, { excludeTestServices: true })("TerminalManager clear", (it) => {
   it.effect.each([
     {
       part: "opener",

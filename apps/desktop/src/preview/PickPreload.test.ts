@@ -1,7 +1,11 @@
 import type { PreviewAnnotationPayload } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 
-import { ELEMENT_PICKED_CHANNEL, START_PICK_CHANNEL } from "./GuestProtocol.ts";
+import {
+  CANCEL_PICK_CHANNEL,
+  ELEMENT_PICKED_CHANNEL,
+  START_PICK_CHANNEL,
+} from "./GuestProtocol.ts";
 import "./PickPreload.ts";
 
 const ipcListeners = vi.hoisted(() => new Map<string, Array<(...args: unknown[]) => void>>());
@@ -49,6 +53,9 @@ const startAnnotation = (): ShadowRoot => {
 
 const pickAndAttach = async (element: Element) => {
   ipcSend.calls.length = 0;
+  using _rect = vi
+    .spyOn(element, "getBoundingClientRect")
+    .mockReturnValue(new DOMRect(40, 60, 200, 120));
   document.elementsFromPoint = () => [element];
   using listeners = vi.spyOn(HTMLButtonElement.prototype, "addEventListener");
   const shadowRoot = startAnnotation();
@@ -73,6 +80,37 @@ const pickAndAttach = async (element: Element) => {
     ipcSend.calls.find(([channel]) => channel === ELEMENT_PICKED_CHANNEL) ?? [];
   return (annotation as PreviewAnnotationPayload | undefined)?.elements[0]?.element;
 };
+
+it("installs and removes the annotation cursor sheet in an accessible frame", () => {
+  const frame = document.body.appendChild(document.createElement("iframe"));
+  const frameDocument = frame.contentDocument;
+  if (!frameDocument?.defaultView) throw new Error("annotation frame did not load");
+  const pageSheet = new frameDocument.defaultView.CSSStyleSheet();
+  Object.defineProperty(frameDocument, "adoptedStyleSheets", {
+    value: [pageSheet],
+    writable: true,
+  });
+
+  const cancel = () => {
+    for (const listener of ipcListeners.get(CANCEL_PICK_CHANNEL) ?? []) listener();
+  };
+  try {
+    startAnnotation();
+    expect(frameDocument.documentElement.getAttribute("data-t3code-annotation-tool")).toBe(
+      "select",
+    );
+    expect(frameDocument.adoptedStyleSheets).toHaveLength(2);
+    expect(frameDocument.adoptedStyleSheets[1]).toBeInstanceOf(
+      frameDocument.defaultView.CSSStyleSheet,
+    );
+    cancel();
+    expect(frameDocument.adoptedStyleSheets).toEqual([pageSheet]);
+    expect(frameDocument.documentElement.hasAttribute("data-t3code-annotation-tool")).toBe(false);
+  } finally {
+    cancel();
+    frame.remove();
+  }
+});
 
 it("switches tools from the keyboard after a toolbar button is clicked", () => {
   const shadowRoot = startAnnotation();

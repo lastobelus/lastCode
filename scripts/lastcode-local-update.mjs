@@ -11,7 +11,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-import { requestCheckpointServiceRunNow } from "./lib/lastcode-checkpoint-service-run-now.mjs";
+import {
+  readCheckpointPostPublishPending,
+  requestCheckpointServiceRunNow,
+} from "./lib/lastcode-checkpoint-service-run-now.mjs";
 import { triggerIntelBuild } from "./lib/lastcode-intel-build-trigger.mjs";
 
 import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
@@ -194,6 +197,15 @@ function run(cwd, command, args, options = {}) {
 
 function git(repoRoot, args) {
   return run(repoRoot, "git", args);
+}
+
+function pendingPostPublishTag(repoRoot) {
+  const commonDirectory = git(repoRoot, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  return readCheckpointPostPublishPending(commonDirectory)?.tag;
 }
 
 function splitLines(value) {
@@ -706,7 +718,7 @@ export function inspect(options, overrides = {}) {
     );
     checkpointRequested = request.status === "requested";
   }
-  const installableTags = splitLines(
+  const localTags = splitLines(
     git(options.repoRoot, [
       "tag",
       "--list",
@@ -714,6 +726,8 @@ export function inspect(options, overrides = {}) {
       `${REVISION_PREFIX}v*-nightly.*`,
     ]),
   );
+  const pending = pendingPostPublishTag(options.repoRoot);
+  const installableTags = localTags.filter((tag) => tag !== pending);
   const checkpointTag = resolveLatestInstallableTag(installableTags);
   if (!checkpointTag) {
     if (checkpointRequested) return { schemaVersion: 2, status: "checkpoint-requested" };
@@ -817,6 +831,9 @@ function buildUnlocked(options, updateRoot) {
     "rev-parse",
     `${options.checkpointTag}^{commit}`,
   ]);
+  if (options.checkpointTag === pendingPostPublishTag(options.repoRoot)) {
+    throw new Error(`Checkpoint ${options.checkpointTag} is waiting for its post-publish command.`);
+  }
   const outputRoot = NodePath.join(updateRoot, "artifacts");
   let existing;
   let incompleteBuildError;

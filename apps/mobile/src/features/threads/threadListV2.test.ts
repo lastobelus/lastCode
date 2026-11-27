@@ -2358,7 +2358,7 @@ describe("LastCode mobile thread state", () => {
     exitSignal: null,
   };
 
-  it("keeps Action waiting/progress visible behind guest requests and runtime priorities", () => {
+  it("keeps Action waiting/progress behind guest, input and runtime priorities", () => {
     const thread = makeThread({ id: actionResume.threadId, title: "Action", actionResume });
     expect(resolveThreadListV2Status(thread)).toBe("waiting");
     expect(resolveThreadStatus(thread)?.kind).toBe("waiting");
@@ -2376,6 +2376,8 @@ describe("LastCode mobile thread state", () => {
     expect(resolveThreadListV2Status(request)).toBe("request");
     expect(resolveThreadListV2Status({ ...request, hasPendingApprovals: true })).toBe("approval");
     expect(resolveThreadListV2Status({ ...request, hasPendingUserInput: true })).toBe("input");
+    expect(resolveThreadListV2Status({ ...thread, hasPendingApprovals: true })).toBe("approval");
+    expect(resolveThreadListV2Status({ ...thread, hasPendingUserInput: true })).toBe("input");
     const runtime = {
       status: "running" as const,
       activeRunId: RunId.make("run-1"),

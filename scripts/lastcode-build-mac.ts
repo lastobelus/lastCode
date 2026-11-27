@@ -6,6 +6,8 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { LOCAL_PACKAGE_READY_FILE } from "./lib/lastcode-build-progress.ts";
+import { recordInstallableBuildReady } from "./lastcode-checkpoint-effort.mjs";
 import { validateInstallableMigrations } from "./lastcode-migration-validation.ts";
 import { assertCheckpointCiStamp, assertCleanWorktree } from "./lastcode-local-ci.ts";
 import {
@@ -39,6 +41,18 @@ interface BuildManifest {
   readonly platform: "mac";
   readonly upstreamCommit: string;
   readonly upstreamTag: string;
+}
+
+export function announceLocalPackageReady(outputRoot: string, checkpointCommit: string): void {
+  try {
+    NodeFS.writeFileSync(
+      NodePath.join(outputRoot, LOCAL_PACKAGE_READY_FILE),
+      `${checkpointCommit}\n`,
+      { mode: 0o600 },
+    );
+  } catch (error) {
+    console.warn("[lastcode:build] Could not notify the desktop that the package is ready:", error);
+  }
 }
 
 export function parseBuildOptions(argv: ReadonlyArray<string>): BuildOptions {
@@ -260,6 +274,11 @@ function main(argv: ReadonlyArray<string>): void {
     `LastCode local build ${buildTag}\n\nCheckpoint: ${options.checkpointTag}\nManifest: ${NodePath.relative(repoRoot, NodePath.join(outputDir, "build-manifest.json"))}`,
   ]);
   if (options.pushTag) run(repoRoot, "git", ["push", "origin", buildTag]);
+  if (options.arch === "arm64") {
+    // Installed build commands run the packager from the selected checkpoint.
+    announceLocalPackageReady(NodePath.resolve(repoRoot, options.outputRoot), checkpointCommit);
+  }
+  recordInstallableBuildReady(manifest);
   console.log(`[lastcode:build] Created ${buildTag}.`);
   console.log(`[lastcode:build] Artifacts: ${outputDir}`);
 }

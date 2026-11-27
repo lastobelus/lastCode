@@ -32,6 +32,11 @@ The default is in **Settings → Devices**. Projects can override it.
 Revoking access blocks running agents' device tools and previously issued
 CLI commands on their next request. Your own Device panel is unaffected.
 
+A simulator or emulator an agent started on the environment server is powered off
+when its thread is settled, archived or deleted and no other session holds it,
+after 30 minutes without device commands, or when the server stops cleanly.
+Devices you started stay on.
+
 ## Remote connections
 
 Device video streams through the environment server (works over LAN, Tailscale, and T3 Connect). Live video requires HTTPS or `localhost`—plain HTTP remote origins fall back to still images on iOS and disable video on Android (except Expo Simulators).

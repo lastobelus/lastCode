@@ -18,6 +18,7 @@ New to T3 Code? Start with the **[User Guide & Index](./user/README.md)** for ho
 - [Workflows](./user/workflows.md) · [Text generation models](./user/text-generation.md) · [Prompt links](./user/prompt-links.md)
 - [Activity log](./user/activity-log.md) · [Appearance and themes](./user/appearance.md) · [Keybindings](./user/keybindings.md) · [Keyboard focus](./user/keyboard-focus.md)
 
+- [LastCode appearance preferences](./user/lastcode-appearance.md)
 - [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
 - [Use an agent to add resumable Project Actions](./user/resumable-project-actions-for-agents.md)
 
@@ -64,6 +65,7 @@ anything.
 - [15 · Testing](./internals/15_testing.md)
 - [16 · Performance regression checks](./internals/16_performance-regressions.md)
 - [17 · Scripts](./internals/17_scripts.md)
+- [Simulator ownership and shutdown](./internals/devices.md)
 - [Agent implementation guide to resumable Project
   Actions](./internals/resumable-project-actions-for-agents.md)
 - [Implementation runbook: set up resumable Project Actions with an

@@ -9,7 +9,7 @@ import {
 } from "@t3tools/contracts";
 import type { ComponentProps } from "react";
 import { expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../../test/render";
 
@@ -317,9 +317,9 @@ it.each([true, false])(
     await screen.getByRole("combobox").click();
     if (canList) {
       // Keys sent before the popup takes focus only move focus onto the selected option.
-      await expect.element(screen.getByRole("option", { name: "Antigravity" })).toHaveFocus();
+      await expect.element(page.getByRole("option", { name: "Antigravity" })).toHaveFocus();
       await userEvent.keyboard("{ArrowDown}{Enter}");
-    } else await screen.getByRole("option", { name: "Second", exact: true }).click();
+    } else await page.getByRole("option", { name: "Second", exact: true }).click();
     await expect
       .element(
         screen.getByRole("combobox", {

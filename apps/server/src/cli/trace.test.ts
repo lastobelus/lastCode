@@ -129,6 +129,7 @@ it("formats large summaries without overflowing the call stack", () => {
       lastEndMs: MINUTE_MS,
       minutes: 1,
       spans,
+      cleanupInventory: [],
     },
     rowCount,
   ).split("\n");

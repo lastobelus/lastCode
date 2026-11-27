@@ -1,5 +1,9 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
+  childActionResumeContext,
+  actionResumeWait,
+} from "@t3tools/client-runtime/state/action-resume";
+import {
   normalizeProviderAccentColor,
   resolveProviderInstanceDisplayName,
   shouldShowInstanceBadge,
@@ -19,6 +23,7 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { ProviderIcon, ProviderInstanceIcon } from "../../components/ProviderIcon";
 import { cn } from "../../lib/cn";
 import { useEnvironmentServerConfig, useProject, useThreadShell } from "../../state/entities";
+import { useActionEnvironmentPause } from "./action-resume-state";
 import { SUBAGENT_TONE_TEXT_CLASS, SubagentStatusDot } from "./SubagentStatusDot";
 import { resolveSubagentRowPresentation } from "./threadAgentsPresentation";
 
@@ -36,7 +41,8 @@ type SubagentRowSubagent = Pick<
   | "progress"
   | "result"
   | "remoteChild"
->;
+> &
+  Partial<Pick<OrchestrationV2Subagent, "origin">>;
 
 export function SubagentRow(props: {
   readonly environmentId: EnvironmentId;
@@ -52,6 +58,12 @@ export function SubagentRow(props: {
     messages,
   );
   const detail = subagentCardDetail(presentation.detail);
+  const childTarget =
+    props.subagent.childThreadId !== null
+      ? scopeThreadRef(props.environmentId, props.subagent.childThreadId)
+      : props.canOpenRemote === true
+        ? props.subagent.remoteChild
+        : undefined;
   return (
     <View className="flex-row gap-3">
       <View className="h-5 justify-center">
@@ -95,6 +107,12 @@ export function SubagentRow(props: {
           ) : null}
         </View>
         <SubagentMetadata environmentId={props.environmentId} subagent={props.subagent} />
+        {props.subagent.origin === "app_owned" && childTarget !== undefined ? (
+          <ChildActionWait
+            environmentId={childTarget.environmentId}
+            childThreadId={childTarget.threadId}
+          />
+        ) : null}
         {detail ? (
           <Text
             numberOfLines={3}
@@ -204,5 +222,21 @@ function SubagentMetadata(props: {
         </View>
       ))}
     </View>
+  );
+}
+
+function ChildActionWait(props: {
+  readonly environmentId: EnvironmentId;
+  readonly childThreadId: NonNullable<OrchestrationV2Subagent["childThreadId"]>;
+}) {
+  const shell = useThreadShell(scopeThreadRef(props.environmentId, props.childThreadId))?.source;
+  const context = shell ? childActionResumeContext(shell) : null;
+  const { paused } = useActionEnvironmentPause(props.environmentId);
+  const { presentation } = actionResumeWait(context, context?.action ?? null, paused);
+  if (!presentation || !context) return null;
+  return (
+    <Text className="text-xs font-t3-medium text-foreground-secondary" numberOfLines={2}>
+      {context.action.actionName} · {presentation.label}
+    </Text>
   );
 }

@@ -3,6 +3,7 @@ import type { SideThreadOpenIntent } from "@t3tools/client-runtime/side-thread";
 import type { ThreadRunSummary } from "@t3tools/client-runtime/state/models";
 import type {
   ProviderApprovalDecision,
+  CommandId,
   ResponseContextRecord,
   RuntimeRequestId,
   WorktreeSetupSnapshot,
@@ -105,7 +106,8 @@ export interface TimelineRowSharedState {
   onWorkEntryContentReady?: (anchorKey: string, entryId: string) => void;
   onCancelWorktreeSetup: (() => void) | null;
   retryableWorkspacePreparationRunIds: ReadonlySet<RunId>;
-  onRetryWorkspacePreparation: ((runId: RunId) => void) | null;
+  retryableEmptyWorkspacePreparationFailureId?: CommandId | null;
+  onRetryWorkspacePreparation: ((runId: RunId | null, failureCommandId?: CommandId) => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   workGroupViewState: WorkGroupViewState;

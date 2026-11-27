@@ -16,10 +16,10 @@ import {
 
 const TAILNET_STATUS = JSON.stringify({ Self: { DNSName: "host.example.ts.net." } });
 const EMPTY_SERVE_STATUS = JSON.stringify({ TCP: {}, Web: {} });
-const serveStatus = (proxy: string) =>
+const serveStatus = (proxy: string, mount = "/") =>
   JSON.stringify({
     TCP: { 5788: { HTTPS: true } },
-    Web: { "host.example.ts.net:5788": { Handlers: { "/": { Proxy: proxy } } } },
+    Web: { "host.example.ts.net:5788": { Handlers: { [mount]: { Proxy: proxy } } } },
   });
 
 interface CallResult {
@@ -283,7 +283,7 @@ describe("shareDevServer", () => {
       const error: DevShareError = yield* shareDevServer({ webPort: 5788 }).pipe(
         Effect.provide(
           spawnerLayer({
-            serveStatus: { exitCode: 0, stdout: serveStatus("http://127.0.0.1:39831") },
+            serveStatus: { exitCode: 0, stdout: serveStatus("http://127.0.0.1:39831", "/api") },
           }),
         ),
         Effect.flip,

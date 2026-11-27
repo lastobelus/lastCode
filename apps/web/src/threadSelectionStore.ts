@@ -15,6 +15,7 @@ interface ThreadSelectionStore extends ThreadSelectionState {
     openThreadKey?: string | null,
   ) => void;
   clearSelection: () => void;
+  setAnchor: (threadKey: string) => void;
   removeFromSelection: (threadKeys: readonly string[]) => void;
   hasSelection: () => boolean;
 }
@@ -85,6 +86,11 @@ export const useThreadSelectionStore = create<ThreadSelectionStore>((set, get) =
     const state = get();
     if (state.selectedThreadKeys.size === 0 && state.anchorThreadKey === null) return;
     set({ selectedThreadKeys: EMPTY_SET, anchorThreadKey: null });
+  },
+
+  setAnchor: (threadKey) => {
+    if (get().anchorThreadKey === threadKey) return;
+    set({ anchorThreadKey: threadKey });
   },
 
   removeFromSelection: (threadKeys) => {

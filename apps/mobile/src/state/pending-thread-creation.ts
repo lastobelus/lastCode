@@ -17,7 +17,12 @@ import type { QueuedThreadMessage } from "./thread-outbox-model";
 
 export type PendingThreadCreationOutcome =
   | { readonly kind: "delivered"; readonly message: QueuedThreadMessage }
-  | { readonly kind: "failed"; readonly message: QueuedThreadMessage; readonly reason: string };
+  | {
+      readonly kind: "failed";
+      readonly message: QueuedThreadMessage;
+      readonly reason: string;
+      readonly resolveReason?: (resolve: MessageResolver) => string;
+    };
 
 export type PendingThreadCreation = {
   readonly message: QueuedThreadMessage;

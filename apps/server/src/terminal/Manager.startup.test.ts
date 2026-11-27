@@ -16,10 +16,15 @@ import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 import { expect, vi } from "vite-plus/test";
 import * as ProcessRunner from "../processRunner.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import { makeWithOptions } from "./Manager.ts";
 
 const node = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
-const services = Layer.mergeAll(node, ProcessRunner.layer.pipe(Layer.provide(node)));
+const services = Layer.mergeAll(
+  node,
+  ProcessRunner.layer.pipe(Layer.provide(node)),
+  WorkspaceAcquisitionTestkit.layer,
+);
 
 vi.mock("node:child_process", { spy: true });
 

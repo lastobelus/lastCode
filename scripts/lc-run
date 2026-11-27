@@ -1,0 +1,3 @@
+#!/bin/sh
+export MISE_ACTIVATE_AGGRESSIVE=1
+exec mise exec node@26.13.1 -- node "$(dirname "$0")/lastcode-run.ts" "$@"

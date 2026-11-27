@@ -658,6 +658,9 @@ function TerminalSessionViewport({
     (listener: (session: TerminalSessionState) => void) =>
       appAtomRegistry.subscribe(terminalSessionAtom, listener),
   );
+  const readTerminalLinkProfileName = useEffectEvent(
+    () => readTerminalSession().terminalLinkProfileName,
+  );
   // The surface reports a resent grid like any other, so the next report is the retry.
   const resizeRetryGenerationRef = useRef<number | null>(null);
   const resizeTerminal = useEffectEvent(async (cols: number, rows: number) => {
@@ -700,8 +703,15 @@ function TerminalSessionViewport({
     },
   );
   const openLinkInPreview = useEffectEvent(
-    (url: string, forceBrowser: boolean, fallbackToBrowser: () => void) =>
-      openTerminalLinkInPreview({ url, threadRef, openPreview, fallbackToBrowser, forceBrowser }),
+    (url: string, forceBrowser: boolean, fallbackToBrowser: (url: string) => void) =>
+      openTerminalLinkInPreview({
+        url,
+        terminalLinkProfileName: readTerminalLinkProfileName(),
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser,
+      }),
   );
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sets the terminal input's readOnly from the operate grant and consumes a pending focus request
@@ -1159,16 +1169,19 @@ function TerminalSessionViewport({
             );
             return;
           }
-          const fallbackToBrowser = () => {
-            void localApi.shell.openExternal(text).catch((error: unknown) => {
+          const fallbackToBrowser = (url: string) => {
+            void localApi.shell.openExternal(url).catch((error: unknown) => {
               writeSystemMessage(
                 latestTerminal,
                 thrownErrorMessage(error, m) ?? m(msg("Unable to open link")),
               );
             });
           };
-          if (!readEnvironmentScope(environmentId, AuthPreviewOperateScope)) {
-            fallbackToBrowser();
+          if (
+            !readEnvironmentScope(environmentId, AuthPreviewOperateScope) &&
+            readTerminalLinkProfileName() === undefined
+          ) {
+            fallbackToBrowser(text);
             return;
           }
           void openLinkInPreview(text, event.metaKey || event.ctrlKey, fallbackToBrowser).catch(

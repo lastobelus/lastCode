@@ -34,7 +34,7 @@ function selectOrNavigate(
   }
   if (event.shiftKey) {
     event.preventDefault();
-    selection.rangeSelectTo(threadKey, orderedThreadKeys);
+    selection.rangeSelectTo(threadKey, orderedThreadKeys, selection.anchorThreadKey);
     return;
   }
   // Modifier selection still processes every click; only plain double clicks

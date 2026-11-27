@@ -22,6 +22,7 @@ vi.mock("./threads", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     steadyNavigationThreadShellsAtom: Atom.make([]).pipe(Atom.keepAlive),
+    steadyAnnotationHiddenThreadKeysAtom: Atom.make(new Set<string>()).pipe(Atom.keepAlive),
   };
 });
 vi.mock("./server", async () => {

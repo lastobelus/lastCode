@@ -29,7 +29,8 @@ describe("isMarkdownFileLinkLabel", () => {
     ["src/main.ts#L10", "./src/main.ts%23L10", true],
     ["draft.md ", "/tmp/draft.md%20", true],
     [" draft.md  ", "./%20draft.md%20%20", true],
-    [" draft.md ", "/tmp/draft.md", true],
+    // Leave authored whitespace visible when it is absent from the destination.
+    [" draft.md ", "/tmp/draft.md", false],
   ])("classifies %s for %s", (label, href, expected) => {
     expect(isMarkdownFileLinkLabel(label, href)).toBe(expected);
   });

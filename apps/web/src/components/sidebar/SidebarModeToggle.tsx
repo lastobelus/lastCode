@@ -1,3 +1,4 @@
+import { useGT } from "gt-react";
 import { ListTreeIcon } from "lucide-react";
 
 import {
@@ -11,6 +12,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean }) {
   const sidebarMode = useSidebarMode();
   const hydrated = useClientSettingsHydrated();
+  const gt = useGT();
   const active = sidebarMode === "lastcode";
 
   return (
@@ -18,7 +20,7 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
       <TooltipTrigger
         render={
           <Button
-            aria-label="LastCode sidebar"
+            aria-label={gt("{product} sidebar", { product: "LastCode" })}
             aria-pressed={active}
             disabled={!hydrated}
             size="titlebar-icon"
@@ -39,7 +41,9 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
           </Button>
         }
       />
-      <TooltipPopup side="bottom">{`Switch to ${active ? "v2" : "LastCode"} sidebar`}</TooltipPopup>
+      <TooltipPopup side="bottom">
+        {gt("Switch to {mode} sidebar", { mode: active ? "v2" : "LastCode" })}
+      </TooltipPopup>
     </Tooltip>
   );
 }

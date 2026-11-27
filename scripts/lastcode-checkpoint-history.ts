@@ -2,8 +2,31 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import type {
+  CheckpointBuildReadyRecord,
+  CheckpointEpisodeRecord,
+} from "./lastcode-checkpoint-effort.mjs";
 
-export interface CheckpointRunRecord {
+export interface CheckpointReplayStop {
+  readonly replayId: string;
+  readonly group: string;
+  readonly commit: string;
+  readonly kind: "fold" | "replay";
+  readonly conflictedPaths: {
+    readonly test: number;
+    readonly generated: number;
+    readonly other: number;
+  };
+}
+
+export interface CheckpointAttemptFields {
+  readonly episodeKey?: string;
+  readonly attemptOrdinal?: number;
+  readonly replayStops?: ReadonlyArray<CheckpointReplayStop>;
+  readonly failingSteps?: ReadonlyArray<string>;
+}
+
+export interface CheckpointRunRecord extends CheckpointAttemptFields {
   readonly schemaVersion: 1;
   readonly status: "failed" | "success";
   readonly upstreamTag: string;
@@ -14,7 +37,7 @@ export interface CheckpointRunRecord {
   readonly checkpointCommit?: string;
   readonly checkpointTag?: string;
   readonly error?: string;
-  readonly failurePhase?: "publication" | "rebase" | "smoke";
+  readonly failurePhase?: "publication" | "post-publish" | "rebase" | "smoke";
   readonly localTagRetained?: boolean;
   readonly recoveryBranch?: string;
   readonly recoveryFingerprint?: string;
@@ -39,7 +62,11 @@ export interface CarrySetShadowRecord {
   readonly error?: string;
 }
 
-export type CheckpointHistoryRecord = CheckpointRunRecord | CarrySetShadowRecord;
+export type CheckpointHistoryRecord =
+  | CheckpointRunRecord
+  | CarrySetShadowRecord
+  | CheckpointEpisodeRecord
+  | CheckpointBuildReadyRecord;
 
 function isOptionalBoolean(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === "boolean";
@@ -58,6 +85,60 @@ function hasValidRollbackMetadata(candidate: Record<string, unknown>): boolean {
   );
 }
 
+export function isCheckpointReplayStop(value: unknown): value is CheckpointReplayStop {
+  if (!value || typeof value !== "object") return false;
+  const stop = value as Record<string, unknown>;
+  const paths = stop.conflictedPaths as Record<string, unknown> | undefined;
+  return (
+    typeof stop.replayId === "string" &&
+    typeof stop.group === "string" &&
+    typeof stop.commit === "string" &&
+    (stop.kind === "fold" || stop.kind === "replay") &&
+    !!paths &&
+    [paths.test, paths.generated, paths.other].every(
+      (count) => typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
+    )
+  );
+}
+
+function isStringArray(value: unknown): value is ReadonlyArray<string> {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+export function checkpointFailingSteps(error: unknown): ReadonlyArray<string> {
+  return error &&
+    typeof error === "object" &&
+    "failingSteps" in error &&
+    isStringArray(error.failingSteps)
+    ? error.failingSteps
+    : [];
+}
+
+function failureStepNames(input: {
+  readonly failingSteps?: ReadonlyArray<string>;
+  readonly error?: unknown;
+  readonly failurePhase?: CheckpointRunRecord["failurePhase"];
+  readonly replayMode?: CheckpointRunRecord["replayMode"];
+}): ReadonlyArray<string> {
+  const names = (input.failingSteps ?? checkpointFailingSteps(input.error)).filter(
+    (name) => name.trim() !== "",
+  );
+  if (names.length > 0) return names;
+  return [
+    input.failurePhase === "rebase"
+      ? input.replayMode === "carry"
+        ? "Carry replay"
+        : "Historical replay"
+      : input.failurePhase === "smoke"
+        ? "Checkpoint validation"
+        : input.failurePhase === "publication"
+          ? "Checkpoint publication"
+          : input.failurePhase === "post-publish"
+            ? "Checkpoint post-publish command"
+            : "Checkpoint attempt",
+  ];
+}
+
 function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
   const candidate = record as Record<string, unknown>;
@@ -74,6 +155,7 @@ function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
     isOptionalString(candidate.error) &&
     (candidate.failurePhase === undefined ||
       candidate.failurePhase === "publication" ||
+      candidate.failurePhase === "post-publish" ||
       candidate.failurePhase === "rebase" ||
       candidate.failurePhase === "smoke") &&
     isOptionalBoolean(candidate.localTagRetained) &&
@@ -85,15 +167,24 @@ function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
       candidate.replayMode === "historical") &&
     hasValidRollbackMetadata(candidate) &&
     isOptionalString(candidate.sourceObjectRef) &&
-    isOptionalString(candidate.sourceCommit)
+    isOptionalString(candidate.sourceCommit) &&
+    isOptionalString(candidate.episodeKey) &&
+    (candidate.attemptOrdinal === undefined ||
+      (typeof candidate.attemptOrdinal === "number" &&
+        Number.isSafeInteger(candidate.attemptOrdinal) &&
+        candidate.attemptOrdinal > 0)) &&
+    (candidate.replayStops === undefined ||
+      (Array.isArray(candidate.replayStops) &&
+        candidate.replayStops.every(isCheckpointReplayStop))) &&
+    (candidate.failingSteps === undefined || isStringArray(candidate.failingSteps))
   );
 }
 
 export function checkpointFailureRecord(
-  input: {
+  input: CheckpointAttemptFields & {
     readonly commitsRebased: number;
     readonly error: unknown;
-    readonly failurePhase?: "publication" | "rebase" | "smoke";
+    readonly failurePhase?: CheckpointRunRecord["failurePhase"];
     readonly localTagRetained?: boolean;
     readonly recoveryBranch?: string;
     readonly recoveryFingerprint?: string;
@@ -120,6 +211,10 @@ export function checkpointFailureRecord(
     finishedAt: new Date(finishedAtMs).toISOString(),
     durationMs: finishedAtMs - input.startedAtMs,
     commitsRebased: input.commitsRebased,
+    ...(input.episodeKey ? { episodeKey: input.episodeKey } : {}),
+    ...(input.attemptOrdinal ? { attemptOrdinal: input.attemptOrdinal } : {}),
+    ...(input.replayStops ? { replayStops: input.replayStops } : {}),
+    failingSteps: failureStepNames(input),
     error: input.error instanceof Error ? input.error.message : String(input.error),
     ...(input.failurePhase ? { failurePhase: input.failurePhase } : {}),
     ...(input.localTagRetained ? { localTagRetained: true } : {}),
@@ -141,27 +236,83 @@ export function checkpointRevisionRunHistoryPath(home = NodeOS.homedir()): strin
   return NodePath.join(home, ".lastcode", "automation", "checkpoint-revision-runs.jsonl");
 }
 
+export function readCheckpointRuns(
+  historyPath = checkpointRunHistoryPath(),
+): ReadonlyArray<CheckpointRunRecord> {
+  try {
+    return NodeFS.readFileSync(historyPath, "utf8")
+      .split(/\r?\n/u)
+      .flatMap((line) => {
+        if (!line) return [];
+        try {
+          const record: unknown = JSON.parse(line);
+          return isCheckpointRunRecord(record) ? [record] : [];
+        } catch {
+          // A process can be interrupted while appending. Other records remain usable.
+          return [];
+        }
+      });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
 export function readLatestCheckpointRun(
   historyPath = checkpointRunHistoryPath(),
 ): CheckpointRunRecord | undefined {
+  return readCheckpointRuns(historyPath).at(-1);
+}
+
+export function checkpointReplayStopKey(stop: CheckpointReplayStop): string {
+  return JSON.stringify([stop.replayId, stop.kind, stop.group, stop.commit]);
+}
+
+function attemptHistory(record: CheckpointRunRecord, historyPath: string): CheckpointRunRecord {
+  const paths = new Set([
+    historyPath,
+    NodePath.join(NodePath.dirname(historyPath), "checkpoint-runs.jsonl"),
+    NodePath.join(NodePath.dirname(historyPath), "checkpoint-revision-runs.jsonl"),
+  ]);
+  const allRecords = Array.from(paths).flatMap((path) => readCheckpointRuns(path));
+  const previous = allRecords.filter((run) => run.upstreamTag === record.upstreamTag);
+  const seenStops = new Set(
+    allRecords.flatMap((run) => (run.replayStops ?? []).map(checkpointReplayStopKey)),
+  );
+  const replayStops = (record.replayStops ?? []).filter((stop) => {
+    const key = checkpointReplayStopKey(stop);
+    if (seenStops.has(key)) return false;
+    seenStops.add(key);
+    return true;
+  });
+  return {
+    ...record,
+    episodeKey: record.upstreamTag,
+    attemptOrdinal:
+      Math.max(previous.length, ...previous.map((run) => run.attemptOrdinal ?? 0)) + 1,
+    replayStops,
+    failingSteps: Array.from(
+      new Set(record.status === "failed" ? failureStepNames(record) : (record.failingSteps ?? [])),
+    ),
+  };
+}
+
+// Checkpoint writes are serialized by their existing run lock. Isolate a torn tail first.
+export function appendCheckpointHistoryLine(historyPath: string, record: unknown): void {
+  NodeFS.mkdirSync(NodePath.dirname(historyPath), { recursive: true });
+  const descriptor = NodeFS.openSync(historyPath, "a+", 0o600);
   try {
-    const lines = NodeFS.readFileSync(historyPath, "utf8").trim().split(/\r?\n/u);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const line = lines[index];
-      if (!line) continue;
-      try {
-        const record: unknown = JSON.parse(line);
-        if (isCheckpointRunRecord(record)) return record;
-      } catch {
-        // A process can be interrupted while appending. Older valid records remain usable.
-      }
-    }
-    return undefined;
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
+    const size = NodeFS.fstatSync(descriptor).size;
+    const tail = Buffer.alloc(1);
+    if (size > 0) NodeFS.readSync(descriptor, tail, 0, 1, size - 1);
+    NodeFS.writeSync(
+      descriptor,
+      `${size > 0 && tail[0] !== 10 ? "\n" : ""}${JSON.stringify(record)}\n`,
+    );
+  } finally {
+    NodeFS.closeSync(descriptor);
   }
 }
 
@@ -171,11 +322,17 @@ export function appendCheckpointRun(
   warn: (message: string) => void = console.warn,
 ): boolean {
   try {
-    NodeFS.mkdirSync(NodePath.dirname(historyPath), { recursive: true });
-    NodeFS.appendFileSync(historyPath, `${JSON.stringify(record)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    let enriched = record;
+    if (record.status === "failed" || record.status === "success") {
+      try {
+        enriched = attemptHistory(record, historyPath);
+      } catch {
+        warn(
+          "[lastcode:checkpoint] Could not enrich attempt history; retaining the checkpoint result.",
+        );
+      }
+    }
+    appendCheckpointHistoryLine(historyPath, enriched);
     return true;
   } catch (error) {
     warn(

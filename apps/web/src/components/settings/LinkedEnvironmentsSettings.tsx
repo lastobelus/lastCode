@@ -4,7 +4,12 @@ import {
   linkBatchFailureLabel,
   linkWithMintedCode,
 } from "@t3tools/client-runtime/link-batch";
-import { ANOTHER_ADDRESS, linkRequestFailureMessage } from "@t3tools/client-runtime/link-request";
+import {
+  ANOTHER_ADDRESS,
+  linkRequestDefaultAccess,
+  linkRequestFailureMessage,
+  linkRequestPreflightInput,
+} from "@t3tools/client-runtime/link-request";
 import {
   AuthAccessWriteScope,
   type AuthMcpClientAccess,
@@ -279,7 +284,7 @@ export function LinkEnvironmentDialog({
   const [choice, setChoice] = useState<string | null>(prefill?.choice ?? null);
   const [address, setAddress] = useState(prefill?.address ?? "");
   const [pairingCode, setPairingCode] = useState("");
-  const [access, setAccess] = useState<AuthMcpClientAccess>("approval-required");
+  const [access, setAccess] = useState<AuthMcpClientAccess>(() => linkRequestDefaultAccess({}));
   const [busy, setBusy] = useState(false);
   // Machines whose minting already failed, so the dialog asks for a code instead.
   const [mintFailed, setMintFailed] = useState<ReadonlySet<EnvironmentId>>(new Set());
@@ -287,6 +292,11 @@ export function LinkEnvironmentDialog({
   const inFlight = useRef(false);
   const formId = useId();
   const link = useAtomCommand(peerLinkEnvironment.link, { label: LINK_COMMAND_LABEL });
+  const preflight = useAtomCommand(peerLinkEnvironment.preflight, {
+    label: "check link address",
+    reportFailure: false,
+    reportDefect: false,
+  });
   const linkOnTarget = useAtomCommand(peerLinkEnvironment.link, {
     label: "link environment back",
     // The failure cause holds the request, and with it the code; keep it out of the console.
@@ -358,7 +368,7 @@ export function LinkEnvironmentDialog({
       setChoice(prefill?.choice ?? null);
       setAddress(prefill?.address ?? "");
       setPairingCode("");
-      setAccess("approval-required");
+      setAccess(linkRequestDefaultAccess({}));
       setMintFailed(new Set());
       setThroughFailed(new Set());
       setAlsoLinkBack(false);
@@ -405,34 +415,31 @@ export function LinkEnvironmentDialog({
     );
     return null;
   };
+  const resolveDirect = async () => {
+    const input = linkRequestPreflightInput(
+      machine === null || needsAddress ? { url: address } : machine,
+    );
+    if (input === null) return null;
+    const checked = await preflight({ environmentId, input });
+    if (checked._tag === "Failure") {
+      if (!isAtomCommandInterrupted(checked)) {
+        failureToast(
+          gt("Could not link the environment"),
+          linkRequestFailureMessage(squashAtomCommandFailure(checked), resolveMessage),
+        );
+      }
+      return null;
+    }
+    const pairingCode = await resolvePairingCode();
+    return pairingCode === null ? null : { ...input, pairingCode };
+  };
   const submit = async () => {
-    const [url, ...alternateUrls] =
-      machine === null || needsAddress ? [address.trim()] : machine.urls;
-    if (inFlight.current || !ready || url === undefined) return;
+    if (inFlight.current || !ready) return;
     inFlight.current = true;
     setBusy(true);
-    const throughInput = through === null ? null : await resolveThrough(through);
-    const code = through === null ? await resolvePairingCode() : null;
+    const input = through === null ? await resolveDirect() : await resolveThrough(through);
     const result =
-      through !== null
-        ? throughInput === null
-          ? null
-          : await link({ environmentId, input: { ...throughInput, access } })
-        : code === null
-          ? null
-          : await link({
-              environmentId,
-              input: {
-                url,
-                ...(alternateUrls.length > 0 ? { alternateUrls } : {}),
-                // A typed address links alone: only this app's own addresses name a machine.
-                ...(machine === null || needsAddress
-                  ? {}
-                  : { expectedEnvironmentId: machine.environmentId, expectedLabel: machine.label }),
-                pairingCode: code,
-                access,
-              },
-            });
+      input === null ? null : await link({ environmentId, input: { ...input, access } });
     // The link back is its own link, made on the other machine: it never undoes this one.
     const back =
       result?._tag === "Success" &&

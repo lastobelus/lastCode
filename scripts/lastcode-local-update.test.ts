@@ -175,11 +175,11 @@ describe("lastcode-local-update", () => {
     try {
       NodeFS.mkdirSync(NodePath.dirname(executable), { recursive: true });
       NodeFS.writeFileSync(executable, "");
-      for (const version of ["26.12.1", "24.13.1"]) {
+      for (const version of ["26.13.1", "24.13.1"]) {
         NodeFS.writeFileSync(
           NodePath.join(root, "package.json"),
           JSON.stringify({
-            engines: { node: "26.12.1" },
+            engines: { node: "26.13.1" },
             scripts: {
               "lastcode:ci": `MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@${version} -- node scripts/lastcode-local-ci.ts --full`,
             },

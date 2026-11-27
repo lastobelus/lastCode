@@ -18,6 +18,7 @@ vi.mock("../../state/threads", async () => {
       quietThreadShellsAtom: ReactivityAtom.make<readonly EnvironmentThreadShell[]>([]).pipe(
         ReactivityAtom.keepAlive,
       ),
+      annotationPendingChildThreadKeysAtom: ReactivityAtom.make(new Set<string>()),
     },
   };
 });

@@ -67,6 +67,10 @@
       "types": "./src/server/maintenanceResolver.ts",
       "import": "./src/server/maintenanceResolver.ts"
     },
+    "./server/lastcodeProjectActions": {
+      "types": "./src/server/lastcodeProjectActions.ts",
+      "import": "./src/server/lastcodeProjectActions.ts"
+    },
     "./server/managedProvider": {
       "types": "./src/server/managedProvider.ts",
       "import": "./src/server/managedProvider.ts"

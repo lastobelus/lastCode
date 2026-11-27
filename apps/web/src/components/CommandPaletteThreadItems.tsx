@@ -1,4 +1,7 @@
+import { useLastCodeCommandPaletteThreadListing } from "./sidebar/useLastCodeCommandPaletteThreadListing";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { arrayElementsEqual } from "@t3tools/client-runtime/state/entities";
+import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { findForMessageMatch, openThreadFindOnQuery } from "./chat/threadFindStore";
 import {
   claimThreadOpen,
@@ -24,7 +27,6 @@ import {
   deriveProviderInstanceEntries,
   type ProviderInstanceEntry,
 } from "../providerInstances";
-import { useDelegatedUnderParent, useVisibleThreadShells } from "../state/entities";
 import {
   useEnvironmentProviders,
   useEnvironments,
@@ -110,19 +112,34 @@ function useConnectedThreadSearch(query: string) {
 
 type PaletteActiveThread = { readonly environmentId: EnvironmentId; readonly id: ThreadId };
 
-/**
- * Every visible thread as a palette item. Its own hook, so the rows are cached on the
- * threads alone and keep their identity while the query changes.
- */
+function usePaletteListedThreads(query: string) {
+  const listing = useLastCodeCommandPaletteThreadListing(query);
+  const next = listing.threads.filter(
+    (thread) =>
+      thread.archivedAt === null &&
+      (listing.delegatedUnderParent === undefined
+        ? listing.isThreadListed(thread)
+        : !isShownUnderParent(
+            scopeThreadRef(thread.environmentId, thread.id),
+            thread.lineage,
+            listing.delegatedUnderParent,
+          )),
+  );
+  // A query can reveal hidden threads. Keep the title rows cached when membership is the same.
+  const [threads, setThreads] = useState(next);
+  if (arrayElementsEqual(threads, next)) return threads;
+  setThreads(next);
+  return next;
+}
+
 function useThreadActionItems(input: {
   readonly activeThread: PaletteActiveThread | null;
+  readonly threads: readonly SidebarThreadSummary[];
   readonly runThread: (thread: SidebarThreadSummary) => Promise<void>;
 }) {
-  const { activeThread, runThread } = input;
+  const { activeThread, threads, runThread } = input;
   const messages = useMessages();
   const gt = useGT();
-  const threads = useVisibleThreadShells();
-  const delegatedUnderParent = useDelegatedUnderParent();
   const { environments } = useEnvironments();
   const { projectEnvironmentLocationById } = useEnvironmentLookups();
   const providerEntryByEnvironmentAndInstanceId = useProviderEntryByEnvironmentAndInstanceId();
@@ -130,7 +147,7 @@ function useThreadActionItems(input: {
   return buildThreadActionItems(
     {
       threads,
-      delegatedUnderParent,
+      isThreadListed: () => true,
       ...(environments.length > 1
         ? {
             environmentLabelOf: (thread: (typeof threads)[number]) =>
@@ -199,7 +216,8 @@ export function useCommandPaletteThreadItems(input: {
   const [now] = useState(() => Date.now());
   // Rows already shown keep their places when a slower environment answers.
   const [shownOrder, setShownOrder] = useState<ShownOrder | null>(null);
-  // Reads the query when picked, so the rows need not be rebuilt on every keystroke.
+  const listedThreads = usePaletteListedThreads(threadSearchQuery);
+  // A pick uses the current query, including when the row was already shown.
   const runThread = useStableCallback(async (thread: SidebarThreadSummary) => {
     // A pick sends its open with the query, always, so the server records
     // it; the thread view then skips its own open. The open thread is no pick.
@@ -229,7 +247,7 @@ export function useCommandPaletteThreadItems(input: {
       params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
     });
   });
-  const threadItems = useThreadActionItems({ activeThread, runThread });
+  const threadItems = useThreadActionItems({ activeThread, threads: listedThreads, runThread });
 
   const itemByValue = new Map(threadItems.map((item) => [item.value, item]));
   const itemForMatch = (match: EnvironmentThreadSearchMatch) =>

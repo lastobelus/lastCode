@@ -64,60 +64,59 @@ const access = DeviceAgentAccess.layer.pipe(
     }),
   ),
 );
-const readyHost = Effect.gen(function* () {
-  const http = yield* HttpClient.HttpClient;
-  const run = (command: string) =>
-    Effect.succeed({
-      code: 0,
-      stdout: command === "emulator" ? "" : " V....D libx264",
-      stderr: "",
-    });
-  return {
-    hub: { origin: "http://hub.example" },
-    nodePath: process.execPath,
-    run,
-    devices: makeDeviceHubOperations({
-      hostId: "local",
-      origin: "http://hub.example",
-      http,
-      run,
-      platformAvailable: () => Effect.succeed(true),
-    }),
-    helpers: { serveSimAxSettings: null, serveSimCli: null },
-  };
-});
-const host = Layer.effect(
-  DeviceHost.DeviceHost,
-  Effect.gen(function* () {
-    const ready = yield* readyHost;
-    return DeviceHost.DeviceHost.of({
-      id: "local",
-      label: "Test server",
-      summary: Effect.succeed({
-        id: "local",
-        kind: "local",
-        label: "Test server",
-        platforms: [{ platform: "ios", available: true }],
-        hubInstalled: true,
-        agentDeviceInstalled: true,
-      }),
-      platformAvailability: (platform) => Effect.succeed({ platform, available: true }),
-      ensureReady: () => Effect.succeed(ready),
-      current: Effect.succeed(ready),
-      stopAgent: Effect.void,
-      stop: Effect.void,
-      ensureAgentReady: () =>
-        Effect.succeed({
-          ...ready,
-          agentDevice: {
-            baseUrl: "http://daemon.example",
-            token: "raw-daemon-token",
-            entryPath: "/tool/cli.js",
-          },
+const runHostCommand = (command: string) =>
+  Effect.succeed({
+    code: 0,
+    stdout: command === "emulator" ? "" : " V....D libx264",
+    stderr: "",
+  });
+const makeHost = (run: DeviceHost.DeviceHostReady["run"] = runHostCommand) =>
+  Layer.effect(
+    DeviceHost.DeviceHost,
+    Effect.gen(function* () {
+      const http = yield* HttpClient.HttpClient;
+      const ready = {
+        hub: { origin: "http://hub.example" },
+        nodePath: process.execPath,
+        run,
+        devices: makeDeviceHubOperations({
+          hostId: "local",
+          origin: "http://hub.example",
+          http,
+          run,
+          platformAvailable: () => Effect.succeed(true),
         }),
-    });
-  }),
-);
+        helpers: { serveSimAxSettings: null, serveSimCli: null },
+      };
+      return DeviceHost.DeviceHost.of({
+        id: "local",
+        label: "Test server",
+        summary: Effect.succeed({
+          id: "local",
+          kind: "local",
+          label: "Test server",
+          platforms: [{ platform: "ios", available: true }],
+          hubInstalled: true,
+          agentDeviceInstalled: true,
+        }),
+        platformAvailability: (platform) => Effect.succeed({ platform, available: true }),
+        ensureReady: () => Effect.succeed(ready),
+        current: Effect.succeed(ready),
+        stopAgent: Effect.void,
+        stop: Effect.void,
+        ensureAgentReady: () =>
+          Effect.succeed({
+            ...ready,
+            agentDevice: {
+              baseUrl: "http://daemon.example",
+              token: "raw-daemon-token",
+              entryPath: "/tool/cli.js",
+            },
+          }),
+      });
+    }),
+  );
+const host = makeHost();
 const layer = (
   hostname: string,
   beforeWrite: (content: string) => Effect.Effect<void> = () => Effect.void,
@@ -166,6 +165,7 @@ const layer = (
       Layer.succeed(SecretResolver.SecretResolver, {
         read: (references) => Effect.succeed(references.map(() => undefined)),
         invalidate: () => Effect.void,
+        label: (provider) => Effect.succeed(provider),
       }),
     ),
     Layer.provide(ProcessRunner.layer),
@@ -300,6 +300,15 @@ it.effect.each([
       const deviceId = DeviceId.make("emulator-5554");
       const threadId = ThreadId.make("thread-1");
       let booted = true;
+      const deviceHost = makeHost((command, args) =>
+        command === "adb" && args.length === 1 && args[0] === "devices"
+          ? Effect.sync(() => ({
+              code: 0,
+              stdout: `List of devices attached\n${platform === "android" && booted ? `${deviceId}\tdevice\n` : ""}`,
+              stderr: "",
+            }))
+          : runHostCommand(command),
+      );
       const http = HttpClient.make((request) =>
         Effect.sync(() => {
           const path = new URL(request.url).pathname;
@@ -400,7 +409,10 @@ it.effect.each([
         } else {
           expect(yield* access.authorize(token, resource)).toEqual(target);
         }
-      }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
+      }).pipe(
+        Effect.provide(layer("127.0.0.1", undefined, http, settings, deviceHost)),
+        Effect.scoped,
+      );
     }),
 );
 

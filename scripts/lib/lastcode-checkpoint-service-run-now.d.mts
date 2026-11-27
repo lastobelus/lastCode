@@ -1,5 +1,16 @@
 export const LASTCODE_CHECKPOINT_SERVICE_LABEL: "codes.lastobelus.lastcode-nightly-checkpoint";
 
+export interface CheckpointPostPublishTarget {
+  readonly tag: string;
+  readonly commit: string;
+  readonly remote: string;
+  readonly revisionOnly?: true;
+}
+export function checkpointPostPublishPendingPath(commonDirectory: string): string;
+export function readCheckpointPostPublishPending(
+  commonDirectory: string,
+): CheckpointPostPublishTarget | undefined;
+
 export function checkpointServiceRunNowPaths(homeDirectory: string): {
   readonly plistPath: string;
   readonly requestPath: string;

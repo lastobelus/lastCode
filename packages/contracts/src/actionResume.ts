@@ -1,5 +1,10 @@
 import * as Schema from "effect/Schema";
 import {
+  EnvironmentId,
+  NodeId,
+  RunId,
+  RunAttemptId,
+  MessageId,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -7,6 +12,30 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+
+export const ActionResumeSource = Schema.Struct({
+  runId: RunId,
+  attemptId: RunAttemptId,
+});
+export type ActionResumeSource = typeof ActionResumeSource.Type;
+
+export const ActionResumeOwner = Schema.Struct({
+  parentEnvironmentId: EnvironmentId,
+  parentThreadId: ThreadId,
+  taskId: NodeId,
+  sourceRunId: RunId,
+  delegationId: Schema.optional(TrimmedNonEmptyString),
+});
+export type ActionResumeOwner = typeof ActionResumeOwner.Type;
+
+export const ActionResumeObligation = Schema.Struct({
+  actionRunId: TrimmedNonEmptyString,
+  messageId: MessageId,
+  owner: ActionResumeOwner,
+  state: Schema.Literals(["waiting", "transferred", "disposed"]),
+  continuationRunId: Schema.optional(RunId),
+});
+export type ActionResumeObligation = typeof ActionResumeObligation.Type;
 
 export const ActionResumeOutcome = Schema.Literals([
   "running",
@@ -153,21 +182,41 @@ export const ActionProtocolEvent = ActionProtocolEventFields.check(
 );
 export type ActionProtocolEvent = typeof ActionProtocolEvent.Type;
 
+export const ActionCheckoutHead = Schema.Struct({
+  head: TrimmedNonEmptyString,
+  /** Null when HEAD is detached. */
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ActionCheckoutHead = typeof ActionCheckoutHead.Type;
+
+/** The checkout an Action launched on, so a later result can't pass for a newer head. */
+export const ActionRunCheckout = Schema.Struct({
+  ...ActionCheckoutHead.fields,
+  cwd: TrimmedNonEmptyString,
+  pullRequest: Schema.optional(Schema.Struct({ number: PositiveInt, url: TrimmedNonEmptyString })),
+});
+export type ActionRunCheckout = typeof ActionRunCheckout.Type;
+
 /**
  * Durable one-shot state for one Project Action process and its follow-up.
  * The thread shell exposes the latest run; retained runs preserve their output.
  */
 export const ActionResumeState = Schema.Struct({
   runId: TrimmedNonEmptyString,
+  owner: Schema.optional(ActionResumeOwner),
   threadId: ThreadId,
   projectId: ProjectId,
   actionId: TrimmedNonEmptyString,
   actionName: TrimmedNonEmptyString,
   /** Exact command captured at launch; absent on states persisted by older servers. */
   command: Schema.optional(TrimmedNonEmptyString),
+  /** Absent when the Action's directory isn't a Git checkout, or on older rows. */
+  checkout: Schema.optional(ActionRunCheckout),
   terminalId: TrimmedNonEmptyString,
   outcome: ActionResumeOutcome,
   delivery: ActionResumeDelivery,
+  /** Retains automatic delivery intent across restart after environment Resume. */
+  heldByEnvironmentPause: Schema.optional(Schema.Boolean),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
   exitCode: Schema.NullOr(Schema.Int),
@@ -181,12 +230,64 @@ export const ActionResumeState = Schema.Struct({
 });
 export type ActionResumeState = typeof ActionResumeState.Type;
 
+export const ActionResumeStatus = Schema.Struct({
+  state: Schema.Literals([
+    "running",
+    "environment_paused",
+    "waiting_for_input",
+    "pending_delivery",
+    "follow_up_queued",
+    "follow_up_active",
+    "follow_up_ended",
+    "follow_up_dispatched",
+    "attention_required",
+    "interrupted",
+    "disposed",
+  ]),
+  environmentPaused: Schema.Boolean,
+  automaticResumeArmed: Schema.Boolean,
+  attentionRequired: Schema.Boolean,
+});
+export type ActionResumeStatus = typeof ActionResumeStatus.Type;
+
+export const ActionRunSummary = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  actionId: TrimmedNonEmptyString,
+  actionName: TrimmedNonEmptyString,
+  outcome: ActionResumeOutcome,
+  delivery: ActionResumeDelivery,
+  startedAt: IsoDateTime,
+  finishedAt: Schema.NullOr(IsoDateTime),
+  exitCode: Schema.NullOr(Schema.Int),
+  exitSignal: Schema.NullOr(Schema.Int),
+  status: ActionResumeStatus,
+  report: Schema.optional(
+    Schema.Struct({
+      outcome: ActionReportOutcome,
+      summary: ActionReportShortText,
+      untrusted: Schema.Literal(true),
+    }),
+  ),
+});
+export type ActionRunSummary = typeof ActionRunSummary.Type;
+
 export const ActionRunInspection = Schema.Struct({
   runId: TrimmedNonEmptyString,
   actionName: TrimmedNonEmptyString,
   lifecycleOutcome: ActionResumeOutcome,
+  delivery: ActionResumeDelivery,
+  heldByEnvironmentPause: Schema.optional(Schema.Boolean),
+  status: ActionResumeStatus,
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
+  checkout: Schema.optional(
+    Schema.Struct({
+      launched: ActionRunCheckout,
+      /** Null when the checkout can no longer be read. */
+      current: Schema.NullOr(ActionCheckoutHead),
+      headMoved: Schema.Boolean,
+    }),
+  ),
   outputTail: Schema.String.check(Schema.isMaxLength(12_000)),
 });
 export type ActionRunInspection = typeof ActionRunInspection.Type;
@@ -207,5 +308,6 @@ export class ActionResumeError extends Schema.TaggedError<ActionResumeError>()(
       "internal_error",
     ]),
     message: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}

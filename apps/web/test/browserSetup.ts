@@ -11,6 +11,8 @@ declare module "vite-plus/test/browser" {
     pointerDown: () => Promise<void>;
     /** Defined in vite.config.ts. Releases the primary button. */
     pointerUp: () => Promise<void>;
+    /** Native wheel input at the pointer's current position. */
+    wheel: (deltaY: number) => Promise<void>;
   }
 }
 

@@ -10,18 +10,20 @@ import {
 import type { EnvironmentOption } from "../components/BranchToolbar.logic";
 import {
   deriveLogicalProjectKeyFromSettings,
+  isPickableProjectMember,
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
-import { useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { useDraftProjectChoices } from "./useProjectPickerGroups";
 import { useClientSettings } from "./useSettings";
 
 export function useLogicalProjectEnvironments(
   activeProject: EnvironmentProject | null,
   scratchDraft: boolean,
+  isDraft = false,
 ): readonly EnvironmentOption[] {
   const { environments } = useEnvironments();
-  const allProjects = useProjects();
+  const allProjects = useDraftProjectChoices(activeProject);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
 
@@ -61,6 +63,7 @@ export function useLogicalProjectEnvironments(
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
     const seen = new Set<string>();
     for (const p of allProjects) {
+      if (isDraft && !isPickableProjectMember(p)) continue;
       if (seen.has(p.environmentId)) continue;
       if (deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) !== logicalKey) continue;
       seen.add(p.environmentId);

@@ -3,8 +3,8 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
-  T3_CODE_ORCHESTRATION_SECTIONS,
   t3AcpPromptWithInstructions,
+  t3CodeMcpInstructions,
   t3OrchestrationPrompt,
   t3OrchestrationSystemPrompt,
 } from "./orchestrationInstructions.ts";
@@ -64,7 +64,7 @@ describe("T3 device instructions", () => {
         deviceInstructionsDelivered,
       });
     assert.include(laterRun(false), T3_CODE_DEVICE_TOOL_INSTRUCTIONS);
-    assert.notInclude(laterRun(false), T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n").trim());
+    assert.notInclude(laterRun(false), t3CodeMcpInstructions(false, false));
     assert.equal(laterRun(true), "Check the login screen.");
 
     // A provider's own guidance reaches a conversation that already had the rest.
@@ -79,7 +79,7 @@ describe("T3 device instructions", () => {
         providerInstructionsDelivered,
       });
     assert.include(providerRun(false), "Mark awaited shells.");
-    assert.notInclude(providerRun(false), T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim());
+    assert.notInclude(providerRun(false), t3CodeMcpInstructions(false, false));
     assert.equal(providerRun(true), "Check the login screen.");
   });
 

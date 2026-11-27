@@ -1,3 +1,4 @@
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import { useAtomValue } from "@effect/atom-react";
 import {
   parseScopedThreadKey,
@@ -19,6 +20,7 @@ import { Atom } from "effect/reactivity";
 
 import { PREVIEW_RECENT_URL_LIMIT } from "./components/preview/previewConstants";
 import { appAtomRegistry } from "./rpc/atomRegistry";
+import { updateHandoffBrowserTitle } from "./handoffs/handoffsStore";
 import { useRightPanelStore } from "./rightPanelStore";
 import { randomUUID } from "./lib/utils";
 
@@ -67,6 +69,8 @@ export interface ThreadPreviewState {
   listLoaded: boolean;
   serverEpoch: string | null;
   serverRevision: number;
+  liveServerRevision: number;
+  liveRevealRequest: Extract<PreviewEvent, { type: "navigated" }> | null;
 }
 
 const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
@@ -81,6 +85,8 @@ const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
   listLoaded: false,
   serverEpoch: null,
   serverRevision: 0,
+  liveServerRevision: -1,
+  liveRevealRequest: null,
 });
 
 const emptyPreviewStateAtom = Atom.make<ThreadPreviewState>(EMPTY_THREAD_PREVIEW_STATE).pipe(
@@ -148,14 +154,28 @@ function updateThreadPreviewState(
   );
   const atom = previewStateAtom(threadKey);
   let nextState = appAtomRegistry.get(atom);
+  const previousSessions = nextState.sessions;
   const changed = appAtomRegistry.modify(atom, (current) => {
     nextState = update(current);
     return [nextState !== current, nextState];
   });
-  if (changed) syncActivePreviewThread(threadKey, nextState);
+  if (!changed) return;
+  for (const [tabId, snapshot] of Object.entries(nextState.sessions)) {
+    const previous = previousSessions[tabId];
+    if (previous === snapshot || previous?.navStatus === snapshot.navStatus) continue;
+    if (snapshot.navStatus._tag === "Success" && snapshot.navStatus.title) {
+      updateHandoffBrowserTitle(ref, tabId, snapshot.navStatus.title, snapshot.navStatus.url);
+    }
+  }
+  syncActivePreviewThread(threadKey, nextState);
 }
 
 const dedupeRecentUrls = (existing: string[], url: string): string[] => {
+  try {
+    url = stripPreviewBootstrapTokenFromUrl(new URL(url)).href;
+  } catch {
+    /* Relative input is normalized by navigation. */
+  }
   const next = [url, ...existing.filter((entry) => entry !== url)];
   return next.slice(0, PREVIEW_RECENT_URL_LIMIT);
 };
@@ -288,7 +308,16 @@ export function applyPreviewServerEvent(
     event.type === "opened" &&
     event.focus?.clientId === openFocusClientId &&
     event.focus.userActionRevision !== useRightPanelStore.getState().getUserActionRevision(ref);
-  updateThreadPreviewState(ref, (current) => {
+  updateThreadPreviewState(ref, (state) => {
+    const current =
+      !options.replay &&
+      event.type === "navigated" &&
+      event.reveal === true &&
+      !state.suppressedTabIds.has(event.tabId) &&
+      (state.serverEpoch === null || event.serverEpoch === state.serverEpoch) &&
+      (event.revision >= state.serverRevision || state.sessions[event.tabId])
+        ? { ...state, liveRevealRequest: event }
+        : state;
     if (current.serverEpoch !== null && event.serverEpoch !== current.serverEpoch) return current;
     // A list may hydrate a new tab before its live creation event. Consume
     // that focus once, while retaining newer metadata and revision ordering.
@@ -355,12 +384,16 @@ export function applyPreviewServerEvent(
         }
       }
     })();
-    return next.serverRevision === event.revision && next.serverEpoch === event.serverEpoch
+    const liveServerRevision = options.replay ? current.liveServerRevision : event.revision;
+    return next.serverRevision === event.revision &&
+      next.serverEpoch === event.serverEpoch &&
+      next.liveServerRevision === liveServerRevision
       ? next
       : {
           ...next,
           serverEpoch: event.serverEpoch,
           serverRevision: event.revision,
+          liveServerRevision,
         };
   });
   const state = readThreadPreviewState(ref);

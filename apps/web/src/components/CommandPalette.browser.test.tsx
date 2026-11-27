@@ -16,6 +16,7 @@ const entities = vi.hoisted(() => ({
   projects: [] as ReadonlyArray<Project>,
   threads: [] as ReadonlyArray<Thread>,
   activeThread: undefined as Thread | undefined,
+  connectedEnvironmentIds: ["local"] as readonly string[],
   delegatedUnderParent: new Set<string>() as ReadonlySet<string>,
   handleNewThread: vi.fn(async () => undefined),
 }));
@@ -50,6 +51,24 @@ vi.mock("../state/entities", async (original) => ({
   useVisibleThreadShells: () => entities.threads,
   useDelegatedUnderParent: () => entities.delegatedUnderParent,
 }));
+vi.mock("../state/environments", async (original) => ({
+  ...(await original<typeof import("../state/environments")>()),
+  // New-thread project rows are selectable only while their environment is connected.
+  useEnvironments: () => ({
+    environments: entities.connectedEnvironmentIds.map((environmentId) => ({
+      environmentId,
+      label: environmentId === "local" ? "Local" : "Remote",
+      connection: { phase: "connected" },
+      entry: {
+        target:
+          environmentId === "local"
+            ? { _tag: "PrimaryConnectionTarget" }
+            : { _tag: "BearerConnectionTarget", connectionId: `paired-${environmentId}` },
+      },
+      serverConfig: null,
+    })),
+  }),
+}));
 
 function setup(state: Partial<typeof entities> = {}) {
   // Earlier browser test files share this origin's localStorage; a remembered project
@@ -59,6 +78,7 @@ function setup(state: Partial<typeof entities> = {}) {
   entities.projects = state.projects ?? [];
   entities.threads = state.threads ?? [];
   entities.activeThread = state.activeThread;
+  entities.connectedEnvironmentIds = state.connectedEnvironmentIds ?? ["local"];
   entities.delegatedUnderParent = state.delegatedUnderParent ?? new Set();
   entities.handleNewThread.mockClear();
 }
@@ -161,11 +181,13 @@ describe("CommandPalette open intents", () => {
     await expect
       .element(page.getByPlaceholder("Search commands, projects, and threads..."))
       .toHaveFocus();
-    await userEvent.keyboard("{ArrowDown}");
     await expect
-      .element(page.getByRole("option", { name: /^New thread in\.\.\./ }))
+      .element(page.getByRole("option", { name: /^New thread in Acme/ }))
       .toHaveAttribute("data-highlighted");
-    await userEvent.keyboard("{Enter}");
+    const newThreadIn = page.getByRole("option", { name: /^New thread in\.\.\./ });
+    await userEvent.hover(newThreadIn);
+    await expect.element(newThreadIn).toHaveAttribute("data-highlighted");
+    await newThreadIn.click();
 
     await expect.element(page.getByPlaceholder("Search...")).toHaveFocus();
     await expect.element(page.getByRole("option").first()).toHaveAttribute("data-highlighted");
@@ -272,6 +294,7 @@ describe("CommandPalette open intents", () => {
     };
     setup({
       projects: [archived, open],
+      connectedEnvironmentIds: ["local", "remote"],
       activeThread: makeThreadFixture({
         environmentId: archived.environmentId,
         projectId: archived.id,
@@ -283,10 +306,10 @@ describe("CommandPalette open intents", () => {
     await page.getByRole("option", { name: /acme/i }).click();
 
     await vi.waitFor(() =>
-      expect(entities.handleNewThread).toHaveBeenCalledWith({
-        environmentId: open.environmentId,
-        projectId: open.id,
-      }),
+      expect(entities.handleNewThread).toHaveBeenCalledWith(
+        { environmentId: open.environmentId, projectId: open.id },
+        { environmentSelection: "manual" },
+      ),
     );
   });
 
@@ -302,10 +325,13 @@ describe("CommandPalette open intents", () => {
     await userEvent.keyboard("{Control>}1{/Control}");
 
     await vi.waitFor(() =>
-      expect(entities.handleNewThread).toHaveBeenCalledWith({
-        environmentId: EnvironmentId.make("local"),
-        projectId: ProjectId.make("lima"),
-      }),
+      expect(entities.handleNewThread).toHaveBeenCalledWith(
+        {
+          environmentId: EnvironmentId.make("local"),
+          projectId: ProjectId.make("lima"),
+        },
+        { environmentSelection: "manual" },
+      ),
     );
   });
 
@@ -346,12 +372,21 @@ describe("CommandPalette open intents", () => {
   });
 
   it("ignores repeated Escape keydowns after stepping back from file search", async () => {
-    setup();
+    const project = makeProject("Acme");
+    setup({
+      projects: [project],
+      activeThread: makeThreadFixture({
+        environmentId: project.environmentId,
+        projectId: project.id,
+      }),
+    });
     await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
 
     openCommandPalette({});
     const palette = page.getByTestId("command-palette");
+    const commandInput = page.getByPlaceholder("Search commands, projects, and threads...");
     await expect.element(palette).toHaveAttribute("data-palette-mode", "command");
+    await expect.element(commandInput).toHaveFocus();
 
     await act(() => {
       dispatchCommandPalette({
@@ -361,12 +396,11 @@ describe("CommandPalette open intents", () => {
       });
     });
     await expect.element(palette).toHaveAttribute("data-palette-mode", "files");
+    await expect.element(page.getByPlaceholder("Search files…")).toHaveFocus();
 
     await userEvent.keyboard("{Escape}");
     await expect.element(palette).toHaveAttribute("data-palette-mode", "command");
-    await expect
-      .element(page.getByPlaceholder("Search commands, projects, and threads..."))
-      .toHaveFocus();
+    await expect.element(commandInput).toHaveFocus();
 
     await act(() => {
       document.activeElement?.dispatchEvent(

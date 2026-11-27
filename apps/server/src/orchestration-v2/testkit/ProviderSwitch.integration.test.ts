@@ -186,7 +186,6 @@ function makeTestAdapter(input: {
           providerSessionId: sessionInput.providerSessionId,
           providerSession,
           events: Stream.fromPubSub(events),
-          ...(input.unloadThread === undefined ? {} : { unloadThread: input.unloadThread }),
           ...(input.backgroundTasksEndWithProcess === undefined
             ? {}
             : { backgroundTasksEndWithProcess: input.backgroundTasksEndWithProcess }),
@@ -511,6 +510,7 @@ function makeTestAdapter(input: {
             }),
           steerTurn: () => Effect.void,
           interruptTurn: () => Effect.void,
+          unloadThread: input.unloadThread ?? (() => Effect.void),
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () =>
             unimplemented(input.driver, "readThreadSnapshot unused in provider switch test"),

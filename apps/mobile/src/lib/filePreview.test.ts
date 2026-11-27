@@ -18,7 +18,7 @@ import {
 } from "../features/threads/ThreadMarkdownVideo";
 import { AudioFilePreview } from "../features/files/AudioFilePreview";
 import { MediaVideoPlayer } from "../components/MediaVideoPlayer";
-import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ThreadId, type AssetResource } from "@t3tools/contracts";
 import { acquireAudioSession, activateAudioSession, releaseAudioSession } from "./audioSession";
 import { ThreadFeed } from "../features/threads/ThreadFeed";
 import type { ThreadFeedEntry } from "./threadActivity";
@@ -120,6 +120,7 @@ vi.mock("../components/ui/Button", () => ({
 }));
 vi.mock("expo", () => ({
   requireNativeModule: () => ({ is24HourFormat: () => true }),
+  requireOptionalNativeModule: () => null,
   useEvent: (_player: unknown, _event: unknown, initial: unknown) => initial,
   useReleasingSharedObjectWithLifecycle: (
     lifecycle: {
@@ -133,6 +134,16 @@ vi.mock("expo", () => ({
     return player;
   },
 }));
+vi.mock("expo-crypto", () => ({
+  randomUUID: () => "test-uuid",
+  getRandomBytes: (byteCount: number) => new Uint8Array(byteCount),
+}));
+vi.mock("expo-secure-store", () => ({
+  deleteItemAsync: vi.fn(),
+  getItemAsync: vi.fn(async () => null),
+  setItemAsync: vi.fn(),
+}));
+vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 vi.mock("expo-video", () => ({
   useVideoPlayer: () => audio.video,
   VideoView: () => null,
@@ -151,7 +162,14 @@ vi.mock("./videoAudioSession", () => ({
 }));
 vi.mock("../state/assets", () => ({
   useRefreshAssetUrl: () => audio.refresh,
-  useAssetUrlState: () => ({ _tag: "Success", url: "https://example.com/clip.mp4" }),
+  useAssetUrlState: (_environmentId: EnvironmentId | null, resource: AssetResource | null) => ({
+    _tag: "Success",
+    url:
+      resource?._tag === "media-file"
+        ? `https://example.com${resource.path}`
+        : "https://example.com/clip.mp4",
+    expiresAt: 0,
+  }),
   assetEnvironment: {},
 }));
 vi.mock("../features/threads/ThreadMarkdownVideo", async (importOriginal) => {
@@ -177,8 +195,14 @@ vi.mock("../state/projects", () => ({
 }));
 vi.mock("../state/server", () => ({ serverEnvironment: {} }));
 vi.mock("../state/session", () => ({
+  environmentBootstrap: {},
   readEnvironmentScope: () => true,
-  usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://example.com" } }),
+  useEnvironmentScope: () => true,
+  useConfiguredPreviewEnvironmentUrl: () => null,
+  usePreparedConnection: () => ({
+    _tag: "Some",
+    value: { httpBaseUrl: "https://environment.example.com" },
+  }),
 }));
 vi.mock("../state/atom-registry", () => ({ appAtomRegistry: {} }));
 vi.mock("../state/threads", () => ({ environmentThreadShells: {}, threadEnvironment: {} }));
@@ -186,6 +210,7 @@ vi.mock("../state/entities", () => ({
   useLiveThreadLinkLabels: (text: string) => text,
   useThreadChipIcons: () => new Map(),
   useEnvironmentPreviewTunnelOff: () => false,
+  useEnvironmentServerConfig: () => null,
 }));
 vi.mock("../state/peerLinks", () => ({ useLinkedEnvironments: () => new Map() }));
 vi.mock("../features/threads/useOpenThreadLink", () => ({ useOpenThreadLink: () => vi.fn() }));
@@ -196,7 +221,7 @@ vi.mock("../state/presentation", () => ({
   useEnvironmentPresentation: () => ({ isReady: true, presentation: null }),
 }));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
-vi.mock("../state/use-atom-command", () => ({}));
+vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn(async () => []) }));
 vi.mock("../state/v2-item-support", () => ({}));
 vi.mock("../native/SelectableMarkdownText", () => ({
   SelectableMarkdownText: (props: {
@@ -246,8 +271,8 @@ vi.mock("react-native-safe-area-context", () => ({
 }));
 vi.mock("expo-haptics", () => ({ selectionAsync: async () => {} }));
 vi.mock("expo-image", () => ({ Image: () => null }));
-vi.mock("expo/fetch", () => ({}));
-vi.mock("react-native-svg", () => ({}));
+vi.mock("expo/fetch", () => ({ fetch: vi.fn() }));
+vi.mock("react-native-svg", () => ({ parse: vi.fn(), SvgAst: () => null }));
 vi.mock("uniwind", () => ({}));
 vi.mock("../components/ui/Dialog", () => ({}));
 vi.mock("../components/ui/Sheet", () => ({

@@ -3,6 +3,7 @@ import {
   LastCodeQuickCiMode,
   type LastCodeLocalCiSettings,
 } from "@t3tools/contracts/settings";
+import { msg, useGT, useMessages } from "gt-react";
 import { GaugeIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -19,36 +20,37 @@ import { Switch } from "../ui/switch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingsScopeNoticeContent } from "./SettingsScopeNotice";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 
 const QUICK_CI_MODES = {
-  auto: "Automatic",
-  local: "Always local",
-  github: "GitHub only",
+  auto: msg("Automatic", { $context: "Quick CI mode" }),
+  local: msg("Always local", { $context: "Quick CI mode" }),
+  github: msg("{host} only", { $context: "Quick CI mode", host: "GitHub" }),
 } satisfies Record<LastCodeQuickCiMode, string>;
 
 const LIMIT_ROWS = [
   {
     key: "maxConcurrentRuns",
     id: "local-ci-runs",
-    title: "Concurrent CI runs",
-    description:
-      "Limit local CI runs across worktrees on this machine. Automatic defers to GitHub when busy; explicit local runs wait.",
+    description: msg(
+      "Limit local CI runs across worktrees on this machine. Automatic defers to {host} when busy; explicit local runs wait.",
+      { host: "GitHub" },
+    ),
     max: 4,
   },
   {
     key: "packageConcurrency",
     id: "local-ci-packages",
-    title: "Packages checked at once",
-    description: "Limit packages checked in parallel within each CI run.",
+    description: msg("Limit packages checked in parallel within each CI run."),
     max: 8,
   },
   {
     key: "compilerThreads",
     id: "local-ci-compiler-cpu",
-    title: "TypeScript compiler CPU limit",
-    description: "Limit native TypeScript compiler CPU parallelism within each CI run.",
+    description: msg("Limit native {language} compiler CPU parallelism within each CI run.", {
+      language: "TypeScript",
+    }),
     max: 16,
   },
 ] as const;
@@ -59,6 +61,7 @@ function LocalCiLimitField(props: {
   readonly max: number;
   readonly onChange: (value: number) => void;
 }) {
+  const gt = useGT();
   const [savedValue, setSavedValue] = useState(props.value);
   const [draft, setDraft] = useState(props.value);
   if (savedValue !== props.value) {
@@ -83,9 +86,16 @@ function LocalCiLimitField(props: {
         }}
       >
         <NumberFieldGroup>
-          <NumberFieldDecrement aria-label={`Decrease ${props.label.toLowerCase()}`} />
-          <NumberFieldInput aria-label={props.label} placeholder="Mixed" />
-          <NumberFieldIncrement aria-label={`Increase ${props.label.toLowerCase()}`} />
+          <NumberFieldDecrement
+            aria-label={gt("Decrease {label}", { label: props.label.toLowerCase() })}
+          />
+          <NumberFieldInput
+            aria-label={props.label}
+            placeholder={gt("Mixed", { $context: "selected Local CI settings differ" })}
+          />
+          <NumberFieldIncrement
+            aria-label={gt("Increase {label}", { label: props.label.toLowerCase() })}
+          />
         </NumberFieldGroup>
       </NumberField>
     </div>
@@ -93,14 +103,18 @@ function LocalCiLimitField(props: {
 }
 
 export function LocalCiSettingsSection() {
+  const gt = useGT();
   return (
-    <SettingsSection title="Local CI" icon={<GaugeIcon className="size-5" />}>
+    <SettingsSection title={gt("Local CI")} icon={<GaugeIcon className="size-5" />}>
       <LocalCiSettingsContent />
     </SettingsSection>
   );
 }
 
 function LocalCiSettingsContent() {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const resolve = useMessages();
   const settings = useScopedSettings((settings) => settings.lastcodeLocalCi);
   const updateSettings = useUpdateScopedSettings();
   const { scope, connectedEnvironments, targets } = useSettingsScope();
@@ -129,8 +143,9 @@ function LocalCiSettingsContent() {
         target="environment"
         eligibleEnvironmentIds={eligibleEnvironmentIds}
       >
-        Local CI settings apply to all projects on an environment. Choose a connected environment
-        that supports Local CI to configure them.
+        {gt(
+          "Local CI settings apply to all projects on an environment. Choose a connected environment that supports Local CI to configure them.",
+        )}
       </SettingsScopeNoticeContent>
     );
   }
@@ -141,8 +156,9 @@ function LocalCiSettingsContent() {
         target="environment"
         eligibleEnvironmentIds={eligibleEnvironmentIds}
       >
-        Update the selected environments to configure Local CI, or choose a connected environment
-        that supports it.
+        {gt(
+          "Update the selected environments to configure Local CI, or choose a connected environment that supports it.",
+        )}
       </SettingsScopeNoticeContent>
     );
   }
@@ -151,7 +167,10 @@ function LocalCiSettingsContent() {
     <>
       <SettingsRow
         {...searchableSetting("local-ci-quick-mode")}
-        description="Automatic uses free local capacity, otherwise defers to GitHub. Always local waits for capacity. GitHub checks remain required to merge."
+        description={gt(
+          "Automatic uses free local capacity, otherwise defers to {host}. Always local waits for capacity. {host} checks remain required to merge.",
+          { host: "GitHub" },
+        )}
         serverScoped
         settingKeys={["lastcodeLocalCi"]}
         mixed={mixed("quickCiMode")}
@@ -159,7 +178,7 @@ function LocalCiSettingsContent() {
           mixed("quickCiMode") ||
           settings.quickCiMode !== DEFAULT_LASTCODE_LOCAL_CI_SETTINGS.quickCiMode ? (
             <SettingResetButton
-              label="Quick CI mode"
+              ariaLabel={gt("Reset Quick CI mode to default")}
               onClick={() => patch({ quickCiMode: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS.quickCiMode })}
             />
           ) : null
@@ -173,52 +192,62 @@ function LocalCiSettingsContent() {
               }
             }}
           >
-            <SelectTrigger size="sm" aria-label="Quick CI mode">
+            <SelectTrigger size="sm" aria-label={gt("Quick CI mode")}>
               <SelectValue>
                 {(value: LastCodeQuickCiMode | null) =>
-                  value === null ? "Mixed" : QUICK_CI_MODES[value]
+                  value === null
+                    ? gt("Mixed", { $context: "selected Local CI settings differ" })
+                    : resolve(QUICK_CI_MODES[value])
                 }
               </SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
               {LastCodeQuickCiMode.literals.map((mode) => (
                 <SelectItem key={mode} value={mode}>
-                  {QUICK_CI_MODES[mode]}
+                  {resolve(QUICK_CI_MODES[mode])}
                 </SelectItem>
               ))}
             </SelectPopup>
           </Select>
         }
       />
-      {LIMIT_ROWS.map((row) => (
-        <SettingsRow
-          key={row.key}
-          {...searchableSetting(row.id)}
-          description={row.description}
-          serverScoped
-          settingKeys={["lastcodeLocalCi"]}
-          mixed={mixed(row.key)}
-          resetAction={
-            mixed(row.key) || settings[row.key] !== DEFAULT_LASTCODE_LOCAL_CI_SETTINGS[row.key] ? (
-              <SettingResetButton
-                label={row.title.toLowerCase()}
-                onClick={() => patch({ [row.key]: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS[row.key] })}
+      {LIMIT_ROWS.map((row) => {
+        const setting = searchableSetting(row.id);
+        return (
+          <SettingsRow
+            key={row.key}
+            {...setting}
+            description={resolve(row.description)}
+            serverScoped
+            settingKeys={["lastcodeLocalCi"]}
+            mixed={mixed(row.key)}
+            resetAction={
+              mixed(row.key) ||
+              settings[row.key] !== DEFAULT_LASTCODE_LOCAL_CI_SETTINGS[row.key] ? (
+                <SettingResetButton
+                  ariaLabel={gt("Reset {label} to default", {
+                    label: setting.title.toLowerCase(),
+                  })}
+                  onClick={() => patch({ [row.key]: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS[row.key] })}
+                />
+              ) : null
+            }
+            control={
+              <LocalCiLimitField
+                label={setting.title}
+                max={row.max}
+                value={mixed(row.key) ? null : settings[row.key]}
+                onChange={(value) => patch({ [row.key]: value })}
               />
-            ) : null
-          }
-          control={
-            <LocalCiLimitField
-              label={row.title}
-              max={row.max}
-              value={mixed(row.key) ? null : settings[row.key]}
-              onChange={(value) => patch({ [row.key]: value })}
-            />
-          }
-        />
-      ))}
+            }
+          />
+        );
+      })}
       <SettingsRow
         {...searchableSetting("local-ci-background-priority")}
-        description="Run CI at a lower CPU priority so agents and the app stay responsive. Applies to new CI runs."
+        description={gt(
+          "Run CI at a lower CPU priority so agents and the app stay responsive. Applies to new CI runs.",
+        )}
         serverScoped
         settingKeys={["lastcodeLocalCi"]}
         mixed={mixed("backgroundPriority")}
@@ -227,7 +256,7 @@ function LocalCiSettingsContent() {
             mixed={mixed("backgroundPriority")}
             checked={mixed("backgroundPriority") ? false : settings.backgroundPriority}
             onCheckedChange={(checked) => patch({ backgroundPriority: Boolean(checked) })}
-            aria-label="Background CI priority"
+            aria-label={gt("Background CI priority")}
           />
         }
       />

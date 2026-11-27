@@ -1,9 +1,9 @@
 import { T, useGT, Var } from "gt-react";
 import { ExternalLinkIcon, PaperclipIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
-import { markdownImageSourceFragment } from "@t3tools/client-runtime/markdown-images";
 import { makePullRequestMediaKindAtom } from "@t3tools/client-runtime/pull-request-markdown";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { markdownImageSourceFragment } from "@t3tools/shared/markdownImages";
 import {
   SOURCE_CONTROL_MEDIA_ASSET,
   type AssetResource,

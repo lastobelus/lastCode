@@ -1,19 +1,25 @@
 ---
 name: test-t3-mobile
-description: Test T3 Code's native iOS and Android app through its Device panel and returned AgentDevice command. Use for mobile verification, native-client builds, Metro launch, and mobile pairing against isolated development state.
+description: Test T3 Code's native iOS and Android app through its Device panel and returned AgentDevice command. Use only when the user explicitly asks for native mobile verification, a native-client build, or mobile pairing; web and desktop QA use test-t3-app.
 ---
 
 # Test T3 Mobile
 
+Run this skill only on an explicit user request for native mobile verification.
+A mobile code change alone gets its integrated pass through `test-t3-app`.
+
 ## Open the device
 
-Call `device_list`, then `device_open` with the selected host and device IDs.
-T3 boots the device and shows its live stream in the Device panel. Follow its
+Call `device_list`. Reuse a simulator that is already booted; boot one only when
+none is running. Then call `device_open` with the selected host and device IDs.
+T3 shows its live stream in the Device panel. Follow its
 returned `quickStart`, using the exact `agentDevice.command` and all `targetArgs`
 on every operation. Use `device_screenshot` to inspect the screen.
 
 If T3 device tools or the selected device are unavailable, report the blocker
 and stop verification. Do not install or switch to another automation system.
+If a command fails with `DEVICE_IN_USE`, another thread holds the device: ask
+the user, or wait and retry. Never open a second simulator to get around it.
 
 ## Use an isolated backend
 
@@ -82,9 +88,7 @@ Confirm the intended projects appear, exercise the affected flow, and capture
 evidence. Actually inspect the screenshots (`device_screenshot`) as a user using
 the feature—check layout, visual hierarchy, touch ergonomics, and flow—and
 iterate on anything that feels off until you are satisfied before handing back.
-Retain the app and environment while iterating. At teardown, remove
-the disposable connection, close the AgentDevice session, call `device_close`,
-and stop only your backend and Metro processes.
+Keep the app and environment while you iterate within this task.
 
 ## Accessibility audit
 
@@ -109,3 +113,14 @@ vp run mobile:audit report --dir /tmp/mobile-audit/after \
 Attach the generated `report.md` summary and annotated PNG(s) to your response
 to the user (embedded by absolute file path) and to the PR description (uploaded
 via `ghdrop` or forge assets; never commit generated audit artifacts).
+
+## Tear down
+
+Before you hand back, remove the disposable connection, close the AgentDevice
+session, and stop only your backend and Metro processes. Then call
+`device_close` with `shutdown: true` for every device this thread booted; use a
+plain `device_close` only for a device that was already running when you opened
+it. Hand back with none of your simulators running, and never pass one to
+another thread to keep. T3 Code also shuts down a local simulator an agent
+booted after 30 minutes without device commands, but that is a backstop, not
+your teardown.

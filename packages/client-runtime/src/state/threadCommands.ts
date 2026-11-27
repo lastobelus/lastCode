@@ -1,14 +1,23 @@
-import { CommandId, type ModelSelection, type ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type ModelSelection,
+  type ThreadId,
+  type ThreadOwnershipAction,
+} from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 import {
   WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
+
+import { type EnvironmentRpcInput, request } from "../rpc/client.ts";
+import { awaitThreadShell } from "./threadShellAvailability.ts";
 
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import type { EnvironmentShellStatus } from "./shell.ts";
@@ -24,6 +33,12 @@ import {
 } from "./runtime.ts";
 import { waitForTitleRegenerationOutcome } from "./threadTitleRegeneration.ts";
 import {
+  type RetryThreadWorktreeCleanupInput,
+  type AbandonThreadWorktreeCleanupInput,
+  type SetThreadPersistenceInput,
+  type UpsertThreadAnnotationInput,
+  type ResolveThreadAnnotationInput,
+  type ReopenThreadAnnotationInput,
   type InterruptThreadTurnInput,
   type UpdateThreadMetadataInput,
   archiveThread,
@@ -32,6 +47,12 @@ import {
   cancelQueuedRun,
   createThread,
   deleteThread,
+  retryThreadWorktreeCleanup,
+  abandonThreadWorktreeCleanup,
+  setThreadPersistence,
+  upsertThreadAnnotation,
+  resolveThreadAnnotation,
+  reopenThreadAnnotation,
   editQueuedRun,
   interruptThreadTurn,
   forkSideChat,
@@ -41,6 +62,7 @@ import {
   promoteQueuedRun,
   resumeThreadQueue,
   retryWorkspacePreparation,
+  acknowledgeWorkspacePreparation,
   linkThreadPullRequest,
   linkThreadIssue,
   respondToThreadApproval,
@@ -71,6 +93,7 @@ import { connectionProjectionPhase } from "../connection/model.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
+import { presentThreadShell } from "./models.ts";
 
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
@@ -119,6 +142,15 @@ function applySnooze(
         snoozedAt: now,
       };
 }
+
+export type {
+  RetryThreadWorktreeCleanupInput,
+  AbandonThreadWorktreeCleanupInput,
+  SetThreadPersistenceInput,
+  UpsertThreadAnnotationInput,
+  ResolveThreadAnnotationInput,
+  ReopenThreadAnnotationInput,
+} from "../operations/commands.ts";
 
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | SecureRandom.SecureRandom | R, E>,
@@ -261,6 +293,63 @@ export function createThreadEnvironmentAtoms<R, E>(
     resolveGuestMessage: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:resolve-guest-message",
       execute: resolveGuestMessage,
+      scheduler,
+      concurrency,
+    }),
+    retryWorktreeCleanup: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:retryWorktreeCleanup",
+      execute: (input: RetryThreadWorktreeCleanupInput) => retryThreadWorktreeCleanup(input),
+      scheduler,
+      concurrency,
+    }),
+    abandonWorktreeCleanup: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:abandonWorktreeCleanup",
+      execute: (input: AbandonThreadWorktreeCleanupInput) => abandonThreadWorktreeCleanup(input),
+      scheduler,
+      concurrency,
+    }),
+    setPersistence: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:setPersistence",
+      execute: (input: SetThreadPersistenceInput) => setThreadPersistence(input),
+      scheduler,
+      concurrency,
+    }),
+    upsertAnnotation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:upsertAnnotation",
+      execute: (input: UpsertThreadAnnotationInput) => upsertThreadAnnotation(input),
+      scheduler,
+      concurrency,
+    }),
+    resolveAnnotation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:resolveAnnotation",
+      execute: (input: ResolveThreadAnnotationInput) => resolveThreadAnnotation(input),
+      scheduler,
+      concurrency,
+    }),
+    reopenAnnotation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:reopenAnnotation",
+      execute: (input: ReopenThreadAnnotationInput) => reopenThreadAnnotation(input),
+      scheduler,
+      concurrency,
+    }),
+    recoverThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:recoverThread",
+      tag: ORCHESTRATION_V2_WS_METHODS.recoverThread,
+      scheduler,
+      concurrency,
+    }),
+    repairThread: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:repairThread",
+      execute: (
+        input: EnvironmentRpcInput<typeof ORCHESTRATION_V2_WS_METHODS.repairThread>,
+        registry,
+        environmentId,
+      ) =>
+        request(ORCHESTRATION_V2_WS_METHODS.repairThread, input).pipe(
+          Effect.tap(({ threadId }) =>
+            awaitThreadShell(registry, snapshotAtom(environmentId), threadId),
+          ),
+        ),
       scheduler,
       concurrency,
     }),
@@ -497,6 +586,12 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    acknowledgeWorkspacePreparation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:acknowledge-workspace-preparation",
+      execute: acknowledgeWorkspacePreparation,
+      scheduler,
+      concurrency,
+    }),
     retryWorkspacePreparation: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:retry-workspace-preparation",
       execute: retryWorkspacePreparation,
@@ -555,6 +650,13 @@ export function createThreadEnvironmentAtoms<R, E>(
     pin: rowAction(sent.pin),
     unpin: rowAction(sent.unpin),
   };
+  // Inspection may reconcile provider-proven stale activity, so use the write guard.
+  const archiveFamily = createEnvironmentRpcCommand(runtime, {
+    label: "environment-data:commands:thread:archive-family",
+    tag: ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily,
+    scheduler,
+    concurrency,
+  });
   const triage = createThreadTriageOutbox({
     runtime,
     sourceSnapshotAtom: snapshotAtom,
@@ -607,6 +709,52 @@ export function createThreadEnvironmentAtoms<R, E>(
       ),
   };
   return {
+    loadOwnershipAvailability: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:ownership-availability",
+      tag: ORCHESTRATION_V2_WS_METHODS.getThreadOwnershipAvailability,
+      scheduler,
+      concurrency,
+    }),
+    changeOwnership: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:ownership-change",
+      execute: Effect.fnUntraced(function* (input: {
+        threadId: ThreadId;
+        action: ThreadOwnershipAction;
+      }) {
+        const random = yield* SecureRandom.SecureRandom;
+        return yield* request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
+          ...input,
+          type: "thread.ownership.change",
+          commandId: CommandId.make(yield* random.uuidV4()),
+        });
+      }),
+      scheduler,
+      concurrency,
+    }),
+    loadArchiveFamily: {
+      ...archiveFamily,
+      run: (...[registry, target]: Parameters<typeof archiveFamily.run>) =>
+        Effect.map(archiveFamily.run(registry, target), (family) => {
+          const threads = family.threads.map((shell) =>
+            presentThreadShell(target.environmentId, shell),
+          );
+          const byId = new Map(threads.map((thread) => [thread.id, thread]));
+          const select = (ids: readonly ThreadId[]) =>
+            ids.flatMap((id) => {
+              const thread = byId.get(id);
+              return thread === undefined ? [] : [thread];
+            });
+          return {
+            ...family,
+            threads,
+            children: select(family.childThreadIds),
+            activeChildren: select(family.activeChildThreadIds),
+            activeThreads: select(family.activeThreadIds),
+            unreadThreads: select(family.unreadThreadIds),
+            protectedChildren: select(family.protectedChildThreadIds),
+          };
+        }),
+    },
     ...commands,
     regenerateTitle,
     rowActionsAtom,

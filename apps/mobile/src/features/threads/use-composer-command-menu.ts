@@ -7,6 +7,7 @@ import type {
   ThreadId,
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import { AuthOrchestrationReadScope } from "@t3tools/contracts";
 import {
   type ComposerEnvironmentCandidate,
   matchComposerEnvironmentItems,
@@ -67,6 +68,8 @@ import {
 } from "../../state/queries";
 import type { ModelOption } from "../../lib/modelOptions";
 import { m, type MessageResolver } from "../../i18n/messages";
+import { useEnvironments } from "../../state/environments";
+import { useEnvironmentsWithScope } from "../../state/session";
 import type { ComposerCommandItem } from "./ComposerCommandPopover";
 import { scoreSlashSkillQuery } from "./composerSlashSkillSearch";
 
@@ -278,7 +281,6 @@ export function useComposerCommandMenu({
   readonly environmentId: EnvironmentId | null;
   readonly threadShells?: ReadonlyArray<EnvironmentThreadShell>;
   readonly environments?: ReadonlyArray<ComposerEnvironmentCandidate>;
-  /** The machines `environmentId` links to, by name, whose threads the picker also offers. */
   readonly linkedEnvironments?: ReadonlyMap<EnvironmentId, string>;
   readonly currentThreadId?: ThreadId | null;
   readonly projectCwd: string | null;
@@ -356,12 +358,55 @@ export function useComposerCommandMenu({
     cwd: trigger?.kind === "path" ? projectCwd : null,
     query: trigger?.kind === "path" ? trigger.query : null,
   });
-  // Mounts older settled threads matching the mention, here and on linked machines, which shells
-  // may leave out.
-  useThreadSearch(
-    trigger?.kind === "path" && environmentId ? [environmentId, ...linkedEnvironments.keys()] : [],
+  const { environments: environmentCatalog } = useEnvironments();
+  const canReadEnvironment = useEnvironmentsWithScope(
+    environmentCatalog,
+    AuthOrchestrationReadScope,
+  );
+  const destinationSupportsReferences = environmentCatalog.some(
+    (environment) =>
+      environment.environmentId === environmentId &&
+      environment.connection.phase === "connected" &&
+      environment.serverConfig?.environment.capabilities.universalThreadReferences === true,
+  );
+  const mentionSources = environmentCatalog.filter(
+    (environment) =>
+      environment.connection.phase === "connected" &&
+      canReadEnvironment.has(environment.environmentId) &&
+      environment.serverConfig?.environment.capabilities.universalThreadReferences === true &&
+      (environment.environmentId === environmentId || destinationSupportsReferences),
+  );
+  const allowedThreadEnvironments = new Set(
+    environmentCatalog
+      .filter(
+        (environment) =>
+          environment.connection.phase === "connected" &&
+          canReadEnvironment.has(environment.environmentId) &&
+          (environment.environmentId === environmentId ||
+            (destinationSupportsReferences &&
+              environment.serverConfig?.environment.capabilities.universalThreadReferences ===
+                true)),
+      )
+      .map((environment) => environment.environmentId),
+  );
+  const environmentLabels = new Map(
+    environmentCatalog.map(
+      (environment) => [environment.environmentId, environment.label] as const,
+    ),
+  );
+  const mentionSearch = useThreadSearch(
+    trigger?.kind === "path" ? mentionSources.map(({ environmentId: id }) => id) : [],
     trigger?.kind === "path" ? trigger.query : "",
-    { titlesOnly: true },
+    {
+      mode: "thread-mention",
+      titlesOnly: true,
+      environmentLabels: Object.fromEntries(environmentLabels),
+    },
+  );
+  const hasUnsearchedEnvironments = environmentCatalog.some(
+    (environment) =>
+      environment.entry.enabled &&
+      !mentionSources.some((source) => source.environmentId === environment.environmentId),
   );
   const pullRequestSearch = useComposerPullRequestSearch({
     environmentId,
@@ -527,8 +572,11 @@ export function useComposerCommandMenu({
             {
               shells: threadShells,
               environmentId,
-              linkedEnvironments,
-              excludeThreadId: currentThreadId,
+              allowedEnvironmentIds: allowedThreadEnvironments,
+              environmentLabels,
+              excludeThread:
+                currentThreadId === null ? null : { environmentId, threadId: currentThreadId },
+              candidates: mentionSearch.mentionCandidates ?? [],
               query: trigger.query,
               now,
             },
@@ -599,13 +647,7 @@ export function useComposerCommandMenu({
     }
     if (item.type === "thread") {
       if (!ownerKey || trigger.kind !== "path") return;
-      const shell = threadShells.find(
-        (candidate) =>
-          candidate.environmentId === item.thread.environmentId &&
-          candidate.id === item.thread.threadId,
-      );
-      if (!shell) return;
-      const record = threadContextRecord(item.thread, shell.title);
+      const record = threadContextRecord(item.thread, item.label);
       const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
       const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
       if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {
@@ -701,13 +743,23 @@ export function useComposerCommandMenu({
     items,
     skills,
     isLoading:
-      trigger?.kind === "pull-request" ? pullRequestSearch.isPending : pathSearch.isPending,
+      trigger?.kind === "pull-request"
+        ? pullRequestSearch.isPending
+        : pathSearch.isPending || mentionSearch.isPending,
     error:
       trigger?.kind === "pull-request"
         ? pullRequestProjectId === null || pullRequestRepository === null
           ? gt("Pull requests are unavailable for this project.")
           : pullRequestSearch.error
-        : null,
+        : trigger?.kind === "path" && trigger.query.trim().length > 0
+          ? trigger.query.trim().length < 2
+            ? gt("Type at least two characters to search more threads.")
+            : hasUnsearchedEnvironments || (mentionSearch.mentionFailures?.length ?? 0) > 0
+              ? gt("Some environments could not be searched. Results may be incomplete.")
+              : mentionSearch.mentionsTruncated
+                ? gt("More threads match than can be shown. Keep typing to narrow the results.")
+                : null
+          : null,
     onSelect,
   };
 }

@@ -27,6 +27,18 @@ Install Git and authenticate on the machine running your T3 Code server (for rem
 - **Clone**: Use **Add Project** to pick a host (enable non-GitHub hosts in **Settings → Source control & issues**) or paste a Git URL or web page URL. Cloning runs in the background so you can draft your first prompt immediately; falls back to HTTPS if SSH auth fails. Enable **Clone into host folders** (**Settings → Threads**, or **Source control** on mobile) for `ghq`-style `<host>/<owner>/<repo>` paths.
 - **Publish**: For a local repo without a remote, **Publish Repository** creates the remote, adds `origin`, and pushes commits.
 
+## Keep project checkouts on their default branch
+
+A project's main checkout stays on its default branch (the one `origin/HEAD` names, or else `origin/main` or `origin/master`),
+so it keeps pulling cleanly while threads work elsewhere. When the server starts or you add a project, LastCode tells
+Git (2.54 or later) to refuse any command that moves that checkout to another branch or a detached
+HEAD, including commands agents run. Do branch work in a worktree instead. Commits, pulls, rebases,
+`git worktree add`, and switching back to the default branch still work there. A repository with no such
+remote branch isn't guarded.
+
+To switch on purpose, run `LASTCODE_ALLOW_ROOT_BRANCH_CHANGE=1 git switch <branch>`. To turn the
+guard off for one repository, run `git config hook.lastcode-root-guard.enabled false` in it.
+
 ## Review turn changes
 
 A turn's diff shows only that turn's own edits, commits, and conflict fixes—excluding unrelated files brought in by a pull, merge, or rebase. Use the branch comparison to view everything changed against your base branch.
@@ -60,7 +72,7 @@ Turn on **Settings → Source control & issues → Review guides** to add a **Gu
 
 Disabled by default. In **Settings → Environments → Pull request sharing** (**Pull request routing** on mobile), opt in trusted environments to **Read PRs** or **Read and act** so review reads/actions can route through another connected environment signed into the same account on the same host (credentials never leave their machines). Enable on both source and target environments; only grant **Read and act** to environments you control.
 
-## Linked pull requests and watching
+## Linked pull requests
 
 Threads can link multiple PRs (even across repos on the same host). Creating a PR via Git actions, `gh pr create`, `glab mr create`, or an agent's `link_pull_request` links it automatically; manage links from **Linked items** or the command palette.
 
@@ -68,7 +80,8 @@ Threads can link multiple PRs (even across repos on the same host). Creating a P
 - **Watch / babysit a PR**: Ask an agent to watch or babysit a PR (or toggle it in **Linked items** / click the eye icon in thread details). The server polls every 2 minutes and wakes the agent on failed checks, passed required checks, new comments/reviews from others, reactions to your comments, conflicts, merge-queue drops, or merge/close.
   - A reaction-only review result, such as a reviewer bot's 👍 on a review request, therefore still wakes the agent. Reactions carry no time, so ones already present can be reported once when watching starts. A reaction on a review, an inline review comment, or an older comment of a busy pull request can take up to about 30 minutes to notice.
   - Watched threads stay in the **Working** section while checks run (or until merge/close if the agent is waiting to act) and never auto-settle.
-  - Watching stops automatically on merge/close, Stop, settle/archive, 10 wakes that bring only comments or reactions in a row, or 8 consecutive read failures. Subagents cannot watch PRs—the parent thread watches instead.
+  - Watching stops automatically on merge/close, Stop, settle/archive, 10 wakes that bring only comments or reactions in a row, or 8 consecutive read failures.
+  - The parent thread watches for its subagents unless a LastCode child can [own its PR watch](../internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
 
 ## GitHub stacks
 

@@ -81,6 +81,7 @@ export function SidebarUpdateCapsule({
   local,
   icon,
   onRestart,
+  restartLabel,
 }: {
   readonly run: UpdateEverythingRun;
   /** Every server as it is now, to rebuild the retry of a row restored after a relaunch. */
@@ -88,6 +89,8 @@ export function SidebarUpdateCapsule({
   readonly local: UpdateRunLocalState;
   readonly icon: ReactNode;
   readonly onRestart?: () => Promise<void>;
+  /** Names the version "Restart to update" installs, e.g. "LastCode 4218 → 4301". */
+  readonly restartLabel?: string | undefined;
 }) {
   const machines = useUpdateRunMachineViews(run, current);
   const hasActiveMachine = machines.some(
@@ -195,9 +198,7 @@ export function SidebarUpdateCapsule({
             </div>
           ) : onRestart ? (
             <div className="flex items-center justify-between gap-3">
-              <span>
-                <T>This app</T>
-              </span>
+              <span className="min-w-0 break-words">{restartLabel ?? <T>This app</T>}</span>
               <Button size="xs" variant="outline" onClick={() => void onRestart()}>
                 <T>Restart to update</T>
               </Button>

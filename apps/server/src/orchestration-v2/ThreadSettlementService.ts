@@ -8,8 +8,8 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   CommandId,
-  isDelegatedAppThread,
   isOrchestrationV2WorkActive,
+  isOwnedSubagentThread,
   type ThreadId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
@@ -31,6 +31,7 @@ import * as Stream from "effect/Stream";
 
 import * as GitManager from "../git/GitManager.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -184,9 +185,12 @@ export function isAutoSettlementCandidate(
 ): boolean {
   if (thread.archivedAt !== null || thread.settledOverride !== null) return false;
   if (thread.pinnedAt != null || thread.autoSettleDisabledAt != null) return false;
+  // Blocked-on-you work must never park behind a settled override.
   if (thread.pendingRuntimeRequest !== null) return false;
   // A guest is waiting on the owner; settling would hide the Request.
   if ((thread.pendingGuestMessageCount ?? 0) > 0) return false;
+  // A live run, or background work that will wake the agent, is not
+  // staleness. A dev server left running is: the agent is done.
   if (thread.activityRunStatus != null) return false;
   const pendingTasks = thread.pendingBackgroundTasks ?? [];
   if (backgroundWorkHoldsCompletion(pendingTasks)) return false;
@@ -334,6 +338,7 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const git = yield* GitManager.GitManager;
+  const previews = yield* PreviewHosting.PreviewHosting;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const random = yield* SecureRandom.SecureRandom;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -379,17 +384,20 @@ export const make = Effect.gen(function* () {
     for (const [key, readAtMs] of quietOpenReadAt) {
       if (nowMs - readAtMs >= QUIET_SYNC_INTERVAL_MS) quietOpenReadAt.delete(key);
     }
+    const settlesAsDelegatedThread = (thread: (typeof threads)[number]) =>
+      isOwnedSubagentThread(thread) ||
+      (thread.delegatedFrom != null && thread.lineage.independent !== true);
     // Merge events resweep all candidates because unlinked threads settle through branch lookup.
     const candidates = threads.filter(
       (thread) =>
-        (automaticSettlementEnabled || isDelegatedAppThread(thread)) &&
+        (automaticSettlementEnabled || settlesAsDelegatedThread(thread)) &&
         isAutoSettlementCandidate(thread, nowMs),
     );
 
     // Runs per candidate thread, thousands per sweep on busy servers; the sweep owns the span.
     const settleThread = Effect.fnUntraced(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {
-        if (isDelegatedAppThread(thread)) {
+        if (settlesAsDelegatedThread(thread)) {
           if (yield* terminals.hasActiveSubprocess({ threadId: thread.id })) return null;
           // The store returns a subagent once its parent is done, or once its own run ended and
           // the parent holds its result. A task delegated from a linked environment has no parent
@@ -447,7 +455,7 @@ export const make = Effect.gen(function* () {
     const lookupCandidates = (yield* Effect.forEach(
       candidates,
       (thread) => {
-        if (isDelegatedAppThread(thread)) return settleThread(thread, null);
+        if (settlesAsDelegatedThread(thread)) return settleThread(thread, null);
         const projectSettings = resolveProjectSettings(settings, thread.projectId).settings;
         // Skip no-op decisions; actual settlement still reads fresh settings before dispatch.
         const settledAt = resolveAutoSettlementAt({
@@ -796,7 +804,28 @@ export const make = Effect.gen(function* () {
     function* (threadId: ThreadId) {
       const settled = yield* projections.getThread(threadId);
       if (settled.deletedAt !== null || settled.settledOverride !== "settled") return;
-      yield* terminals.closeOnSettle({ threadId });
+      const managedTerminalIds = yield* previews.list(threadId).pipe(
+        Effect.map((leases) => leases.map((preview) => preview.terminalId)),
+        Effect.catch((error) =>
+          terminals.metadata.pipe(
+            Effect.map((summaries) =>
+              summaries
+                .filter(
+                  (terminal) =>
+                    terminal.threadId === threadId && terminal.terminalId.startsWith("preview-"),
+                )
+                .map((terminal) => terminal.terminalId),
+            ),
+            Effect.tap(() =>
+              Effect.logWarning("preview leases unavailable while settling thread", {
+                threadId,
+                error: error.message,
+              }),
+            ),
+          ),
+        ),
+      );
+      yield* terminals.closeOnSettle({ threadId, excludedTerminalIds: managedTerminalIds });
       const worktreePath = settled.worktreePath;
       if (worktreePath === null) return;
       if (!(yield* fileSystem.exists(worktreePath))) {

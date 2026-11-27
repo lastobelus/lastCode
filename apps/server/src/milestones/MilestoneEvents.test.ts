@@ -32,9 +32,9 @@ import {
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as McpWebhookTransport from "../mcp/McpWebhookTransport.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { layerMcpEventTestAuth } from "../testUtils/mcpEventAuth.lastcode.ts";
 import * as MilestoneHub from "./MilestoneHub.ts";
 
 const environmentId = EnvironmentId.make("environment-milestone-events-test");
@@ -173,12 +173,7 @@ const serveWith = Effect.fnUntraced(function* (settings: { readonly workflowsEna
             sessionId === "client-session" ? Deferred.await(revoked) : Effect.never,
         }),
       ),
-      Layer.provide(
-        Layer.mock(McpSessionRegistry.McpSessionRegistry)({
-          resolve: (presented) =>
-            Effect.succeed(scopes[presented] as McpInvocationContext.McpThreadInvocationScope),
-        }),
-      ),
+      Layer.provide(layerMcpEventTestAuth(scopes)),
     ),
     { disableListenLog: true, disableLogger: true },
   ).pipe(Layer.build);

@@ -27,7 +27,6 @@ import {
 } from "~/hooks/useLocalStorage";
 import { resolveSidebarState, type ResponsiveSidebarState } from "./sidebarState";
 import { bindSidebarRailScroll } from "./sidebarRailScroll";
-import { bindSidebarPageScroll } from "./sidebarPageScroll";
 import * as Schema from "effect/Schema";
 import { announceSidebarVisibility } from "~/lib/accessibilityAnnouncements";
 
@@ -587,13 +586,15 @@ function SidebarRail({
   const { open, setOpen, toggleSidebar, onCollapse } = useSidebar();
   const gt = useGT();
   const sidebarInstance = React.use(SidebarInstanceContext);
+  const railElementRef = React.useRef<HTMLButtonElement | null>(null);
   const suppressClickRef = React.useRef(false);
   const resolvedResizable = sidebarInstance?.resizable ?? null;
   const canResize = resolvedResizable !== null && open;
   const railLabel = canResize ? gt("Resize Sidebar") : gt("Toggle Sidebar");
   const railTitle = canResize ? gt("Drag to resize sidebar") : gt("Toggle Sidebar");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- binds the mounted sidebar rail DOM wheel listener and removes it on cleanup
   React.useEffect(() => {
-    const rail = railRef.current;
+    const rail = railElementRef.current;
     if (!rail || !open || props.onWheel) return;
     return bindSidebarRailScroll(rail);
   }, [open, props.onWheel]);
@@ -683,10 +684,12 @@ function SidebarRail({
   const [railRef] = React.useState(() => {
     const { ref: dragRef, cancel } = resize;
     return (node: HTMLButtonElement | null) => {
+      railElementRef.current = node;
       const releaseDrag = dragRef(node);
       if (!releaseDrag) return undefined;
       const stopCancelOnCollapse = onCollapse(cancel);
       return () => {
+        railElementRef.current = null;
         stopCancelOnCollapse();
         releaseDrag();
       };
@@ -817,15 +820,10 @@ function SidebarContent({
 }: React.ComponentProps<"div"> & {
   fixedHeader?: React.ReactNode;
 }) {
-  const scrollAreaRef = React.useRef<HTMLDivElement | null>(null);
-  React.useEffect(() => {
-    if (scrollAreaRef.current) return bindSidebarPageScroll(scrollAreaRef.current);
-  }, []);
   return (
     <>
       {fixedHeader ? <div className="w-full shrink-0">{fixedHeader}</div> : null}
       <ScrollArea
-        ref={scrollAreaRef}
         hideScrollbars
         scrollFade
         scrollFadePadding={false}

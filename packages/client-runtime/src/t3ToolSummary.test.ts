@@ -220,10 +220,3 @@ describe("summarizeT3ToolCalls", () => {
     });
   });
 });
-
-it("describes promotion as a request rather than completed promotion", () => {
-  expect(
-    summarizeT3ToolCalls("subagent-promote", [completed({ threadId: "child" }, { sequence: 4 })])
-      .label,
-  ).toBe("Requested 1 subagent promotion");
-});

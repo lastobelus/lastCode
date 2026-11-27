@@ -1,0 +1,99 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+
+import {
+  freeBytesOnSameVolume,
+  parseDarwinLiveValues,
+  parseDarwinMemoryPressure,
+  parseDarwinSwapUsed,
+  parseLinuxSwapUsed,
+  parseLinuxTopology,
+  parsePhysicalCores,
+  nativeSource,
+} from "./source.ts";
+
+describe("capacity native parsing", () => {
+  it("uses physical Darwin cores and deduplicates Linux hardware threads per socket", () => {
+    expect(parsePhysicalCores("10\n")).toBe(10);
+    for (const text of ["", "0", "-1", "8x", "1.5", "9007199254740992"])
+      expect(parsePhysicalCores(text)).toBeNull();
+    expect(
+      parseLinuxTopology([
+        { packageId: "0\n", coreId: "0\n" },
+        { packageId: "0", coreId: "0" },
+        { packageId: "0", coreId: "1" },
+        { packageId: "1", coreId: "0" },
+      ]),
+    ).toBe(3);
+    expect(parseLinuxTopology([])).toBeNull();
+    expect(parseLinuxTopology([{ packageId: "0", coreId: "-1" }])).toBeNull();
+    expect(parseLinuxTopology([{ packageId: "", coreId: "0" }])).toBeNull();
+  });
+
+  it("maps only kernel memory-pressure levels with a known meaning", () => {
+    expect(["1\n", "2", "4", "0", "garbage", ""].map(parseDarwinMemoryPressure)).toEqual([
+      "normal",
+      "warning",
+      "critical",
+      "unknown",
+      "unknown",
+      "unknown",
+    ]);
+  });
+
+  it("parses Darwin swap units and Linux swap without substituting free memory", () => {
+    expect(
+      parseDarwinSwapUsed("total = 3072.00M used = 1800.50M free = 1271.50M (encrypted)"),
+    ).toBe(1800.5 * 1024 ** 2);
+    expect(parseDarwinSwapUsed("used = 1.25G")).toBe(1.25 * 1024 ** 3);
+    expect(parseDarwinSwapUsed("used = 0.00M")).toBe(0);
+    expect(parseDarwinSwapUsed("used = -1M")).toBeNull();
+    expect(parseDarwinSwapUsed("permission denied")).toBeNull();
+    expect(
+      parseDarwinLiveValues("2\ntotal = 1024.00M  used = 512.00M  free = 512.00M  (encrypted)\n"),
+    ).toEqual({ memoryPressure: "warning", swapUsedBytes: 512 * 1024 ** 2 });
+    expect(parseDarwinLiveValues("")).toEqual({ memoryPressure: "unknown", swapUsedBytes: null });
+    // A failed name prints nothing, so the other value is matched by content, not position.
+    expect(parseDarwinLiveValues("total = 4.00M  used = 1.00M  free = 3.00M\n")).toEqual({
+      memoryPressure: "unknown",
+      swapUsedBytes: 1024 ** 2,
+    });
+    expect(parseLinuxSwapUsed("SwapTotal: 1024 kB\nSwapFree: 256 kB\nMemAvailable: 2 kB\n")).toBe(
+      768 * 1024,
+    );
+    expect(parseLinuxSwapUsed("SwapTotal: 0 kB\nSwapFree: 0 kB\n")).toBe(0);
+    expect(parseLinuxSwapUsed("SwapTotal: 1 kB\nSwapFree: 2 kB\n")).toBeNull();
+    expect(parseLinuxSwapUsed("MemAvailable: 1234 kB\n")).toBeNull();
+  });
+
+  it("reports free space unreadable once when a different volume appears under the path", () => {
+    expect(freeBytesOnSameVolume(null, { freeBytes: 10, device: 1 })).toBe(10);
+    expect(freeBytesOnSameVolume(1, { freeBytes: 20, device: 1 })).toBe(20);
+    expect(freeBytesOnSameVolume(1, { freeBytes: 30, device: 2 })).toBeNull();
+    expect(freeBytesOnSameVolume(1, { freeBytes: null, device: null })).toBeNull();
+    expect(freeBytesOnSameVolume(null, { freeBytes: 40, device: 2 })).toBe(40);
+  });
+
+  it.effect("restarts free space when another volume appears under the same path", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "capacity-volume-" });
+      const link = path.join(root, "worktrees");
+      // `/dev` is its own filesystem on macOS and Linux, unlike the temporary directory.
+      yield* fs.symlink("/dev", link);
+      const source = yield* nativeSource(link);
+      const before = yield* source.read;
+      yield* fs.remove(link);
+      yield* fs.symlink(root, link);
+      const swapped = yield* source.read;
+      const after = yield* source.read;
+      expect(before.worktreesFreeBytes).not.toBeNull();
+      expect(swapped.worktreesFreeBytes).toBeNull();
+      expect(after.worktreesFreeBytes).not.toBeNull();
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});

@@ -1,5 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  defaultInstanceIdForDriver,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -24,13 +25,15 @@ import * as PortScanner from "../preview/PortScanner.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   DEV_REPLAY_INSTANCE_ID,
-  deriveProviderInstanceConfigMap,
   layerSettingsWatcher,
   providerHostLayer,
   seedDevReplayInstance,
 } from "./ProviderInstanceRegistryHydration.ts";
 import * as ProviderHostLive from "./ProviderHostLive.ts";
 import { ProviderInstanceRegistryMutator } from "./ProviderInstanceRegistryMutator.ts";
+
+import { deriveProviderInstanceConfigMap } from "./providerInstanceConfig.ts";
+import { BUILT_IN_DRIVERS } from "./builtInDrivers.ts";
 
 const projectId = ProjectId.make("project-a");
 const instanceId = ProviderInstanceId.make("codex_work");
@@ -40,6 +43,25 @@ function settingsWith(overrides: Partial<ServerSettings>): ServerSettings {
 }
 
 describe("deriveProviderInstanceConfigMap", () => {
+  it("seeds the built-in defaults in driver order and preserves configured instances", () => {
+    const codexId = defaultInstanceIdForDriver(ProviderDriverKind.make("codex"));
+    const configured = { driver: ProviderDriverKind.make("codex"), enabled: false };
+    const settings = settingsWith({ providerInstances: { [codexId]: configured } });
+    const merged = deriveProviderInstanceConfigMap(settings);
+    const expected = Object.fromEntries(
+      BUILT_IN_DRIVERS.filter((driver) => driver.metadata.hasDefaultInstance !== false).map(
+        (driver) => [
+          defaultInstanceIdForDriver(driver.driverKind),
+          driver.driverKind === configured.driver ? configured : { driver: driver.driverKind },
+        ],
+      ),
+    );
+
+    expect(merged).toEqual(expected);
+    expect(Object.keys(merged)).toEqual(Object.keys(expected));
+    expect(merged[codexId]).toBe(configured);
+    expect(settings.providerInstances).toEqual({ [codexId]: configured });
+  });
   it("turns a machine-disabled instance on when a project enables it", () => {
     const settings = settingsWith({
       providerInstances: {

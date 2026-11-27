@@ -10,6 +10,10 @@ Import cookies from another browser into the desktop app's [preview browser](./b
 
 This is a one-time copy—later login changes stay separate, and some sites may still require signing in again.
 
+Named profiles share their sign-in across environments connected to the same desktop. Select the
+same profile when working in another environment to reuse its session. Default and Incognito keep
+separate storage for each environment; profiles on another desktop have their own sessions.
+
 ## Platform notes
 
 - **macOS (Safari)**: Requires temporary **Full Disk Access** (grant in System Settings, quit/reopen T3 Code if macOS requires it, then reopen the import wizard). You can revoke Full Disk Access afterward.

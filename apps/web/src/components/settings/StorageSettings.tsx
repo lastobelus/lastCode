@@ -5,7 +5,7 @@ import type {
 } from "@t3tools/contracts";
 import { resolvePastedPath } from "@t3tools/shared/path";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useAtomValue } from "@effect/atom-react";
 import {
   isAtomCommandInterrupted,
@@ -51,6 +51,9 @@ import {
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
+import { LastCodeStorageSettings } from "./LastCodeStorageSettings";
+import { SavedWorkspacesSettings } from "./SavedWorkspacesSettings";
+import { StorageCleanupScheduleSettings } from "./StorageCleanupScheduleSettings";
 
 export function WorktreesDirectoryRow() {
   const setting = useSearchableSetting();
@@ -479,17 +482,19 @@ function CleanupSection() {
           ? gt("{removed} removed, {kept} kept, {failed} failed", report.counts)
           : gt("{removed} removed, {kept} kept", report.counts)
         : "",
+      // File sizes cannot prove the change in free disk space, and individual
+      // dependency results may be omitted from a capped report.
       description: report
         ? report.counts.failed > 0
           ? gt(
-              "{count, plural, one {Last run {when}. {bytes} recovered. {count} item couldn't be removed.} other {Last run {when}. {bytes} recovered. {count} items couldn't be removed.}}",
+              "{count, plural, one {Last run {when}. Estimated space recovered: {bytes}. {count} item couldn't be removed.} other {Last run {when}. Estimated space recovered: {bytes}. {count} items couldn't be removed.}}",
               {
                 count: report.counts.failed,
                 when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
                 bytes: formatBytes(report.bytesFreed),
               },
             )
-          : gt("Last run {when}. {bytes} recovered.", {
+          : gt("Last run {when}. Estimated space recovered: {bytes}.", {
               when: formatRelativeTimeLabel(report.finishedAt, nowMs, messages),
               bytes: formatBytes(report.bytesFreed),
             })
@@ -618,7 +623,11 @@ function StorageCleanupScopeNotice() {
   );
 }
 
-export function WorktreeCleanupSection() {
+export function WorktreeCleanupSection({
+  savedWorkspaces,
+}: {
+  readonly savedWorkspaces?: ReactNode;
+} = {}) {
   const messages = useMessages();
   const setting = useSearchableSetting();
   const gt = useGT();
@@ -635,6 +644,12 @@ export function WorktreeCleanupSection() {
       : "inherit";
   const mode = projectMode(target);
   const mixedModes = targets.some((entry) => projectMode(entry) !== mode);
+  const showWorktreeRules = !isProjectScope || (!mixedModes && mode === "custom");
+  const showBuildReview = connectedEnvironments.some(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeBuildReview === true &&
+      targets.some((entry) => entry.environmentId === environment.environmentId),
+  );
   const updateSettings = useUpdateScopedSettings();
   const clearSettings = useClearScopedSettings();
   const ruleStatus = (key: keyof StorageCleanupSettings) =>
@@ -717,6 +732,10 @@ export function WorktreeCleanupSection() {
       ? updateSettings({ worktreeCleanup: { mode: "custom", rules: patch } }, options)
       : update(patch, options);
 
+  const suspensionSettings = (
+    <LastCodeStorageSettings savedWorkspaces={savedWorkspaces ?? <SavedWorkspacesSettings />} />
+  );
+
   if (
     isProjectScope &&
     connectedEnvironments.some(
@@ -725,25 +744,32 @@ export function WorktreeCleanupSection() {
     )
   ) {
     return (
-      <SettingsSection id="storage-worktrees" title={gt("Cleanup")} variant="plain">
-        <SettingsScopeNotice inline target="all">
-          {gt("Update the selected machines to configure project worktree cleanup.")}
-        </SettingsScopeNotice>
-      </SettingsSection>
+      <>
+        {suspensionSettings}
+        <SettingsSection id="storage-worktrees" title={gt("Cleanup")} variant="plain">
+          <SettingsScopeNotice inline target="all">
+            {gt("Update the selected machines to configure project worktree cleanup.")}
+          </SettingsScopeNotice>
+        </SettingsSection>
+      </>
     );
   }
   if (!supportsStorageCleanup(connectedEnvironments)) {
     return (
-      <SettingsSection id="storage-worktrees" title={gt("Cleanup")} variant="plain">
-        <StorageCleanupScopeNotice />
-      </SettingsSection>
+      <>
+        {suspensionSettings}
+        <SettingsSection id="storage-worktrees" title={gt("Cleanup")} variant="plain">
+          <StorageCleanupScopeNotice />
+        </SettingsSection>
+      </>
     );
   }
 
   return (
-    <SettingsSection id="storage-worktrees" title={gt("Cleanup")}>
-      <>
-        {isProjectScope && (
+    <>
+      {suspensionSettings}
+      {isProjectScope && (
+        <SettingsSection title={gt("Worktree settings")}>
           <SettingsRow
             title={gt("Automatic worktree cleanup")}
             description={
@@ -791,9 +817,11 @@ export function WorktreeCleanupSection() {
               </Select>
             }
           />
-        )}
-        {(!isProjectScope || (!mixedModes && mode === "custom")) && (
-          <>
+        </SettingsSection>
+      )}
+      {(showWorktreeRules || showBuildReview) && (
+        <SettingsSection id="storage-dependencies" title={gt("Dependencies and verified builds")}>
+          {showWorktreeRules && (
             <SettingsRow
               title={disposableOutputsLabel}
               status={ruleStatus("worktreeDependenciesAfterDays")}
@@ -817,192 +845,202 @@ export function WorktreeCleanupSection() {
                 />
               }
             />
-            <SettingsRow
-              title={gt("Delete worktrees with deleted threads")}
-              status={ruleStatus("worktreeOnDelete")}
-              managedPaths={lockablePath("worktreeOnDelete")}
-              description={gt(
-                "Remove unused worktrees when active or archived threads are deleted. Worktrees with local changes are kept.",
-              )}
-              serverScoped={!isProjectScope}
-              control={
-                <Switch
-                  aria-label={gt("Delete worktrees with deleted threads")}
-                  checked={settings.worktreeOnDelete}
-                  onCheckedChange={(worktreeOnDelete) => updateWorktree({ worktreeOnDelete })}
-                />
-              }
-            />
-            <SettingsRow
-              title={gt("Delete merged worktrees")}
-              status={ruleStatus("worktreeOnMerge")}
-              managedPaths={lockablePath("worktreeOnMerge")}
-              description={gt(
-                "Remove worktrees whose pull request is merged and whose commits are included in the default branch.",
-              )}
-              serverScoped={!isProjectScope}
-              control={
-                <Switch
-                  aria-label={gt("Delete merged worktrees")}
-                  checked={settings.worktreeOnMerge}
-                  onCheckedChange={(worktreeOnMerge) => updateWorktree({ worktreeOnMerge })}
-                />
-              }
-            />
-            <SettingsRow
-              title={gt("Delete inactive worktrees")}
-              status={ruleStatus("worktreeAfterDays")}
-              managedPaths={lockablePath("worktreeAfterDays")}
-              description={
-                preservationSupported
+          )}
+          <LegacyBuildReviewRow />
+        </SettingsSection>
+      )}
+      {showWorktreeRules && (
+        <SettingsSection id="storage-worktrees" title={gt("Permanent deletion")}>
+          <p className="px-3 py-3 text-xs leading-relaxed text-muted-foreground sm:px-4">
+            <T>
+              These rules are separate from suspension. They delete eligible Git worktrees without
+              saving a copy; branches and thread history are kept. Scratch workspaces are always
+              saved first and can be restored from Saved workspaces.
+            </T>
+          </p>
+          <SettingsRow
+            title={gt("Delete worktrees with deleted threads")}
+            status={ruleStatus("worktreeOnDelete")}
+            managedPaths={lockablePath("worktreeOnDelete")}
+            description={gt(
+              "Remove unused worktrees when active or archived threads are deleted. Worktrees with local changes are kept.",
+            )}
+            serverScoped={!isProjectScope}
+            control={
+              <Switch
+                aria-label={gt("Delete worktrees with deleted threads")}
+                checked={settings.worktreeOnDelete}
+                onCheckedChange={(worktreeOnDelete) => updateWorktree({ worktreeOnDelete })}
+              />
+            }
+          />
+          <SettingsRow
+            title={gt("Delete merged worktrees")}
+            status={ruleStatus("worktreeOnMerge")}
+            managedPaths={lockablePath("worktreeOnMerge")}
+            description={gt(
+              "Remove worktrees whose pull request is merged and whose commits are included in the default branch.",
+            )}
+            serverScoped={!isProjectScope}
+            control={
+              <Switch
+                aria-label={gt("Delete merged worktrees")}
+                checked={settings.worktreeOnMerge}
+                onCheckedChange={(worktreeOnMerge) => updateWorktree({ worktreeOnMerge })}
+              />
+            }
+          />
+          <SettingsRow
+            title={gt("Delete inactive worktrees")}
+            status={ruleStatus("worktreeAfterDays")}
+            managedPaths={lockablePath("worktreeAfterDays")}
+            description={
+              preservationSupported
+                ? gt(
+                    "Clean archived worktrees are eligible immediately; others use this delay. Scratch workspaces wait for every thread to be archived or deleted and the delay to pass, then are saved before removal.",
+                  )
+                : anyPreservationSupported
                   ? gt(
-                      "Clean archived worktrees are eligible immediately when enabled. Unarchived worktrees use the configured delay. Branches and thread history are kept.",
+                      "Updated environments make clean archived worktrees eligible immediately when enabled and delay unarchived ones. Older environments keep their inactivity rule. Branches and thread history are kept.",
                     )
-                  : anyPreservationSupported
-                    ? gt(
-                        "Updated environments allow clean archived worktrees immediately when enabled and use the configured delay for unarchived worktrees. Older environments use their existing inactivity rule. Branches and thread history are kept.",
-                      )
-                    : gt(
-                        "Remove worktrees using the selected environment’s inactivity rule. Branches and thread history are kept.",
-                      )
-              }
-              serverScoped={!isProjectScope}
-              control={
-                <RetentionControl
-                  label={gt("Delete inactive worktrees")}
-                  value={settings.worktreeAfterDays}
-                  onChange={(worktreeAfterDays, onFailed) =>
-                    updateWorktree({ worktreeAfterDays }, { onFailed })
-                  }
-                />
-              }
-            />
-            <AdvancedSettings
-              // The keep-when search result lands on this section, not its row.
-              targetIds={["storage-worktrees", localPreservationSetting.id]}
-            >
-              {connectedEnvironments.length > 0 &&
-                connectedEnvironments.every(
-                  (environment) =>
-                    environment.serverConfig?.environment.capabilities.settledWorktreeCleanup ===
-                    true,
-                ) && (
-                  <SettingsRow
-                    title={gt("Delete settled worktrees")}
-                    managedPaths={lockablePath("worktreeSettledAfterDays")}
-                    status={[
-                      ruleStatus("worktreeSettledAfterDays"),
-                      environments.length > connectedEnvironments.length
-                        ? gt("Offline machines will not get this setting")
-                        : undefined,
-                    ]
-                      .filter(Boolean)
-                      .join(". ")}
-                    description={gt(
-                      "Remove worktrees this many days after their thread settles. Set 0 days to remove them at the next cleanup. Branches and thread history are kept.",
-                    )}
-                    serverScoped={!isProjectScope}
-                    control={
-                      <RetentionControl
-                        label={gt("Delete settled worktrees")}
-                        value={settings.worktreeSettledAfterDays}
-                        minimum={0}
-                        onChange={(worktreeSettledAfterDays, onFailed) =>
-                          updateWorktree({ worktreeSettledAfterDays }, { onFailed })
-                        }
-                      />
-                    }
-                  />
-                )}
-              <SettingsRow
-                title={gt("Delete unchanged worktrees")}
-                status={ruleStatus("worktreeUnchanged")}
-                managedPaths={lockablePath("worktreeUnchanged")}
-                description={gt("Remove worktrees with no commits beyond the default branch.")}
-                serverScoped={!isProjectScope}
-                control={
-                  <Switch
-                    aria-label={gt("Delete unchanged worktrees")}
-                    checked={settings.worktreeUnchanged}
-                    onCheckedChange={(worktreeUnchanged) => updateWorktree({ worktreeUnchanged })}
-                  />
+                  : gt(
+                      "Remove worktrees using the selected environment’s inactivity rule. Branches and thread history are kept.",
+                    )
+            }
+            serverScoped={!isProjectScope}
+            control={
+              <RetentionControl
+                label={gt("Delete inactive worktrees")}
+                value={settings.worktreeAfterDays}
+                onChange={(worktreeAfterDays, onFailed) =>
+                  updateWorktree({ worktreeAfterDays }, { onFailed })
                 }
               />
-              {connectedEnvironments.every(
+            }
+          />
+          <AdvancedSettings
+            // The keep-when search result lands on this section, not its row.
+            targetIds={["storage-worktrees", localPreservationSetting.id]}
+          >
+            {connectedEnvironments.length > 0 &&
+              connectedEnvironments.every(
                 (environment) =>
-                  environment.serverConfig?.environment.capabilities.storageCleanupRun === true,
+                  environment.serverConfig?.environment.capabilities.settledWorktreeCleanup ===
+                  true,
               ) && (
                 <SettingsRow
-                  {...localPreservationSetting}
-                  title={
-                    preservationSupported
-                      ? localPreservationSetting.title
-                      : gt("Keep worktrees with local changes")
-                  }
-                  status={legacyKeepWhenStatus}
-                  managedPaths={lockablePath("worktreeKeepWhen")}
-                  description={
-                    preservationSupported
-                      ? preservedFilesDescription
-                      : mixedPreservationSupport
-                        ? gt(
-                            "{olderEnvironments} Updated environments preserve unknown local files regardless of this preference.",
-                            {
-                              olderEnvironments: legacyKeepWhenStatus
-                                ? gt("Older selected environments use their own local-file preferences.")
-                                : gt("Older selected environments: {description}", {
-                                    description: legacyKeepWhenDescription,
-                                  }),
-                            },
-                          ) + verifiedBuildsDescription
-                        : legacyKeepWhenDescription
-                  }
+                  title={gt("Delete settled worktrees")}
+                  managedPaths={lockablePath("worktreeSettledAfterDays")}
+                  status={[
+                    ruleStatus("worktreeSettledAfterDays"),
+                    environments.length > connectedEnvironments.length
+                      ? gt("Offline machines will not get this setting")
+                      : undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(". ")}
+                  description={gt(
+                    "Remove worktrees this many days after their thread settles. Set 0 days to remove them at the next cleanup. Branches and thread history are kept.",
+                  )}
                   serverScoped={!isProjectScope}
                   control={
-                    preservationSupported ? null : (
-                      <Select
-                        value={legacyKeepWhenStatus ? null : settings.worktreeKeepWhen}
-                        onValueChange={(next) => {
-                          if (
-                            next === "any-local-files" ||
-                            next === "uncommitted-changes" ||
-                            next === "tracked-changes"
-                          )
-                            updateWorktree({ worktreeKeepWhen: next });
-                        }}
-                      >
-                        <SelectTrigger
-                          size="sm"
-                          aria-label={gt("Keep worktrees with local changes")}
-                        >
-                          <SelectValue>
-                            {legacyKeepWhenStatus
-                              ? gt("Mixed")
-                              : messages(KEEP_WHEN_LABELS[settings.worktreeKeepWhen])}
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectPopup align="end" alignItemWithTrigger={false}>
-                          <SelectItem value="any-local-files">
-                            <T>Any local files</T>
-                          </SelectItem>
-                          <SelectItem value="uncommitted-changes">
-                            <T>Uncommitted changes</T>
-                          </SelectItem>
-                          <SelectItem value="tracked-changes">
-                            <T>Edited tracked files</T>
-                          </SelectItem>
-                        </SelectPopup>
-                      </Select>
-                    )
+                    <RetentionControl
+                      label={gt("Delete settled worktrees")}
+                      value={settings.worktreeSettledAfterDays}
+                      minimum={0}
+                      onChange={(worktreeSettledAfterDays, onFailed) =>
+                        updateWorktree({ worktreeSettledAfterDays }, { onFailed })
+                      }
+                    />
                   }
                 />
               )}
-            </AdvancedSettings>
-          </>
-        )}
-        <LegacyBuildReviewRow />
-      </>
-    </SettingsSection>
+            <SettingsRow
+              title={gt("Delete unchanged worktrees")}
+              status={ruleStatus("worktreeUnchanged")}
+              managedPaths={lockablePath("worktreeUnchanged")}
+              description={gt("Remove worktrees with no commits beyond the default branch.")}
+              serverScoped={!isProjectScope}
+              control={
+                <Switch
+                  aria-label={gt("Delete unchanged worktrees")}
+                  checked={settings.worktreeUnchanged}
+                  onCheckedChange={(worktreeUnchanged) => updateWorktree({ worktreeUnchanged })}
+                />
+              }
+            />
+            {connectedEnvironments.every(
+              (environment) =>
+                environment.serverConfig?.environment.capabilities.storageCleanupRun === true,
+            ) && (
+              <SettingsRow
+                {...localPreservationSetting}
+                title={
+                  preservationSupported
+                    ? localPreservationSetting.title
+                    : gt("Keep worktrees with local changes")
+                }
+                status={legacyKeepWhenStatus}
+                managedPaths={lockablePath("worktreeKeepWhen")}
+                description={
+                  preservationSupported
+                    ? preservedFilesDescription
+                    : mixedPreservationSupport
+                      ? gt(
+                          "{olderEnvironments} Updated environments preserve unknown local files regardless of this preference.",
+                          {
+                            olderEnvironments: legacyKeepWhenStatus
+                              ? gt(
+                                  "Older selected environments use their own local-file preferences.",
+                                )
+                              : gt("Older selected environments: {description}", {
+                                  description: legacyKeepWhenDescription,
+                                }),
+                          },
+                        ) + verifiedBuildsDescription
+                      : legacyKeepWhenDescription
+                }
+                serverScoped={!isProjectScope}
+                control={
+                  preservationSupported ? null : (
+                    <Select
+                      value={legacyKeepWhenStatus ? null : settings.worktreeKeepWhen}
+                      onValueChange={(next) => {
+                        if (
+                          next === "any-local-files" ||
+                          next === "uncommitted-changes" ||
+                          next === "tracked-changes"
+                        )
+                          updateWorktree({ worktreeKeepWhen: next });
+                      }}
+                    >
+                      <SelectTrigger size="sm" aria-label={gt("Keep worktrees with local changes")}>
+                        <SelectValue>
+                          {legacyKeepWhenStatus
+                            ? gt("Mixed")
+                            : messages(KEEP_WHEN_LABELS[settings.worktreeKeepWhen])}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectPopup align="end" alignItemWithTrigger={false}>
+                        <SelectItem value="any-local-files">
+                          <T>Any local files</T>
+                        </SelectItem>
+                        <SelectItem value="uncommitted-changes">
+                          <T>Uncommitted changes</T>
+                        </SelectItem>
+                        <SelectItem value="tracked-changes">
+                          <T>Edited tracked files</T>
+                        </SelectItem>
+                      </SelectPopup>
+                    </Select>
+                  )
+                }
+              />
+            )}
+          </AdvancedSettings>
+        </SettingsSection>
+      )}
+    </>
   );
 }
 
@@ -1061,6 +1099,7 @@ export function StorageCleanupSections() {
   // Machines report their databases after the page renders, so the notice goes last to push nothing down.
   return (
     <>
+      <StorageCleanupScheduleSettings />
       <SettingsSection id="storage-artifacts" title={gt("Artifacts and logs")}>
         <AnimatedHeight>
           <SettingsRow

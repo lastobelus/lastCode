@@ -79,6 +79,7 @@ export const TimelinePendingApprovalRow = memo(function TimelinePendingApprovalR
           <ApprovalText
             text={approval.detail || m(presentation.label)}
             label={m(presentation.detailLabel)}
+            className="[scrollbar-width:var(--app-native-scrollbar-width)]"
           />
         )
       }

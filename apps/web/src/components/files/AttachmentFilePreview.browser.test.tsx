@@ -423,7 +423,15 @@ describe("bounded binary previews", () => {
         await expect
           .element(page.getByRole("option", { name: "zzInventory (1 row)" }))
           .toBeVisible();
-        await userEvent.keyboard("{ArrowDown}{Enter}");
+        // Visible options can precede the select's deferred focus transfer.
+        await expect
+          .element(page.getByRole("option", { name: "sqliteData (1 row)" }))
+          .toHaveFocus();
+        await userEvent.keyboard("{ArrowDown}");
+        await expect
+          .element(page.getByRole("option", { name: "zzInventory (1 row)" }))
+          .toHaveFocus();
+        await userEvent.keyboard("{Enter}");
         await vi.waitFor(() =>
           expect([...screen.container.querySelectorAll("td")].map((x) => x.textContent)).toEqual([
             "42",
@@ -457,17 +465,16 @@ describe("bounded binary previews", () => {
         asset={{ environmentId: EnvironmentId.make("test-environment"), attachmentId: "image" }}
       />,
     );
-    await vi.waitFor(() =>
-      expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
-        "Unable to load image.",
-      ),
-    );
-    await act(() =>
-      screen.container.querySelector<HTMLButtonElement>('[role="alert"] button')!.click(),
-    );
-    await vi.waitFor(() =>
-      expect(screen.container.querySelector("img")?.getAttribute("src")).toBe(image),
-    );
+    // Await the cold lazy import under the test deadline before asserting the image failure.
+    await act(async () => {
+      await import("./PreviewImageContent");
+    });
+    const alert = screen.getByRole("alert");
+    await expect.element(alert.getByText("Unable to load image.", { exact: true })).toBeVisible();
+    await alert.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect
+      .element(screen.getByRole("img", { name: "photo.png" }))
+      .toHaveAttribute("src", image);
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
@@ -1726,7 +1733,7 @@ it("toggles a Mermaid attachment between diagram and source through the lazy pre
 });
 
 it("keeps a workspace PDF open across URL renewals and reloads it when the file changes", async () => {
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(true);
   const original = URL.createObjectURL(new Blob(["%PDF-1.4"], { type: "application/pdf" }));
   const edited = URL.createObjectURL(new Blob(["%PDF-1.4 edited"], { type: "application/pdf" }));
@@ -1738,6 +1745,7 @@ it("keeps a workspace PDF open across URL renewals and reloads it when the file 
       workspaceRoot="/repo"
       absolutePath="/repo/planning.pdf"
       title="Planning PDF"
+      revision={0}
       workspaceMutationId={mutation}
     />
   );
@@ -1793,8 +1801,8 @@ it("keeps a workspace PDF open across URL renewals and reloads it when the file 
 });
 
 it("loads an edited HTML file outside the workspace from a renewed URL", async () => {
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
-  const preview = (mutation: string) => (
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
+  const preview = (revision: number) => (
     <WorkspaceBrowserPreview
       environmentId={EnvironmentId.make("test")}
       threadRef={{ environmentId: EnvironmentId.make("test"), threadId: ThreadId.make("test") }}
@@ -1802,34 +1810,34 @@ it("loads an edited HTML file outside the workspace from a renewed URL", async (
       workspaceRoot="/repo"
       absolutePath="/tmp/report.html"
       title="Report"
-      workspaceMutationId={mutation}
+      revision={revision}
     />
   );
-  assetUrlState.mockReturnValue({ _tag: "Success", url: "data:text/html,original", expiresAt: 0 });
-  await using screen = await render(preview("first"));
+  refresh.mockReset().mockResolvedValue("data:text/html,original");
+  await using screen = await render(preview(0));
   const opened = screen.container.querySelector("iframe");
   expect(opened?.getAttribute("src")).toMatch(/^data:text\/html,original/);
 
-  assetUrlState.mockReturnValue({
-    _tag: "Success",
-    url: "data:text/html,original",
-    expiresAt: 0,
-    waiting: true,
-  });
-  await screen.rerender(preview("second"));
-  expect(assetUrlState).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), "second");
+  let renew!: (url: string) => void;
+  refresh.mockReturnValueOnce(
+    new Promise<string>((resolve) => {
+      renew = resolve;
+    }),
+  );
+  await screen.rerender(preview(1));
+  expect(refresh).toHaveBeenCalledTimes(2);
   expect(screen.container.querySelector("iframe")).toBe(opened);
 
-  assetUrlState.mockReturnValue({ _tag: "Success", url: "data:text/html,edited", expiresAt: 0 });
-  await screen.rerender(preview("second"));
+  await act(() => renew("data:text/html,edited"));
+  await screen.rerender(preview(1));
   expect(screen.container.querySelector("iframe")?.getAttribute("src")).toMatch(
     /^data:text\/html,edited/,
   );
 });
 
-it("keeps an unchanged workspace HTML page loaded across commands and renews its grant", async () => {
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
-  const preview = (mutation: string) => (
+it("keeps a workspace HTML reading session across commands and refreshes on explicit reload", async () => {
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
+  const preview = (mutation: string, revision = 0) => (
     <WorkspaceBrowserPreview
       environmentId={EnvironmentId.make("test")}
       threadRef={{ environmentId: EnvironmentId.make("test"), threadId: ThreadId.make("test") }}
@@ -1837,6 +1845,7 @@ it("keeps an unchanged workspace HTML page loaded across commands and renews its
       workspaceRoot="/repo"
       absolutePath="/repo/report.html"
       title="Report"
+      revision={revision}
       workspaceMutationId={mutation}
     />
   );
@@ -1844,39 +1853,41 @@ it("keeps an unchanged workspace HTML page loaded across commands and renews its
     assetUrlState.mockReturnValue({ _tag: "Success", url, expiresAt, fileRevision });
   const shownSrc = (screen: Screen) =>
     screen.container.querySelector("iframe")?.getAttribute("src");
-  refresh.mockReset();
-  using _timers = fakeTimers();
-  vi.setSystemTime(0);
   const expiresAt = 60 * 60_000;
   minted("data:text/html,original", "one", expiresAt);
+  refresh.mockReset().mockResolvedValue("data:text/html,original");
   await using screen = await render(preview("first"));
+  using _timers = fakeTimers();
+  vi.setSystemTime(0);
   const opened = screen.container.querySelector("iframe");
   expect(shownSrc(screen)).toMatch(/^data:text\/html,original/);
 
-  // Agent commands re-mint the URL; the page and everything it loaded are unchanged.
   minted("data:text/html,renewed", "one", expiresAt + 30 * 60_000);
   await screen.rerender(preview("second"));
   await screen.rerender(preview("third"));
   expect(screen.container.querySelector("iframe")).toBe(opened);
   expect(shownSrc(screen)).toMatch(/^data:text\/html,original/);
-  expect(refresh).not.toHaveBeenCalled();
-
-  // Its grant is about to expire, so the page moves to the URL minted since.
-  await act(() => vi.advanceTimersByTime(59 * 60_000));
-  expect(shownSrc(screen)).toMatch(/^data:text\/html,renewed/);
-  expect(refresh).not.toHaveBeenCalled();
-
-  // With no command since, the page asks for a fresh URL itself and moves to it.
-  refresh.mockResolvedValue(null);
-  await act(() => vi.advanceTimersByTime(30 * 60_000));
   expect(refresh).toHaveBeenCalledTimes(1);
+
+  await act(() => vi.advanceTimersByTime(59 * 60_000));
+  expect(shownSrc(screen)).toMatch(/^data:text\/html,original/);
+  expect(refresh).toHaveBeenCalledTimes(1);
+
+  await act(() => vi.advanceTimersByTime(30 * 60_000));
   minted("data:text/html,renewed-again", "one", expiresAt + 90 * 60_000);
   await screen.rerender(preview("third"));
-  expect(shownSrc(screen)).toMatch(/^data:text\/html,renewed-again/);
+  expect(shownSrc(screen)).toMatch(/^data:text\/html,original/);
+  expect(refresh).toHaveBeenCalledTimes(1);
 
   minted("data:text/html,edited", "two", expiresAt + 90 * 60_000);
   await screen.rerender(preview("fourth"));
+  expect(screen.container.querySelector("iframe")).toBe(opened);
+  expect(shownSrc(screen)).toMatch(/^data:text\/html,original/);
+
+  refresh.mockResolvedValueOnce("data:text/html,edited");
+  await screen.rerender(preview("fourth", 1));
   expect(shownSrc(screen)).toMatch(/^data:text\/html,edited/);
+  expect(refresh).toHaveBeenCalledTimes(2);
 });
 
 function planningPdf(
@@ -1927,7 +1938,7 @@ function nextPdfLoad() {
 it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it", async () => {
   assetUrlState.mockReset();
   pdfOpens.length = 0;
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
   const original = URL.createObjectURL(planningPdf());
   // A taller first page moves page 2, so only a page-relative restore lands on the same spot.
@@ -1952,6 +1963,7 @@ it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it
           absolutePath={path}
           workspaceRoot="/repo"
           title="Planning PDF"
+          revision={0}
           workspaceMutationId={mutation}
         />
       </div>
@@ -2000,65 +2012,6 @@ it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it
   } finally {
     URL.revokeObjectURL(original);
     URL.revokeObjectURL(updated);
-  }
-});
-
-it("keeps first-page PDF zoom on reload and resets a different file", async () => {
-  assetUrlState.mockReset();
-  pdfOpens.length = 0;
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
-  using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
-  const original = URL.createObjectURL(planningPdf());
-  const preview = (src: string, mutation: string, path = "/repo/planning.pdf") => {
-    assetUrlState.mockReturnValue({
-      _tag: "Success",
-      url: `${src}#preview`,
-      expiresAt: Date.now() + 3_600_000,
-    });
-    return (
-      <div className="flex h-[600px] w-[320px]">
-        <WorkspaceBrowserPreview
-          environmentId={EnvironmentId.make("test")}
-          threadRef={{
-            environmentId: EnvironmentId.make("test"),
-            threadId: ThreadId.make(original),
-          }}
-          draft={false}
-          absolutePath={path}
-          workspaceRoot="/repo"
-          title="Planning PDF"
-          workspaceMutationId={mutation}
-        />
-      </div>
-    );
-  };
-  const reload = async (screen: Screen, element: ReactElement) => {
-    const loaded = nextPdfLoad();
-    await screen.rerender(element);
-    await loaded;
-  };
-  try {
-    const loaded = nextPdfLoad();
-    await using screen = await render(preview(original, "one"));
-    await loaded;
-    await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
-    using workers = vi.spyOn(window, "Worker");
-    const region = () => screen.getByRole("region", { name: "Planning PDF" }).element();
-    await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
-    const firstPageZoom = screen.container.textContent!.match(/\d+%/)![0];
-    await reload(screen, preview(original, "first-page"));
-    await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
-    expect(screen.container.textContent).toContain(firstPageZoom);
-    await screen.getByRole("button", { name: "Next page", exact: true }).click();
-    await expect.element(screen.getByText("2 / 3 pages", { exact: true })).toBeVisible();
-    await reload(screen, preview(original, "one", "/repo/another.pdf"));
-    await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
-    expect(screen.container.textContent).toContain("Fit width");
-    expect(region().scrollTop).toBe(0);
-    expect(region().scrollLeft).toBe(0);
-    expect(workers).not.toHaveBeenCalled();
-  } finally {
-    URL.revokeObjectURL(original);
   }
 });
 

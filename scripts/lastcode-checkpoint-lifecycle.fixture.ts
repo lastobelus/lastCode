@@ -40,11 +40,14 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lib/lastcode-ci-process-identity.ts",
   "scripts/lib/lastcode-ci-scope.ts",
   "scripts/lib/lastcode-ci-worker.mjs",
+  "scripts/lib/lastcode-publication-checks.ts",
   "scripts/lastcode-carry-checkpoint.ts",
   "scripts/lastcode-carry-replay.ts",
+  "scripts/lastcode-carry-dossier.ts",
   "scripts/lastcode-carry-set.json",
   "scripts/lastcode-carry-set.ts",
   "scripts/lastcode-checkpoint-history.ts",
+  "scripts/lastcode-checkpoint-post-publish.ts",
   "scripts/lastcode-checkpoint.ts",
   "scripts/lastcode-quiet-references.ts",
   "scripts/lastcode-migration-history.ts",
@@ -53,6 +56,9 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-main-write-lock.ts",
   "scripts/lastcode-build-mac.ts",
   "scripts/lastcode-nightly.ts",
+  "scripts/lib/lastcode-git.ts",
+  "scripts/lib/lastcode-checkpoint-service-run-now.mjs",
+  "scripts/lib/lastcode-upstream-conflicts.ts",
   "scripts/lib/lastcode-installable-tag.ts",
 ] as const;
 
@@ -121,6 +127,9 @@ TASKS
   exit 0
 fi
 if [ "$1" = check ] && [ -f "$FIXTURE_CI_FAILURES/lint" ]; then echo 'fixture lint failure'; exit 71; fi
+if [ "$*" = 'run knip:check' ] && [ -f "$FIXTURE_CI_FAILURES/knip" ]; then echo 'fixture unused-code failure'; exit 71; fi
+if [ "$*" = 'run --filter @t3tools/source-control-github generate --check' ] && [ -f "$FIXTURE_CI_FAILURES/github-generate" ]; then echo 'fixture GitHub generation failure'; exit 71; fi
+if [ "$*" = 'run --filter t3 generate --check' ] && [ -f "$FIXTURE_CI_FAILURES/expo-generate" ]; then echo 'fixture Expo generation failure'; exit 71; fi
 if [ "$1" = run ] && [ "$2" = -r ] && [ "$5" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture smoke typecheck failure'; exit 72; fi
 if [ "$1" = run ] && [ "$2" = --filter ] && [ "$3" = @fixture/early ] && [ "$7" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture early typecheck failure'; exit 72; fi
 if [ "$1" = run ] && [ "$2" = --filter ] && [ "$3" = @fixture/later ] && [ "$7" = test ] && [ -f "$FIXTURE_CI_FAILURES/test" ]; then echo 'fixture later test failure'; exit 73; fi
@@ -258,6 +267,10 @@ function checkpoint(
   // Fixture reports must not satisfy the enclosing Project Action.
   delete env.T3CODE_ACTION_RUN_ID;
   delete env.T3CODE_ACTION_EVENT_TOKEN;
+  if (environment.LASTCODE_CHECKPOINT_SUPERVISOR_RUN_ID === undefined)
+    delete env.LASTCODE_CHECKPOINT_SUPERVISOR_RUN_ID;
+  if (environment.LASTCODE_CHECKPOINT_SUPERVISOR_LAUNCHD_PID === undefined)
+    delete env.LASTCODE_CHECKPOINT_SUPERVISOR_LAUNCHD_PID;
   const candidates = [
     process.execPath,
     ...(process.env.PATH?.split(NodePath.delimiter).map((directory) =>

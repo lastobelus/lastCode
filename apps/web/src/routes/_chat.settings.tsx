@@ -107,8 +107,10 @@ export function SettingsScopeBoundary({
             environment.connection.phase !== "connected" &&
             environment.connection.phase !== "connecting",
         )
-          ? "The selected project cannot be resolved while environments are offline or syncing. Reconnect to check its archived threads."
-          : "Loading archived threads"}
+          ? gt(
+              "The selected project cannot be resolved while environments are offline or syncing. Reconnect to check its archived threads.",
+            )
+          : gt("Loading archived threads")}
       </p>
     );
   }

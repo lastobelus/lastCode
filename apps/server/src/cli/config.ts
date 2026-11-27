@@ -31,6 +31,10 @@ import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntim
 import { isServerOwnershipHeld } from "../serverOwnership.ts";
 import { resolveHostCliCommand } from "./invocation.ts";
 
+export class CliLocationError extends Schema.TaggedError<CliLocationError>()("CliLocationError", {
+  message: Schema.String,
+}) {}
+
 const modeFlag = Flag.Literals("mode", ServerConfig.RuntimeMode.literals).pipe(
   Flag.withDescription("Runtime mode. `desktop` keeps loopback defaults unless overridden."),
   Flag.optional,
@@ -216,6 +220,7 @@ export interface CliServerFlags {
 export interface CliAuthLocationFlags {
   readonly baseDir: Option.Option<string>;
   readonly devUrl?: Option.Option<URL>;
+  readonly stateDir?: Option.Option<string>;
 }
 
 export const authLocationFlags = {
@@ -275,6 +280,8 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
       preferred: number,
       host: string | undefined,
     ) => Effect.Effect<number, NetService.NetError | CliError.UserError>;
+    readonly activeStateDir?: Option.Option<string>;
+    readonly discoverPort?: boolean;
   },
 ) {
   const { findAvailablePort } = yield* NetService.NetService;
@@ -330,9 +337,30 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   );
   const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
   const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
-  const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
-    baseDirIsExplicit: Option.isSome(explicitBaseDir),
+  const requestedStateDir = yield* Option.match(options?.activeStateDir ?? Option.none(), {
+    onNone: () => Effect.void,
+    onSome: (value) => Effect.map(expandHomePath(value.trim()), path.resolve),
   });
+  const userdataStateDir = path.join(baseDir, "userdata");
+  const devStateDir = path.join(baseDir, "dev");
+  if (
+    requestedStateDir !== undefined &&
+    requestedStateDir !== userdataStateDir &&
+    requestedStateDir !== devStateDir
+  ) {
+    return yield* new CliLocationError({
+      message: "--state-dir must select the userdata or dev directory within --base-dir.",
+    });
+  }
+  const derivedPaths = yield* ServerConfig.deriveServerPaths(
+    baseDir,
+    requestedStateDir === userdataStateDir
+      ? undefined
+      : requestedStateDir === devStateDir
+        ? (devUrl ?? new URL("http://127.0.0.1"))
+        : devUrl,
+    { baseDirIsExplicit: requestedStateDir === undefined && Option.isSome(explicitBaseDir) },
+  );
   // An interactive CLI must not start over a discovered server. Lifetime locking
   // and supervisor handoff are separate; this preflight cannot arbitrate two starts.
   if (options?.rejectRunningServer && mode === "web") {
@@ -450,7 +478,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     {
       onSome: (value) => Effect.succeed(value),
       onNone: () => {
-        if (mode === "desktop") {
+        if (mode === "desktop" || options?.discoverPort === false) {
           return Effect.succeed(ServerConfig.DEFAULT_PORT);
         }
         return selectAutomaticPort(ServerConfig.DEFAULT_PORT, host);
@@ -547,36 +575,47 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   return config;
 });
 
+const cliAuthServerFlags = (flags: CliAuthLocationFlags): CliServerFlags => ({
+  mode: Option.none(),
+  port: Option.none(),
+  host: Option.none(),
+  baseDir: flags.baseDir,
+  cwd: Option.none(),
+  devUrl: flags.devUrl ?? Option.none(),
+  noBrowser: Option.none(),
+  bootstrapFd: Option.none(),
+  autoBootstrapProjectFromCwd: Option.none(),
+  logWebSocketEvents: Option.none(),
+  tailscaleServeEnabled: Option.none(),
+  tailscaleServePort: Option.none(),
+  lan: Option.none(),
+});
+
 export const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
   options?: { readonly quietLogs?: boolean; readonly prepareDirectories?: boolean },
 ) => {
-  const resolved = resolveServerConfig(
-    {
-      mode: Option.none(),
-      port: Option.none(),
-      host: Option.none(),
-      baseDir: flags.baseDir,
-      cwd: Option.none(),
-      devUrl: flags.devUrl ?? Option.none(),
-      noBrowser: Option.none(),
-      bootstrapFd: Option.none(),
-      autoBootstrapProjectFromCwd: Option.none(),
-      logWebSocketEvents: Option.none(),
-      tailscaleServeEnabled: Option.none(),
-      tailscaleServePort: Option.none(),
-      lan: Option.none(),
-    },
-    cliLogLevel,
-    options,
-  );
+  const resolved = resolveServerConfig(cliAuthServerFlags(flags), cliLogLevel, {
+    activeStateDir: flags.stateDir ?? Option.none(),
+    prepareDirectories: options?.prepareDirectories ?? true,
+  });
   // Logs go to stdout, where --json and --token-only print, and resolving can
   // log, for example when it sweeps abandoned attachment uploads.
   return options?.quietLogs === true
     ? resolved.pipe(Effect.provideService(References.MinimumLogLevel, "Error"))
     : resolved;
 };
+
+export const resolveThreadInspectionConfig = (
+  flags: CliAuthLocationFlags,
+  cliLogLevel: Option.Option<LogLevel.LogLevel>,
+) =>
+  resolveServerConfig(cliAuthServerFlags(flags), cliLogLevel, {
+    activeStateDir: flags.stateDir ?? Option.none(),
+    prepareDirectories: false,
+    discoverPort: false,
+  });
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;
 

@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
-import * as Clock from "effect/Clock";
-
 import * as NodeOS from "node:os";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -1151,6 +1148,15 @@ if (import.meta.main) {
   // on SIGINT/SIGTERM; a closed terminal or dropped SSH session sends SIGHUP.
   process.on("SIGHUP", () => process.kill(process.pid, "SIGTERM"));
   Command.run(devRunnerCli, { version: "0.0.0" }).pipe(
+    Effect.raceFirst(
+      Effect.callback<never>((resume) => {
+        // Closing an interactive terminal hangs up its foreground job; NodeRuntime
+        // handles SIGINT/SIGTERM, so SIGHUP must enter the same scoped cleanup path.
+        const hangup = () => resume(Effect.interrupt);
+        process.once("SIGHUP", hangup);
+        return Effect.sync(() => process.removeListener("SIGHUP", hangup));
+      }),
+    ),
     Effect.scoped,
     Effect.provide(cliRuntimeLayer),
     NodeRuntime.runMain,

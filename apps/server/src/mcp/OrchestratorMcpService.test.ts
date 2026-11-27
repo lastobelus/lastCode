@@ -15,6 +15,7 @@ import {
   type Project,
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
+  type ModelSelection,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
   ScheduledTaskId,
@@ -60,6 +61,10 @@ import {
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import {
+  DelegatedTaskCancellation,
+  type DelegatedTaskCancellationEdge,
+} from "../orchestration-v2/DelegatedTaskCancellation.ts";
+import {
   OrchestratorDispatchError,
   OrchestratorProjectionError,
   OrchestratorThreadAboveModeLimitError,
@@ -75,22 +80,47 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpToolAccess from "./McpToolAccess.ts";
+import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
+import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
+import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
+import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
+const layerThreadReadBroker = Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+  forSession: () => ({ authorize: () => Effect.undefined }),
+  inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+});
+
+const layerOrchestratorReadDependencies = Layer.mergeAll(
+  Layer.mock(PeerForwarding.PeerForwarding)({}),
+  Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone }),
+  Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  layerThreadReadBroker,
+);
+
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
-  Layer.provide(ThreadReadBroker.layer),
+  Layer.provide(layerOrchestratorReadDependencies),
+  Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
+
+const layerWithDependencies = <ROut, E, RIn>(dependencies: Layer.Layer<ROut, E, RIn>) =>
+  layerOrchestratorService.pipe(Layer.provide(dependencies));
 
 describe("OrchestratorMcpService", () => {
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
@@ -265,7 +295,7 @@ describe("OrchestratorMcpService", () => {
         assert.equal(missing.code, "task_not_found");
         assert.include(missing.message, "No delegated task with id node:mcp-ack-missing");
         assert.include(missing.message, `${taskId} (Merge)`);
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -841,15 +871,145 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "task_not_cancellable");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(
-        Effect.provide(
-          layerOrchestratorService.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
+  );
+
+  it.effect.each(["owned", "later round", "other task", "other source", "disposed"] as const)(
+    "routes only an exact waiting Action owner to task cancellation: %s",
+    (ownership) =>
+      Effect.gen(function* () {
+        const parentThreadId = ThreadId.make("thread:mcp-cancel-parent");
+        const childThreadId = ThreadId.make("thread:mcp-cancel-child");
+        const taskId = NodeId.make("node:mcp-cancel-task");
+        const parentRunId = RunId.make("run:mcp-action-parent");
+        const sourceRunId = RunId.make("run:mcp-action-source");
+        const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+        const parentProjection = {
+          thread: { id: parentThreadId },
+          runs: [],
+          contextTransfers: [],
+          subagents: [
+            {
+              id: taskId,
+              threadId: parentThreadId,
+              runId: parentRunId,
+              status: "running",
+              origin: "app_owned",
+              childThreadId,
+              driver: "codex",
+              model: "gpt-5.6-terra",
+              result: null,
+              completionDelivery: { state: "pending" },
+            },
+          ],
+        } as unknown as OrchestrationV2ThreadProjection;
+        const childProjection = {
+          thread: { id: childThreadId, title: "Child" },
+          runs: [
+            {
+              id: sourceRunId,
+              ordinal: 1,
+              status: "completed",
+              delegatedTaskId: taskId,
+              actionObligations: [
+                {
+                  actionRunId: "action:mcp-cancel",
+                  state: ownership === "disposed" ? "disposed" : "waiting",
+                  owner: {
+                    parentThreadId,
+                    taskId: ownership === "other task" ? NodeId.make("node:other") : taskId,
+                    sourceRunId:
+                      ownership === "other source" ? RunId.make("run:other") : sourceRunId,
+                  },
+                },
+              ],
+            },
+          ],
+          contextTransfers: [],
+          messages: [],
+          subagents: [],
+          providerThreads: [],
+          providerTurns: [],
+          runtimeRequests: [],
+        } as unknown as OrchestrationV2ThreadProjection;
+        if (ownership === "later round") {
+          (childProjection.runs as Array<unknown>).push({
+            id: RunId.make("run:unrelated-later"),
+            ordinal: 2,
+            status: "running",
+            delegatedTaskId: NodeId.make("node:unrelated-later"),
+          });
+        }
+        const layerDependencies = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: (threadId) =>
+              Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
+            delegatedTaskResultPending: () => Effect.succeed(true),
+            getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+            listAppOwnedChildThreadIds: () => Effect.succeed([]),
+            dispatch: (command) =>
+              Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+                Effect.as({} as never),
+              ),
+          }),
+          ServerSettings.layerTest(),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+            list: () => Effect.succeed([]),
+          }),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        const scope: McpInvocationScope = {
+          environmentId: EnvironmentId.make("environment:mcp-cancel"),
+          requestNamespace: "provider-session:mcp-cancel",
+          thread: {
+            threadId: parentThreadId,
+            providerSessionId: "provider-session:mcp-cancel",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 1,
+        };
+
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const outcome = yield* service
+            .cancelTask(scope, { taskId, clientRequestId: "cancel-action-task" })
+            .pipe(Effect.result);
+          const commands = yield* Ref.get(dispatched);
+          if (ownership === "owned" || ownership === "later round") {
+            assert.equal(outcome._tag, "Success");
+            if (outcome._tag === "Success") {
+              assert.deepEqual(outcome.success, { taskId, status: "cancel_requested" });
+            }
+            assert.deepEqual(
+              commands.map((command) => (command as OrchestrationV2ServerCommand).type),
+              ["subagent.stop", "delegated_task.completion-delivery.dispose"],
+            );
+            const stop = commands[0] as Extract<
+              OrchestrationV2ServerCommand,
+              { type: "subagent.stop" }
+            >;
+            assert.deepEqual(
+              { threadId: stop.threadId, runId: stop.runId, subagentId: stop.subagentId },
+              { threadId: parentThreadId, runId: parentRunId, subagentId: taskId },
+            );
+          } else {
+            assert.equal(outcome._tag, "Failure");
+            assert.deepEqual(
+              commands.map((command) => (command as OrchestrationV2ServerCommand).type),
+              ["subagent.stop"],
+            );
+          }
+        }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
+      }),
   );
 
   it.effect.each(["no runs", "a finished run"] as const)(
@@ -1066,14 +1226,7 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop"],
         );
-      }).pipe(
-        Effect.provide(
-          layerOrchestratorService.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -1167,14 +1320,7 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop", "delegated_task.completion-delivery.dispose"],
         );
-      }).pipe(
-        Effect.provide(
-          layerOrchestratorService.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -1356,20 +1502,18 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "runtime_mode_escalation_denied");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(
-        Effect.provide(
-          layerOrchestratorService.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
   const cancelOverRaisedGrandchild = (child: {
     readonly deleted: boolean;
     readonly raisedDuringStop?: boolean;
+    readonly releasedRoot?: "task" | "lineage";
+    readonly releasedGrandchild?: "task" | "lineage";
+    readonly supervisedGrandchild?: boolean;
+    readonly captureOwnership?: boolean;
+    readonly readStatus?: boolean;
   }) =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-cancel-grandchild-parent");
@@ -1378,6 +1522,9 @@ describe("OrchestratorMcpService", () => {
       const taskId = NodeId.make("node:mcp-cancel-grandchild-task");
       const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
       const stoppedBelow = yield* Ref.make(false);
+      const ownership = yield* Ref.make<
+        ReadonlyArray<ReadonlyArray<DelegatedTaskCancellationEdge>>
+      >([]);
       const subagentReads = yield* Ref.make<ReadonlyArray<ProjectionRecordFilter | undefined>>([]);
       const appOwnedTask = (
         id: string,
@@ -1415,7 +1562,10 @@ describe("OrchestratorMcpService", () => {
                 settledThreadId,
                 "settled",
               ),
-              appOwnedTask(taskId, parentThreadId, childThreadId),
+              {
+                ...appOwnedTask(taskId, parentThreadId, childThreadId),
+                ownershipReleased: child.releasedRoot === "task",
+              },
             ],
           },
         ],
@@ -1433,7 +1583,14 @@ describe("OrchestratorMcpService", () => {
                 settledThreadId,
                 "settled",
               ),
-              appOwnedTask("node:mcp-cancel-grandchild-below", childThreadId, grandchildThreadId),
+              {
+                ...appOwnedTask(
+                  "node:mcp-cancel-grandchild-below",
+                  childThreadId,
+                  grandchildThreadId,
+                ),
+                ownershipReleased: child.releasedGrandchild === "task",
+              },
             ],
             providerThreads: [],
             providerTurns: [],
@@ -1480,29 +1637,57 @@ describe("OrchestratorMcpService", () => {
               projections
                 .get(threadId)!
                 .subagents.flatMap((task) =>
-                  task.origin === "app_owned" && task.childThreadId !== null
+                  task.origin === "app_owned" &&
+                  task.childThreadId !== null &&
+                  task.ownershipReleased !== true
                     ? [task.childThreadId]
                     : [],
                 ),
             ),
-          getThreadShell: (threadId) =>
-            Effect.succeed(
-              threadId === grandchildThreadId && child.raisedDuringStop !== true
+          // The child still runs Supervised; its user has since raised the task under it
+          // to full access.
+          getThreadShell: (threadId) => {
+            const shell =
+              threadId === grandchildThreadId &&
+              child.raisedDuringStop !== true &&
+              child.supervisedGrandchild !== true
                 ? liveThreadShell(threadId)
                 : threadId === childThreadId && child.deleted
                   ? null
-                  : liveThreadShell(threadId, { runtimeMode: "approval-required" }),
-            ),
+                  : liveThreadShell(threadId, { runtimeMode: "approval-required" });
+            return Effect.succeed(
+              shell !== null &&
+                ((threadId === childThreadId && child.releasedRoot === "lineage") ||
+                  (threadId === grandchildThreadId && child.releasedGrandchild === "lineage"))
+                ? { ...shell, lineage: { ...shell.lineage, independent: true } }
+                : shell,
+            );
+          },
           dispatch: (command) =>
-            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
-              Effect.as({} as never),
-            ),
+            Effect.gen(function* () {
+              if (command.type === "thread.stop") {
+                const edges = yield* DelegatedTaskCancellation;
+                yield* Ref.update(ownership, (seen) => [...seen, edges]);
+              }
+              yield* Ref.update(dispatched, (commands) => [...commands, command]);
+              return {} as never;
+            }),
           cancelDelegatedTask: ({ command, stopDescendants }) =>
             stopDescendants(() => Effect.die("No remote descendants in this test")).pipe(
-              Effect.andThen(Ref.update(dispatched, (commands) => [...commands, command])),
+              Effect.andThen(
+                Effect.gen(function* () {
+                  const edges = yield* DelegatedTaskCancellation;
+                  yield* Ref.update(ownership, (seen) => [...seen, edges]);
+                  yield* Ref.update(dispatched, (commands) => [...commands, command]);
+                }),
+              ),
             ),
+          // Stands in for the orchestrator, which finds the grandchild raised
+          // under its lock, when the stop runs under the parent's limit.
           stopDelegatedTasks: () =>
             Effect.gen(function* () {
+              const edges = yield* DelegatedTaskCancellation;
+              yield* Ref.update(ownership, (seen) => [...seen, edges]);
               const limit = yield* DispatchModeLimit;
               if (child.raisedDuringStop === true && limit?.refused !== undefined) {
                 const refusal: DispatchModeRefusal = {
@@ -1548,9 +1733,15 @@ describe("OrchestratorMcpService", () => {
 
       return yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const error = yield* service
+        const code = yield* service
           .cancelTask(scope, { taskId, clientRequestId: "cancel-grandchild-above-modes" })
-          .pipe(Effect.flip);
+          .pipe(
+            Effect.match({
+              onFailure: (error) => error.code,
+              onSuccess: (result) => result.status,
+            }),
+          );
+        const status = child.readStatus ? yield* service.taskStatus(scope, taskId) : undefined;
         // No read decodes every task a thread has dispatched.
         for (const filter of yield* Ref.get(subagentReads)) {
           assert.isTrue(
@@ -1558,18 +1749,13 @@ describe("OrchestratorMcpService", () => {
           );
         }
         return {
-          code: error.code,
+          code,
           dispatched: yield* Ref.get(dispatched),
           stoppedBelow: yield* Ref.get(stoppedBelow),
+          ...(child.captureOwnership ? { ownership: yield* Ref.get(ownership) } : {}),
+          ...(status === undefined ? {} : { status }),
         };
-      }).pipe(
-        Effect.provide(
-          layerOrchestratorService.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     });
 
   it.effect("refuses to cancel a task when a task under it now runs above the parent's modes", () =>
@@ -1598,6 +1784,57 @@ describe("OrchestratorMcpService", () => {
         stoppedBelow: false,
       });
     }),
+  );
+
+  it.effect.each(["task", "lineage"] as const)(
+    "rejects historical cancellation after release recorded on %s",
+    (releasedRoot) =>
+      Effect.gen(function* () {
+        const outcome = yield* cancelOverRaisedGrandchild({
+          deleted: false,
+          releasedRoot,
+          readStatus: true,
+        });
+        assert.equal(outcome.code, "task_not_cancellable");
+        assert.deepEqual(outcome.dispatched, []);
+        assert.isFalse(outcome.stoppedBelow);
+        assert.equal(outcome.status?.taskId, NodeId.make("node:mcp-cancel-grandchild-task"));
+        assert.equal(
+          outcome.status?.childThreadId,
+          ThreadId.make("thread:mcp-cancel-grandchild-child"),
+        );
+      }),
+  );
+
+  it.effect.each(["task", "lineage"] as const)(
+    "excludes a released %s edge from cancellation permission checks",
+    (releasedGrandchild) =>
+      Effect.gen(function* () {
+        const outcome = yield* cancelOverRaisedGrandchild({ deleted: false, releasedGrandchild });
+        assert.equal(outcome.code, "cancel_requested");
+        assert.isTrue(outcome.stoppedBelow);
+        assert.equal(outcome.dispatched.length, 2);
+      }),
+  );
+
+  it.effect(
+    "retains the original ownership guard through the child stop and recursive cancellation",
+    () =>
+      Effect.gen(function* () {
+        const outcome = yield* cancelOverRaisedGrandchild({
+          deleted: false,
+          supervisedGrandchild: true,
+          captureOwnership: true,
+        });
+        assert.equal(outcome.code, "cancel_requested");
+        assert.isTrue(outcome.stoppedBelow);
+        const edge = {
+          parentThreadId: ThreadId.make("thread:mcp-cancel-grandchild-parent"),
+          taskId: NodeId.make("node:mcp-cancel-grandchild-task"),
+          childThreadId: ThreadId.make("thread:mcp-cancel-grandchild-child"),
+        };
+        assert.deepEqual(outcome.ownership, [[edge], [edge]]);
+      }),
   );
 });
 
@@ -1651,6 +1888,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed(providers),
       refreshInstance: () => Effect.succeed(providers),
+      refreshWorkspaceSnapshot: () => Effect.succeed(providers),
     });
 
   const adapterRegistryLayer = (instanceIds: ReadonlyArray<ProviderInstanceId>) =>
@@ -1682,6 +1920,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         id: parentThreadId,
         projectId,
         title: "MCP parent",
+        lineage: { rootThreadId: parentThreadId, parentThreadId: null, relationshipToParent: null },
         createdBy: "user",
         creationSource: "web",
         modelSelection,
@@ -2370,14 +2609,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             "Driver 'forkOnly' is not registered in this build.",
             "Provider instance is disabled.",
           ]);
-        }).pipe(
-          Effect.provide(
-            layerOrchestratorService.pipe(
-              Layer.provide(ThreadReadBroker.layer),
-              Layer.provide(layerDependencies),
-            ),
-          ),
-        );
+        }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
       }),
   );
 
@@ -2828,6 +3060,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           detail: "fatal: not a git repository (or any of the parent directories): .git",
         });
       const layerService = OrchestratorMcpService.layer.pipe(
+        Layer.provide(layerOrchestratorReadDependencies),
         Layer.provide(
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
             isNonGitProject: () => Effect.succeed(true),
@@ -2954,7 +3187,14 @@ describe("OrchestratorMcpService provider resolution", () => {
             "release",
             "the child's workspace names only the parent's commit, so other repositories fall back to their default branch",
           );
-        }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+        }).pipe(
+          Effect.provide(
+            OrchestratorMcpService.layer.pipe(
+              Layer.provide(layerOrchestratorReadDependencies),
+              Layer.provide(dependencies),
+            ),
+          ),
+        );
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -3029,14 +3269,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.isTrue(
           byDriver.message.includes("No V2 provider adapter is registered for driver forkOnly."),
         );
-      }).pipe(
-        Effect.provide(
-          layerOrchestratorService.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -3128,7 +3361,6 @@ describe("OrchestratorMcpService provider resolution", () => {
             dispatchLaunch: (input) =>
               Effect.gen(function* () {
                 const claimed = yield* dispatch(input.claim);
-                if (input.beforeInitialMessage !== undefined) yield* input.beforeInitialMessage;
                 const initialMessage = yield* dispatch(input.initialMessage);
                 return { claimed, initialMessage };
               }),
@@ -3333,7 +3565,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           modelSelection: { instanceId: string; model: string };
         };
         assert.equal(request.modelSelection.instanceId, altInstanceId);
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -3419,7 +3651,14 @@ describe("OrchestratorMcpService provider resolution", () => {
           ServerSettings.layerTest(),
         );
         const layerService = OrchestratorMcpService.layer.pipe(
-          Layer.provide(ThreadReadBroker.layer),
+          Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+          Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
+          Layer.provide(
+            Layer.mock(ActionResume.ActionResume)({
+              readLatestSummary: () => Effect.succeed(null),
+            }),
+          ),
+          Layer.provide(layerThreadReadBroker),
           Layer.provide(
             Layer.mock(ThreadLaunchService.ThreadLaunchService)({
               prepareRun: (input) =>
@@ -3566,7 +3805,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             modelSelection: { instanceId: string; model: string };
           };
           assert.equal(retryCommand.modelSelection.instanceId, codexInstanceId);
-        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+        }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
       }),
   );
 
@@ -3591,11 +3830,6 @@ describe("OrchestratorMcpService provider resolution", () => {
           })),
         );
         const layerDatabase = SqlitePersistence.layerMemory;
-        const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
-          { name: "mcp-create-retry", runtimePolicyOverride: { cwd } },
-          layerRegistry,
-          { databaseLayer: layerDatabase, runEffectWorker: false },
-        );
         const layerSettings = ServerSettings.layerTest({
           providerInstances: {
             [codexInstanceId]: { driver: "codex", enabled: true },
@@ -3605,6 +3839,15 @@ describe("OrchestratorMcpService provider resolution", () => {
             [projectId]: { providerInstances: { [codexInstanceId]: { enabled: parentEnabled } } },
           },
         });
+        const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+          { name: "mcp-create-retry", runtimePolicyOverride: { cwd } },
+          layerRegistry,
+          {
+            databaseLayer: layerDatabase,
+            serverSettingsLayer: layerSettings,
+            runEffectWorker: false,
+          },
+        );
         const layerThreads = ThreadManagementService.layer.pipe(
           Layer.provideMerge(layerOrchestrator),
           Layer.provide(
@@ -3847,7 +4090,17 @@ describe("OrchestratorMcpService provider resolution", () => {
             });
           }),
         ).pipe(Layer.provide(layerWatchedThreads));
-        const layerTest = layerOrchestratorService.pipe(
+        const layerTest = OrchestratorMcpService.layer.pipe(
+          Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+          Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
+          Layer.provide(
+            Layer.mock(ActionResume.ActionResume)({
+              readLatestSummary: () => Effect.succeed(null),
+            }),
+          ),
+          Layer.provide(layerThreadReadBroker),
+          Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+          Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
           Layer.provideMerge(layerWatchedThreads),
           Layer.provide(
             Layer.mergeAll(
@@ -4170,14 +4423,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             } else {
               assert.equal(request.modelSelection.model, "codex-alt-model", testCase.name);
             }
-          }).pipe(
-            Effect.provide(
-              layerOrchestratorService.pipe(
-                Layer.provide(ThreadReadBroker.layer),
-                Layer.provide(layerDependencies),
-              ),
-            ),
-          );
+          }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
         }
       }),
   );
@@ -4234,7 +4480,12 @@ describe("OrchestratorMcpService provider resolution", () => {
       created?: Ref.Ref<ReadonlyArray<ScheduledTask>>,
     ) =>
       OrchestratorMcpService.layer.pipe(
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+        Layer.provide(
+          Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+        ),
+        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
+        Layer.provide(layerThreadReadBroker),
         Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
         Layer.provide(
           Layer.mock(GitVcsDriver.GitVcsDriver)({
@@ -4422,40 +4673,36 @@ describe("OrchestratorMcpService provider resolution", () => {
         const lookups = yield* Ref.make(0);
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(
-            layerOrchestratorService.pipe(
-              Layer.provide(ThreadReadBroker.layer),
-              Layer.provide(
-                Layer.mergeAll(
-                  NodeServices.layer,
-                  NodeCrypto.layer,
-                  Layer.mock(ThreadManagementService.ThreadManagementService)({
-                    getThreadShell: (threadId) =>
-                      Ref.getAndUpdate(lookups, (count) => count + 1).pipe(
-                        Effect.flatMap((count) =>
-                          count === 0
-                            ? Effect.succeed(
-                                liveThreadShell(threadId, { runtimeMode: "approval-required" }),
-                              )
-                            : Effect.fail(new OrchestratorProjectionError({ threadId })),
-                        ),
+            layerWithDependencies(
+              Layer.mergeAll(
+                NodeServices.layer,
+                NodeCrypto.layer,
+                Layer.mock(ThreadManagementService.ThreadManagementService)({
+                  getThreadShell: (threadId) =>
+                    Ref.getAndUpdate(lookups, (count) => count + 1).pipe(
+                      Effect.flatMap((count) =>
+                        count === 0
+                          ? Effect.succeed(
+                              liveThreadShell(threadId, { runtimeMode: "approval-required" }),
+                            )
+                          : Effect.fail(new OrchestratorProjectionError({ threadId })),
                       ),
-                  }),
-                  ServerSettings.layerTest(),
-                  Layer.mock(ProviderRegistry.ProviderRegistry)({
-                    getProviders: Effect.succeed([]),
-                  }),
-                  Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-                    list: () => Effect.succeed([]),
-                  }),
-                  Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
-                  Layer.mock(SecretRequests.SecretRequests)({}),
-                  Layer.mock(RemoteDelegation.RemoteDelegation)({}),
-                  Layer.mock(ScheduledTaskService.ScheduledTaskService)({
-                    list: () => Effect.succeed({ tasks: [bound] }),
-                    upsert: () =>
-                      Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: bound })),
-                  }),
-                ),
+                    ),
+                }),
+                ServerSettings.layerTest(),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({
+                  getProviders: Effect.succeed([]),
+                }),
+                Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                  list: () => Effect.succeed([]),
+                }),
+                Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+                Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                  list: () => Effect.succeed({ tasks: [bound] }),
+                  upsert: () =>
+                    Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: bound })),
+                }),
               ),
             ),
           ),
@@ -4517,9 +4764,15 @@ describe("OrchestratorMcpService provider resolution", () => {
         readonly project: ScheduledTask["modelSelection"] | null;
         readonly environment?: ScheduledTask["modelSelection"];
       } = { project: existing.modelSelection },
+      models?: {
+        providers?: ReadonlyArray<ServerProvider>;
+        enabledForProject?: boolean;
+        parent?: OrchestrationV2ThreadProjection;
+      },
     ) =>
       OrchestratorMcpService.layer.pipe(
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
+        Layer.provide(layerThreadReadBroker),
         Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
         Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)(git)),
         Layer.provide(
@@ -4531,19 +4784,23 @@ describe("OrchestratorMcpService provider resolution", () => {
             }),
             Layer.mock(PeerForwarding.PeerForwarding)({}),
             Layer.mock(ThreadReadBroker.ThreadReadBroker)({
-              authorize: () => Effect.void,
+              forSession: () => ({ authorize: () => Effect.undefined }),
             }),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadShell: () => Effect.succeed(null),
+              getThreadRecords: () => Effect.succeed(models!.parent!),
+              isProviderInstanceEnabledForProject: () =>
+                Effect.succeed(models?.enabledForProject ?? true),
             }),
             ServerSettings.layerTest(
               defaults.environment === undefined
                 ? {}
                 : { defaultModelSelection: defaults.environment },
             ),
-            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+            providerRegistryLayer(models?.providers ?? []),
             Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-              list: () => Effect.succeed([]),
+              list: () =>
+                Effect.succeed(models?.providers?.map((provider) => provider.instanceId) ?? []),
             }),
             Layer.mock(ProjectService.ProjectService)({
               getById: () =>
@@ -4552,6 +4809,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   workspaceRoot,
                   defaultModelSelection: defaults.project,
                 } as never),
+              workspaceScanDirectory: (cwd) => Effect.succeed(cwd),
             }),
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(RemoteDelegation.RemoteDelegation)({}),
@@ -4564,7 +4822,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                       ? Effect.void
                       : Ref.update(inputs, (all) => [...all, input]),
                   ),
-                  Effect.as({ task }),
+                  Effect.as({ task: { ...task, modelSelection: input.modelSelection } }),
                 ),
             }),
           ),
@@ -4577,6 +4835,345 @@ describe("OrchestratorMcpService provider resolution", () => {
       resolveCommit: () => Effect.succeed({ commitSha: "abc123" }),
     };
     const schedule = { type: "interval", everyMs: 3_600_000 } as const;
+
+    const selectedModel = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-haiku-4-5",
+      options: [{ id: "effort", value: "low" }],
+    } as const satisfies ModelSelection;
+    // `schedule_task` names the instance as `target` does.
+    const requested = ({ instanceId, model, options }: ModelSelection) => ({
+      providerInstanceId: instanceId,
+      model,
+      ...(options === undefined ? {} : { options }),
+    });
+    const selectedProvider: ServerProvider = {
+      ...providerSnapshot({
+        instanceId: selectedModel.instanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        model: selectedModel.model,
+      }),
+      models: [
+        {
+          slug: "machine-only-model",
+          name: "machine-only-model",
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+      // The selected model is only in the project folder's catalog, as orchestrator_capabilities lists it.
+      workspaceSnapshots: [
+        {
+          cwd: workspaceRoot,
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          slashCommands: [],
+          skills: [],
+          models: [
+            {
+              slug: selectedModel.model,
+              name: selectedModel.model,
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "effort",
+                    label: "Effort",
+                    type: "select",
+                    options: [{ id: "low", label: "Low" }],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    it.effect.each([
+      { name: "with options", selection: selectedModel, freshSession: undefined },
+      {
+        name: "without options and with new threads per run",
+        freshSession: false,
+        selection: { instanceId: selectedModel.instanceId, model: selectedModel.model },
+      },
+    ])(
+      "creates, updates, and lists the selected scheduled-task model $name",
+      ({ selection, freshSession }) =>
+        Effect.gen(function* () {
+          const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                { ...existing, threadId: ThreadId.make("thread:previous-scheduled-run") },
+                saved,
+                undefined,
+                {
+                  providers: [selectedProvider],
+                },
+              ),
+            ),
+          );
+          const dependencies = Layer.mergeAll(
+            Layer.succeed(OrchestratorMcpService.OrchestratorMcpService, mcp),
+            Layer.succeed(McpInvocationContext.McpInvocationContext, client),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(ThreadMetadataMcpService.ThreadMetadataMcpService)({}),
+            Layer.mock(PeerForwarding.PeerForwarding)({}),
+            Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+            Layer.mock(PeerLinks.PeerLinks)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          );
+          const toolkit = yield* OrchestratorToolkit.pipe(
+            Effect.provide(
+              McpToolAccess.HandlersLayer.layer(OrchestratorHandlers.layer).pipe(
+                Layer.provide(dependencies),
+              ),
+            ),
+          );
+          const createResults = yield* toolkit
+            .handle("schedule_task", {
+              projectId,
+              prompt: "Check the build",
+              schedule,
+              modelSelection: requested(selection),
+              ...(freshSession === undefined ? {} : { freshSession }),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          const updateResults = yield* toolkit
+            .handle("schedule_task", {
+              scheduledTaskId: existing.id,
+              modelSelection: requested(selection),
+              ...(freshSession === undefined ? {} : { freshSession }),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          const savedInputs = yield* Ref.get(saved);
+          const expectedMode = freshSession === false ? "new_thread" : "fresh_session";
+          assert.lengthOf(savedInputs, 2);
+          for (const input of savedInputs) {
+            assert.deepEqual(input.modelSelection, selection);
+            assert.equal(input.threadId, null);
+            assert.equal(input.threadMode, expectedMode);
+          }
+          const expected = { modelSelection: requested(selection) };
+          assert.deepInclude(createResults.at(-1)?.result, expected);
+          assert.deepInclude(updateResults.at(-1)?.result, expected);
+          const listed = yield* mcp.listScheduledTasks(client, {});
+          assert.deepEqual(listed.tasks[0]?.modelSelection, requested(existing.modelSelection));
+        }),
+    );
+
+    it.effect(
+      "inherits a caller or project model on create and keeps a stored model on update",
+      () =>
+        Effect.gen(function* () {
+          const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const projection = parentProjection([], selectedModel);
+          const parent = { ...projection, thread: { ...projection.thread, projectId } };
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                existing,
+                saved,
+                undefined,
+                {
+                  parent,
+                },
+              ),
+            ),
+          );
+          yield* mcp.scheduleTask(client, { projectId, prompt: "Check the build", schedule });
+          yield* mcp.scheduleTask(scope, {
+            projectId,
+            prompt: "Check the build",
+            schedule,
+            bindToCurrentThread: false,
+          });
+          yield* mcp.updateScheduledTask(scope, { scheduledTaskId: existing.id, title: "Renamed" });
+          assert.deepEqual(
+            (yield* Ref.get(saved)).map((input) => input.modelSelection),
+            [existing.modelSelection, selectedModel, existing.modelSelection],
+          );
+        }),
+    );
+
+    it.effect("accepts an Antigravity suffixed model as delegate_task does", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const instanceId = ProviderInstanceId.make("antigravity");
+        const antigravity: ServerProvider = {
+          ...providerSnapshot({
+            instanceId,
+            driver: ProviderDriverKind.make("antigravity"),
+            model: "gemini-4-neon",
+          }),
+          models: [
+            {
+              slug: "gemini-4-neon",
+              name: "Gemini 4 Neon",
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "thinking",
+                    label: "Thinking",
+                    type: "select",
+                    role: "reasoning",
+                    options: [
+                      { id: "low", label: "Low" },
+                      { id: "high", label: "High" },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        };
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            service(
+              masterRepository,
+              yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+              existing,
+              saved,
+              undefined,
+              { providers: [antigravity] },
+            ),
+          ),
+        );
+        yield* mcp.scheduleTask(client, {
+          projectId,
+          prompt: "Check the build",
+          schedule,
+          modelSelection: { providerInstanceId: instanceId, model: "gemini-4-neon-high" },
+        });
+        assert.deepEqual((yield* Ref.get(saved)).at(0)?.modelSelection, {
+          instanceId,
+          model: "gemini-4-neon",
+          options: [{ id: "thinking", value: "high" }],
+        });
+      }),
+    );
+
+    it.effect("refuses to bind an explicit task model to the caller's thread", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const projection = parentProjection([], existing.modelSelection);
+        const parent = { ...projection, thread: { ...projection.thread, projectId } };
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            service(
+              masterRepository,
+              yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+              existing,
+              saved,
+              undefined,
+              { parent, providers: [selectedProvider] },
+            ),
+          ),
+        );
+        const modelAndBinding = {
+          modelSelection: requested(selectedModel),
+          bindToCurrentThread: true,
+        };
+        const createError = yield* mcp
+          .scheduleTask(scope, {
+            projectId,
+            prompt: "Check the build",
+            schedule,
+            ...modelAndBinding,
+          })
+          .pipe(Effect.flip);
+        const updateError = yield* mcp
+          .updateScheduledTask(scope, {
+            scheduledTaskId: existing.id,
+            ...modelAndBinding,
+          })
+          .pipe(Effect.flip);
+        for (const error of [createError, updateError]) {
+          assert.equal(error.code, "invalid_request");
+          assert.include(error.message, "bindToCurrentThread");
+        }
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect.each([
+      {
+        name: "unknown provider",
+        selection: { ...selectedModel, instanceId: ProviderInstanceId.make("missing") },
+        providers: [selectedProvider],
+        problem: "missing",
+      },
+      {
+        name: "disabled provider",
+        selection: selectedModel,
+        providers: [{ ...selectedProvider, enabled: false }],
+        problem: "disabled",
+      },
+      {
+        name: "provider disabled for this project",
+        selection: selectedModel,
+        providers: [selectedProvider],
+        enabledForProject: false,
+        problem: "disabled",
+      },
+      {
+        name: "unknown model",
+        selection: { ...selectedModel, model: "missing-model" },
+        providers: [selectedProvider],
+        problem: "missing-model",
+      },
+      {
+        name: "invalid options",
+        selection: { ...selectedModel, options: [{ id: "effort", value: "invalid" }] },
+        providers: [selectedProvider],
+        problem: "effort",
+      },
+    ])(
+      "rejects $name on scheduled-task create and update",
+      ({ selection, providers, enabledForProject, problem }) =>
+        Effect.gen(function* () {
+          const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                existing,
+                saved,
+                undefined,
+                {
+                  providers,
+                  enabledForProject: enabledForProject ?? true,
+                },
+              ),
+            ),
+          );
+          const created = yield* mcp
+            .scheduleTask(client, {
+              projectId,
+              prompt: "Check the build",
+              schedule,
+              modelSelection: requested(selection),
+            })
+            .pipe(Effect.flip);
+          const updated = yield* mcp
+            .updateScheduledTask(client, {
+              scheduledTaskId: existing.id,
+              modelSelection: requested(selection),
+            })
+            .pipe(Effect.flip);
+          for (const error of [created, updated]) {
+            assert.equal(error.code, "invalid_request");
+            assert.include(error.message, problem);
+          }
+          assert.deepEqual(yield* Ref.get(saved), []);
+        }),
+    );
 
     it.effect("starts from the project's default branch", () =>
       Effect.gen(function* () {
@@ -5489,10 +6086,13 @@ describe("OrchestratorMcpService provider resolution", () => {
       let createdProjection = childProjection;
       const dependencies = Layer.mergeAll(
         NodeServices.layer,
+        NodeCrypto.layer,
         Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
           getThreadRecords: (threadId) =>
             Effect.succeed(threadId === parentThreadId ? parentProjection([]) : createdProjection),
+          assertProviderInstanceEnabled: () => Effect.void,
           dispatch: (command) => {
             commands.push(command);
             if (command.type === "thread.create") {
@@ -5505,6 +6105,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   createdBy: command.createdBy,
                   creationSource: command.creationSource,
                   creatorThreadId: command.creatorThreadId,
+                  modelSelection: command.modelSelection,
                 },
               };
             }
@@ -5519,8 +6120,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           }),
         ]),
         adapterRegistryLayer([codexInstanceId]),
-        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
       );
       yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
@@ -5529,11 +6131,11 @@ describe("OrchestratorMcpService provider resolution", () => {
           clientRequestId: "creator-unprompted-batch",
         });
         const command = commands.find((command) => command.type === "thread.create");
-        assert.equal(command?.creatorThreadId, scope.thread!.threadId);
-        assert.equal(result.threads[0]?.creatorThreadId, scope.thread!.threadId);
+        assert.equal(command?.creatorThreadId, parentThreadId);
+        assert.equal(result.threads[0]?.creatorThreadId, parentThreadId);
         assert.isFalse(commands.some((command) => command.type === "message.dispatch"));
         assert.isFalse(commands.some((command) => command.type === "delegated_task.request"));
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+      }).pipe(Effect.provide(layerWithDependencies(dependencies)));
     }),
   );
 });

@@ -36,8 +36,9 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as AutoPullStatus from "../project/AutoPullStatus.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import type * as GitVcsDriver from "./GitVcsDriver.ts";
+import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { VcsAutomaticFetchInterval } from "./VcsAutomaticFetchInterval.ts";
 
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
@@ -172,8 +173,12 @@ interface ActiveRemotePoller {
 
 export class VcsAutoPullPolicy extends Context.Reference<{
   readonly isEnabled: (cwd: string) => Effect.Effect<boolean, never>;
+  readonly fetchState: (cwd: string) => Effect.Effect<GitVcsDriver.GitStatusFetchState>;
 }>("t3/vcs/VcsAutoPullPolicy", {
-  defaultValue: () => ({ isEnabled: () => Effect.succeed(false) }),
+  defaultValue: () => ({
+    isEnabled: () => Effect.succeed(false),
+    fetchState: () => Effect.succeed("fetched"),
+  }),
 }) {}
 
 export const layerAutoPullPolicy = Layer.effect(
@@ -181,7 +186,9 @@ export const layerAutoPullPolicy = Layer.effect(
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const git = yield* GitVcsDriver.GitVcsDriver;
     return {
+      fetchState: git.statusFetchState,
       isEnabled: Effect.fn("VcsAutoPullPolicy.isEnabled")(
         function* (cwd: string) {
           const project = yield* projects.findActiveByWorkspaceRoot(cwd);
@@ -260,6 +267,7 @@ const normalizeCwd = (cwd: string) =>
 export const make = Effect.gen(function* () {
   const automaticFetchInterval = yield* VcsAutomaticFetchInterval;
   const autoPullPolicy = yield* VcsAutoPullPolicy;
+  const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
   const workflow = yield* GitWorkflowService.GitWorkflowService;
   const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
   const fs = yield* FileSystem.FileSystem;
@@ -672,36 +680,47 @@ export const make = Effect.gen(function* () {
   const maybeAutoPull = Effect.fn("VcsStatusBroadcaster.maybeAutoPull")(function* (
     cwd: string,
     remoteRead: CachedRemoteStatus | null,
-    policyCwds: ReadonlyArray<string>,
+    local: VcsStatusLocalResult,
+    enabledCwds: ReadonlyArray<string>,
   ) {
     const remote = remoteRead?.value ?? null;
     let pullAttempted = false;
+    const record = (outcome: AutoPullStatus.AutoPullOutcome) =>
+      Effect.forEach(enabledCwds, (policyCwd) => autoPullStatus.record(policyCwd, outcome), {
+        discard: true,
+      });
     return yield* Effect.gen(function* () {
-      const autoPullEnabled = (yield* Effect.forEach(policyCwds, autoPullPolicy.isEnabled, {
-        concurrency: "unbounded",
-      })).some(Boolean);
-      if (
-        remote === null ||
-        !remote.hasUpstream ||
-        remote.aheadCount > 0 ||
-        remote.behindCount <= 0 ||
-        !autoPullEnabled
-      ) {
+      if (remote === null || enabledCwds.length === 0) return null;
+
+      if (local.refName !== remoteRead?.branch) return null;
+      const skipReason = AutoPullStatus.autoPullSkipReason({
+        isRepo: local.isRepo,
+        isDefaultBranch: local.isDefaultRef,
+        branch: local.refName,
+        hasUpstream: remote.hasUpstream,
+        hasWorkingTreeChanges: local.hasWorkingTreeChanges,
+        aheadCount: remote.aheadCount,
+      });
+      if (skipReason !== null) {
+        yield* record({ result: "skipped", reason: skipReason });
+        return null;
+      }
+      if (remote.behindCount <= 0) {
+        yield* record(
+          AutoPullStatus.autoPullCurrencyOutcome(yield* autoPullPolicy.fetchState(cwd)),
+        );
         return null;
       }
 
-      yield* workflow.invalidateLocalStatus(cwd);
-      const local = yield* workflow.localStatus({ cwd });
-      if (
-        !local.isRepo ||
-        !local.isDefaultRef ||
-        local.hasWorkingTreeChanges ||
-        local.refName !== remoteRead?.branch
-      )
-        return null;
-
       pullAttempted = true;
-      yield* workflow.pullCurrentBranch(cwd);
+      const pull = yield* workflow
+        .pullCurrentBranch(cwd)
+        .pipe(
+          Effect.tapError((error) =>
+            record({ result: "failed", reason: AutoPullStatus.autoPullFailureReason(error) }),
+          ),
+        );
+      yield* record({ result: pull.status === "pulled" ? "pulled" : "up-to-date" });
       yield* workflow.invalidateStatus(cwd);
       yield* refreshLocalStatusCore(cwd);
       const { remote: refreshedRemote } = yield* readRemoteStatus(cwd, { refreshUpstream: false });
@@ -743,21 +762,28 @@ export const make = Effect.gen(function* () {
           inputStamp,
           refreshedLocal,
         } = yield* readRemoteStatus(cwd, options, inputsAtLocalRead !== undefined);
-        const pulled =
+        const enabledCwds =
           options?.refreshUpstream === false
-            ? null
-            : yield* maybeAutoPull(cwd, remoteRead, options?.policyCwds ?? [cwd]);
-        if (pulled !== null) {
+            ? []
+            : yield* Effect.filter(options?.policyCwds ?? [cwd], autoPullPolicy.isEnabled, {
+                concurrency: "unbounded",
+              });
+        // The stamp tracks base refs, and a pull also needs a fresh view of working-tree edits.
+        if (
+          enabledCwds.length > 0 ||
+          inputsAtLocalRead === undefined ||
+          inputStamp === null ||
+          inputStamp !== (yield* Ref.get(inputsAtLocalRead))
+        ) {
           if (inputsAtLocalRead !== undefined) yield* Ref.set(inputsAtLocalRead, null);
-          return pulled.remote;
-        }
-        // Base refs and merge bases can move without changing divergence counts.
-        if (inputsAtLocalRead === undefined) {
-          if (!refreshedLocal) yield* refreshLocalStatusCore(cwd);
-        } else if (inputStamp === null || inputStamp !== (yield* Ref.get(inputsAtLocalRead))) {
-          yield* Ref.set(inputsAtLocalRead, null);
-          if (!refreshedLocal) yield* refreshLocalStatusCore(cwd);
-          yield* Ref.set(inputsAtLocalRead, inputStamp);
+          if (enabledCwds.length > 0) {
+            const local = yield* refreshLocalStatusCore(cwd);
+            const pulled = yield* maybeAutoPull(cwd, remoteRead, local, enabledCwds);
+            if (pulled !== null) return pulled.remote;
+          } else if (!refreshedLocal) {
+            yield* refreshLocalStatusCore(cwd);
+          }
+          if (inputsAtLocalRead !== undefined) yield* Ref.set(inputsAtLocalRead, inputStamp);
         }
         return yield* updateCachedRemoteStatus(cwd, remoteRead, { publish: true });
       }),
@@ -774,19 +800,23 @@ export const make = Effect.gen(function* () {
           yield* workflow.invalidateStatus(cwd);
           const { remote: remoteRead } = yield* readRemoteStatus(cwd, { refreshUpstream });
           // Without a fetch, the cached behind count cannot justify an automatic pull.
-          const pulled = refreshUpstream
-            ? yield* maybeAutoPull(cwd, remoteRead, [policyCwd])
-            : null;
-          if (pulled !== null) {
-            return { status: mergeGitStatusParts(pulled.local, pulled.remote), refs: null };
-          }
-          yield* updateCachedRemoteStatus(cwd, remoteRead, { publish: true });
+          const enabledCwds =
+            refreshUpstream && (yield* autoPullPolicy.isEnabled(policyCwd)) ? [policyCwd] : [];
           // A fetch, ours or not, can move the base used for local Changes totals.
           const refs =
             refsBeforeLocalRead === null ? null : yield* workflow.readStatusRefreshRefs(cwd);
-          if (refs === null || refs !== refsBeforeLocalRead) {
+          // Automatic pull must see edits made during the remote read even if no refs moved.
+          if (enabledCwds.length > 0 || refs === null || refs !== refsBeforeLocalRead) {
             yield* refreshLocalStatusCore(cwd);
           }
+          if (enabledCwds.length > 0) {
+            const local = (yield* getStatusParts(cwd)).local;
+            const pulled = yield* maybeAutoPull(cwd, remoteRead, local, enabledCwds);
+            if (pulled !== null) {
+              return { status: mergeGitStatusParts(pulled.local, pulled.remote), refs: null };
+            }
+          }
+          yield* updateCachedRemoteStatus(cwd, remoteRead, { publish: true });
           const parts = yield* getStatusParts(cwd);
           return { status: mergeGitStatusParts(parts.local, parts.remote), refs };
         }),
