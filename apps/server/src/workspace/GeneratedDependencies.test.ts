@@ -416,6 +416,58 @@ it.effect("walks each consumer root at most once per native inventory during rem
   ),
 );
 
+it.effect(
+  "starts an unverified inactivity clock during inconclusive screening and keeps the used install at removal",
+  () =>
+    Effect.gen(function* () {
+      const { fs, path, cleanup, input, dependencyPath, runGit } = yield* fixture();
+      const inspected = yield* cleanup.inspect(input);
+      assert.isNotNull(inspected);
+      const gitDir = (yield* runGit(input.worktreePath, [
+        "rev-parse",
+        "--absolute-git-dir",
+      ])).stdout.trim();
+      const used = yield* Effect.promise(() =>
+        NodeFSP.stat(path.join(dependencyPath, "package/index.js"), { bigint: true }),
+      );
+      yield* fakeLsof(
+        "p123\0\nfcwd\0tDIR\0n/\0\n" +
+          "f8\0tREG\0D0x" +
+          used.dev.toString(16) +
+          "\0i" +
+          used.ino +
+          "\0n/t3-absent/index.js\0\n",
+      );
+      const opendir = vi.mocked(NodeFSP.opendir);
+      opendir.mockClear();
+      const earlier = NOW - 30 * day;
+      assert.deepEqual(yield* cleanup.observe(input, earlier), {
+        lastUsedAt: earlier,
+        renewed: true,
+      });
+      const record = JSON.parse(
+        yield* fs.readFileString(path.join(gitDir, "t3-dependency-activity.json")),
+      );
+      assert.equal(record.lastUsedAt, earlier);
+      assert.notProperty(record, "verifiedUseAt");
+
+      const before = dependencyActivitySnapshot(input.worktreePath);
+      assert.deepEqual(yield* cleanup.observe(input, NOW), { lastUsedAt: earlier, renewed: false });
+      assert.equal(dependencyActivitySnapshot(input.worktreePath), before);
+      expect(opendir).not.toHaveBeenCalled();
+
+      const captures = vi.mocked(NodeChildProcess.execFile);
+      captures.mockClear();
+      assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isTrue(yield* fs.exists(dependencyPath));
+      expect(captures).toHaveBeenCalled();
+      expect(opendir).toHaveBeenCalled();
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(testLayer(undefined, undefined, undefined, false, undefined, darwinCapture)),
+    ),
+);
+
 it.effect("records dependency use even when the broader worktree proof cannot complete", () =>
   Effect.gen(function* () {
     yield* TestClock.setTime(NOW);
@@ -3014,8 +3066,6 @@ it.effect(
       const agedActive = yield* addWorktree("aged-active");
       const agedIdle = yield* addWorktree("aged-idle");
       observeDependencyActivity(recent.gitDir, recent.worktreePath, NOW - 23 * HOUR_MS, true);
-      observeDependencyActivity(agedActive.gitDir, agedActive.worktreePath, NOW - 30 * day, true);
-      observeDependencyActivity(agedIdle.gitDir, agedIdle.worktreePath, NOW - 30 * day, true);
       const agedStat = yield* Effect.promise(() =>
         NodeFSP.stat(f.path.join(agedActive.dependencyPath, "package/index.js"), { bigint: true }),
       );
@@ -3026,6 +3076,13 @@ it.effect(
           "p102\0cpython\0\nfcwd\0tDIR\0n/\0\n" +
           "f6\0tunix\0n/t3-absent/vanished.sock\0\n",
       );
+      for (const { input } of [agedActive, agedIdle]) {
+        const firstSeenAt = NOW - 30 * day;
+        assert.deepEqual(yield* f.cleanup.observe(input, firstSeenAt), {
+          lastUsedAt: firstSeenAt,
+          renewed: true,
+        });
+      }
       const threads = [recent, agedActive, agedIdle].map((entry, index) => ({
         ...makeShell(entry.worktreePath),
         id: ThreadId.make(`skip-thread-${index}`),
@@ -3164,16 +3221,15 @@ it.effect(
       assert.isDefined(sweepOneAttr);
       expect(sweepOneAttr).toMatchObject({
         skippedRecentUsageChecks: 1,
-        walkTriggers: [
-          { kind: "socket", process: "python", walks: expect.any(Number) },
-          { kind: "vnode", process: "node", walks: expect.any(Number) },
-        ],
+        inconclusiveScreeningChecks: 2,
+        treeWalks: 0,
+        walkTriggers: [],
       });
       expect(JSON.stringify(sweepOneAttr)).not.toContain("/t3-absent/");
       opendir.mockClear();
       yield* worker.runNow;
       yield* worker.drain;
-      assert.isAbove(dependencyWalksFor(recent.dependencyPath), 0);
+      assert.equal(dependencyWalksFor(recent.dependencyPath), 0);
       assert.equal(
         observeDependencyActivity(recent.gitDir, recent.worktreePath, NOW, false, false).lastUsedAt,
         NOW - 23 * HOUR_MS,

@@ -16,6 +16,7 @@ import { vi } from "vite-plus/test";
 import {
   createGeneratedBuildStage,
   generatedBuildActivity,
+  legacyBuildActivity,
 } from "@t3tools/shared/generatedBuildOwnership";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -547,6 +548,61 @@ it.effect(
       assert.equal(changed.files, 0);
       assert.include(changed.reason, "Git or generated-path eligibility changed");
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "starts the legacy clock and preserves existing clocks during inconclusive screening",
+  () =>
+    Effect.gen(function* () {
+      const { builds, input, emit, fs } = yield* fixture();
+      const compiledRoot = "apps/server/dist";
+      const legacyRoot = "apps/web/dist";
+      yield* emit(compiledRoot, 1);
+      const legacyDirectory = NodePath.join(input.worktreePath, legacyRoot);
+      yield* fs.makeDirectory(legacyDirectory, { recursive: true });
+      yield* fs.writeFileString(NodePath.join(legacyDirectory, "legacy.js"), "legacy");
+      const vnode = yield* Effect.promise(() =>
+        NodeFSP.stat(NodePath.join(input.worktreePath, compiledRoot, "main.js"), { bigint: true }),
+      );
+      const execFile = vi.mocked(NodeChildProcess.execFile);
+      const previous = execFile.getMockImplementation()!;
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          execFile.mockImplementation(((_file, _args, _options, callback) => {
+            const capture =
+              "p123\0\nfcwd\0tDIR\0n/\0\n" +
+              "f7\0tREG\0D0x" +
+              vnode.dev.toString(16) +
+              "\0i" +
+              vnode.ino +
+              "\0n/t3-absent/main.js\0\n";
+            (callback as (error: null, stdout: string, stderr: string) => void)(null, capture, "");
+            return {} as NodeChildProcess.ChildProcess;
+          }) as typeof NodeChildProcess.execFile),
+        ),
+        () => Effect.sync(() => execFile.mockImplementation(previous)),
+      );
+      const paths = WorktreeConsumers.ProcessPaths.defaultValue().pipe(
+        Effect.provideService(HostProcess.Platform, "darwin"),
+        Effect.provideService(HostProcess.UserId, 1000),
+        Effect.provideService(ResourceMonitorBinary.ProcessCaptureBinary, Effect.succeed(null)),
+      );
+      const opendir = vi.mocked(NodeFSP.opendir);
+      opendir.mockClear();
+      assert.deepEqual(yield* builds.observe(input, DAY, false, true, paths), {
+        lastUsedAt: 1,
+        renewed: false,
+      });
+      assert.equal(generatedBuildActivity(input.worktreePath, compiledRoot)?.lastUsedAt, 1);
+      assert.equal(legacyBuildActivity(input.worktreePath, legacyRoot)?.lastUsedAt, DAY);
+      assert.deepEqual(yield* builds.observe(input, 2 * DAY, false, true, paths), {
+        lastUsedAt: 1,
+        renewed: false,
+      });
+      assert.equal(generatedBuildActivity(input.worktreePath, compiledRoot)?.lastUsedAt, 1);
+      assert.equal(legacyBuildActivity(input.worktreePath, legacyRoot)?.lastUsedAt, DAY);
+      assert.equal(opendir.mock.calls.length, 0);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );
 
 it.effect(

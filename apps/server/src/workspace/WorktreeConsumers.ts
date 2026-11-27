@@ -1072,17 +1072,12 @@ const scanProcessPaths = async (
   };
 };
 
-/**
- * Darwin D/i identify vnodes; only unresolved objects may use complete unchanged no-follow inventories.
- * Socket paths come from sockaddr_un; vanished paths prove absence only for socket-free targets.
- * Callers retain fresh mount protection under the canonical workspace lease.
- */
-export const processPathsUseRoot = async (
+const scanRootProcessPaths = async (
   canonicalRoot: string,
   paths: ReadonlyArray<string>,
   observation?: TargetObservation,
   completeProof = false,
-): Promise<boolean> => {
+) => {
   if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
   const sweep = observation?.sweep;
   const captures = observation?.captures;
@@ -1110,7 +1105,43 @@ export const processPathsUseRoot = async (
       sweep.measurement.missingIdentityChecks++;
     throw error;
   }
-  const { matched, unresolved, vanishedSocket, walkTriggers, walkReasons } = evidence;
+
+  return evidence;
+};
+
+type ScreenedProcessUse = "used" | "unused" | "inconclusive";
+
+export const screenProcessPathsUseRoot = async (
+  canonicalRoot: string,
+  paths: ReadonlyArray<string>,
+  observation?: TargetObservation,
+  completeScan = false,
+): Promise<ScreenedProcessUse> => {
+  const { matched, unresolved, vanishedSocket } = await scanRootProcessPaths(
+    canonicalRoot,
+    paths,
+    observation,
+    completeScan,
+  );
+  if (matched) return "used";
+  if (unresolved.length === 0 && !vanishedSocket) return "unused";
+  if (observation?.sweep !== undefined) observation.sweep.measurement.inconclusiveScreeningChecks++;
+  return "inconclusive";
+};
+
+/**
+ * Darwin D/i identify vnodes; only unresolved objects may use complete unchanged no-follow inventories.
+ * Socket paths come from sockaddr_un; vanished paths prove absence only for socket-free targets.
+ * Callers retain fresh mount protection under the canonical workspace lease.
+ */
+export const processPathsUseRoot = async (
+  canonicalRoot: string,
+  paths: ReadonlyArray<string>,
+  observation?: TargetObservation,
+  completeProof = false,
+): Promise<boolean> => {
+  const { matched, unresolved, vanishedSocket, walkTriggers, walkReasons } =
+    await scanRootProcessPaths(canonicalRoot, paths, observation, completeProof);
   if (matched && !completeProof) return true;
   if (unresolved.length === 0 && !vanishedSocket) return matched;
   const { found } = await targetEvidence(
@@ -1169,7 +1200,7 @@ const runtimeKeptReason = async (root: string): Promise<string | null> => {
   return null;
 };
 
-/** Check whether consumer evidence is complete before stopping owned previews. */
+/** Check consumer paths before stopping owned previews. */
 export const worktreeConsumerPreflightReason = Effect.fn(
   "WorktreeConsumers.worktreeConsumerPreflightReason",
 )(function* (canonicalRoot: string) {
@@ -1189,7 +1220,7 @@ export const worktreeConsumerPreflightReason = Effect.fn(
         return "Worktree root is not canonical.";
       // An owned preview may itself be the runtime; the final removal guard
       // checks runtime descriptors again after preview shutdown.
-      await processPathsUseRoot(canonicalRoot, paths, sweep?.freshObservation, true);
+      await screenProcessPathsUseRoot(canonicalRoot, paths, sweep?.freshObservation, true);
       return null;
     },
     catch: (cause) =>
@@ -1205,6 +1236,7 @@ const worktreeConsumerReasonWithCapture = Effect.fn("WorktreeConsumers.worktreeC
     canonicalRoot: string,
     capture: Effect.Effect<ReadonlyArray<string> | null>,
     observation?: TargetObservation,
+    screening = false,
   ) {
     const paths = yield* capture;
     if (paths === null) return "Process file-consumer inventory is unavailable.";
@@ -1219,8 +1251,10 @@ const worktreeConsumerReasonWithCapture = Effect.fn("WorktreeConsumers.worktreeC
           (await NodeFSP.realpath(canonicalRoot)) !== canonicalRoot
         )
           return "Worktree root is not canonical.";
-        if (await processPathsUseRoot(canonicalRoot, paths, observation))
-          return "A process is using a file or directory in the worktree.";
+        const used = screening
+          ? (await screenProcessPathsUseRoot(canonicalRoot, paths, observation)) === "used"
+          : await processPathsUseRoot(canonicalRoot, paths, observation);
+        if (used) return "A process is using a file or directory in the worktree.";
         return runtimeKeptReason(canonicalRoot);
       },
       catch: (cause) =>
@@ -1248,11 +1282,10 @@ export const worktreeConsumerReason = Effect.fnUntraced(function* (
 /** A shared capture can only veto removal. A miss requires the fresh guard under the lease. */
 export const screenWorktreeConsumerReason = Effect.fnUntraced(function* (canonicalRoot: string) {
   const sweep = yield* WorktreeConsumerSweepContext;
-  return yield* sweep === undefined
-    ? worktreeConsumerReason(canonicalRoot)
-    : worktreeConsumerReasonWithCapture(
-        canonicalRoot,
-        sweep.screeningPaths,
-        sweep.screeningObservation,
-      );
+  return yield* worktreeConsumerReasonWithCapture(
+    canonicalRoot,
+    sweep?.screeningPaths ?? captureWorktreePaths(sweep),
+    sweep?.screeningObservation,
+    true,
+  );
 });

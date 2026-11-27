@@ -35,6 +35,7 @@ const StorageCleanupInventoryCounters = Schema.Struct({
   skippedRecentUsageChecks: Schema.optional(Schema.Finite),
   walkReasons: Schema.optional(Schema.Record(Schema.String, Schema.Finite)),
   missingIdentityChecks: Schema.optional(Schema.Finite),
+  inconclusiveScreeningChecks: Schema.optional(Schema.Finite),
   walkTriggers: Schema.optional(Schema.Array(StorageCleanupWalkTrigger)),
 });
 
@@ -61,6 +62,7 @@ export const emptyStorageCleanupInventoryTrace = () => ({
   skippedRecentUsageChecks: 0,
   walkReasons: {} as Partial<Record<StorageCleanupWalkReason, number>>,
   missingIdentityChecks: 0,
+  inconclusiveScreeningChecks: 0,
 });
 
 const decodeInventory = Schema.decodeUnknownOption(StorageCleanupInventoryTrace);
@@ -103,6 +105,9 @@ export const formatStorageCleanupInventory = (
       : []),
     ...(inventory.missingIdentityChecks
       ? [`Missing identity checks  ${inventory.missingIdentityChecks}`]
+      : []),
+    ...(inventory.inconclusiveScreeningChecks
+      ? [`Inconclusive screening   ${inventory.inconclusiveScreeningChecks} checks skipped walks`]
       : []),
     ...(inventory.walkTriggers && inventory.walkTriggers.length > 0
       ? [

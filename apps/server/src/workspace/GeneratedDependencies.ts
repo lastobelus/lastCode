@@ -425,7 +425,12 @@ const make = Effect.gen(function* () {
       const paths = yield* capture;
       if (paths === null) return null;
       consumed = yield* Effect.tryPromise({
-        try: () => consumesPath(current.dependencyPath, paths, observationTargets),
+        try: async () =>
+          (await WorktreeConsumers.screenProcessPathsUseRoot(
+            current.dependencyPath,
+            paths,
+            observationTargets,
+          )) === "used",
         catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
       });
     }

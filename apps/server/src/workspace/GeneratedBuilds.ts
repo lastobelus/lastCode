@@ -339,10 +339,14 @@ const make = Effect.gen(function* () {
         paths = yield* capture;
       }
       if (persist && paths === null) return null;
+      const captured = paths;
       const used =
         persist &&
-        (yield* actualOutputUse(input.worktreePath, root, paths ?? null, observationTargets));
-      if (used && persist) {
+        captured != null &&
+        (yield* io(input.worktreePath, () =>
+          WorktreeConsumers.screenProcessPathsUseRoot(output, captured, observationTargets),
+        )) === "used";
+      if (used) {
         const updated = yield* Effect.try({
           try: () => {
             const compiled = recordGeneratedBuildUse(input.worktreePath, root, now);
