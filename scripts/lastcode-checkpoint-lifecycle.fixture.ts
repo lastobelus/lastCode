@@ -49,6 +49,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-checkpoint-history.ts",
   "scripts/lastcode-checkpoint-post-publish.ts",
   "scripts/lastcode-checkpoint.ts",
+  "scripts/lastcode-upstream-import-drift.ts",
   "scripts/lastcode-quiet-references.ts",
   "scripts/lastcode-migration-history.ts",
   "scripts/lastcode-migration-validation.ts",

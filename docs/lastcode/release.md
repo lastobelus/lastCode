@@ -216,6 +216,17 @@ completed GitHub merge. Service admission still owns schedule and batch spacing.
 
 ## Checkpoint CI
 
+### Tracking imported upstream PRs
+
+Publishing runs read [upstream import pins](../../scripts/lastcode-upstream-imports.json)
+from the run's downstream source commit. For each entry, the checkpoint
+compares the current GitHub PR head and state with the pin. It comments on the
+tracking issue when the head changes or the PR closes or merges, and skips
+duplicate observations. Update the pin when re-porting the import and remove
+the entry when convergence is resolved. The checkpoint runner's `gh` session
+needs permission to comment on the tracking issue. GitHub errors appear in the
+checkpoint log and publication can still proceed.
+
 ### Waiting for the checkpoint service
 
 The checkpoint supervisor configuration accepts an optional `postPublishCommand`
