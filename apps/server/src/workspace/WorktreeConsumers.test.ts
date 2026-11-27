@@ -1866,7 +1866,7 @@ describe("worktree removal guard", () => {
     for (const [index, path] of files.entries()) stats.set(path, objectStat(BigInt(12 + index)));
   };
 
-  it.effect("keeps fallback walk evidence local to each worktree screen", () =>
+  it.effect("skips tree walks when worktree screening sees a vanished socket", () =>
     Effect.gen(function* () {
       socketFixture();
       targetFixture();
@@ -1880,15 +1880,35 @@ describe("worktree removal guard", () => {
         ).toBeNull();
       }).pipe(worktrees.provide);
       expect(native.execFile).toHaveBeenCalledOnce();
-      expect(native.opendir.mock.calls.map(([path]) => path)).toEqual([
-        "/workspace/example",
-        "/workspace/example/dist",
-        "/workspace/example/dist",
-      ]);
+      expect(native.opendir).not.toHaveBeenCalled();
+      expect(worktrees.inventory.measurement.inconclusiveScreeningChecks).toBe(2);
     }).pipe(
       Effect.provideService(WorktreeConsumers.ProcessPaths, inventory("darwin")),
       Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
     ),
+  );
+
+  it.effect("screens unresolved vnodes without walking and preserves positive path hits", () =>
+    Effect.gen(function* () {
+      const root = "/workspace/example";
+      vnodeFixture();
+      targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      expect(
+        yield* Effect.promise(() => WorktreeConsumers.screenProcessPathsUseRoot(root, paths)),
+      ).toBe("inconclusive");
+      expect(
+        yield* Effect.promise(() =>
+          WorktreeConsumers.screenProcessPathsUseRoot(root, [root + "/dist/output.js"]),
+        ),
+      ).toBe("used");
+      expect(native.opendir).not.toHaveBeenCalled();
+      const freshPaths = (yield* inventory("darwin"))!;
+      expect(yield* guard(freshPaths)).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+      expect(native.opendir).toHaveBeenCalled();
+    }),
   );
 
   it.effect("uses direct path resolutions when a sweep targets one worktree", () =>
@@ -1907,7 +1927,7 @@ describe("worktree removal guard", () => {
     ),
   );
 
-  it.effect("counts fresh worktree checks and preview preflight in the worktree inventory", () =>
+  it.effect("counts a fresh worktree walk and an inconclusive preview preflight", () =>
     Effect.gen(function* () {
       const root = "/workspace/example";
       darwinFixture(
@@ -1942,12 +1962,13 @@ describe("worktree removal guard", () => {
           uniquePaths: 3,
           cachedPathChecks: 0,
           directoryChecks: 0,
-          treeWalks: 2,
-          objectsVisited: 8,
+          treeWalks: 1,
+          objectsVisited: 4,
           targetRevalidations: 0,
+          inconclusiveScreeningChecks: 1,
           walkTriggers: [
-            { kind: "socket", process: "worker", walks: 2 },
-            { kind: "vnode", process: "worker", walks: 2 },
+            { kind: "socket", process: "worker", walks: 1 },
+            { kind: "vnode", process: "worker", walks: 1 },
           ],
         },
       });

@@ -118,6 +118,14 @@ export function observeDependencyActivity(
   return { lastUsedAt, renewed };
 }
 
+/** Read the established clock for this install when current usage is unknown. */
+export function knownDependencyActivity(gitDirectory: string, worktreePath: string) {
+  const { identity, previous } = readActivity(gitDirectory, worktreePath);
+  return previous?.identity === identity
+    ? { lastUsedAt: previous.lastUsedAt, renewed: false }
+    : null;
+}
+
 /** Skip only inside 24h after verified use of this same install while inside retention. */
 export function recentVerifiedDependencyActivity(
   gitDirectory: string,
