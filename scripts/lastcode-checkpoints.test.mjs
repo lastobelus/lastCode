@@ -57,6 +57,17 @@ describe("LastCode checkpoint dashboard", () => {
     });
     expect(
       persistentThreadRepairStatus(config, [
+        { threadId: "thread-old", title: "Old", persistent: true, archived: true },
+        { threadId: "thread-new", title: "Maintenance", persistent: true },
+      ]),
+    ).toEqual({
+      kind: "stale",
+      configuredId: "thread-old",
+      replacementId: "thread-new",
+      replacementTitle: "Maintenance",
+    });
+    expect(
+      persistentThreadRepairStatus(config, [
         { threadId: "thread-old", title: "Old", persistent: false },
         { threadId: "thread-new", title: "Maintenance", persistent: true },
       ]),

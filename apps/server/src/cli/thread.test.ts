@@ -536,7 +536,8 @@ it("rejects only pending standalone waits for the current thread", () => {
   );
 });
 
-const shellThread = (id: string) => ({ id: ThreadId.make(id) }) as OrchestrationV2ThreadShell;
+const shellThread = (id: string) =>
+  ({ id: ThreadId.make(id), archivedAt: null, deletedAt: null }) as OrchestrationV2ThreadShell;
 
 const activity = (id: string, summary: string, createdAt: string) =>
   ({
@@ -584,6 +585,8 @@ const runnerSource = () => {
     snoozedUntil: null,
     settledOverride: null,
     settledAt: null,
+    archivedAt: null,
+    deletedAt: null,
   };
   const thread = rawThread as never;
   const limits: number[] = [];
@@ -602,7 +605,9 @@ const runnerSource = () => {
         ],
         threads: [thread],
       },
-      getThread: (_threadId: ThreadId, limit: number) => {
+      hasThreadRecord: (threadId: ThreadId) => Effect.succeed(threadId === rawThread.id),
+      getThread: (threadId: ThreadId, limit: number) => {
+        if (threadId !== rawThread.id) return Effect.succeed(null);
         limits.push(limit);
         return Effect.succeed({
           thread: rawThread,
@@ -691,6 +696,83 @@ it.effect("runs current, list, and bounded read outputs and rejects missing curr
     assert.strictEqual(read.kind, "read");
     assert.deepStrictEqual(limits, [1, 7]);
     assert.strictEqual(missing._tag, "Failure");
+  }),
+);
+
+it.effect(
+  "reads an exact archived ID before trying active prefixes and keeps lists active-only",
+  () =>
+    Effect.gen(function* () {
+      const { source } = runnerSource();
+      const archivedId = ThreadId.make("thread-run");
+      const deletedId = ThreadId.make("thread-ru");
+      const archivedAt = DateTime.makeUnsafe("2026-01-02T00:00:00.000Z");
+      const archivedSource: ThreadReadSource = {
+        ...source,
+        hasThreadRecord: (id) =>
+          id === archivedId || id === deletedId ? Effect.succeed(true) : source.hasThreadRecord(id),
+        getThread: (id, limit) =>
+          id === archivedId
+            ? source
+                .getThread(ThreadId.make("thread-runner"), limit)
+                .pipe(
+                  Effect.map((detail) =>
+                    detail === null
+                      ? null
+                      : { ...detail, thread: { ...detail.thread, id, archivedAt } },
+                  ),
+                )
+            : source.getThread(id, limit),
+      };
+
+      const archived = yield* readThreadOutput(archivedSource, archivedId, 5);
+      assert.include(archived, {
+        kind: "read",
+        threadId: archivedId,
+        title: "Runner thread",
+        archived: true,
+      });
+      const active = yield* readThreadOutput(archivedSource, "thread-runn", 5);
+      assert.include(active, {
+        kind: "read",
+        threadId: "thread-runner",
+      });
+      assert.notProperty(active, "archived");
+      assert.include(yield* readThreadOutput(archivedSource, "missing", 5), {
+        kind: "not-found",
+      });
+      assert.include(yield* readThreadOutput(archivedSource, deletedId, 5), {
+        kind: "not-found",
+      });
+      assert.deepStrictEqual(
+        (yield* listThreadsOutput(archivedSource)).threads.map(({ threadId }) => threadId),
+        ["thread-runner"],
+      );
+    }),
+);
+
+it.effect("excludes deleted cleanup entries from listing and prefix resolution", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    const deletedAt = DateTime.makeUnsafe("2026-01-02T00:00:00.000Z");
+    const retired = {
+      ...source.shell.threads[0]!,
+      id: ThreadId.make("thread-rival"),
+      archivedAt: deletedAt,
+      deletedAt,
+    };
+    const cleanupSource = {
+      ...source,
+      shell: { ...source.shell, threads: [retired, ...source.shell.threads] },
+    };
+    assert.deepStrictEqual(
+      (yield* listThreadsOutput(cleanupSource)).threads.map(({ threadId }) => threadId),
+      ["thread-runner"],
+    );
+    assert.include(yield* readThreadOutput(cleanupSource, "thread-r", 5), {
+      kind: "read",
+      threadId: "thread-runner",
+    });
   }),
 );
 
@@ -1005,8 +1087,7 @@ it.effect("prepares and dispatches an exact accepted send using the target threa
     const { source } = runnerSource();
     const dispatched: unknown[] = [];
     const sendSource: ThreadSendSource = {
-      descriptor: source.descriptor,
-      shell: source.shell,
+      ...source,
       dispatch: (command) => {
         dispatched.push(command);
         return Effect.succeed({ sequence: 42 });
@@ -1051,7 +1132,7 @@ it.effect(
       const dispatched: unknown[] = [];
       yield* sendThreadOutput(
         {
-          descriptor: source.descriptor,
+          ...source,
           shell: {
             ...source.shell,
             threads: source.shell.threads.map((thread) => ({
@@ -1092,8 +1173,7 @@ it.effect("rejects a native steer to an idle thread without creating a queued tu
     const result = yield* Effect.result(
       sendThreadOutput(
         {
-          descriptor: source.descriptor,
-          shell: source.shell,
+          ...source,
           dispatch: () =>
             Effect.sync(() => {
               dispatchCount += 1;
@@ -1119,8 +1199,7 @@ it.effect("does not mark a send to the current thread as cross-thread", () =>
     const dispatched: unknown[] = [];
     yield* sendThreadOutput(
       {
-        descriptor: source.descriptor,
-        shell: source.shell,
+        ...source,
         dispatch: (command) => Effect.sync(() => dispatched.push(command)),
       },
       {
@@ -1141,8 +1220,7 @@ it.effect("uses the same durable message identity for tracked and untracked send
     const { source } = runnerSource();
     const dispatched: unknown[] = [];
     const sendSource: ThreadSendSource = {
-      descriptor: source.descriptor,
-      shell: source.shell,
+      ...source,
       dispatch: (command) => Effect.sync(() => dispatched.push(command)),
     };
     const input = {
@@ -1164,8 +1242,7 @@ it.effect("rejects waiting on the current thread before dispatch", () =>
     const result = yield* Effect.result(
       sendThreadOutput(
         {
-          descriptor: source.descriptor,
-          shell: source.shell,
+          ...source,
           dispatch: () => {
             dispatchCount += 1;
             return Effect.void;
@@ -1193,7 +1270,7 @@ it.effect("rejects blank, missing, ambiguous, and oversized sends before dispatc
     const { source } = runnerSource();
     let dispatchCount = 0;
     const sendSource: ThreadSendSource = {
-      descriptor: source.descriptor,
+      ...source,
       shell: {
         ...source.shell,
         threads: [
@@ -1245,14 +1322,32 @@ it.effect("rejects blank, missing, ambiguous, and oversized sends before dispatc
   }),
 );
 
+it.effect("does not send to an active prefix match for a recorded archived ID", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    const archivedId = ThreadId.make("thread-run");
+    const sendSource = {
+      ...source,
+      hasThreadRecord: (id: ThreadId) => Effect.succeed(id === archivedId),
+      dispatch: () => Effect.die("The active prefix match must not receive this message."),
+    };
+    const failure = yield* sendThreadOutput(sendSource, {
+      identifier: archivedId,
+      message: "hello",
+      commandId: CommandId.make("command-archived-send"),
+      messageId: MessageId.make("message-archived-send"),
+    }).pipe(Effect.flip);
+    assert.include(failure, { _tag: "ThreadSendTargetError", reason: "not-found" });
+  }),
+);
+
 it.effect("does not report acceptance when authoritative dispatch rejects the send", () =>
   Effect.gen(function* () {
     const { source } = runnerSource();
     const result = yield* Effect.result(
       sendThreadOutput(
         {
-          descriptor: source.descriptor,
-          shell: source.shell,
+          ...source,
           dispatch: () =>
             Effect.fail(
               new ThreadCliError({ operation: "test dispatch rejection", cause: "rejected" }),
