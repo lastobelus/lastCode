@@ -3464,7 +3464,14 @@ it.effect(
         const resolved = yield* registry.resolve(token!);
         assert.deepEqual(
           resolved?.capabilities,
-          new Set(["orchestration", "worktree", "pull-requests", "issues"]),
+          new Set([
+            "orchestration",
+            "worktree",
+            "pull-requests",
+            "issues",
+            "project-action-launch-disabled",
+            "background-wait",
+          ]),
         );
 
         yield* manager.close(providerSessionId);
