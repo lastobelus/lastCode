@@ -922,27 +922,41 @@ it("bounds the parts of a megabyte of approval text and still shows what it ends
   }
 });
 
-it("splits a megabyte of approval text the same way as a short one", () => {
-  const size = 1 << 20;
-  const fill = (unit: string) => unit.repeat(size / unit.length);
-  const count = (text: string) => {
-    const { parts } = approvalTextParts(text, {
-      length: 2 * size,
-      namedRuns: size,
-      tailLength: 0,
-      tailNamedRuns: 0,
-    });
-    return [parts.length, parts.filter((part) => part.named).length];
-  };
-  // A long run of marks before one joiner, and a long run of joined emoji with one left open.
-  expect(count(`1${fill("\u094D")}\u200D`)).toEqual([2, 1]);
-  expect(count(fill("\u{1F469}\u200D"))).toEqual([2, 1]);
-  expect(count(fill("\u{1F469}\u{1F3FD}\u200D\u{1F4BB}"))).toEqual([1, 0]);
-  // Nothing but joiners, selectors or carriage returns: one run.
-  expect(count(fill("\u200D"))).toEqual([1, 1]);
-  expect(count(fill("\uFE0F"))).toEqual([1, 1]);
-  expect(count(fill("\r"))).toEqual([1, 1]);
-  // Every other character named: one run each.
-  expect(count(fill("a\r"))).toEqual([size, size / 2]);
-  expect(count(fill("a"))).toEqual([1, 0]);
-});
+it.each([
+  {
+    name: "marks before a joiner",
+    unit: "\u094D",
+    prefix: "1",
+    suffix: "\u200D",
+    expected: [2, 1],
+  },
+  { name: "joined emoji with a trailing joiner", unit: "\u{1F469}\u200D", expected: [2, 1] },
+  {
+    name: "joined emoji with skin tone",
+    unit: "\u{1F469}\u{1F3FD}\u200D\u{1F4BB}",
+    expected: [1, 0],
+  },
+  { name: "joiners", unit: "\u200D", expected: [1, 1] },
+  { name: "presentation selectors", unit: "\uFE0F", expected: [1, 1] },
+  { name: "carriage returns", unit: "\r", expected: [1, 1] },
+  { name: "alternating text and controls", unit: "a\r", expected: [2, 1], countPerRepeat: true },
+  { name: "plain text", unit: "a", expected: [1, 0] },
+])(
+  "splits a megabyte of approval text the same way as a short one ($name)",
+  ({ unit, prefix = "", suffix = "", expected, countPerRepeat = false }) => {
+    const count = (repeats: number) => {
+      const text = `${prefix}${unit.repeat(repeats)}${suffix}`;
+      const { parts } = approvalTextParts(text, {
+        length: text.length,
+        namedRuns: text.length,
+        tailLength: 0,
+        tailNamedRuns: 0,
+      });
+      const named = parts.reduce((total, part) => total + (part.named ? 1 : 0), 0);
+      const scale = countPerRepeat ? repeats : 1;
+      return [parts.length / scale, named / scale];
+    };
+    expect(count(2)).toEqual(expected);
+    expect(count(Math.floor((1 << 20) / unit.length))).toEqual(expected);
+  },
+);
