@@ -33,28 +33,12 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "../serverRuntimeState.ts";
 import { unknownCapacitySnapshot } from "./logic.ts";
-
-vi.mock("../auth/EnvironmentAuth.ts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../auth/EnvironmentAuth.ts")>();
-  const { AuthSessionId } = await import("@t3tools/contracts");
-  return {
-    ...actual,
-    layerRuntime: Layer.mock(actual.EnvironmentAuth)({
-      issueMcpClientSession: () =>
-        Effect.succeed({
-          sessionId: AuthSessionId.make("test-session"),
-          token: "synthetic-token",
-          expiresAt: DateTime.makeUnsafe(1),
-        }),
-      revokeSession: () => Effect.succeed(true),
-    }),
-  };
-});
 
 const isSettingsPatch = Schema.is(ServerSettingsPatch);
 const decodeServerConfig = Schema.decodeUnknownSync(ServerConfig);
@@ -319,6 +303,11 @@ it.effect("prints thread launch and capacity CLI results from a newer server", (
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-thread-capacity-" });
+    yield* Effect.scoped(
+      Layer.build(
+        SqlitePersistence.layerFromPath(path.join(baseDir, "userdata", "statev2.sqlite")),
+      ),
+    );
     yield* persistServerRuntimeState({
       path: path.join(baseDir, "userdata", "server-runtime.json"),
       state: yield* makePersistedServerRuntimeState({

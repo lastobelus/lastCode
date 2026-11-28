@@ -5,7 +5,11 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import { runDatabaseMigrations } from "./DatabaseMigrations.ts";
+import {
+  DatabaseSchemaMismatchError,
+  runDatabaseMigrations,
+  verifyDatabaseMigrations,
+} from "./DatabaseMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import { legacyUpstreamMigrationEntries } from "./LegacyUpstreamMigrations.ts";
 import {
@@ -154,6 +158,34 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("fresh database", (it
         [],
       );
       assert.deepStrictEqual(yield* runDatabaseMigrations(), []);
+    }),
+  );
+});
+
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("ledger verification", (it) => {
+  it.effect("accepts only this build's exact migrations and never writes", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const verify = verifyDatabaseMigrations();
+      assert.instanceOf(yield* Effect.flip(verify), DatabaseSchemaMismatchError);
+      yield* runDatabaseMigrations();
+      yield* verify;
+
+      const [lastId, lastName] = lastcodeMigrationManifest.at(-1)!;
+      yield* sql`DELETE FROM lastcode_sql_migrations WHERE migration_id = ${lastId}`;
+      assert.instanceOf(yield* Effect.flip(verify), DatabaseSchemaMismatchError);
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM lastcode_sql_migrations WHERE migration_id = ${lastId}`,
+        [],
+      );
+
+      yield* sql`INSERT INTO lastcode_sql_migrations (migration_id, name) VALUES (${lastId}, ${lastName}), (${lastId + 1}, 'FutureMigration')`;
+      assert.instanceOf(yield* Effect.flip(verify), DatabaseSchemaMismatchError);
+      yield* sql`DELETE FROM lastcode_sql_migrations WHERE migration_id = ${lastId + 1}`;
+
+      const [lastUpstreamId] = migrationManifest.at(-1)!;
+      yield* sql`UPDATE effect_sql_migrations SET name = 'DifferentMigration' WHERE migration_id = ${lastUpstreamId}`;
+      assert.instanceOf(yield* Effect.flip(verify), DatabaseSchemaMismatchError);
     }),
   );
 });
