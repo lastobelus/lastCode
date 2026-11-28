@@ -134,9 +134,10 @@ describe("LastCode userland install command", () => {
     "/Contents/Frameworks/LastCode Helper.app/Contents/MacOS/LastCode Helper",
     "/Contents/Resources/server.asar/apps/server/dist/bin.mjs",
   ])("detects a running bundle path: %s", (suffix) => {
+    const { targetPath } = idleFixture();
     expect(
-      appBundleIsInUse("/Applications/LastCode.app", {
-        runCommand: () => `42 /Applications/LastCode.app${suffix}`,
+      appBundleIsInUse(targetPath, {
+        runCommand: () => `42 ${targetPath}${suffix}`,
       }),
     ).toBe(true);
   });
@@ -371,6 +372,57 @@ describe("LastCode userland install command", () => {
       expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
     } finally {
       cleanupPreparedInstall(prepared, fixture.options);
+    }
+  });
+
+  it("restores an app that an interrupted install left aside before preparing", async () => {
+    const fixture = idleFixture();
+    const root = NodePath.dirname(fixture.targetPath);
+    const exited = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]).pid;
+    const backup = NodePath.join(root, `.LastCode.previous-${exited}.app`);
+    const staging = NodePath.join(root, `.LastCode.install-${exited}.app`);
+    // A live installer's bundles, here this process's parent, are never touched.
+    const liveStaging = NodePath.join(root, `.LastCode.install-${process.ppid}.app`);
+    NodeFS.renameSync(fixture.targetPath, backup);
+    NodeFS.mkdirSync(staging);
+    NodeFS.mkdirSync(liveStaging);
+
+    const release = acquireInstallLock(fixture.options.lockDirectory);
+    try {
+      await expect(prepareDmgInstall(fixture.dmgPath, fixture.options)).rejects.toThrow(
+        "Another LastCode install is already running",
+      );
+      expect(NodeFS.existsSync(fixture.targetPath)).toBe(false);
+      expect(NodeFS.existsSync(backup)).toBe(true);
+      expect(NodeFS.existsSync(staging)).toBe(true);
+    } finally {
+      release();
+    }
+
+    const prepared = await prepareDmgInstall(fixture.dmgPath, fixture.options);
+    try {
+      expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+      expect(NodeFS.existsSync(backup)).toBe(false);
+      expect(NodeFS.existsSync(staging)).toBe(false);
+      expect(NodeFS.existsSync(liveStaging)).toBe(true);
+    } finally {
+      cleanupPreparedInstall(prepared, fixture.options);
+    }
+  });
+
+  it("continues preparing when the recovery directory does not exist yet", async () => {
+    const fixture = idleFixture();
+    const targetPath = NodePath.join(NodePath.dirname(fixture.targetPath), "new", "LastCode.app");
+    const warning = vi.spyOn(console, "error").mockImplementation(() => {});
+    const options = { ...fixture.options, targetPath };
+    const prepared = await prepareDmgInstall(fixture.dmgPath, options);
+    try {
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("Warning: could not clean up an interrupted install"),
+      );
+      expect(NodeFS.readFileSync(NodePath.join(prepared.staging, "version"), "utf8")).toBe("new");
+    } finally {
+      cleanupPreparedInstall(prepared, options);
     }
   });
 
