@@ -1901,19 +1901,21 @@ const make = Effect.gen(function* () {
     review?: BuildReviewRequest,
     automaticWork?: AutomaticOutputWork,
   ) {
+    yield* Effect.annotateCurrentSpan("storage_cleanup.resource", resource);
     const generatedBuilds = resource === "generated-builds";
     const protectionResource = generatedBuilds ? "worktree" : "dependencies";
     const protectionInventory = yield* Effect.cached(suspensionRegistry.snapshotWorktreeProtection);
     const readWorkspaceProtection = (workspacePath: string) =>
       savedWorkspaceProtection(workspacePath, protectionResource);
     // Screening can retain candidates. Removal checks still read current authority under the lease.
-    const screenWorkspaceProtection = generatedBuilds
-      ? readWorkspaceProtection
-      : (workspacePath: string) =>
-          protectionInventory.pipe(
-            Effect.flatMap((protect) => protect(workspacePath, "dependencies")),
-            Effect.orElseSucceed(() => unavailableWorkspaceAuthority),
-          );
+    const screenWorkspaceProtection =
+      generatedBuilds && (review !== undefined || !automaticWork)
+        ? readWorkspaceProtection
+        : (workspacePath: string) =>
+            protectionInventory.pipe(
+              Effect.flatMap((protect) => protect(workspacePath, protectionResource)),
+              Effect.orElseSucceed(() => unavailableWorkspaceAuthority),
+            );
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
     const outputExists = Effect.fnUntraced(function* (cwd: string) {
       const exists = yield* fs.exists(cwd).pipe(
