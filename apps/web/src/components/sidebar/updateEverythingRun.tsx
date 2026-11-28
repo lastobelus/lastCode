@@ -20,13 +20,13 @@ import { m } from "~/i18n/messages";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { desktopUpdateStateAtom } from "~/state/desktopUpdate";
 import { serverEnvironment } from "~/state/server";
-import { resolveVersionMismatch } from "~/versionSkew";
 import type { ServerUpdateOutcome, ServerUpdateTarget } from "../ServerUpdateAction";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   closeFinishedUpdateRun,
   getUpdateEverythingToastView,
   isServerUpdateHandedOff,
+  serverReachedVersion,
   SKIPPED_SERVER_UPDATE,
   type RestoredRetry,
   type UpdateEverythingResult,
@@ -77,10 +77,7 @@ export function settleUpdateRunMachine(
 }
 
 function runsVersion(config: ServerConfig | null, targetVersion: string): boolean {
-  return (
-    config !== null &&
-    resolveVersionMismatch(config.environment.serverVersion, targetVersion) === null
-  );
+  return serverReachedVersion(config?.environment.serverVersion, targetVersion);
 }
 
 export function retryFailedUpdateRunServers(
@@ -210,6 +207,7 @@ export function postponeUpdateRestart(): void {
 
 const SAVED_RESULT_KEY = "t3code:update-everything-result:v1";
 const SAVED_RESULT_MAX_AGE_MS = 10 * 60 * 1000;
+const HANDOFFS_KEY = "t3code:update-everything-handoffs:v1";
 // Covers a background service's 30-minute trial start, like the server update itself.
 const HANDOFF_TIMEOUT_MS = 32 * 60 * 1000;
 
@@ -234,6 +232,29 @@ const SavedResult = Schema.Struct({
 });
 const decodeSavedResult = Schema.decodeUnknownOption(Schema.fromJsonString(SavedResult));
 
+const SavedHandoffs = Schema.Struct({
+  servers: Schema.Array(HandedOffServer),
+  trackSwitch: Schema.Boolean,
+});
+type SavedHandoffs = typeof SavedHandoffs.Type;
+const decodeHandoffs = Schema.decodeUnknownOption(Schema.fromJsonString(SavedHandoffs));
+
+function readHandoffs(): SavedHandoffs | null {
+  try {
+    const raw = window.localStorage.getItem(HANDOFFS_KEY);
+    return raw === null ? null : Option.getOrNull(decodeHandoffs(raw));
+  } catch {
+    return null;
+  }
+}
+
+function writeHandoffs(handoffs: SavedHandoffs): void {
+  try {
+    if (handoffs.servers.length === 0) window.localStorage.removeItem(HANDOFFS_KEY);
+    else window.localStorage.setItem(HANDOFFS_KEY, JSON.stringify(handoffs));
+  } catch {}
+}
+
 export function saveUpdateEverythingResult(result: UpdateEverythingResult): void {
   const run = appAtomRegistry.get(updateEverythingRunAtom);
   const handedOff = (run?.machines ?? []).flatMap((machine): HandedOffServer[] => {
@@ -255,6 +276,7 @@ export function saveUpdateEverythingResult(result: UpdateEverythingResult): void
       },
     ];
   });
+  writeHandoffs({ servers: handedOff, trackSwitch: run?.trackSwitch === true });
   try {
     window.localStorage.setItem(
       SAVED_RESULT_KEY,
@@ -274,6 +296,7 @@ export function saveUpdateEverythingResult(result: UpdateEverythingResult): void
 export function clearSavedUpdateEverythingResult(): void {
   try {
     window.localStorage.removeItem(SAVED_RESULT_KEY);
+    window.localStorage.removeItem(HANDOFFS_KEY);
   } catch {}
 }
 
@@ -282,12 +305,7 @@ function takeSavedUpdateEverythingResult(): typeof SavedResult.Type | null {
     const raw = window.localStorage.getItem(SAVED_RESULT_KEY);
     if (raw === null) return null;
     window.localStorage.removeItem(SAVED_RESULT_KEY);
-    return Option.getOrNull(
-      Option.filter(
-        decodeSavedResult(raw),
-        (saved) => Date.now() - saved.savedAt < SAVED_RESULT_MAX_AGE_MS,
-      ),
-    );
+    return Option.getOrNull(decodeSavedResult(raw));
   } catch {
     return null;
   }
@@ -358,6 +376,13 @@ function followHandedOffServers(
       });
       appAtomRegistry.set(stateAtom, { status: "idle" });
       releaseState();
+      const handoffs = readHandoffs();
+      if (handoffs !== null) {
+        writeHandoffs({
+          ...handoffs,
+          servers: handoffs.servers.filter((entry) => entry.environmentId !== server.environmentId),
+        });
+      }
       settleUpdateRunMachine(server.environmentId, failure);
       if (failure === null) updatedServers += 1;
       else failures.push(m(msg("{machine}: {failure}", { machine: server.label, failure })));
@@ -429,11 +454,18 @@ function followHandedOffServers(
 /** Reports, once per launch, how the update run that restarted the app ended. */
 export function startDesktopUpdateLaunchNotice(): () => void {
   const saved = takeSavedUpdateEverythingResult();
-  if (saved) {
-    const handedOff = saved.handedOff ?? [];
-    showUpdateEverythingResult({ ...saved, restarting: handedOff.map((server) => server.label) });
-    followHandedOffServers(handedOff, saved.trackSwitch === true);
+  // Older builds stored handoffs in the one-time notice, which expires before the handoffs do.
+  const handoffs = readHandoffs() ?? {
+    servers: saved?.handedOff ?? [],
+    trackSwitch: saved?.trackSwitch === true,
+  };
+  const now = Date.now();
+  const servers = handoffs.servers.filter((server) => now < server.startedAt + HANDOFF_TIMEOUT_MS);
+  writeHandoffs({ ...handoffs, servers });
+  if (saved !== null && now - saved.savedAt < SAVED_RESULT_MAX_AGE_MS) {
+    showUpdateEverythingResult({ ...saved, restarting: servers.map((server) => server.label) });
   }
+  followHandedOffServers(servers, handoffs.trackSwitch);
 
   let notifiedNotAppliedVersion: string | null = null;
   return appAtomRegistry.subscribe(
