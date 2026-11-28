@@ -176,7 +176,7 @@ function HistoryNavigationButton({
 function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
   const gt = useGT();
   return (
-    <div className="relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden shrink-0 md:block">
+    <div className="relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden shrink-0 has-[button]:self-end md:block">
       <Link
         aria-label={gt("T3 Code home")}
         className={cn(

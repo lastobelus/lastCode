@@ -6,7 +6,6 @@ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useClientSetting, useSidebarMode } from "../../hooks/useSettings";
 import { lastcodeSidebarScaleStyle } from "../../lastcodeSidebarScale";
 import { cn } from "../../lib/utils";
-import { InlineButton } from "../ui/button";
 import { toastManager } from "../ui/toast";
 
 export function SidebarBrandCheckpoint({ onBackdrop }: { onBackdrop: boolean }) {
@@ -23,20 +22,19 @@ export function SidebarBrandCheckpoint({ onBackdrop }: { onBackdrop: boolean }) 
   const label = `checkpoint ${build.checkpoint}`;
 
   return (
-    <div
-      className={cn(
-        "pointer-events-none absolute inset-x-0 top-5 flex justify-center text-sm leading-none",
-        onBackdrop && "[--color-foreground:white]",
-      )}
-    >
-      <InlineButton
+    <div className="pointer-events-none relative -mt-0.5 flex h-3.5 justify-center text-sm leading-none">
+      <button
+        type="button"
         aria-label={gt("Copy {label}", { label })}
-        className="pointer-events-auto [-webkit-app-region:no-drag]"
+        className={cn(
+          "pointer-events-auto cursor-pointer self-start font-normal underline-offset-2 hover:underline focus-visible:outline-2 -outline-offset-2 focus-visible:outline-ring [-webkit-app-region:no-drag]",
+          onBackdrop ? "text-white/70" : "text-sidebar-muted-foreground/80",
+        )}
         style={lastcodeSidebarScaleStyle(sidebarMode === "lastcode" ? scale : 100)}
         onClick={() => copyToClipboard(label, undefined)}
       >
         {build.checkpoint}
-      </InlineButton>
+      </button>
     </div>
   );
 }
