@@ -751,14 +751,25 @@ Uninstall removes only each command's managed launcher, copied module, helper,
 and matching PATH symlink. It preserves shared checkpoint configuration, build
 artifacts, and any foreign file or symlink.
 
+After updating the checkout, run `pnpm run lastcode:install -- --install`
+before using a previously installed `lastcode-install`. The command on PATH
+is a copy and needs its own refresh. In-app updates use the installer from the
+configured checkout.
+
 Use `lastcode-install` to install one of those retained DMGs. It presents every
 DMG under `~/.lastcode/local-updates/artifacts` in an `fzf` picker, ordered with
 the newest build selected. After selection it validates and mounts the image,
 stages the app beside `/Applications/LastCode.app`, asks a running LastCode to
 quit, safely replaces it, detaches the image, and relaunches LastCode. The old
 app remains in place until the replacement has been completely copied and is
-restored if the final swap fails. The normal path does not invoke `sudo` or
-request a password.
+restored if the swap fails before the replacement is exposed. The old bundle
+is kept beside the app until the newly installed app's own local backend
+reports ready for the same data directory. The installer and desktop record
+the result under `local-updates/install-outcomes` in the LastCode home. After
+the replacement is in place, the backend can migrate data before reporting
+ready, so startup recovery keeps the old bundle available and does not offer
+that version as a downgrade. The normal path does not invoke `sudo` or request
+a password.
 
 ```bash
 lastcode-install
