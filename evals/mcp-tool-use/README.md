@@ -147,6 +147,8 @@ These cases measure routing decisions with simulated tools, not delivered child 
 
 `cases/launch-callbacks.ndjson` scores callbacks in the briefs of launched threads. The launcher cases load the current callback rule from `AGENTS.md` through `contextFiles`. `expect.threadBriefs` checks case-sensitive patterns in each successful launch's brief, including a brief sent to a thread after it was launched idle.
 
+The lower-permission fixture uses `expect.singleLaunchHandoff` to match the final reply's thread link to the successful launch receipt.
+
 The fixtures cover owned release threads, a callback over a peer link, a worker with fewer permissions than its launcher, and threads the user will drive. A separate worker fixture checks the queued send after completing its assigned work.
 
 ```sh

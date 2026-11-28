@@ -37,6 +37,16 @@ const run = (...calls: Array<Omit<SampleRun["calls"][number], "step">>): SampleR
 const passes = (expect: Parameters<typeof gradeSample>[0], sample: SampleRun) =>
   gradeSample(expect, sample).every((check) => check.pass);
 
+const decodeCase = Schema.decodeUnknownSync(McpToolUseCase);
+const fixtures = NodeFS.readFileSync(
+  new URL("./cases/launch-callbacks.ndjson", import.meta.url),
+  "utf8",
+)
+  .trim()
+  .split("\n")
+  .map((line) => decodeCase(JSON.parse(line)));
+const fixtureFor = (id: string) => fixtures.find((entry) => entry.id === id)!;
+
 it("requires the callback in each single and batched launch brief", () => {
   assert.isTrue(passes(expectsCallback, run(launch(callback), batch(callback))));
   assert.isFalse(passes(expectsCallback, run(launch(callback), batch("Run it."))));
@@ -73,26 +83,23 @@ it("resolves an omitted environment to the local environment for both calls", ()
 });
 
 it("requires a successful lower-mode child launch with a handoff and without a callback", () => {
-  const fixtures = NodeFS.readFileSync(
-    new URL("./cases/launch-callbacks.ndjson", import.meta.url),
-    "utf8",
-  );
-  const fixture = fixtures
-    .trim()
-    .split("\n")
-    .map((line) => Schema.decodeUnknownSync(McpToolUseCase)(JSON.parse(line)))
-    .find((entry) => entry.id === "lc-lower-mode-return-unavailable")!;
+  const fixture = fixtureFor("lc-lower-mode-return-unavailable");
+  const environmentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const destination = `t3-thread://v2/${environmentId}/t-1`;
+  const link = `[Benchmark worker](${destination})`;
   const worker = {
     ...launch("Report the benchmark result in your own thread."),
     input: {
-      environmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      environmentId,
       runtimeMode: "approval-required",
       message: "Report the benchmark result in your own thread.",
     },
+    output: JSON.stringify({ threadId: "t-1", link, runId: "run-1", status: "starting" }),
     failed: false,
   };
-  const finalText =
-    "The worker has fewer permissions. Read its result with t3_thread_read at t3-thread://v2/fixture/thread.";
+  const handoff = (target: string) =>
+    `The worker has fewer permissions. Read its result with t3_thread_read at ${target}.`;
+  const finalText = handoff(link);
   const grade = (call: Omit<SampleRun["calls"][number], "step">, answer = finalText) =>
     passes(fixture.expect, { ...run(call), finalText: answer });
   assert.isTrue(grade(worker));
@@ -106,4 +113,34 @@ it("requires a successful lower-mode child launch with a handoff and without a c
     }),
   );
   assert.isFalse(grade(worker, "The worker will finish later."));
+  assert.isFalse(grade(worker, handoff("[Worker](t3-thread://v2/fixture/thread/extra)")));
+  assert.isFalse(grade(worker, handoff(link.replace("/t-1", "/t-2"))));
+  assert.isFalse(grade(worker, handoff(link.replace(environmentId, local))));
+  assert.isFalse(grade(worker, handoff(`\`${destination}\``)));
+  assert.isFalse(
+    grade({
+      ...worker,
+      input: { ...worker.input, message: "Message your launcher with the result." },
+    }),
+  );
+});
+
+it("requires an instruction to send the callback in the positive callback fixtures", () => {
+  const release = fixtureFor("lc-landing-threads-call-back");
+  const remote = fixtureFor("lc-remote-thread-calls-back-across-environments");
+  const destination =
+    "with threadId 33333333-3333-4333-8333-333333333333, environmentId " +
+    "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee, mode queue, and a stable clientRequestId per event.";
+  const grade = (instruction: string) =>
+    [release, remote].map((fixture) =>
+      passes(
+        fixture.expect,
+        fixture === release
+          ? run(launch(`Land PR 41. ${instruction}`), launch(`Land PR 42. ${instruction}`))
+          : run(launch(instruction, { environmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" })),
+      ),
+    );
+  assert.deepEqual(grade(`When done, call t3_thread_send ${destination}`), [true, true]);
+  assert.deepEqual(grade(`Do not call t3_thread_send ${destination}`), [false, false]);
+  assert.deepEqual(grade(`Thread notes mention t3_thread_send ${destination}`), [false, false]);
 });

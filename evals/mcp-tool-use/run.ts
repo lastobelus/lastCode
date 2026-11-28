@@ -94,7 +94,12 @@ import { type BackgroundWait, makeBackgroundWait } from "./backgroundWait.ts";
 import { localProjectRefusal } from "./localProjectRefusal.ts";
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
 import { FileLinksExpect, gradeFileLinks } from "./file-link-grading.ts";
-import { firstSentBrief, gradeThreadBriefs, ThreadBriefsExpect } from "./lastcodeLaunchBriefs.ts";
+import {
+  firstSentBrief,
+  gradeThreadBriefs,
+  hasSingleLaunchHandoff,
+  ThreadBriefsExpect,
+} from "./lastcodeLaunchBriefs.ts";
 import {
   AGENT_DEVICE_SHELL,
   deviceFailure,
@@ -257,6 +262,8 @@ const McpToolUseExpect = Schema.Struct({
    */
   newThreads: Schema.optional(Schema.Array(Schema.Unknown)),
   threadBriefs: Schema.optional(ThreadBriefsExpect),
+  /** Final response links to the child identified by the one successful single launch. */
+  singleLaunchHandoff: Schema.optional(Schema.Literal(true)),
   /** The last step with tool calls includes this tool, then the turn ends. */
   endsTurnAfter: Schema.optional(Schema.String),
   /**
@@ -1510,7 +1517,21 @@ export const t3Default = (
   switch (name) {
     case "t3_thread_launch": {
       const launched = newThread(input, input.message);
-      return launched.status === "idle" ? { ...launched, runId: null, status: null } : launched;
+      const link = formatThreadLink(
+        {
+          environmentId:
+            typeof input.environmentId === "string"
+              ? EnvironmentId.make(input.environmentId)
+              : EVAL_ENVIRONMENT_ID,
+          threadId: ThreadId.make(launched.threadId),
+        },
+        launched.title,
+      );
+      return {
+        ...launched,
+        link,
+        ...(launched.status === "idle" ? { runId: null, status: null } : {}),
+      };
     }
     case "create_threads":
       return {
@@ -2753,6 +2774,12 @@ export const gradeSample = (
   for (const p of expect.textMustNot ?? []) add(`textMustNot /${p}/`, !test(p, run.text));
   for (const p of expect.finalTextMust ?? [])
     add(`finalTextMust /${p}/`, run.stopReason === "end_turn" && test(p, run.finalText ?? ""));
+  if (expect.singleLaunchHandoff)
+    add(
+      "singleLaunchHandoff",
+      run.stopReason === "end_turn" &&
+        hasSingleLaunchHandoff(calls, run.finalText ?? "", EVAL_ENVIRONMENT_ID),
+    );
   const isLinked = (url: string) => (run.linked ?? []).some((at) => matches(url, at));
   for (const url of expect.linked ?? []) add(`linked ${url}`, isLinked(url));
   if (expect.linkedNumbers !== undefined) {
