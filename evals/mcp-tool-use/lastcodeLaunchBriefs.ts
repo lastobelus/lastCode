@@ -16,6 +16,7 @@ export function firstSentBrief(
   launch: Readonly<Record<string, unknown>>,
   output: string | undefined,
   laterCalls: ReadonlyArray<Call>,
+  localEnvironmentId: string,
 ): unknown {
   if (typeof launch.message === "string" && launch.message.trim() !== "") return launch.message;
   let receipt: unknown;
@@ -24,18 +25,19 @@ export function firstSentBrief(
   } catch {
     return undefined;
   }
-  if (!isRecord(receipt) || receipt.status !== "idle" || typeof receipt.threadId !== "string")
+  if (
+    !isRecord(receipt) ||
+    receipt.status !== null ||
+    receipt.runId !== null ||
+    typeof receipt.threadId !== "string"
+  )
     return undefined;
 
+  const launchEnvironmentId = launch.environmentId ?? localEnvironmentId;
   for (const { tool, input, failed } of laterCalls) {
     if (tool !== "t3_thread_send" || failed === true || !isRecord(input)) continue;
     if (input.threadId !== receipt.threadId) continue;
-    if (
-      launch.environmentId !== undefined &&
-      input.environmentId !== undefined &&
-      input.environmentId !== launch.environmentId
-    )
-      continue;
+    if ((input.environmentId ?? localEnvironmentId) !== launchEnvironmentId) continue;
     return input.message;
   }
 }

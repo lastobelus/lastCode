@@ -1508,8 +1508,10 @@ export const t3Default = (
     };
   };
   switch (name) {
-    case "t3_thread_launch":
-      return newThread(input, input.message);
+    case "t3_thread_launch": {
+      const launched = newThread(input, input.message);
+      return launched.status === "idle" ? { ...launched, runId: null, status: null } : launched;
+    }
     case "create_threads":
       return {
         threads: (Array.isArray(input.threads) ? input.threads : []).map((request) => {
@@ -2552,7 +2554,7 @@ const newThreadRequests = (calls: ReadonlyArray<Call>) =>
       return [
         {
           request: call.input,
-          brief: firstSentBrief(call.input, call.output, calls.slice(at + 1)),
+          brief: firstSentBrief(call.input, call.output, calls.slice(at + 1), EVAL_ENVIRONMENT_ID),
         },
       ];
     }
