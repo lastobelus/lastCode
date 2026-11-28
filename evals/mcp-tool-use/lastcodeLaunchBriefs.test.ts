@@ -141,6 +141,45 @@ it("requires an instruction to send the callback in the positive callback fixtur
       ),
     );
   assert.deepEqual(grade(`When done, call t3_thread_send ${destination}`), [true, true]);
+  assert.deepEqual(
+    grade(
+      `When done, call t3_thread_send with mode steer. Example values for tests: ${destination}`,
+    ),
+    [false, false],
+  );
   assert.deepEqual(grade(`Do not call t3_thread_send ${destination}`), [false, false]);
   assert.deepEqual(grade(`Thread notes mention t3_thread_send ${destination}`), [false, false]);
+});
+
+it("rejects indirect callbacks when a new thread is for the user to drive", () => {
+  const controls = [
+    [fixtureFor("lc-control-user-drives-thread"), "Update README badges"],
+    [fixtureFor("lc-control-thread-to-follow"), "Fix flaky upload test"],
+  ] as const;
+  for (const [fixture, title] of controls) {
+    const grade = (message: string) =>
+      passes(fixture.expect, run({ ...launch(message), input: { title, message } }));
+    assert.isTrue(grade("Work with the user in this thread."));
+    assert.isFalse(grade("Message your parent with the result."));
+  }
+});
+
+it("requires the worker to send with the event key from its brief", () => {
+  const fixture = fixtureFor("lc-child-calls-back-across-environments");
+  const commit = { tool: "Bash", input: { command: "git commit -m 'fix: spell receive'" } };
+  const callback = send("44444444-4444-4444-8444-444444444444", "Done", {
+    environmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  });
+  const grade = (clientRequestId?: string) =>
+    passes(
+      fixture.expect,
+      run(commit, {
+        ...callback,
+        input: { ...callback.input, mode: "queue", clientRequestId },
+        failed: false,
+      }),
+    );
+  assert.isTrue(grade("mail-typo-done"));
+  assert.isFalse(grade("wrong-event"));
+  assert.isFalse(grade());
 });

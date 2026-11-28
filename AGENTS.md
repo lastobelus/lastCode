@@ -142,7 +142,7 @@ A **callback** from the child reaches you only when both hold:
 - The child runs with your runtime and interaction modes, which is the launch default. A child launched with narrower modes cannot message you.
 - For a child on another environment, that environment has a peer link back to yours that allows sending.
 
-When both hold, put the callback in the brief:
+When both hold and you need the result, put the callback in the brief:
 
 - Take your ids from `t3_thread_list` (`currentThreadId`) and from `t3_thread_read` of that id (`thread.environmentId`).
 - Tell the child: when it finishes, or stops to wait for someone, call `t3_thread_send` with `threadId` and `environmentId` set to yours, `mode: "queue"`, a new stable `clientRequestId` per event, and a message naming its thread, the result or blocker, and what is left open.
