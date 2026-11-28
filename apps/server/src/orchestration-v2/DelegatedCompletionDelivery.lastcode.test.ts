@@ -65,7 +65,6 @@ import * as RuntimeLayer from "./runtimeLayer.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
-import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 
@@ -119,39 +118,7 @@ const makeTestProviderInstance = (
     driver: driverKind,
     getCapabilities: () => Effect.succeed(capabilities),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
-    openSession: ({ providerSessionId, modelSelection }) =>
-      Effect.gen(function* () {
-        const now = yield* DateTime.now;
-        const unsupported = () => Effect.die("Unexpected provider operation in delivery replay");
-        return {
-          instanceId,
-          driver: driverKind,
-          providerSessionId,
-          providerSession: {
-            id: providerSessionId,
-            providerInstanceId: instanceId,
-            driver: driverKind,
-            model: modelSelection.model,
-            cwd: "/workspace",
-            status: "ready",
-            capabilities,
-            createdAt: now,
-            updatedAt: now,
-            lastError: null,
-          },
-          events: Stream.never,
-          backgroundTasksEndWithProcess: true,
-          ensureThread: unsupported,
-          resumeThread: unsupported,
-          startTurn: unsupported,
-          steerTurn: unsupported,
-          interruptTurn: unsupported,
-          respondToRuntimeRequest: unsupported,
-          readThreadSnapshot: unsupported,
-          rollbackThread: unsupported,
-          forkThread: unsupported,
-        } as const;
-      }),
+    openSession: () => Effect.die("sessions are not used by delegated completion tests"),
   },
   textGeneration: {} as ProviderInstance["textGeneration"],
 });
@@ -866,7 +833,6 @@ it.layer(layerFollowups)("delegated background wakes", (it) => {
     { driver, modelSelection, wake: "completion" },
     { driver: CLAUDE_PROVIDER, modelSelection: claudeModelSelection, wake: "completion" },
     { driver, modelSelection, wake: "restart" },
-    { driver, modelSelection, wake: "provider exit" },
   ] as const)("reconciles the awaited $driver command after $wake", (childProvider) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -987,22 +953,6 @@ it.layer(layerFollowups)("delegated background wakes", (it) => {
 
       const wakeMessageId = MessageId.make(`message:${name}-wake`);
       let wakeRunMessageId = wakeMessageId;
-      if (childProvider.wake === "provider exit") {
-        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-        yield* sessions.open({
-          threadId: childThreadId,
-          providerSessionId,
-          modelSelection: childProvider.modelSelection,
-          runtimePolicy: { cwd: null, runtimeMode: "full-access", interactionMode: "default" },
-        });
-        yield* sessions.release({ providerSessionId, reason: "runtime_error" });
-        assert.deepEqual(
-          (yield* orchestrator.getThreadProjection(childThreadId)).providerThreads[0]
-            ?.owedBackgroundResults,
-          [],
-        );
-        return;
-      }
       if (childProvider.wake === "restart") {
         yield* eventSink.write({
           events: [

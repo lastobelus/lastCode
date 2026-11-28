@@ -30,6 +30,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../../config.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import {
   isWindowsClaudeLauncherShimPath,
   resolveClaudeSdkExecutablePath,
@@ -1066,6 +1067,8 @@ function layerClaudeProviderAdapterRegistryReplay(
         NodeServices.layer,
         NodeCrypto.layer,
         layerServerConfig,
+        // These transcripts were captured with wrapper-registered waits disabled.
+        ServerSettings.layerTest({ lastcodeBackgroundWaitEnabled: false }).pipe(Layer.orDie),
       ),
     ),
   );
