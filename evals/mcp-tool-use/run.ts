@@ -10,6 +10,9 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
 import * as NodeVM from "node:vm";
 import * as NodeZlib from "node:zlib";
+import { WAIT_INSTRUCTION } from "../../scripts/lastcode-run.ts";
+import { lostBackgroundResultWork } from "../../apps/server/src/orchestration-v2/LastCodeLostBackgroundResults.ts";
+import { restartCancelledBackgroundWorkNote } from "../../apps/server/src/orchestration-v2/RestartBackgroundNote.ts";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as PlatformNodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -364,6 +367,8 @@ export const McpToolUseCase = Schema.Struct({
     ownedPullRequestWatch: Schema.optional(Schema.Boolean),
     /** Runs only on this harness, for cases whose right answer depends on it. */
     harness: Schema.optional(Schema.Literals(["claude", "codex"])),
+    /** Override the LastCode background-wait setting for this thread. */
+    lastcodeBackgroundWaitEnabled: Schema.optional(Schema.Boolean),
     /** The Linked environments beta is on, so T3 lists its link tools. */
     linkedEnvironments: Schema.optional(Schema.Boolean),
     /** false: the project is on no forge T3 reads, so T3 hides its forge tools. */
@@ -599,6 +604,8 @@ const hiddenWhileFeedbackOff = enabledWhen(McpInvocationContext.hiddenWhileFeedb
 // T3 lists PR and CI tools only to a thread whose project is on a forge it reads.
 const hiddenWithoutForge = enabledWhen(McpInvocationContext.hiddenWithoutForge);
 const hiddenWithProjectActionLaunchDisabled = enabledWhen(visibleWithProjectActionLaunch);
+const hiddenWithoutBackgroundWait = enabledWhen(McpInvocationContext.hiddenWithoutBackgroundWait);
+const defaultBackgroundWait = Contracts.DEFAULT_SERVER_SETTINGS.lastcodeBackgroundWaitEnabled;
 /**
  * `tools` is T3 as shipped. `raw` takes away T3's PR, CI and issue tools and their instructions,
  * so the agent works the forge with CLIs alone, to measure what the tools save.
@@ -620,12 +627,16 @@ const visibleT3Tools = (options: {
   readonly agentFeedback?: Contracts.AgentFeedbackMode;
   readonly arm?: Arm;
   readonly ownedPullRequestWatch?: boolean;
-  readonly codexBackgroundWait?: boolean;
+  readonly projectActionLaunchDisabled: boolean;
+  readonly backgroundWaitAvailable: boolean;
 }) =>
   t3Tools.filter(
     (tool) =>
       !(options.arm === "raw" && forgeToolNames.has(tool.name)) &&
-      !(options.codexBackgroundWait && hiddenWithProjectActionLaunchDisabled.has(tool.name)) &&
+      !(
+        options.projectActionLaunchDisabled && hiddenWithProjectActionLaunchDisabled.has(tool.name)
+      ) &&
+      (options.backgroundWaitAvailable || !hiddenWithoutBackgroundWait.has(tool.name)) &&
       (options.links === true || !hiddenWhileLinksOff.has(tool.name)) &&
       ((options.agentFeedback ?? "off") !== "off" || !hiddenWhileFeedbackOff.has(tool.name)) &&
       (options.forge !== false || !hiddenWithoutForge.has(tool.name)) &&
@@ -647,6 +658,7 @@ const claudeQueryOptions = (
   device = true,
   browser = true,
   agentFeedback: Contracts.AgentFeedbackMode = "off",
+  projectActionLaunchDisabled = defaultBackgroundWait,
 ) => {
   // Refs whose text follows a capability read its flag; older ones ignore it.
   const input: Parameters<typeof makeClaudeQueryOptions>[0] & {
@@ -659,6 +671,7 @@ const claudeQueryOptions = (
     cwd: null,
     mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1/mcp" } },
     agentFeedback,
+    projectActionLaunchDisabled,
     deviceToolsAvailable: device,
     browserToolsAvailable: browser,
   };
@@ -671,8 +684,15 @@ export const t3SystemAppend = (
   device = true,
   browser = true,
   agentFeedback: Contracts.AgentFeedbackMode = "off",
+  projectActionLaunchDisabled = defaultBackgroundWait,
 ) => {
-  const { systemPrompt } = claudeQueryOptions(model, device, browser, agentFeedback);
+  const { systemPrompt } = claudeQueryOptions(
+    model,
+    device,
+    browser,
+    agentFeedback,
+    projectActionLaunchDisabled,
+  );
   if (isRecord(systemPrompt) && systemPrompt.type === "preset" && systemPrompt.append) {
     return systemPrompt.append;
   }
@@ -683,10 +703,14 @@ export const t3SystemAppend = (
  * The context T3's SubagentStart hooks give a native subagent, which gets none of the append.
  * Empty when T3 registers no such hook.
  */
-export const t3SubagentContext = async (model: Model, device = true, browser = true) => {
-  const hooks = (claudeQueryOptions(model, device, browser).hooks?.SubagentStart ?? []).flatMap(
-    (m) => m.hooks,
-  );
+export const t3SubagentContext = async (
+  model: Model,
+  device = true,
+  browser = true,
+  projectActionLaunchDisabled = defaultBackgroundWait,
+) => {
+  const options = claudeQueryOptions(model, device, browser, "off", projectActionLaunchDisabled);
+  const hooks = (options.hooks?.SubagentStart ?? []).flatMap((m) => m.hooks);
   const input = {
     hook_event_name: "SubagentStart" as const,
     session_id: "mcp-tool-use-eval",
@@ -715,13 +739,15 @@ export const t3SubagentContext = async (model: Model, device = true, browser = t
  */
 const t3ContextReport = (model: Model, backgroundWait: boolean) => {
   const size = (chars: number) => `${chars} chars (~${Math.round(chars / 4)} tokens)`;
-  const actionLaunchDisabled = isCodex(model) && backgroundWait;
-  const tools = actionLaunchDisabled
-    ? t3Tools.filter((tool) => !hiddenWithProjectActionLaunchDisabled.has(tool.name))
-    : t3Tools;
+  const codex = isCodex(model);
+  const tools = t3Tools.filter(
+    (tool) =>
+      !(backgroundWait && hiddenWithProjectActionLaunchDisabled.has(tool.name)) &&
+      (!codex || backgroundWait || !hiddenWithoutBackgroundWait.has(tool.name)),
+  );
   const descriptions = tools.reduce((sum, tool) => sum + valueText(tool.description).length, 0);
   const schemas = JSON.stringify(tools).length;
-  const systemText = isCodex(model)
+  const systemText = codex
     ? JSON.stringify(
         buildCodexAdditionalContext(
           { model },
@@ -729,11 +755,11 @@ const t3ContextReport = (model: Model, backgroundWait: boolean) => {
             browser: true,
             device: true,
             backgroundWait,
-            projectActionLaunchDisabled: actionLaunchDisabled,
+            projectActionLaunchDisabled: backgroundWait,
           },
         ),
       )
-    : t3SystemAppend(model);
+    : t3SystemAppend(model, true, true, "off", backgroundWait);
   return [
     `- T3 context: system text ${size(systemText.length)}`,
     `tool descriptions ${size(descriptions)}`,
@@ -782,10 +808,17 @@ export const buildBase = (
     readonly browserAccess?: boolean;
     /** The Agent feedback mode: on, T3 lists its tools and its text includes the mode's line. */
     readonly agentFeedback?: Contracts.AgentFeedbackMode;
+    readonly lastcodeBackgroundWaitEnabled?: boolean;
     readonly arm?: Arm;
   },
 ) => {
-  const t3 = visibleT3Tools(options);
+  const projectActionLaunchDisabled =
+    options.lastcodeBackgroundWaitEnabled ?? defaultBackgroundWait;
+  const t3 = visibleT3Tools({
+    ...options,
+    projectActionLaunchDisabled,
+    backgroundWaitAvailable: true,
+  });
   const firstAssistant = template.messages.findIndex((message) => message.role === "assistant");
   const head = template.messages.slice(0, firstAssistant === -1 ? undefined : firstAssistant);
   const systemTexts = [
@@ -809,7 +842,13 @@ export const buildBase = (
   const append = options.nativeSubagent
     ? ""
     : forArm(
-        t3SystemAppend(model, options.deviceAccess, options.browserAccess, options.agentFeedback),
+        t3SystemAppend(
+          model,
+          options.deviceAccess,
+          options.browserAccess,
+          options.agentFeedback,
+          projectActionLaunchDisabled,
+        ),
         options.arm,
       );
   const modelLine = `You are powered by the model named ${MODELS[model]}. The exact model ID is ${model}.`;
@@ -868,7 +907,7 @@ type Base = ReturnType<typeof buildBase> & {
 };
 
 /** Keep the captured harness prompt and tools; replace app-owned context and the real user. */
-const buildCodexBase = (
+export const buildCodexBase = (
   template: typeof ResponsesRequest.Type,
   options: {
     readonly model: Model;
@@ -884,11 +923,16 @@ const buildCodexBase = (
     readonly browserAccess?: boolean;
     /** The Agent feedback mode: on, T3 lists its tools and its text includes the mode's line. */
     readonly agentFeedback?: Contracts.AgentFeedbackMode;
-    readonly codexBackgroundWait?: boolean;
+    readonly lastcodeBackgroundWaitEnabled?: boolean;
     readonly arm?: Arm;
   },
 ): Base => {
-  const t3 = visibleT3Tools(options);
+  const backgroundWait = options.lastcodeBackgroundWaitEnabled ?? defaultBackgroundWait;
+  const t3 = visibleT3Tools({
+    ...options,
+    projectActionLaunchDisabled: backgroundWait,
+    backgroundWaitAvailable: backgroundWait,
+  });
   const contentText = (item: Block) =>
     Array.isArray(item.content)
       ? item.content.map((block: Block) => valueText(block.text)).join("\n")
@@ -928,8 +972,8 @@ const buildCodexBase = (
     {
       browser: options.browserAccess ?? true,
       device: options.deviceAccess ?? true,
-      backgroundWait: options.codexBackgroundWait === true,
-      projectActionLaunchDisabled: options.codexBackgroundWait === true,
+      backgroundWait,
+      projectActionLaunchDisabled: backgroundWait,
     },
   );
   input.push(
@@ -3274,7 +3318,7 @@ const Flags = Schema.Struct({
   "user-instructions": Schema.Literals(["keep", "drop"]),
   arm: Schema.Literals(ARMS),
   "dry-run": Schema.Boolean,
-  "codex-background-wait": Schema.Boolean,
+  "lastcode-background-wait": Schema.Boolean,
   "stop-on-regression": Schema.Boolean,
   "regression-budget": Schema.optional(PositiveIntOrZero),
   context: Schema.Boolean,
@@ -3282,7 +3326,17 @@ const Flags = Schema.Struct({
 const decodeFlags = Schema.decodeUnknownEffect(Flags);
 const decodeCapture = Schema.decodeUnknownEffect(Schema.fromJsonString(Capture));
 const decodeCodexCapture = Schema.decodeUnknownEffect(Schema.fromJsonString(CodexCapture));
-const decodeCase = Schema.decodeUnknownEffect(Schema.fromJsonString(McpToolUseCase));
+const decodeCaseJson = Schema.decodeUnknownEffect(Schema.fromJsonString(McpToolUseCase));
+const decodeCase = (line: string) =>
+  decodeCaseJson(
+    line
+      .replaceAll("<lc-run-wait-instruction>", JSON.stringify(WAIT_INSTRUCTION).slice(1, -1))
+      .replaceAll("<lost-background-result-note>", () =>
+        JSON.stringify(
+          restartCancelledBackgroundWorkNote([lostBackgroundResultWork("publish-release")]),
+        ).slice(1, -1),
+      ),
+  );
 const decodeBaselineRow = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
     Schema.Struct({
@@ -3297,6 +3351,7 @@ const string = { type: "string" } as const;
 
 const main = Effect.gen(function* () {
   const { values } = NodeUtil.parseArgs({
+    allowNegative: true,
     options: {
       model: { ...string, default: "claude-sonnet-5-5" },
       template: string,
@@ -3317,7 +3372,7 @@ const main = Effect.gen(function* () {
       // `raw` runs without T3's PR, CI and issue tools, to compare against the CLIs.
       arm: { ...string, default: "tools" },
       "dry-run": { type: "boolean", default: false },
-      "codex-background-wait": { type: "boolean", default: false },
+      "lastcode-background-wait": { type: "boolean", default: defaultBackgroundWait },
       "stop-on-regression": { type: "boolean", default: false },
       "regression-budget": string,
       // Prints the size of T3's text and tool schemas, then exits. Needs no template or key.
@@ -3325,8 +3380,9 @@ const main = Effect.gen(function* () {
     },
   });
   const flags = yield* decodeFlags({ template: "", ...values });
+  const backgroundWait = flags["lastcode-background-wait"];
   if (flags.context) {
-    process.stdout.write(`${t3ContextReport(flags.model, flags["codex-background-wait"])}\n`);
+    process.stdout.write(`${t3ContextReport(flags.model, backgroundWait)}\n`);
     return;
   }
   if (flags["stop-on-regression"] && flags.baseline === undefined) {
@@ -3415,8 +3471,9 @@ const main = Effect.gen(function* () {
     browserAccess: boolean,
     links: boolean,
     forge: boolean,
-    agentFeedback: Contracts.AgentFeedbackMode = "off",
-    ownedPullRequestWatch = false,
+    agentFeedback: Contracts.AgentFeedbackMode,
+    ownedPullRequestWatch: boolean,
+    lastcodeBackgroundWaitEnabled: boolean,
   ): Effect.Effect<Base, Schema.SchemaError> =>
     codex
       ? decodeCodexCapture(template).pipe(
@@ -3432,7 +3489,7 @@ const main = Effect.gen(function* () {
               deviceAccess,
               browserAccess,
               agentFeedback,
-              codexBackgroundWait: flags["codex-background-wait"],
+              lastcodeBackgroundWaitEnabled,
               arm: flags.arm,
             }),
           ),
@@ -3450,32 +3507,34 @@ const main = Effect.gen(function* () {
               deviceAccess,
               browserAccess,
               agentFeedback,
+              lastcodeBackgroundWaitEnabled,
               arm: flags.arm,
             });
             return role === "native-subagent"
               ? Effect.promise(() =>
-                  t3SubagentContext(flags.model, deviceAccess, browserAccess),
+                  t3SubagentContext(
+                    flags.model,
+                    deviceAccess,
+                    browserAccess,
+                    lastcodeBackgroundWaitEnabled,
+                  ),
                 ).pipe(Effect.map((subagentContext): Base => ({ ...built, subagentContext })))
               : Effect.succeed(built);
           }),
         );
   // Codex has no native subagents; its cases with that role run as ordinary interactive threads.
   const baseKey = ({ setup }: McpToolUseCase) =>
-    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.world?.browserAgentAccess !== false}:${setup.linkedEnvironments === true}:${setup.forge !== false}:${setup.world?.agentFeedback ?? "off"}:${setup.role === "delegated-child" && setup.ownedPullRequestWatch === true}`;
-  const base = yield* buildFor("top", true, true, false, true, "off", false);
-  const bases = new Map<string, Base>([["top:true:true:false:true:off:false", base]]);
+    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.world?.browserAgentAccess !== false}:${setup.linkedEnvironments === true}:${setup.forge !== false}:${setup.world?.agentFeedback ?? "off"}:${setup.role === "delegated-child" && setup.ownedPullRequestWatch === true}:${setup.lastcodeBackgroundWaitEnabled ?? backgroundWait}`;
+  const base = yield* buildFor("top", true, true, false, true, "off", false, backgroundWait);
+  const bases = new Map<string, Base>([
+    [`top:true:true:false:true:off:false:${backgroundWait}`, base],
+  ]);
   for (const testCase of selected) {
     const key = baseKey(testCase);
     if (bases.has(key)) continue;
-    const [role = "top", device, browser, links, forge, feedback, ownedWatch] = key.split(":") as [
-      McpToolUseCase["setup"]["role"],
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-    ];
+    const [role = "top", device, browser, links, forge, feedback, ownedWatch, wait] = key.split(
+      ":",
+    ) as [McpToolUseCase["setup"]["role"], string, string, string, string, string, string, string];
     bases.set(
       key,
       yield* buildFor(
@@ -3486,6 +3545,7 @@ const main = Effect.gen(function* () {
         forge === "true",
         feedback as Contracts.AgentFeedbackMode,
         ownedWatch === "true",
+        wait === "true",
       ),
     );
   }
@@ -3635,11 +3695,7 @@ const main = Effect.gen(function* () {
   const summary = summarize(
     rows,
     {
-      header: [
-        header,
-        t3ContextReport(flags.model, flags["codex-background-wait"]),
-        ...stopped,
-      ].join("\n"),
+      header: [header, t3ContextReport(flags.model, backgroundWait), ...stopped].join("\n"),
       shellModel: config.shellModel,
       model: config.model,
     },

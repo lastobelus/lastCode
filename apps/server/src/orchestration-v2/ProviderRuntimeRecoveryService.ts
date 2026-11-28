@@ -27,6 +27,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { lostBackgroundResultWork } from "./LastCodeLostBackgroundResults.ts";
 import {
   restartContinuationBlocked,
   restartContinuationRun,
@@ -1134,9 +1135,13 @@ export const make = Effect.gen(function* () {
           continue;
         }
         if (providerThread.ownerNodeId === null) {
-          for (const task of providerThread.pendingBackgroundTasks ?? []) {
+          const owed = providerThread.owedBackgroundResults ?? [];
+          const owedIds = new Set(owed.map((result) => result.taskId));
+          const pending = providerThread.pendingBackgroundTasks ?? [];
+          for (const task of pending) {
             // A subagent already recorded covers the shells it started.
             if (
+              owedIds.has(task.taskId) ||
               cancelledBackgroundNativeIds.has(task.taskId) ||
               (task.parentTaskId !== undefined &&
                 cancelledBackgroundNativeIds.has(task.parentTaskId))
@@ -1144,6 +1149,20 @@ export const make = Effect.gen(function* () {
               continue;
             cancelledBackgroundNativeIds.add(task.taskId);
             recordCancelledBackgroundWork(providerThread.id, cancelledRosterTaskWork(task));
+          }
+          for (const { taskId } of owed) {
+            const task = pending.find((task) => task.taskId === taskId);
+            recordCancelledBackgroundWork(
+              providerThread.id,
+              task === undefined
+                ? lostBackgroundResultWork(taskId)
+                : {
+                    ...cancelledRosterTaskWork(task),
+                    id: taskId,
+                    awaited: true,
+                    resultDeliveryLost: true,
+                  },
+            );
           }
         }
         events.push({

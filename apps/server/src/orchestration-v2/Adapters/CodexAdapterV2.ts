@@ -1483,6 +1483,10 @@ function failureResetAt(
   );
 }
 
+type TrackedCodexOwedBackgroundCommand = CodexOwedBackgroundCommand & {
+  readonly nativeTurnId: string;
+};
+
 interface ActiveCodexTurnContext {
   promptPending?: boolean;
   completedToolBatches?: number;
@@ -2551,7 +2555,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const runningCommandItemsByTurn = yield* Ref.make(
           new Map<string, Map<string, TrackedRunningCommandItem>>(),
         );
-        const owedBackgroundCommands = new Map<string, CodexOwedBackgroundCommand>();
+        const owedBackgroundCommands = new Map<string, TrackedCodexOwedBackgroundCommand>();
         const runningDynamicToolsByTurn = yield* Ref.make(
           new Map<string, Map<string, CodexDynamicToolItem>>(),
         );
@@ -3169,6 +3173,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const turnHasRetainedBackgroundWork =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(function* (nativeTurnId: string) {
+            for (const owed of owedBackgroundCommands.values()) {
+              if (owed.nativeTurnId === nativeTurnId) return true;
+            }
             const commands = (yield* Ref.get(runningCommandItemsByTurn)).get(nativeTurnId);
             if (commands !== undefined && commands.size > 0) {
               return true;
@@ -5993,6 +6000,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           });
         });
 
+        const retireOwedCommandsForTurn = Effect.fnUntraced(function* (
+          context: ActiveCodexTurnContext,
+        ) {
+          let retired = false;
+          for (const owed of owedBackgroundCommands.values()) {
+            if (owed.nativeTurnId === context.nativeTurnId) {
+              owedBackgroundCommands.delete(owed.taskId);
+              retired = true;
+            }
+          }
+          if (retired) yield* emitAwaitedCommands(context.providerThread);
+        });
+
         const clearSettledCommands = Effect.fn("CodexAdapterV2.clearSettledCommands")(function* (
           nativeThreadId: string,
         ) {
@@ -6014,6 +6034,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               updated.delete(context.nativeTurnId);
               return updated;
             });
+            yield* retireOwedCommandsForTurn(context);
             yield* releaseSettledTurnIfIdle(context.nativeTurnId);
           }
         });
@@ -6291,12 +6312,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 !(yield* Ref.get(offeredContinuationItemsByTurn))
                   .get(payload.turnId)
                   ?.has(payload.item.id);
-              const owedResult: CodexOwedBackgroundCommand | undefined =
+              const owedResult: TrackedCodexOwedBackgroundCommand | undefined =
                 awaited && shouldWake && context.projectionRunId !== null
                   ? {
                       taskId: payload.item.id,
                       originRunId: context.projectionRunId,
                       providerThreadId: context.providerThread.id,
+                      nativeTurnId: payload.turnId,
                       processId: tracked?.processId ?? payload.item.processId ?? undefined,
                     }
                   : undefined;
@@ -6356,7 +6378,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     const clear = Effect.suspend(() => {
                       if (!isCurrent()) return Effect.void;
                       owedBackgroundCommands.delete(owedResult.taskId);
-                      return emitAwaitedCommands(context.providerThread);
+                      return emitAwaitedCommands(context.providerThread).pipe(
+                        Effect.andThen(releaseSettledTurnIfIdle(owedResult.nativeTurnId)),
+                      );
                     });
                     const continuation = codexBackgroundResultRequest(request, owedResult, {
                       isCurrent,
@@ -8944,6 +8968,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 for (const item of owed) {
                   if (matched.some((taskId) => matches(item.taskId, item.processId, taskId))) {
                     owedBackgroundCommands.delete(item.taskId);
+                    yield* releaseSettledTurnIfIdle(item.nativeTurnId);
                   }
                 }
                 yield* emitAwaitedCommands(providerThread);
@@ -8954,6 +8979,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
           // Idle release can beat delayed subagent resumes: Codex reports them completed between turns with no resume-expected signal.
           hasPendingBackgroundWork: Effect.gen(function* () {
+            if (owedBackgroundCommands.size > 0) return true;
             for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
               if (items.size > 0) {
                 return true;
@@ -8979,6 +9005,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
           // Untraced: the run's event stream calls this once per provider event.
           hasPendingBackgroundWorkForThread: Effect.fnUntraced(function* (providerThread) {
+            for (const owed of owedBackgroundCommands.values()) {
+              if (owed.providerThreadId === providerThread.id) return true;
+            }
             const contexts = [
               ...(yield* Ref.get(activeTurns)).values(),
               ...(yield* Ref.get(settledTurns)).values(),
@@ -9342,6 +9371,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   if (threadClosings.get(nativeThreadId) === closing) {
                     threadClosings.delete(nativeThreadId);
                   }
+                  if (owedBackgroundCommands.size > 0) {
+                    yield* turnTerminalizationPermit.withPermits(1)(
+                      Effect.gen(function* () {
+                        for (const context of (yield* Ref.get(settledTurns)).values()) {
+                          if (context.providerThread.nativeThreadRef?.nativeId !== nativeThreadId)
+                            continue;
+                          yield* retireOwedCommandsForTurn(context);
+                          yield* releaseSettledTurnIfIdle(context.nativeTurnId);
+                        }
+                      }),
+                    );
+                  }
                   yield* Deferred.succeed(closing, undefined);
                 } else if (unloadInput.awaitClosed === true) {
                   yield* Deferred.await(closing);
@@ -9697,6 +9738,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                         return updated;
                       });
                       yield* clearImageWork(context);
+                      yield* retireOwedCommandsForTurn(context);
                       yield* releaseSettledTurnIfIdle(context.nativeTurnId);
                     }
                   }),

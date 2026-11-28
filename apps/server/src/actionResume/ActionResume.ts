@@ -157,7 +157,7 @@ const MAX_ACTION_OUTPUT_CHARS = 12_000;
 const ACTION_SHELL_READY_SECONDS = 60;
 const ACTION_START_SECONDS = 30;
 const INTERRUPTED_ACTION_RECOVERY_HINT =
-  "If it was interrupted, recover it with Resume agent or Discard in the composer, or with resume_interrupted_action or discard_interrupted_action.";
+  "If it was interrupted, use resume_interrupted_action to continue, or ask the user to choose Resume agent or Discard in the composer.";
 const ACTION_PROGRESS_MIN_INTERVAL_MS = 1_000;
 const ACTION_PROGRESS_MAX_UPDATES = 128;
 const ACTION_OUTPUT_OSC = "777;T3ActionOutput";

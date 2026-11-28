@@ -13,11 +13,13 @@ import {
   PreviewAutomationUnavailableError,
   ThreadId,
 } from "@t3tools/contracts";
+import { projectActionLaunchInstructions } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 
 import {
   answerToolCall,
   buildBase,
+  buildCodexBase,
   buildMessages,
   failedEarly,
   executeCodex,
@@ -883,6 +885,59 @@ it("rebuilds the template from this checkout and sends a child T3's task prompt"
   const prompt = buildMessages(makeSample(childCase, base)).at(-1)?.content.at(-1);
   assert.equal(prompt?.text, taskPrompt({ task: childCase.prompt, role: "implementation" }));
   assert.notEqual(prompt?.text, childCase.prompt);
+});
+
+it("uses the shipped Action retirement setting and keeps the off path on both harnesses", () => {
+  const codexTemplate = {
+    input: [
+      {
+        type: "message",
+        role: "developer",
+        content: "<t3_code_runtime>old context</t3_code_runtime>",
+      },
+      { type: "additional_tools", tools: [{ tools: [{ name: "exec" }] }] },
+    ],
+    reasoning: { effort: "low" },
+  };
+  const claude = { model: "claude-sonnet-5-5", keepUserInstructions: false } as const;
+  const codex = { model: "gpt-6-luna", keepUserInstructions: false } as const;
+  const launchTools = ["list_project_actions", "run_project_action_and_resume"];
+  const recoveryTools = ["inspect_action_run", "resume_interrupted_action"];
+  const promptText = (base: ReturnType<typeof buildCodexBase>) =>
+    (
+      base.codex?.input.flatMap((item) => (Array.isArray(item.content) ? item.content : [])) ??
+      base.system
+    )
+      .map((block) => block.text)
+      .join("\n");
+  for (const base of [buildBase(template, claude), buildCodexBase(codexTemplate, codex)]) {
+    const toolNames = base.t3.map((tool) => normalizeToolName(tool.name));
+    for (const tool of [...launchTools, "discard_interrupted_action"])
+      assert.notInclude(toolNames, tool);
+    assert.includeMembers(toolNames, [...recoveryTools, "t3_background_wait"]);
+    assert.include(promptText(base), projectActionLaunchInstructions(true));
+  }
+
+  const claudeOff = buildBase(template, { ...claude, lastcodeBackgroundWaitEnabled: false });
+  const codexOff = buildCodexBase(codexTemplate, {
+    ...codex,
+    lastcodeBackgroundWaitEnabled: false,
+  });
+  for (const base of [claudeOff, codexOff]) {
+    assert.includeMembers(
+      base.t3.map((tool) => normalizeToolName(tool.name)),
+      [...launchTools, ...recoveryTools, "discard_interrupted_action"],
+    );
+    assert.include(promptText(base), projectActionLaunchInstructions(false));
+  }
+  assert.include(
+    claudeOff.t3.map((tool) => normalizeToolName(tool.name)),
+    "t3_background_wait",
+  );
+  assert.notInclude(
+    codexOff.t3.map((tool) => normalizeToolName(tool.name)),
+    "t3_background_wait",
+  );
 });
 
 it("lists link tools only while a case turns the beta on, and sends chips as T3 projects them", () => {

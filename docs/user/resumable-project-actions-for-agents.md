@@ -1,29 +1,14 @@
-# Use an Agent to Add Resumable Project Actions
+# Run Long Commands With an Agent
 
-An agent can turn a repetitive wait into a resumable Project Action and arrange for future threads
-to use it without repeated reminders. This works especially well for long validation runs, builds,
-deployments, and other workflows that spend time waiting for an external result. To wait on a pull
-request, ask the agent to watch it instead; see
-[Linked pull requests](./source-control.md#linked-pull-requests).
+Ask your agent to run the workflow in its checkout. For a long build or test
+run, LastCode can wake the thread when the command finishes so the agent can
+act on the result. LastCode's own build and validation commands use
+[`lc-run`](../lastcode/release.md#worktree-preparation) to register the wait
+automatically.
 
-For example, ask:
+For a workflow your team runs often, give agents the command, the condition
+that ends the wait, and what they should do on success or failure. For a pull
+request, ask the agent to [watch the PR](./source-control.md#linked-pull-requests).
 
-```text
-Set up our release build workflow to use a resumable Project Action. Do the project work and, with
-authorized computer use, configure and verify the Action in LastCode. Make future threads use it
-automatically instead of polling or waiting in the agent turn.
-```
-
-The agent should inspect the existing workflow before changing it, preserve its acceptance gates,
-and leave decisions such as retrying a failure or publishing a result for the resumed thread. It
-should report any remaining one-time setup instead of claiming the Action is ready when it has not
-been verified.
-
-If you want to point an agent at detailed instructions, give it this page. Before making changes,
-the agent should continue with the
-[agent implementation guide](../internals/resumable-project-actions-for-agents.md), which links to
-the setup runbook.
-
-Once configured, ask for the ordinary workflow. A successful setup means the agent discovers and
-launches the Action itself, ends its turn while the command runs, and continues from the automatic
-follow-up when there is a result that needs attention.
+You can still run saved Project Actions from the project. If your environment
+uses legacy agent launches, see [the fallback guide](../internals/resumable-project-actions-for-agents.md).

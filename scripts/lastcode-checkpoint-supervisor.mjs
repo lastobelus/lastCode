@@ -510,8 +510,8 @@ export function checkpointFailureMessage(failure, fingerprint, detailsPath) {
     "The bounded service logs are ~/.lastcode/automation/nightly-checkpoint.stdout.log and nightly-checkpoint.stderr.log.",
     "Use this thread for the recovery; do not create a new maintenance thread and do not only report the alert.",
     "After replay completes, follow Resuming a repaired checkpoint in docs/lastcode/release.md; run-now does not supersede an active pass.",
-    "For an already-started service run, use the resumable Wait for Checkpoint action as described in docs/lastcode/release.md instead of sleep/status loops. It only observes completion and does not start or repair the service.",
-    "If an authorized recovery requires a local Apple Silicon build, follow the Resumable local builds section in docs/lastcode/release.md and use Build Local Package (lc-build-local-package), then end the turn instead of polling build logs. A pending prior Action continuation must be delivered before starting another Action.",
+    "To observe an already-started service run, follow Waiting for the checkpoint service in docs/lastcode/release.md and run ./scripts/lc-run wait-checkpoint. It only observes; it does not start or repair the service. Follow the wrapper's wait instructions.",
+    "For an authorized local Apple Silicon build, follow Resumable local builds in docs/lastcode/release.md and run ./scripts/lc-run package --tag <tag> with the exact installable tag. It starts a new build. Follow the wrapper's wait instructions.",
     "If the authorized recovery includes a LastCode PR, read .agents/skills/lastcode-pr/SKILL.md. When CI or review is passive and no current finding needs judgement, call watch_pull_request with the PR URL, then run pnpm --config.verify-deps-before-run=false lastcode:pr-gates once; if it reports pending, end the turn immediately without polling. On each wake, rerun the check and act on what changed. This reminder does not authorize creating or merging a PR.",
   ]
     .filter(Boolean)

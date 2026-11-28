@@ -1823,7 +1823,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         clientFactory,
         ...(onUsageLimits ? { onUsageLimits } : {}),
         ...(models ? { models } : {}),
-        ...(transcript.backgroundWait ? { readBackgroundWait: Effect.succeed(true) } : {}),
+        readBackgroundWait: Effect.succeed(transcript.backgroundWait === true),
         digest: yield* Digest.Digest,
         fileSystem,
         idAllocator,
@@ -5260,6 +5260,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
         modelSelection,
         hasT3Mcp: true,
+        projectActionLaunchDisabled: false,
         cyberAccess: { defaultProgram: "daybreakBlue" },
       });
       assert.include(
@@ -5411,6 +5412,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
         modelSelection: CODEX_TEST_MODEL_SELECTION,
         hasT3Mcp: true,
+        projectActionLaunchDisabled: false,
       });
       const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" }).map(
         (entry) =>
@@ -12713,6 +12715,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
         modelSelection: CODEX_TEST_MODEL_SELECTION,
         hasT3Mcp: true,
+        projectActionLaunchDisabled: false,
       });
       const harness = yield* makeCodexReplayHarness(
         makeCodexReplayTranscript({
@@ -12826,6 +12829,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
             modelSelection: CODEX_TEST_MODEL_SELECTION,
             hasT3Mcp: true,
+            projectActionLaunchDisabled: false,
           });
         const firstStartParams = yield* nativeMcpStart(RESUME_PROMPT);
         const secondStartParams = yield* nativeMcpStart(secondPrompt);
@@ -15138,6 +15142,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
               modelSelection: CODEX_TEST_MODEL_SELECTION,
               hasT3Mcp: true,
+              projectActionLaunchDisabled: false,
             }),
             (params): CodexReplay.CodexAppServerReplayEntry => ({
               type: "expect_outbound",

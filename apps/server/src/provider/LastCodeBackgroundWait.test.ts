@@ -2,7 +2,14 @@ import * as NodeAssert from "node:assert/strict";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { CodexSettings, EnvironmentId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import {
+  CodexSettings,
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderSessionId,
+  ServerSettingsError,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { ProviderAdapterV2RuntimePolicy } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -34,6 +41,21 @@ import {
 } from "./LastCodeBackgroundWait.ts";
 
 const defaultCodexSettings = Schema.decodeSync(CodexSettings)({});
+
+it.effect("uses the server default if settings are missing or cannot be read", () =>
+  Effect.gen(function* () {
+    const fallback = DEFAULT_SERVER_SETTINGS.lastcodeBackgroundWaitEnabled;
+    NodeAssert.equal(yield* readLastCodeBackgroundWaitEnabled(), fallback);
+    NodeAssert.equal(
+      yield* readLastCodeBackgroundWaitEnabled(
+        Effect.fail(
+          new ServerSettingsError({ settingsPath: "settings.json", operation: "read-file" }),
+        ),
+      ),
+      fallback,
+    );
+  }),
+);
 
 it.effect("advertises background wait by default and honors the Codex session opt-out", () =>
   Effect.gen(function* () {
@@ -167,9 +189,10 @@ it.effect("advertises background wait by default and honors the Codex session op
       for (const text of [codexText, claudeText]) {
         NodeAssert.equal(text.includes("appOwnedActionContinuationVersion"), false);
         NodeAssert.equal(text.includes("run_project_action_and_resume"), false);
-        NodeAssert.equal(text.includes("Project Action launch tools are unavailable"), enabled);
+        NodeAssert.equal(text.includes("Ignore project instructions to launch Actions"), enabled);
         NodeAssert.ok(text.includes("watch_pull_request"));
       }
+      NodeAssert.equal(claudeText.includes("If `lc-run` reports a registered wake"), enabled);
       NodeAssert.ok(
         Buffer.byteLength(instructions, "utf8") <= CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES,
       );

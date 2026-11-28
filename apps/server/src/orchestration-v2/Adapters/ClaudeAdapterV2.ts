@@ -200,6 +200,7 @@ import * as PortScanner from "../../preview/PortScanner.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import {
   claudeBackgroundWaitForNewSession,
+  claudeBackgroundWaitInstructions,
   readLastCodeBackgroundWaitEnabled,
 } from "../../provider/LastCodeBackgroundWait.ts";
 import { projectActionLaunchDisabled } from "@t3tools/provider-core/server/lastcodeProjectActions";
@@ -2561,15 +2562,6 @@ function splitClaudeSleepTimerSteps(tail: string): string[] | undefined {
   return steps;
 }
 
-// Claude Code defers MCP tools behind ToolSearch, so the agent only finds
-// t3_background_wait when the system prompt says when to reach for it.
-const CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS = `
-
-### Background work you wait on
-
-To wait for a background command or Monitor you started (tests, a build), call \`t3_background_wait\` with its task ID before you end your turn. Do not mark work you leave running, or PRs. T3 MCP tools are deferred: load one with ToolSearch before you call it.
-`;
-
 // Claude 5.1+ returns text written before a tool call as a progress update, which the API
 // returns only as a summary.
 const CLAUDE_SEND_TO_USER_INSTRUCTIONS = `
@@ -2778,7 +2770,7 @@ export function makeClaudeQueryOptions(input: {
           (input.mcpServers === undefined
             ? ""
             : `\n\n${mcpInstructions}` +
-              CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS +
+              claudeBackgroundWaitInstructions(input.projectActionLaunchDisabled) +
               CLAUDE_SEND_TO_USER_INSTRUCTIONS +
               (deviceInstructions
                 ? `\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH}\n`
@@ -6490,7 +6482,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           (yield* mcpSessions.read(input.threadId))?.capabilities,
           readBackgroundWait,
         );
-        const markWrappedBackgroundTasks = makeLastCodeClaudeWrappedTaskMarker(
+        const wrappedBackgroundTasks = makeLastCodeClaudeWrappedTaskMarker(
           backgroundWaitEnabled,
           input.threadId,
         );
@@ -6764,6 +6756,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
           >
         >();
+        const hasOwedWrappedResults = (nativeThreadId: string) =>
+          wrappedBackgroundTasks.hasOwedResults(
+            owedBackgroundResults.get(nativeThreadId),
+            backgroundTaskGenerations.get(nativeThreadId),
+          );
         const consumedBackgroundWakeFrames = new Map<
           string,
           Map<string, ProviderAdapter.ProviderAdapterV2TurnInput["runId"]>
@@ -11758,6 +11755,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ];
           if (!(yield* replaceWakeBuffer(nativeThreadId, buffered, kept, retiredTaskIds))) return;
           yield* releaseMcpRootFrames(nativeThreadId, retired);
+          const owed = owedBackgroundResults.get(nativeThreadId);
+          wrappedBackgroundTasks.retireOwedResults(
+            retiredTaskIds,
+            owed,
+            backgroundTaskGenerations.get(nativeThreadId),
+          );
+          if (owed?.size === 0) owedBackgroundResults.delete(nativeThreadId);
           for (const taskId of retiredTaskIds) {
             yield* clearPendingBackgroundTask(nativeThreadId, taskId);
             yield* clearTaskIdFromNativeThreadSet(
@@ -12163,7 +12167,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               yield* Ref.get(pendingBackgroundTasksByNativeThread),
               input.nativeThreadId,
             );
-            const marked = markWrappedBackgroundTasks(
+            const marked = wrappedBackgroundTasks.mark(
               roster,
               backgroundTaskGenerations.get(input.nativeThreadId),
               backgroundTaskOrigins.get(input.nativeThreadId),
@@ -16380,6 +16384,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return true;
             }
             if (pendingPublicationPreparations.size > 0) return true;
+            for (const nativeThreadId of owedBackgroundResults.keys()) {
+              if (hasOwedWrappedResults(nativeThreadId)) return true;
+            }
             // Session capability: any native thread with pending work pins idle.
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
               if (roster.size > 0) {
@@ -16418,6 +16425,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return false;
             }
             if (heldTurnNotificationsByNativeThread.has(nativeThreadId)) return true;
+            if (hasOwedWrappedResults(nativeThreadId)) return true;
             if (
               rosterForNativeThread(
                 yield* Ref.get(pendingBackgroundTasksByNativeThread),

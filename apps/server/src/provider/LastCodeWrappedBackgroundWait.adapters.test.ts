@@ -157,8 +157,12 @@ const codexTaskId = "call-wrapped-codex";
 const codexProcessId = "4242";
 
 type CodexCommandCompletion = "after-turn" | "marked" | "yielded" | "foreground" | "interrupted";
+type CodexCommandRetirement = "archive" | "stop" | "unload";
 
-const codexTranscript = Effect.fnUntraced(function* (completion: CodexCommandCompletion) {
+const codexTranscript = Effect.fnUntraced(function* (
+  completion: CodexCommandCompletion,
+  retire: CodexCommandRetirement | undefined,
+) {
   const recorded = yield* readReplayFixtureTranscript(
     new URL("../orchestration-v2/testkit/fixtures/simple/codex_transcript.ndjson", import.meta.url),
   ).pipe(Effect.flatMap(CodexOrchestratorReplayHarness.decodeTranscript));
@@ -230,6 +234,24 @@ const codexTranscript = Effect.fnUntraced(function* (completion: CodexCommandCom
       ...(completion === "after-turn"
         ? [turnEnd, commandFrame(true)]
         : [commandFrame(true), commandFrame(true), turnEnd]),
+      ...(retire === "archive" || retire === "unload"
+        ? [
+            {
+              type: "expect_outbound" as const,
+              label: retire,
+              frame: {
+                id: 7,
+                method: retire === "archive" ? "thread/archive" : "thread/unsubscribe",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound" as const,
+              label: `${retire} response`,
+              frame: { id: 7, result: retire === "archive" ? {} : { status: "notLoaded" } },
+            },
+          ]
+        : []),
     ],
   };
 });
@@ -243,23 +265,30 @@ it.effect.each([
   { enabled: true, release: false, completion: "yielded" },
   { enabled: true, release: false, completion: "foreground" },
   { enabled: true, release: false, completion: "interrupted" },
+  { enabled: true, release: false, completion: "marked", retire: "archive" },
+  { enabled: true, release: false, completion: "marked", retire: "unload" },
+  { enabled: true, release: false, completion: "after-turn", retire: "stop" },
 ] satisfies ReadonlyArray<{
   enabled: boolean;
   release: boolean;
   completion: CodexCommandCompletion;
+  retire?: CodexCommandRetirement;
 }>)(
-  "hands off a wrapped Codex command result (enabled=$enabled release=$release completion=$completion)",
-  ({ enabled, release, completion }) =>
+  "hands off a wrapped Codex command result (enabled=$enabled release=$release completion=$completion retire=$retire)",
+  ({ enabled, release, completion, retire }) =>
     Effect.gen(function* () {
       const beforeTerminal = completion !== "after-turn";
       const seen = yield* observation;
       const allowCompletion = yield* Deferred.make<void>();
-      const replay = yield* CodexReplay.makeReplayDriver(yield* codexTranscript(completion), {
-        beforeEmitInbound: (entry) =>
-          entry.label === "wrapped command completed"
-            ? Deferred.await(allowCompletion)
-            : Effect.void,
-      });
+      const replay = yield* CodexReplay.makeReplayDriver(
+        yield* codexTranscript(completion, retire),
+        {
+          beforeEmitInbound: (entry) =>
+            entry.label === "wrapped command completed"
+              ? Deferred.await(allowCompletion)
+              : Effect.void,
+        },
+      );
       const adapter = yield* Codex.makeCodexAdapterV2({
         instanceId: Codex.CODEX_DEFAULT_INSTANCE_ID,
         settings: codexSettings,
@@ -384,6 +413,37 @@ it.effect.each([
       assert.equal(wake.notification?.outcome, "failed");
       assert.isTrue(seen.roster()?.backgroundRosterOnly);
       assert.deepEqual(seen.roster()?.providerThread.owedBackgroundResults, [owed]);
+      if (retire !== undefined) {
+        if (retire === "archive" || retire === "unload") {
+          yield* runtime.unloadThread!({
+            providerThread: turn.providerThread,
+            archive: retire === "archive",
+          });
+        } else {
+          yield* runtime.interruptTurn({
+            ...acknowledgment,
+            providerThread: turn.providerThread,
+            requestRuntimeRestart: true,
+          });
+        }
+        assert.isTrue(
+          Option.isNone(yield* wake.dispatchIfCurrent!(Effect.void)),
+          "a retired result must not dispatch",
+        );
+        yield* seen.until(() => seen.roster()?.providerThread.owedBackgroundResults?.length === 0);
+        assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(turn.providerThread));
+        return;
+      }
+      if (completion === "after-turn" && !release) {
+        assert.deepEqual(
+          [
+            yield* runtime.hasPendingBackgroundWork!,
+            yield* runtime.hasPendingBackgroundWorkForThread!(turn.providerThread),
+          ],
+          [true, true],
+          "owed work must keep the shared process and the owning thread alive",
+        );
+      }
       if (release) {
         assert.deepEqual(
           yield* runtime.awaitBackgroundTasks!({
@@ -402,6 +462,7 @@ it.effect.each([
       assert.equal(Option.isSome(admitted), !release);
       assert.lengthOf(seen.requests, 1);
       yield* seen.until(() => seen.roster()?.providerThread.owedBackgroundResults?.length === 0);
+      assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(turn.providerThread));
     }).pipe(Effect.scoped, Effect.provide(services)),
 );
 
@@ -409,6 +470,7 @@ const claudeSession = "native-wrapped-claude";
 const claudeTaskId = "wrapped-claude-task";
 const claudeToolUseId = "toolu_wrapped_claude";
 const claudeCommand = "CI=1 ./scripts/lc-run ci --quick";
+const claudeCompletedNotificationId = "00000000-0000-4000-8000-000000000201";
 const sdkFrame = (uuid: string, fields: Record<string, unknown>): SDKMessage =>
   ({ ...fields, uuid, session_id: claudeSession }) as SDKMessage;
 
@@ -424,13 +486,15 @@ it.effect.each([
   { enabled: false, promoted: true },
   { enabled: true, promoted: false },
   { enabled: true, promoted: true },
+  { enabled: true, promoted: false, completedBeforeWake: true },
   { enabled: true, promoted: false, configuredTimeout: "10800000" },
 ])(
-  "retains an awaited Claude command after its turn completes (enabled=$enabled promoted=$promoted timeout=$configuredTimeout)",
-  ({ enabled, promoted, configuredTimeout }) =>
+  "retains an awaited Claude command after its turn completes (enabled=$enabled promoted=$promoted timeout=$configuredTimeout completedBeforeWake=$completedBeforeWake)",
+  ({ enabled, promoted, configuredTimeout, completedBeforeWake }) =>
     Effect.gen(function* () {
       const seen = yield* observation;
       const messages = yield* Queue.unbounded<SDKMessage>();
+      const completedNotification = yield* Deferred.make<void>();
       const fileSystem = yield* FileSystem.FileSystem;
       const openedOptions = yield* Deferred.make<Claude.ClaudeAgentSdkQueryOptions>();
       const adapter = yield* Claude.makeClaudeAdapterV2({
@@ -443,12 +507,25 @@ it.effect.each([
         path: yield* Path.Path,
         random: yield* SecureRandom.SecureRandom,
         idAllocator: yield* IdAllocator.IdAllocatorV2,
+        continuationRequests: { offer: seen.offer },
         queryRunner: {
           allocateSessionId: Effect.succeed(claudeSession),
           open: ({ options }) =>
             Deferred.succeed(openedOptions, options).pipe(
               Effect.as({
-                messages: Stream.fromQueue(messages),
+                messages: Stream.fromQueue(messages).pipe(
+                  Stream.flatMap((message) =>
+                    message.uuid === claudeCompletedNotificationId
+                      ? Stream.make(message).pipe(
+                          Stream.concat(
+                            Stream.fromEffect(
+                              Deferred.succeed(completedNotification, undefined),
+                            ).pipe(Stream.drain),
+                          ),
+                        )
+                      : Stream.make(message),
+                  ),
+                ),
                 offer: () => Effect.void,
                 setModel: () => Effect.void,
                 applyFlagSettings: () => Effect.void,
@@ -556,6 +633,41 @@ it.effect.each([
         enabled ? [{ taskId: claudeTaskId, originRunId: turn.runId }] : [],
       );
       if (!enabled) return;
+
+      if (completedBeforeWake) {
+        yield* Queue.offer(
+          messages,
+          sdkFrame(claudeCompletedNotificationId, {
+            type: "system",
+            subtype: "task_notification",
+            task_id: claudeTaskId,
+            tool_use_id: claudeToolUseId,
+            status: "completed",
+            summary: "CI finished.",
+            output_file: "/workspace/ci.log",
+          }),
+        );
+        yield* Deferred.await(completedNotification);
+        assert.deepEqual(
+          [
+            yield* runtime.hasPendingBackgroundWork!,
+            yield* runtime.hasPendingBackgroundWorkForThread!(turn.providerThread),
+          ],
+          [true, true],
+        );
+        assert.lengthOf(seen.requests, 0);
+        assert.deepEqual(
+          yield* runtime.awaitBackgroundTasks!({
+            providerThread: turn.providerThread,
+            taskIds: [claudeTaskId],
+            awaited: false,
+          }),
+          { matched: [claudeTaskId] },
+        );
+        assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+        assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(turn.providerThread));
+        return;
+      }
 
       assert.deepEqual(
         yield* runtime.awaitBackgroundTasks!({

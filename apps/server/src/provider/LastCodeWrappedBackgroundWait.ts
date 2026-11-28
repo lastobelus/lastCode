@@ -191,8 +191,8 @@ export type ClaudeWrappedTaskGeneration = {
 };
 
 export function makeLastCodeClaudeWrappedTaskMarker(enabled: boolean, threadId: ThreadId) {
-  const lastMarkedToolUseByTask = new Map<string, string>();
-  return (
+  const markedByTask = new Map<string, { toolUseId: string; originRunId: RunId }>();
+  const mark = (
     roster: ReadonlyMap<string, OrchestrationV2PendingBackgroundTask>,
     generations: ReadonlyMap<string, ClaudeWrappedTaskGeneration> | undefined,
     origins: ReadonlyMap<string, RunId | null> | undefined,
@@ -215,14 +215,52 @@ export function makeLastCodeClaudeWrappedTaskMarker(enabled: boolean, threadId: 
         (generation.toolUseId !== null && generation.toolUseId !== task.nativeItemId) ||
         generation.ambiguous ||
         generation.retired ||
-        lastMarkedToolUseByTask.get(task.taskId) === task.nativeItemId ||
+        markedByTask.get(task.taskId)?.toolUseId === task.nativeItemId ||
         originRunId == null ||
         !isLastCodeWrappedCommand(task.command)
       )
         continue;
-      lastMarkedToolUseByTask.set(task.taskId, task.nativeItemId);
+      markedByTask.set(task.taskId, { toolUseId: task.nativeItemId, originRunId });
       marked.push({ taskId: task.taskId, originRunId });
     }
     return marked;
+  };
+  const owns = (
+    taskId: string,
+    originRunId: RunId,
+    generation: ClaudeWrappedTaskGeneration | undefined,
+  ) => {
+    const marked = markedByTask.get(taskId);
+    return (
+      marked?.originRunId === originRunId &&
+      generation !== undefined &&
+      !generation.retired &&
+      (generation.toolUseId === null || generation.toolUseId === marked.toolUseId)
+    );
+  };
+  return {
+    mark,
+    hasOwedResults: (
+      owed: ReadonlyMap<string, RunId> | undefined,
+      generations: ReadonlyMap<string, ClaudeWrappedTaskGeneration> | undefined,
+    ) => {
+      for (const [taskId, originRunId] of owed ?? []) {
+        if (owns(taskId, originRunId, generations?.get(taskId))) return true;
+      }
+      return false;
+    },
+    retireOwedResults: (
+      taskIds: ReadonlySet<string>,
+      owed: Map<string, RunId> | undefined,
+      generations: ReadonlyMap<string, ClaudeWrappedTaskGeneration> | undefined,
+    ) => {
+      if (owed === undefined) return;
+      for (const taskId of taskIds) {
+        const originRunId = owed.get(taskId);
+        if (originRunId !== undefined && owns(taskId, originRunId, generations?.get(taskId))) {
+          owed.delete(taskId);
+        }
+      }
+    },
   };
 }

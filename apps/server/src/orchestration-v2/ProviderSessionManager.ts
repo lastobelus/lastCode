@@ -3,6 +3,7 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  DEFAULT_SERVER_SETTINGS,
   isOrchestrationV2WorkActive,
   ModelSelection,
   type OrchestrationV2AppThread,
@@ -2083,7 +2084,8 @@ export const layerWithOptions = (
               const prepared = yield* prepareMcpSession(
                 input.threadId,
                 input.providerInstanceId,
-                owningSession?.projectActionLaunchDisabled ?? false,
+                owningSession?.projectActionLaunchDisabled ??
+                  DEFAULT_SERVER_SETTINGS.lastcodeBackgroundWaitEnabled,
                 codexBackgroundWaitForAttachedSession(attached),
               );
               preparedForCleanup = prepared;

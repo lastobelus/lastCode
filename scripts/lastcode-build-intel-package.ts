@@ -597,7 +597,7 @@ async function main(): Promise<void> {
     const request = selectIntelBuild(options.tag);
     console.log(
       `[build-intel] Selected ${request.installableTag} at ${request.installableCommit}.\n` +
-        `[build-intel] Request token: ${request.requestToken}. Run the Build Intel package Project Action.`,
+        `[build-intel] Request token: ${request.requestToken}. Run pnpm lastcode:intel-build run on macOS.`,
     );
     return;
   }

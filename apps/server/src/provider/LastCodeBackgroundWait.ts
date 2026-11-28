@@ -1,8 +1,9 @@
-import type {
-  OrchestrationV2ProviderSession,
-  ProviderThreadId,
-  ProviderTurnId,
-  RunId,
+import {
+  DEFAULT_SERVER_SETTINGS,
+  type OrchestrationV2ProviderSession,
+  type ProviderThreadId,
+  type ProviderTurnId,
+  type RunId,
 } from "@t3tools/contracts";
 import type { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import type {
@@ -17,11 +18,12 @@ import * as Effect from "effect/Effect";
 export function readLastCodeBackgroundWaitEnabled(
   settings?: ProviderHost["Service"]["settings"]["get"],
 ): Effect.Effect<boolean> {
+  const fallback = DEFAULT_SERVER_SETTINGS.lastcodeBackgroundWaitEnabled;
   return (
     settings?.pipe(
       Effect.map((value) => value.lastcodeBackgroundWaitEnabled),
-      Effect.orElseSucceed(() => false),
-    ) ?? Effect.succeed(false)
+      Effect.orElseSucceed(() => fallback),
+    ) ?? Effect.succeed(fallback)
   );
 }
 
@@ -84,8 +86,20 @@ export function codexBackgroundWaitHook(
 
 export function codexBackgroundWaitInstructions(enabled: boolean): string {
   return enabled
-    ? "\n\nFor a needed background result, call `t3_background_wait` with its exec session ID string in `taskIds` unless `lc-run` reports a registered wake. End your turn without polling. If `lc-run` says LastCode already registered the wake, end your turn without another tool call."
+    ? "\n\nIf `lc-run` reports a registered wake, end your turn. Do not rerun the command or call another tool. For other needed background work, call `t3_background_wait` with the exec session ID string in `taskIds` and end your turn."
     : "";
+}
+
+export function claudeBackgroundWaitInstructions(
+  wrapperRegistersWait = DEFAULT_SERVER_SETTINGS.lastcodeBackgroundWaitEnabled,
+): string {
+  return [
+    "\n\n### Background work you wait on\n\n",
+    "For a needed background command or Monitor, call `t3_background_wait` with the task ID before ending your turn. Load it with ToolSearch. Leave unattended work and PRs unmarked.",
+    wrapperRegistersWait
+      ? " If `lc-run` reports a registered wake, end the turn without another tool call."
+      : "",
+  ].join("");
 }
 
 export function codexBackgroundCommandNeedsWake(

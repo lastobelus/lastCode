@@ -20,7 +20,7 @@ New to T3 Code? Start with the **[User Guide & Index](./user/README.md)** for ho
 
 - [LastCode appearance preferences](./user/lastcode-appearance.md)
 - [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
-- [Use an agent to add resumable Project Actions](./user/resumable-project-actions-for-agents.md)
+- [Run long commands with an agent](./user/resumable-project-actions-for-agents.md)
 
 ### Remote, security & operations
 
@@ -66,10 +66,8 @@ anything.
 - [16 · Performance regression checks](./internals/16_performance-regressions.md)
 - [17 · Scripts](./internals/17_scripts.md)
 - [Simulator ownership and shutdown](./internals/devices.md)
-- [Agent implementation guide to resumable Project
-  Actions](./internals/resumable-project-actions-for-agents.md)
-- [Implementation runbook: set up resumable Project Actions with an
-  agent](./internals/resumable-project-actions-setup.md)
+- [Maintain legacy agent-launched Project Actions](./internals/resumable-project-actions-for-agents.md)
+- [Runbook for maintaining resumable Project Actions](./internals/resumable-project-actions-setup.md)
 
 ### Runbooks
 

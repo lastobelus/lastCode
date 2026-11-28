@@ -170,12 +170,12 @@ Each review supports up to 1,000 files and 512 MiB per root.
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
 
-## Let an agent run an Action and resume
+## Project Actions and agent waits
 
-Project Actions can hand long-running work back to Codex or Claude when they finish. Edit an
-Action, enable **Allow Codex and Claude to run and resume**, and save it. When the agent launches
-that Action, it can end its turn while the command runs in a dedicated terminal. LastCode sends one
-automated follow-up after the command exits so the agent can continue the original task.
+Run saved Project Actions from your project. Agents normally run long commands directly,
+using [background waits](./resumable-project-actions-for-agents.md) to continue when they finish.
+In an environment using legacy agent launches, **Allow Codex and Claude to run and resume** opts
+a saved Action into that fallback.
 
 Protocol-aware Actions can also report a short current status while they run. LastCode shows
 **Working** for active phases and **Waiting** when the command is paused on CI, review, approval, or
@@ -193,9 +193,6 @@ For a useful compact result, have a protocol-aware Action report one concise sum
 result the agent needs next, such as which checks passed, why a wait ended, or what requires
 attention. Actions that do not use the reporting kit should print that summary as their final
 output line.
-
-To delegate the workflow design and one-time setup, see
-[use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
 
 ## Keep the default branch current
 

@@ -15,6 +15,10 @@ import { subagentHoldsCompletion } from "@t3tools/provider-core/server/subagentP
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import { latestRootProviderFailure, runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import {
+  hasLostBackgroundResult,
+  lostBackgroundResultNote,
+} from "./LastCodeLostBackgroundResults.ts";
 
 type Work = OrchestrationV2RestartCancelledBackgroundWork;
 type Attempt = Pick<OrchestrationV2RunAttempt, "id" | "runId">;
@@ -144,9 +148,18 @@ export function restartCancelledBackgroundWorkNote(
   cause: BackgroundWorkLossCause = "server_restart",
 ): string {
   const omitted = work.length - MAX_NOTE_ENTRIES;
+  const restart =
+    cause === "provider_exit" ? "the agent runtime process exited" : "the T3 server restarted";
   return [
-    `Note: ${cause === "provider_exit" ? "the agent runtime process exited" : "the T3 server restarted"}, and this background work was cancelled before it finished. It will not report back on its own, so resume or restart what you still need and wait for its result:`,
-    ...work.slice(0, MAX_NOTE_ENTRIES).map((entry) => `- ${entry.kind}: ${entry.label}`),
+    hasLostBackgroundResult(work)
+      ? lostBackgroundResultNote(restart)
+      : `Note: ${restart}, and this background work was cancelled before it finished. It will not report back on its own, so resume or restart what you still need and wait for its result:`,
+    ...work
+      .slice(0, MAX_NOTE_ENTRIES)
+      .map(
+        (entry) =>
+          `- ${entry.resultDeliveryLost === true ? "undelivered result" : entry.kind}: ${entry.label}`,
+      ),
     ...(omitted > 0 ? [`- and ${omitted} more`] : []),
   ].join("\n");
 }

@@ -20,6 +20,7 @@ import type {
 
 import * as ServerSettings from "../serverSettings.ts";
 import { isNativeMaintenanceCommand } from "./CommandPolicy.ts";
+import { hasLostBackgroundResult } from "./LastCodeLostBackgroundResults.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import {
   type BackgroundWorkLossCause,
@@ -155,9 +156,10 @@ function hasOpenAwaitedWork(
   return (
     openItem ||
     (providerThread.ownerNodeId === null &&
-      (providerThread.pendingBackgroundTasks ?? []).some((task) =>
-        isAwaitedWork(cancelledRosterTaskWork(task)),
-      ))
+      ((providerThread.owedBackgroundResults?.length ?? 0) > 0 ||
+        (providerThread.pendingBackgroundTasks ?? []).some((task) =>
+          isAwaitedWork(cancelledRosterTaskWork(task)),
+        )))
   );
 }
 
@@ -337,8 +339,9 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         notification: {
           source: { kind: "system" },
           outcome: "updated",
-          summary:
-            input.cause === "provider_exit"
+          summary: hasLostBackgroundResult(note.work)
+            ? "Background work results could not be delivered"
+            : input.cause === "provider_exit"
               ? "The agent runtime exited and stopped background work"
               : note.settled
                 ? "T3 Code restarted and stopped background work"

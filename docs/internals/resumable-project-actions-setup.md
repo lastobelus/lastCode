@@ -1,9 +1,8 @@
-# Implementation Runbook: Set Up Resumable Project Actions With an Agent
+# Runbook: Maintain Resumable Project Actions
 
-An agent can do nearly all of the setup for a resumable workflow: identify the passive wait, write
-and test its command, add the importable `t3.json` entry, update repository instructions, and use
-LastCode's UI to import and opt in the Action. The user should not have to transcribe commands or
-remember the setup sequence.
+Use this runbook for an existing workflow that still needs the legacy
+agent-launch fallback or for recovering an Action already in flight. New agent
+workflows use direct commands with background waits.
 
 Agent-launched Project Actions require `lastcodeBackgroundWaitEnabled` to be off
 when the provider session starts. In LastCode checkouts, follow the
@@ -12,14 +11,13 @@ when the provider session starts. In LastCode checkouts, follow the
 The UI step remains deliberate. A command checked into a repository is not automatically trusted
 for agent execution, and importing it does not enable resume permission.
 
-## A prompt that delegates the whole setup
+## A prompt for restoring an existing fallback
 
 Use a request like this:
 
 ```text
-Turn <workflow> into a resumable Project Action. Inspect the repository and existing workflow,
-implement and test a command that waits for stable terminal states, add it to t3.json, and update
-our agent instructions so future threads use it without prompting. Then, subject to the machine
+Restore the legacy Action fallback for <workflow>. Verify the existing command
+and t3.json entry. Keep the direct command as the normal path. Then, subject to the machine
 interaction policy, use the collaborative browser to import the Action into this LastCode
 project, enable “Allow Codex and Claude to run and resume,” and verify it with
 list_project_actions. Do not edit LastCode's live database directly. Stop for my input only if
@@ -41,8 +39,7 @@ The agent should first make the repository self-describing:
 4. For protocol-aware long-running commands, emit coarse `working` and `waiting` progress only when
    the useful phase or summary changes.
 5. Add an importable entry to the repository-root `t3.json`.
-6. Update the repository's agent instructions or workflow skill with the exact
-   list-launch-end-turn-resume sequence.
+6. Document when an existing Action is the fallback and how to verify its result.
 7. Run focused checks for the command and validate the `t3.json` syntax.
 
 Do not put credentials or environment-specific secrets in `t3.json`. Do not add a second manual
@@ -89,10 +86,10 @@ project has multiple checkout entries, configure the checkout that owns the rele
 This separation is why the agent must verify with `list_project_actions` instead of assuming that a
 visible `t3.json` definition is ready to run.
 
-## Make future threads use it automatically
+## Verify the legacy fallback
 
-After setup, start a fresh turn and ask for the normal workflow rather than naming the Action. The
-repository instructions should cause the agent to discover and launch it at the right boundary.
+Verify in a session where the setting is off and the fallback is required.
+Ask the agent to use the existing saved Action and continue from its result.
 
 A successful verification looks like this:
 
@@ -160,10 +157,8 @@ the persistent project root, then reopen the import menu.
 
 ### The agent runs the command directly
 
-Update the workflow instructions to require `list_project_actions`,
-`run_project_action_and_resume`, and an immediate end to the turn. Remove stale instructions that
-prescribe the direct command. Direct execution should be a reported fallback, not a parallel normal
-path.
+Direct execution is the normal path. If this session needs the fallback, check
+that it has the legacy tools and the saved Action is eligible.
 
 ### Computer use is unavailable
 
