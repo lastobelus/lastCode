@@ -523,6 +523,7 @@ function makeLocalCommandHarness(input: {
   readonly recreatedBeforeDispatch?: boolean;
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
+  readonly threadId?: ThreadId;
   readonly createdBy?: "agent" | "system";
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly logoutFailure?: string;
@@ -576,7 +577,7 @@ function makeLocalCommandHarness(input: {
 }) {
   const settledRuns: Array<string> = [];
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
-  const threadId = ThreadId.make("thread-native-account-command");
+  const threadId = input.threadId ?? ThreadId.make("thread-native-account-command");
   const runId = RunId.make("run-native-account-command");
   const rootNodeId = NodeId.make("root-native-account-command");
   const attemptId = RunAttemptId.make("attempt-native-account-command");
@@ -2784,6 +2785,58 @@ effectIt.effect("sends new steering text when restarting a manual continuation",
     yield* harness.start;
     expect(harness.startTurn.mock.calls[0]?.[0].message.text).toBe("New steering instruction");
     expect(harness.startRootRun.mock.calls[0]?.[0].resume).toBe(false);
+  }),
+);
+
+effectIt.effect.each([
+  { retry: false, text: "Replacement instruction", expected: "other" },
+  { retry: true, text: "Original request", expected: "assignment" },
+] as const)("marks the actual delegated prompt on retry=$retry", ({ retry, text, expected }) =>
+  Effect.gen(function* () {
+    const source = { commandId: CommandId.make("command:mcp:parent:delegate-task:retry") };
+    const parentThreadId = ThreadId.make("parent-thread");
+    const threadId = IdAllocator.derive.delegatedTaskThread(source);
+    const taskId = IdAllocator.derive.delegatedTaskNode(source);
+    const originalMessageId = IdAllocator.derive.delegatedTaskMessage(source);
+    const originalRunId = RunId.make("stopped-run");
+    const harness = makeLocalCommandHarness({
+      threadId,
+      text: retry ? "" : "Replacement instruction",
+      manualContinuation: retry,
+      steeringRestart: !retry,
+      sideChat: { contextRun: "delivered", unsentResume: retry },
+    });
+    const projection = harness.projection();
+    harness.setProjection({
+      ...projection,
+      thread: {
+        ...projection.thread,
+        lineage: { parentThreadId, relationshipToParent: "subagent", rootThreadId: parentThreadId },
+        forkedFrom: { type: "node", nodeId: taskId },
+      },
+      runs: projection.runs.map((run) =>
+        run.id === originalRunId
+          ? { ...run, userMessageId: originalMessageId, delegatedTaskId: taskId }
+          : retry
+            ? run
+            : { ...run, ordinal: 1, delegatedTaskId: taskId },
+      ),
+      messages: projection.messages.map((message) =>
+        message.id === harness.messageId && retry
+          ? message
+          : {
+              ...message,
+              ...(retry ? { id: originalMessageId, runId: originalRunId } : {}),
+              createdBy: "agent",
+              creationSource: "mcp",
+              senderThreadId: parentThreadId,
+            },
+      ),
+    });
+    yield* harness.start;
+    const turn = harness.startTurn.mock.calls[0]?.[0];
+    expect(turn?.message.text).toContain(text);
+    expect(turn?.appOwnedTaskPrompt).toBe(expected);
   }),
 );
 

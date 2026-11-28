@@ -685,6 +685,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
     nodeIds: ReadonlyArray<NodeId>,
   ) => Effect.Effect<UnsettledWork, ProjectionStoreV2Error>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
+  readonly appOwnedTaskPrompt?: ProviderAdapter.ProviderAdapterV2TurnInput["appOwnedTaskPrompt"];
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }
@@ -3011,6 +3012,9 @@ export const layer: Layer.Layer<
             message: input.message,
             modelSelection: input.modelSelection,
             runtimePolicy: input.runtimePolicy,
+            ...(input.appOwnedTaskPrompt === undefined
+              ? {}
+              : { appOwnedTaskPrompt: input.appOwnedTaskPrompt }),
             ...(appContext.length === 0 ? {} : { appContext }),
           };
           // Check after the context read: ingestion can settle the run while

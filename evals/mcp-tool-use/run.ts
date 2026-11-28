@@ -52,6 +52,7 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import { THEME_GUIDE } from "@t3tools/shared/themeCss";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../../apps/server/src/provider/CodexDeveloperInstructions.ts";
+import { codexDelegatedTaskContext } from "../../apps/server/src/provider/LastCodeCodexDelegation.ts";
 import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
 import { makeSideChatContext } from "../../apps/server/src/orchestration-v2/ContextHandoffService.ts";
 import { withInlineContext } from "../../apps/server/src/orchestration-v2/ContextHandoffDelivery.ts";
@@ -370,6 +371,8 @@ export const McpToolUseCase = Schema.Struct({
     forge: Schema.optional(Schema.Boolean),
     /** delegate_task `role` for a delegated child. T3 builds the child's first message from it. */
     delegateRole: Schema.optional(OrchestratorMcpTaskRole),
+    /** The parent whose original local assignment this case replays. */
+    codexAssignmentParent: Schema.optional(Contracts.ThreadId),
     context: Schema.optional(Schema.String),
     contextFiles: Schema.optional(Schema.Array(Schema.String)),
     priorTurns: Schema.optional(
@@ -1337,7 +1340,19 @@ export const buildMessages = (sample: Sample) => {
       : projectComposerContextForProvider({ text: testCase.prompt, ...testCase.promptContext });
   const prompt =
     sideChatContext === undefined ? userText : withInlineContext(sideChatContext, userText);
-  const childPrompt = () => taskPrompt({ task: prompt, role: delegateRole });
+  const childPrompt = () => {
+    const brief = taskPrompt({ task: prompt, role: delegateRole });
+    return testCase.setup.codexAssignmentParent === undefined
+      ? brief
+      : Contracts.withMessageSenderNote(
+          {
+            createdBy: "agent",
+            creationSource: "mcp",
+            senderThreadId: testCase.setup.codexAssignmentParent,
+          },
+          brief,
+        );
+  };
   if (testCase.prompt !== "")
     push("user", text(role === "delegated-child" ? childPrompt() : prompt));
   // Claude Code gives a subagent its SubagentStart hooks' context as a reminder after the task.
@@ -2789,7 +2804,7 @@ const requestBody = ({ base, tools }: Sample, effort: string, messages: unknown,
   messages,
 });
 
-const codexRequest = (base: Base, input: ReadonlyArray<Block>) => ({
+const codexRequest = (base: Base, input: ReadonlyArray<Block>, setup: McpToolUseCase["setup"]) => ({
   model: base.model,
   stream: true,
   store: false,
@@ -2799,7 +2814,21 @@ const codexRequest = (base: Base, input: ReadonlyArray<Block>) => ({
   text: base.codex?.text,
   tool_choice: base.codex?.tool_choice,
   include: ["reasoning.encrypted_content"],
-  input: [...(base.codex?.input ?? []), ...input],
+  input: [
+    ...(base.codex?.input ?? []),
+    ...Object.entries(
+      codexDelegatedTaskContext(
+        setup.role === "delegated-child" && setup.codexAssignmentParent !== undefined
+          ? "assignment"
+          : undefined,
+      ) ?? {},
+    ).map(([key, entry]) => ({
+      type: "message",
+      role: "developer",
+      content: [{ type: "input_text", text: `<${key}>${entry.value}</${key}>` }],
+    })),
+    ...input,
+  ],
 });
 
 /** The bridge only accepts serialized data. Model code never receives host objects/functions. */
@@ -3019,7 +3048,7 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
   for (let step = 0; step < maxSteps; step++) {
     modelCalls++;
     const response = input
-      ? yield* callCodex(config, codexRequest(base, input))
+      ? yield* callCodex(config, codexRequest(base, input, testCase.setup))
       : yield* callModel(
           config.apiKey,
           requestBody(sample, config.effort, messages, Boolean(config.apiKey)),
@@ -3498,7 +3527,7 @@ const main = Effect.gen(function* () {
       yield* Effect.scoped(prepareSample(sample));
       const messages = buildMessages(sample);
       const body = sample.base.codex
-        ? codexRequest(sample.base, codexMessages(messages))
+        ? codexRequest(sample.base, codexMessages(messages), testCase.setup)
         : requestBody(sample, effort, messages);
       process.stdout.write(`${yield* encodeJson(body)}\n`);
     }

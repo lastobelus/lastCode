@@ -610,6 +610,8 @@ export interface ProviderAdapterV2TurnInput {
   readonly rootNodeId: NodeId;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly message: ProviderAdapterV2TurnMessage;
+  /** The app-owned child is receiving its original task assignment or another turn. */
+  readonly appOwnedTaskPrompt?: "assignment" | "other";
   /** Leading characters of `message.text` that are inline handoff context, not the user's words. */
   readonly inlineContextLength?: number;
   readonly modelSelection: ModelSelection;
