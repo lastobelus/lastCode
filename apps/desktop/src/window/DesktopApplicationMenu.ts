@@ -111,13 +111,6 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
       detail: result.error,
       buttons: [m(msg("OK"))],
     });
-  } else if (result.checkpointRequested) {
-    yield* electronDialog.showMessageBox({
-      type: "info",
-      title: m(msg("Checkpoint requested")),
-      message: m(DesktopUpdates.checkpointRequestedMessage),
-      buttons: [m(msg("OK"))],
-    });
   } else if (updateState.status === "up-to-date") {
     yield* electronDialog.showMessageBox({
       type: "info",

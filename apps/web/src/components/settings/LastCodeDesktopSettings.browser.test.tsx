@@ -68,6 +68,7 @@ function setDesktopBridge(
       DesktopBridge,
       | "getLastCodeSettings"
       | "setShowAndInstallLocalNightlies"
+      | "checkForUpdate"
       | "previewT3SettingsImport"
       | "importT3Settings"
     >
@@ -94,9 +95,37 @@ describe("LastCode desktop settings", () => {
     state.desktop = false;
     await screen.rerender(<LastCodeLocalUpdatesSettings />);
     expect(button().disabled).toBe(true);
+    await expect.element(screen.getByRole("button", { name: "Request checkpoint" })).toBeDisabled();
     await screen.rerender(<LastCodeImportSettings />);
     expect(button().disabled).toBe(true);
     expect(state.toast).not.toHaveBeenCalled();
+  });
+
+  it("requests a checkpoint explicitly and disables the button until the request settles", async () => {
+    using _fixture = setup();
+    const request = deferred<Awaited<ReturnType<DesktopBridge["checkForUpdate"]>>>();
+    const checkForUpdate = vi.fn(() => request.promise);
+    setDesktopBridge({
+      getLastCodeSettings: async () => ({ ...preference, showAndInstallLocalNightlies: true }),
+      checkForUpdate,
+    });
+    await using screen = await render(<LastCodeLocalUpdatesSettings />, { router: false });
+    const button = screen.getByRole("button", { name: "Request checkpoint" });
+
+    await expect.element(button).toBeEnabled();
+    expect(checkForUpdate).not.toHaveBeenCalled();
+    await button.click();
+    await expect.element(button).toBeDisabled();
+    expect(checkForUpdate).toHaveBeenCalledExactlyOnceWith({ requestCheckpoint: true });
+
+    await act(() => request.reject(new Error("request failed")));
+    await expect.element(button).toBeEnabled();
+    expect(state.toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Could not request a checkpoint",
+        description: "request failed",
+      }),
+    );
   });
 
   it("loads the saved preference, disables during persistence and recovers after rejection", async () => {

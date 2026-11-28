@@ -2,6 +2,7 @@ import { type DesktopLastCodeSettingsState, type DesktopUpdateState } from "@t3t
 import { msg, useGT, useMessages } from "gt-react";
 import { MoonStarIcon } from "lucide-react";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
+import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { useEffect, useState } from "react";
 import { isElectron } from "../../env";
@@ -58,6 +59,62 @@ function useLocalNightlyPreference() {
   return { settings, isSaving, setLocalNightlies };
 }
 
+function useCheckpointRequest() {
+  const [isRequesting, setIsRequesting] = useState(false);
+
+  const requestCheckpoint = () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || typeof bridge.checkForUpdate !== "function") return;
+    setIsRequesting(true);
+    void bridge
+      .checkForUpdate({ requestCheckpoint: true })
+      .then((result) => {
+        if (result.error || !result.checked) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: m(msg("Could not request a checkpoint")),
+              description: result.error ?? result.state.message ?? m(msg("The check did not run.")),
+            }),
+          );
+          return;
+        }
+        toastManager.add(
+          stackedThreadToast({
+            type: "success",
+            title: result.checkpointRequested
+              ? m(msg("Checkpoint requested"))
+              : m(msg("Checked for updates")),
+            description: result.checkpointRequested
+              ? m(
+                  msg(
+                    "The checkpoint service is running. Check again later to pick up its result.",
+                  ),
+                )
+              : m(
+                  msg(
+                    "The checkpoint service is not installed on this Mac, so only existing releases were checked.",
+                  ),
+                ),
+          }),
+        );
+      })
+      .catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: m(msg("Could not request a checkpoint")),
+            description:
+              error instanceof Error ? error.message : m(msg("Checkpoint request failed.")),
+          }),
+        );
+      })
+      .finally(() => setIsRequesting(false));
+  };
+
+  return { isRequesting, requestCheckpoint };
+}
+
 function localNightlyStatus(
   settings: DesktopLastCodeSettingsState | null,
   updateState: DesktopUpdateState | null,
@@ -97,6 +154,7 @@ export function LastCodeLocalUpdatesSettings() {
   const resolve = useMessages();
   const updateState = useDesktopUpdateState();
   const { settings, isSaving, setLocalNightlies } = useLocalNightlyPreference();
+  const { isRequesting, requestCheckpoint } = useCheckpointRequest();
   const localUpdateActive =
     updateState?.source === "lastcode-local" &&
     (updateState.status === "downloading" || updateState.status === "downloaded");
@@ -120,6 +178,27 @@ export function LastCodeLocalUpdatesSettings() {
             onCheckedChange={(checked) => void setLocalNightlies(Boolean(checked))}
             aria-label={gt("Show and install local nightlies")}
           />
+        }
+      />
+      <SettingsRow
+        {...searchableSetting("local-checkpoint-request")}
+        description={gt(
+          "Ask the checkpoint service for a new checkpoint now. Checking for updates only finds releases that are already built.",
+        )}
+        control={
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={
+              !isElectron ||
+              !settings?.showAndInstallLocalNightlies ||
+              isRequesting ||
+              updateState?.status === "checking"
+            }
+            onClick={requestCheckpoint}
+          >
+            {gt("Request checkpoint")}
+          </Button>
         }
       />
     </SettingsSection>
