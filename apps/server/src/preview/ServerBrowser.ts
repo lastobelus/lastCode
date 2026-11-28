@@ -3912,12 +3912,6 @@ const make = Effect.gen(function* () {
         message: "No server preview tab is open for this thread. Call preview_open first.",
       });
     }
-    if (!READ_OPERATIONS.has(request.operation) && !tab.control.agentMayAct(request.agentSessionId))
-      throw new BrowserControlInterrupted({
-        message:
-          "This tab belongs to another agent session. You can read it, but open your own tab to act.",
-        reason: "agentMismatch",
-      });
     return tab;
   };
 
@@ -4601,6 +4595,8 @@ const make = Effect.gen(function* () {
         });
       }
     }
+    // ProviderSessionManager revokes the previous thread credential before issuing its replacement.
+    // Allow that successor to explicitly close the thread's unattended headless tabs.
     if (request.operation === "close" && request.tabId !== undefined) {
       const key = tabKey(request.threadId, request.tabId);
       const root = nativeRoots.get(key);
@@ -4635,7 +4631,8 @@ const make = Effect.gen(function* () {
             });
           if (
             request.agentSessionId === undefined ||
-            retained.automationOwner !== request.agentSessionId
+            (retained.automationOwner !== request.agentSessionId &&
+              !(request.tabIdExplicit && retained.backingPage === "server"))
           )
             throw new BrowserControlInterrupted({
               message: "Only the agent session that opened this tab can close it.",
@@ -4648,6 +4645,23 @@ const make = Effect.gen(function* () {
     }
     const tab = await requireTab(request, signal);
     signal.throwIfAborted();
+    const agentSessionId = request.agentSessionId!;
+    if (
+      !READ_OPERATIONS.has(request.operation) &&
+      !tab.control.agentMayAct(agentSessionId) &&
+      !(
+        request.operation === "close" &&
+        request.tabIdExplicit &&
+        tab.backingPage === "server" &&
+        tab.desktop === null &&
+        tab.viewers.size === 0
+      )
+    )
+      throw new BrowserControlInterrupted({
+        message:
+          "This tab belongs to another agent session. You can read it, but open your own tab to act.",
+        reason: "agentMismatch",
+      });
     // Closing must unblock an action waiting on a dialog, without queueing behind it.
     if (request.operation === "close") {
       if (tab.control.agentId === null)
@@ -4675,8 +4689,6 @@ const make = Effect.gen(function* () {
       await resolveDialog(tab, input as PreviewAutomationDialogInput);
       return statusWithTitle(tab, request.agentSessionId);
     }
-    const agentSessionId = request.agentSessionId!;
-
     if (
       READ_OPERATIONS.has(request.operation) &&
       tab.control.agentId !== agentSessionId &&

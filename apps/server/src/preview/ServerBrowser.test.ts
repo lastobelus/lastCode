@@ -3373,6 +3373,35 @@ it.effect("enforces provider ownership and explicit targets when a session has m
   ).pipe(Effect.provide(layer)),
 );
 
+it.effect("a new session can close its thread's unattended headless tab", () =>
+  Effect.gen(function* () {
+    const { browser, broker, tabId } = yield* ready;
+    const manager = yield* Manager.PreviewManager;
+    const resumed = asSession("agent-after-restart");
+    const close = (caller = resumed) =>
+      broker.invoke<void>({ scope: caller, tabId, operation: "close", input: {} });
+
+    const foreign = yield* close({
+      ...resumed,
+      thread: { ...resumed.thread, threadId: ThreadId.make("different-thread") },
+    }).pipe(Effect.flip);
+    expect(foreign).toMatchObject({ _tag: "PreviewAutomationTabNotFoundError" });
+
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* browser.attachViewer(viewerInput(tabId, false));
+        expect(yield* close().pipe(Effect.flip)).toMatchObject({ reason: "agentMismatch" });
+        expect(contexts[0]!.page.isClosed()).toBe(false);
+      }),
+    );
+
+    yield* close();
+    expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+    expect(contexts[0]!.page.isClosed()).toBe(true);
+    expect(contexts[0]!.close).toHaveBeenCalledTimes(1);
+  }).pipe(Effect.provide(layer)),
+);
+
 it.live(
   "coalesces queued hover movement and preserves drag points on a slow viewer connection",
   () =>
@@ -7904,7 +7933,7 @@ it.live(
 );
 
 it.live.each([1, 32])(
-  "an owner closes a dormant environment tab without reopening it with %s live pages",
+  "a new session closes a dormant environment tab without reopening it with %s live pages",
   (livePages) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -7942,22 +7971,12 @@ it.live.each([1, 32])(
         const contextsBefore = contexts.length;
         const credentialsBefore = contexts.map((context) => context.request.post.mock.calls.length);
         prepared.length = 0;
-        const unauthorized = yield* broker
-          .invoke<void>({
-            scope: asSession("another-agent"),
-            tabId,
-            operation: "close",
-            input: {},
-          })
-          .pipe(Effect.flip);
-        expect(unauthorized).toMatchObject({
-          _tag: "PreviewAutomationControlInterruptedError",
-          reason: "agentMismatch",
+        yield* broker.invoke({
+          scope: asSession("agent-after-restart"),
+          tabId,
+          operation: "close",
+          input: {},
         });
-        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toContainEqual(
-          expect.objectContaining({ tabId }),
-        );
-        yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
         expect(
           (yield* manager.list({ threadId: scope.thread.threadId })).sessions,
         ).not.toContainEqual(expect.objectContaining({ tabId }));
@@ -9453,6 +9472,15 @@ it.live.each([
         expect(Option.getOrNull(published)).toMatchObject({
           snapshot: { desktopRootId: snapshot.desktopRootId },
         });
+        const wrongSession = yield* broker
+          .invoke<void>({
+            scope: asSession("agent-after-restart"),
+            tabId: opened.tabId!,
+            operation: "close",
+            input: {},
+          })
+          .pipe(Effect.flip);
+        expect(wrongSession).toMatchObject({ reason: "agentMismatch" });
         yield* browser.attachViewer(viewerInput(opened.tabId!, false));
         expect(desktopConnections).toHaveLength(1);
         page.locator.mockReturnValue({ evaluate: async () => true } as never);
