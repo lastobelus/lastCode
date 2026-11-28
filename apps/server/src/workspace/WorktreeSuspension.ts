@@ -347,18 +347,60 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     if (!(yield* isManaged(destination)))
       return yield* failure("protected", "Choose a managed worktree destination.");
   });
+  const readOwnerBindings = Effect.fn("WorktreeSuspension.readOwnerBindings")(function* (
+    source: "live" | "screening",
+  ) {
+    yield* Effect.annotateCurrentSpan("workspace.ownership.source", source);
+    return yield* projections.getThreadWorktreePaths({ includeArchived: true });
+  });
+  const loadOwnerView = Effect.fnUntraced(function* () {
+    const records = yield* readOwnerBindings("screening");
+    const resolvedPaths = new Map<string, string>();
+    const byPath = new Map<string, number[]>();
+    for (const [index, { worktreePath }] of records.entries()) {
+      let actual = resolvedPaths.get(worktreePath);
+      if (actual === undefined) {
+        actual = yield* canonical(worktreePath);
+        resolvedPaths.set(worktreePath, actual);
+      }
+      for (const ownerPath of new Set([worktreePath, actual])) {
+        const matches = byPath.get(ownerPath);
+        if (matches === undefined) byPath.set(ownerPath, [index]);
+        else matches.push(index);
+      }
+    }
+    return (aliases: readonly string[]) => {
+      const matches = new Set(aliases.flatMap((alias) => byPath.get(alias) ?? []));
+      return [...matches].sort((left, right) => left - right).map((index) => records[index]!);
+    };
+  });
+  type OwnerView = Effect.Success<ReturnType<typeof loadOwnerView>>;
+
   const ownersFor = Effect.fn("WorktreeSuspension.ownersFor")(function* (
     aliases: readonly string[],
     authority?: CheckoutAuthority,
+    view?: OwnerView,
   ) {
     if (authority?.detached) return [];
-    const records = yield* projections.getThreadWorktreePaths({ includeArchived: true });
+    yield* Effect.annotateCurrentSpan(
+      "workspace.ownership.source",
+      view === undefined ? "live" : "indexed",
+    );
+    const records = view === undefined ? yield* readOwnerBindings("live") : view(aliases);
     const owners: OrchestrationV2ThreadShell[] = [];
     for (const record of records) {
-      const actual = yield* canonical(record.worktreePath);
-      if (!aliases.includes(actual) && !aliases.includes(record.worktreePath)) continue;
+      if (view === undefined) {
+        const actual = yield* canonical(record.worktreePath);
+        if (!aliases.includes(actual) && !aliases.includes(record.worktreePath)) continue;
+      }
       const shell = yield* projections.getThreadShell(record.threadId);
-      if (shell !== null && shell.deletedAt === null) owners.push(shell);
+      if (shell === null || shell.deletedAt !== null) continue;
+      if (view !== undefined) {
+        if (shell.worktreePath === null) continue;
+        const actual = yield* canonical(shell.worktreePath);
+        if (!aliases.includes(actual) && !aliases.includes(shell.worktreePath)) continue;
+      }
+      owners.push(shell);
     }
     if (authority !== undefined) {
       for (const owner of authority.owners) {
@@ -616,8 +658,9 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   });
   const checkOwners = Effect.fn("WorktreeSuspension.checkOwners")(function* (
     record: CheckoutAuthority,
+    view?: OwnerView,
   ) {
-    const owners = yield* ownersFor(record.aliases, record);
+    const owners = yield* ownersFor(record.aliases, record, view);
     if (
       owners.length !== record.owners.length ||
       owners.some((thread) => {
@@ -965,8 +1008,9 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     yield* registerWorkspaceLeaseRoot(pending.path, pending.aliases);
     return yield* finishPublication(pending);
   });
-  const refreshActiveOwners = Effect.fn("WorktreeSuspension.refreshActiveOwners")(function* (
+  const refreshOwners = Effect.fn("WorktreeSuspension.refreshActiveOwners")(function* (
     initial: CheckoutAuthority,
+    view?: OwnerView,
   ) {
     let record = initial;
     if (record.pendingProjection !== undefined) return yield* finishPublication(record);
@@ -982,13 +1026,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         aliases.length !== record.aliases.length ||
         aliases.some((alias, index) => alias !== record.aliases[index])
       ) {
+        if (view !== undefined) return null;
         const normalized = { ...record, aliases };
         yield* registry.put(normalized, record);
         yield* registerPublishedRoots(normalized, record.aliases);
         record = normalized;
       }
     }
-    const sharing = yield* ownersFor(record.aliases, record);
+    const sharing = yield* ownersFor(record.aliases, record, view);
     if (
       record.kind === "scratch" &&
       record.summary.state === "active" &&
@@ -1050,6 +1095,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       departed &&
       !attached.some((thread) => record.owners.some((owner) => owner.threadId === thread.id))
     ) {
+      if (view !== undefined) return null;
       const detached = { ...record, owners: [], detached: true, blockedReason: null };
       yield* registry.put(detached, record);
       return detached;
@@ -1117,6 +1163,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           thread.projectId,
       );
       if (nativeChanged || actualDestination !== record.path || projectsChanged) {
+        if (view !== undefined) return null;
         const projectRows = yield* Effect.forEach(attached, (thread) =>
           projects.get(thread.projectId),
         );
@@ -1208,10 +1255,29 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       };
     }
     if (!sameAuthority(record, next)) {
+      if (view !== undefined) return null;
       yield* registry.put(next, record);
       yield* registerPublishedRoots(next, record.aliases);
     }
     return next;
+  });
+  const refreshActiveOwners = Effect.fnUntraced(function* (
+    record: CheckoutAuthority,
+    view?: OwnerView,
+  ) {
+    // The indexed attempt can only return an unchanged active record.
+    if (
+      view !== undefined &&
+      record.kind !== "scratch" &&
+      record.summary.state === "active" &&
+      record.operation === undefined &&
+      record.pendingProjection === undefined &&
+      !record.detached
+    ) {
+      const unchanged = yield* refreshOwners(record, view).pipe(Effect.orElseSucceed(() => null));
+      if (unchanged !== null) return unchanged;
+    }
+    return (yield* refreshOwners(record))!;
   });
   const markBlocked = Effect.fn("WorktreeSuspension.markBlocked")(function* (
     checkoutId: string,
@@ -1237,13 +1303,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     };
     if (!sameAuthority(record, next)) yield* registry.put(next, record);
   });
+  const requireUnchangedAuthority = Effect.fnUntraced(function* (expected: CheckoutAuthority) {
+    const actual = yield* requireRecord(expected.checkoutId);
+    if (!sameAuthority(actual, expected))
+      return yield* failure("changed", "The workspace changed. Refresh before continuing.");
+    return actual;
+  });
   const assertFresh = Effect.fn("WorktreeSuspension.assertFresh")(function* (
     expected: CheckoutAuthority,
     requireFinished = false,
   ) {
-    const actual = yield* requireRecord(expected.checkoutId);
-    if (!sameAuthority(actual, expected))
-      return yield* failure("changed", "The workspace changed. Refresh before continuing.");
+    const actual = yield* requireUnchangedAuthority(expected);
     const owners = yield* checkOwners(actual);
     if (requireFinished && owners.some(ownerHasUnfinishedWork))
       return yield* failure(
@@ -1383,6 +1453,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   };
   const automaticOwners = Effect.fn("WorktreeSuspension.automaticallyEligible")(function* (
     record: CheckoutAuthority,
+    view?: OwnerView,
   ) {
     if (record.kind === "scratch") return null;
     if (
@@ -1393,7 +1464,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       return null;
     const currentSettings = yield* settings.getSettings;
     const timestamp = yield* milliseconds;
-    const owners = yield* checkOwners(record);
+    const owners = yield* checkOwners(record, view);
     const unverifiedUse = yield* registry.unverifiedUse([record.path, ...record.aliases]);
     const lastUse =
       [latestWorkspaceUse(record), unverifiedUse]
@@ -2347,7 +2418,10 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       initial.path,
       Effect.suspend(() =>
         Effect.gen(function* () {
-          const fresh = yield* assertFresh(initial);
+          // The guard begins with a live owner check on this same leased record.
+          const fresh = yield* automatic
+            ? requireUnchangedAuthority(initial)
+            : assertFresh(initial);
           if (fresh.kind === "scratch")
             return yield* failure("protected", "Only managed linked worktrees can be suspended.");
           yield* guard(fresh);
@@ -3367,6 +3441,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         continue;
       candidates.set(record?.path ?? thread.worktreePath, thread.id);
     }
+    const cacheOwnerView = () => Effect.cached(loadOwnerView().pipe(Effect.option));
+    let readOwnerView = yield* cacheOwnerView();
     for (const [workspacePath, threadId] of candidates) {
       yield* Effect.gen(function* () {
         if (!(yield* fs.exists(workspacePath))) return;
@@ -3377,8 +3453,11 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           liveOperations.has(identified.checkoutId)
         )
           return;
-        let record = yield* refreshActiveOwners(identified);
-        const owners = yield* automaticOwners(record);
+        const view = byId.has(identified.checkoutId)
+          ? Option.getOrUndefined(yield* readOwnerView)
+          : undefined;
+        let record = yield* refreshActiveOwners(identified, view);
+        const owners = yield* automaticOwners(record, view);
         if (owners === null || owners.some(ownerHasUnfinishedWork)) return;
         const leases = yield* previews.protectedWorkspaceLeases();
         const previewOwners = new Set<string>();
@@ -3445,9 +3524,10 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         }
         record = yield* requireRecord(record.checkoutId);
         // acceptCapture repeats the ownership and eligibility proof under the lease.
-        yield* acceptCapture(record, true);
+        const accepted = yield* acceptCapture(record, true);
         const running = liveOperations.get(record.checkoutId);
         if (running !== undefined) yield* Deferred.await(running.completed);
+        if (accepted !== null) readOwnerView = yield* cacheOwnerView();
       }).pipe(Effect.ignoreCause);
     }
   }).pipe(

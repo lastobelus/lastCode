@@ -170,6 +170,7 @@ const harness = (
     occupyRecoveryOnBarrier?: boolean;
     deleteRecoveryAfterPublication?: boolean;
     previews?: Array<{ threadId: string; workspacePath: string }>;
+    worktreeBindingOverrides?: ReadonlyMap<ThreadId, string | null>;
     onPreviewScan?: (leases: Array<{ threadId: string; workspacePath: string }>) => void;
     pausePreviewLocks?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
     pausePreviewRemoval?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
@@ -396,9 +397,11 @@ const harness = (
               }),
             getThreadWorktreePaths: () =>
               Effect.sync(() =>
-                current()
-                  .filter((thread) => thread.worktreePath !== null)
-                  .map((thread) => ({ threadId: thread.id, worktreePath: thread.worktreePath! })),
+                current().flatMap((thread) => {
+                  const override = options.worktreeBindingOverrides?.get(thread.id);
+                  const worktreePath = override === undefined ? thread.worktreePath : override;
+                  return worktreePath === null ? [] : [{ threadId: thread.id, worktreePath }];
+                }),
               ),
             getOwnedThreadIds: (id) => Effect.succeed([id]),
             getArchiveFamilyThreadIds: (id) =>
@@ -5043,12 +5046,14 @@ it.live("avoids duplicate owner and registry reads before automatic suspension",
         },
       });
       const workspaceCount = 4;
+      yield* h.service.previewSuspend({ threadId: firstId });
       for (let index = 1; index < workspaceCount; index++) {
         const branch = `screening-${index}`;
         const workspace = NodePath.join(NodePath.dirname(f.workspace), branch);
         yield* Effect.promise(() => git(f.repository, "worktree", "add", "-b", branch, workspace));
         const id = ThreadId.make(`fixture:${branch}`);
         h.threads.set(id, { ...shell(id, workspace), branch });
+        yield* h.service.previewSuspend({ threadId: id });
       }
       spans.length = 0;
       yield* h.service.sweep;
@@ -5056,13 +5061,39 @@ it.live("avoids duplicate owner and registry reads before automatic suspension",
       const counts = {
         ownersFor: count("WorktreeSuspension.ownersFor"),
         registryReads: count("WorktreeSuspensionRegistry.read"),
+        fullBindingReads: count("WorktreeSuspension.readOwnerBindings"),
       };
       const saved = yield* h.registry.list;
       expect(saved.map((record) => record.summary.state)).toEqual(
         Array(workspaceCount).fill("suspended"),
       );
+      const initialAcceptanceOwnerReads = spans.filter((span) => {
+        if (span.name !== "WorktreeSuspension.ownersFor") return false;
+        const ancestors: string[] = [];
+        let parent = Option.getOrUndefined(span.parent);
+        while (parent?._tag === "Span") {
+          ancestors.push(parent.name);
+          parent = Option.getOrUndefined(parent.parent);
+        }
+        return (
+          ancestors[0] === "WorktreeSuspension.checkOwners" &&
+          ((ancestors[1] === "WorktreeSuspension.assertFresh" &&
+            ancestors[2] === "WorktreeSuspension.acceptCapture") ||
+            (ancestors[1] === "WorktreeSuspension.guardBeforePreviews" &&
+              ancestors[2] === "WorktreeSuspension.guard" &&
+              ancestors[3] === "WorktreeSuspension.acceptCapture"))
+        );
+      });
+      expect(initialAcceptanceOwnerReads).toHaveLength(workspaceCount);
+      const viewLoads = spans.filter(
+        (span) =>
+          span.name === "WorktreeSuspension.readOwnerBindings" &&
+          span.attributes.get("workspace.ownership.source") === "screening",
+      );
+      expect(viewLoads).toHaveLength(workspaceCount);
       const evidence = JSON.stringify(counts);
-      expect(counts.ownersFor, evidence).toBeLessThanOrEqual(25 * workspaceCount);
+      expect(counts.ownersFor, evidence).toBeLessThanOrEqual(24 * workspaceCount);
+      expect(counts.fullBindingReads, evidence).toBeLessThan(counts.ownersFor);
       expect(counts.registryReads, evidence).toBeLessThanOrEqual(1 + 16 * workspaceCount);
     }).pipe(Effect.withTracer(tracer));
   }),
@@ -5077,6 +5108,162 @@ it.live("prefilters ineligible shells before identifying or registering checkout
       expect(yield* h.registry.list).toEqual([]);
     }),
   ),
+);
+
+it.live("shares one screening owner view across kept worktrees and checks late owners live", () =>
+  realGit((f) => {
+    const spans: Tracer.Span[] = [];
+    const tracer = Tracer.make({
+      span(options) {
+        const span = new Tracer.NativeSpan(options);
+        spans.push(span);
+        return span;
+      },
+    });
+    return Effect.gen(function* () {
+      let onScan = () => {};
+      const worktreeBindingOverrides = new Map<ThreadId, string | null>();
+      const scopedSettings = {
+        ...automaticSettings,
+        worktreeSuspension: {
+          ...automaticSettings.worktreeSuspension,
+          scopes: { subagents: false, untouchedChildren: false, otherThreads: true },
+        },
+      };
+      const h = yield* harness(f, {
+        onPreviewScan: () => onScan(),
+        worktreeBindingOverrides,
+        settings: scopedSettings,
+      });
+      yield* h.service.previewSuspend({ threadId: firstId });
+      const alias = NodePath.join(NodePath.dirname(f.workspace), "late-owner-alias");
+      yield* Effect.promise(() => NodeFSP.symlink(f.workspace, alias));
+      const late = ThreadId.make("fixture:late-alias-owner");
+      const shared = NodePath.join(NodePath.dirname(f.workspace), "shared-holdout");
+      const sharedAlias = NodePath.join(NodePath.dirname(f.workspace), "shared-alias");
+      yield* Effect.promise(async () => {
+        await git(f.repository, "worktree", "add", "-b", "shared-holdout", shared);
+        await NodeFSP.symlink(shared, sharedAlias);
+      });
+      const sharedId = ThreadId.make("fixture:shared");
+      const archivedId = ThreadId.make("fixture:archived");
+      const authorityOnlyId = ThreadId.make("fixture:authority-only");
+      for (const id of [sharedId, archivedId, authorityOnlyId]) {
+        h.threads.set(id, { ...shell(id, shared), branch: "shared-holdout" });
+      }
+      const { checkoutId: sharedCheckoutId } = yield* h.service.previewSuspend({
+        threadId: sharedId,
+      });
+      const sharedRecord = (yield* h.registry.list).find(
+        (record) => record.checkoutId === sharedCheckoutId,
+      )!;
+      const activeSummary = sharedRecord.summary;
+      yield* h.registry.put(
+        {
+          ...sharedRecord,
+          owners: sharedRecord.owners.map((owner) => ({
+            ...owner,
+            generation: activeSummary.generation,
+          })),
+        },
+        sharedRecord,
+      );
+      for (const id of [sharedId, archivedId, authorityOnlyId]) {
+        h.threads.set(id, {
+          ...h.threads.get(id)!,
+          worktreeSuspension: activeSummary,
+          ...(id === archivedId ? { archivedAt: yield* DateTime.now, settledAt: null } : {}),
+        });
+      }
+      worktreeBindingOverrides.set(archivedId, sharedAlias);
+      worktreeBindingOverrides.set(authorityOnlyId, null);
+      for (let index = 0; index < 8; index++) {
+        const id = ThreadId.make(`fixture:unrelated-${index}`);
+        const unrelated = NodePath.join(NodePath.dirname(f.workspace), `unrelated-${index}`);
+        h.threads.set(id, { ...shell(id, unrelated), settledAt: null });
+      }
+      const originals = yield* h.registry.list;
+      onScan = () => {
+        h.threads.set(late, shell(late, alias));
+        onScan = () => {};
+      };
+      spans.length = 0;
+      yield* h.service.sweep;
+      expect(h.threads.has(late)).toBe(true);
+      expect(yield* h.registry.list).toEqual(originals);
+      expect(h.previewReleases).toEqual([]);
+      const bindingReads = () =>
+        spans.filter((span) => span.name === "WorktreeSuspension.readOwnerBindings");
+      expect(
+        bindingReads().filter(
+          (span) => span.attributes.get("workspace.ownership.source") === "screening",
+        ),
+      ).toHaveLength(1);
+      const liveUnderScreen = () =>
+        bindingReads().filter((span) => {
+          if (span.attributes.get("workspace.ownership.source") !== "live") return false;
+          const ancestors: string[] = [];
+          let parent = Option.getOrUndefined(span.parent);
+          while (parent?._tag === "Span") {
+            ancestors.push(parent.name);
+            parent = Option.getOrUndefined(parent.parent);
+          }
+          return ancestors.some(
+            (name, index) =>
+              (name === "WorktreeSuspension.refreshActiveOwners" ||
+                name === "WorktreeSuspension.automaticallyEligible") &&
+              ancestors[index + 1] === "WorktreeSuspension.sweep",
+          );
+        });
+      expect(liveUnderScreen()).toHaveLength(0);
+      expect(
+        spans.filter(
+          (span) =>
+            span.name === "WorktreeSuspension.ownersFor" &&
+            span.attributes.get("workspace.ownership.source") === "indexed",
+        ),
+      ).toHaveLength(4);
+
+      h.threads.delete(late);
+      h.setSettings({ ...scopedSettings, worktreeSuspension: { mode: "off" } });
+      spans.length = 0;
+      yield* h.service.sweep;
+      expect(yield* h.registry.list).toEqual(originals);
+      expect(
+        spans.some(
+          (span) =>
+            span.name === "WorktreeSuspension.readOwnerBindings" &&
+            span.attributes.get("workspace.ownership.source") === "screening",
+        ),
+      ).toBe(false);
+
+      h.setSettings(scopedSettings);
+      const renamedBranch = "renamed-holdout";
+      onScan = () => {
+        h.threads.set(sharedId, { ...h.threads.get(sharedId)!, branch: renamedBranch });
+        onScan = () => {};
+      };
+      spans.length = 0;
+      yield* h.service.sweep;
+      const records = yield* h.registry.list;
+      expect(records.find((record) => record.path === f.workspace)?.summary.state).toBe(
+        "suspended",
+      );
+      expect(liveUnderScreen()).toHaveLength(1);
+      const updated = records.find((record) => record.checkoutId === sharedCheckoutId)!;
+      expect(updated.owners.find((owner) => owner.threadId === sharedId)?.branch).toBe(
+        renamedBranch,
+      );
+
+      const originalShared = originals.find((record) => record.checkoutId === sharedCheckoutId)!;
+      yield* h.registry.put(originalShared, updated);
+      h.setSettings({ ...scopedSettings, worktreeSuspension: { mode: "off" } });
+      yield* h.service.sweep;
+      expect(
+        (yield* h.registry.list).find((record) => record.checkoutId === sharedCheckoutId),
+      ).toEqual(updated);
+    }).pipe(Effect.withTracer(tracer));
+  }),
 );
 
 it.live.each([

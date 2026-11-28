@@ -6663,6 +6663,206 @@ describe("one initial process observation per storage sweep", () => {
   );
 });
 
+it.effect.each([
+  [2, false],
+  [4, false],
+  [2, true],
+] as const)(
+  "bounds automatic build screening and revalidation with %s recent worktrees (unavailable: %s)",
+  ([recentCount, unavailable]) => {
+    const spans: Tracer.Span[] = [];
+    const tracer = Tracer.make({
+      span(options) {
+        const span = new Tracer.NativeSpan(options);
+        spans.push(span);
+        return span;
+      },
+    });
+    const buildPassRegistryReads = () => {
+      const buildPass = spans.find(
+        (span) =>
+          span.name === "StorageCleanup.cleanDisposableOutputs" &&
+          span.attributes.get("storage_cleanup.resource") === "generated-builds",
+      );
+      let screening = 0;
+      const liveByPath = new Map<string, number>();
+      for (const span of spans) {
+        if (span.name !== "WorktreeSuspensionRegistry.read") continue;
+        let snapshot = false;
+        let workspacePath: unknown;
+        let parent = Option.getOrUndefined(span.parent);
+        while (parent?._tag === "Span") {
+          if (parent.name === "WorktreeSuspensionRegistry.snapshotWorktreeProtection") {
+            snapshot = true;
+          }
+          if (parent.name === "StorageCleanup.savedWorkspaceProtection") {
+            workspacePath = parent.attributes.get("test.workspacePath");
+          }
+          if (parent === buildPass) {
+            if (snapshot) screening++;
+            else {
+              if (typeof workspacePath !== "string") throw new Error("Missing live read workspace");
+              liveByPath.set(workspacePath, (liveByPath.get(workspacePath) ?? 0) + 1);
+            }
+            break;
+          }
+          parent = Option.getOrUndefined(parent.parent);
+        }
+      }
+      return { screening, liveByPath };
+    };
+    return runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
+          Effect.provide(SuspensionRegistry.layer),
+        );
+        const fixture = yield* cleanupFixture(
+          DEFAULT_SERVER_SETTINGS.storageCleanup,
+          undefined,
+          undefined,
+          {
+            ...registry,
+            automaticProtection: (workspacePath, resource) =>
+              Effect.annotateCurrentSpan("test.workspacePath", workspacePath).pipe(
+                Effect.andThen(registry.automaticProtection(workspacePath, resource)),
+              ),
+          },
+        ).pipe(Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed([])));
+        fixture.setDependencyRetention(3);
+        const root = "apps/web/dist";
+        const owned = fixture.worktree;
+        const ownerless = `${fixture.config.worktreesDir}/aged-ownerless-build`;
+        const addWorktree = (branch: string, worktree: string) =>
+          fixture.command(fixture.repo, ["worktree", "add", "-b", branch, worktree, "feature"]);
+        const agedAt = fixture.now - 4 * DAY_MS;
+        yield* seedCompilerOutput(fixture, root, agedAt);
+        yield* addWorktree("aged-ownerless-build", ownerless);
+        yield* seedCompilerOutput({ ...fixture, worktree: ownerless }, root, agedAt);
+        const owner = shell({ branch: "feature", worktreePath: owned });
+        const threads = [owner];
+        const recent = [];
+        for (let index = 0; index < recentCount; index++) {
+          const branch = `quiet-build-${index}`;
+          const worktree = `${fixture.config.worktreesDir}/${branch}`;
+          yield* addWorktree(branch, worktree);
+          yield* seedCompilerOutput({ ...fixture, worktree }, root, fixture.now);
+          const threadId = index % 2 === 0 ? ThreadId.make(branch) : null;
+          if (threadId !== null) {
+            threads.push(shell({ id: threadId, branch, worktreePath: worktree }));
+          }
+          recent.push({ path: worktree, threadId });
+        }
+        fixture.setThreads(threads);
+        if (unavailable) {
+          yield* fixture.fs.makeDirectory(registry.root, { recursive: true, mode: 0o700 });
+          yield* fixture.fs.writeFileString(`${registry.root}/authority.json`, "invalid catalog", {
+            mode: 0o600,
+          });
+        }
+
+        yield* fixture.activate();
+        const [report] = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report?.trigger === "automatic"),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        yield* fixture.service.drain;
+        const builds = disposableEntries(report!).filter(
+          (entry) => entry.worktreeResource === "generated-builds",
+        );
+        const expected = [
+          { path: owned, threadId: owner.id, outcome: unavailable ? "kept" : "removed" },
+          { path: ownerless, threadId: null, outcome: unavailable ? "kept" : "removed" },
+          ...recent.map((entry) => ({ ...entry, outcome: "kept" })),
+        ];
+        expect(builds).toHaveLength(expected.length);
+        for (const { path, threadId, outcome } of expected) {
+          expect(builds.find((entry) => entry.path === path)).toMatchObject({ threadId, outcome });
+          expect(yield* fixture.fs.exists(`${path}/${root}/assets/emitted.bin`)).toBe(
+            outcome === "kept",
+          );
+        }
+        if (unavailable)
+          expect(
+            builds.every((entry) => entry.reason?.includes("authority could not be verified")),
+          ).toBe(true);
+        // Up-front, pre-removal and final gates read 4 + 4 + 2 times for an owned build
+        // and 2 + 2 + 2 times for an ownerless build.
+        expect(buildPassRegistryReads()).toEqual({
+          screening: 1,
+          liveByPath: new Map(
+            unavailable
+              ? []
+              : [
+                  [owned, 10],
+                  [ownerless, 6],
+                ],
+          ),
+        });
+
+        for (const pass of [fixture.service.runNow, fixture.service.buildReviewTargets({})]) {
+          spans.length = 0;
+          yield* pass;
+          const { screening, liveByPath } = buildPassRegistryReads();
+          expect(screening).toBe(0);
+          for (const { path } of recent) expect(liveByPath.get(path)).toBeGreaterThan(0);
+        }
+      }).pipe(Effect.withTracer(tracer)),
+    );
+  },
+);
+
+it.effect("rechecks a hold added after automatic generated-build screening", () =>
+  runCleanupTest(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
+        Effect.provide(SuspensionRegistry.layer),
+      );
+      const hold = "Keep workspace is enabled.";
+      let addHold: (() => void) | undefined;
+      let held = false;
+      const fixture = yield* cleanupFixture(
+        DEFAULT_SERVER_SETTINGS.storageCleanup,
+        undefined,
+        undefined,
+        {
+          ...registry,
+          snapshotWorktreeProtection: registry.snapshotWorktreeProtection.pipe(
+            Effect.map(
+              (protect) => (worktreePath, resource) =>
+                Effect.suspend(() => {
+                  if (resource === "worktree" && !held) {
+                    held = true;
+                    addHold?.();
+                  }
+                  return protect(worktreePath, resource);
+                }),
+            ),
+          ),
+        },
+      );
+      addHold = () => fixture.protectSavedWorkspace(fixture.worktree, hold);
+      fixture.setDependencyRetention(3);
+      const root = "apps/web/dist";
+      yield* seedCompilerOutput(fixture, root, fixture.now - 4 * DAY_MS);
+      yield* fixture.activate();
+      const [report] = yield* fixture.service.reports.pipe(
+        Stream.filter((report) => report?.trigger === "automatic"),
+        Stream.take(1),
+        Stream.runCollect,
+      );
+      yield* fixture.service.drain;
+      expect(held).toBe(true);
+      expect(
+        disposableEntries(report!).filter((entry) => entry.worktreeResource === "generated-builds"),
+      ).toMatchObject([{ outcome: "kept", reason: expect.stringContaining(hold) }]);
+      expect(yield* fixture.fs.exists(`${fixture.worktree}/${root}/assets/emitted.bin`)).toBe(true);
+    }),
+  ),
+);
+
 it.effect("bounds SQL and registry reads in quiet dependency sweeps", () => {
   const outputPasses: Tracer.Span[] = [];
   const dependencySpans: Tracer.Span[] = [];
