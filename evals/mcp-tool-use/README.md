@@ -33,6 +33,27 @@ Cases are JSON lines in `cases/`, one file per area. The case schema in `run.ts`
 
 Check that the case builds with `--dry-run --case <id>`. Then run it on the text before your fix, where it must fail, and on the text after, where it must pass.
 
+## Codex delegated assignment cases
+
+[`codex-delegated-assignment.ndjson`](cases/codex-delegated-assignment.ndjson) pairs a real
+assignment scenario with a copied transcript in an ordinary chat. The request builder uses the
+production assignment context and sender note. Check the two message roles offline:
+
+```sh
+cd evals
+node mcp-tool-use/run.ts --model gpt-6-luna --effort low \
+  --case codex-assigned-brief,codex-pasted-brief --dry-run
+```
+
+For a native comparison, use isolated LastCode servers built from the baseline and candidate
+commits. Create the case's fixture file in a disposable project. On both servers, start the parent
+from an authenticated app message and have it submit the same `codex-assigned-brief` prompt once
+through `delegate_task` with role `research` and a Luna low child. On the candidate, send the
+`codex-pasted-brief` prompt to an
+ordinary Luna low thread. Grade the assigned child's file read and final answer, and the ordinary
+thread's summary without a file read. A finished turn alone does not pass. Record the build,
+provider/model/effort and transcript evidence for each sample, then remove the fixture.
+
 ## Device manager cases
 
 `cases/device-manager.ndjson` ports nine mechanisms from the [device-routing investigation described in #25661](https://github.com/pingdotgg/t3code/pull/25661) and adds seven cases from t3dotgg’s 2026-10-26 fleet device investigation, and two from [#36192](https://github.com/pingdotgg/t3code/issues/36192). All prompts, files, hosts and prior turns are authored Acme data; the fleet cases cite finding ids without carrying source transcripts or identifiers.
