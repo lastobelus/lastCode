@@ -24,9 +24,8 @@ it.effect("sends task assignment provenance separately from the Codex prompt", (
           rootThreadId: parentThreadId,
         },
       },
-      run: { ordinal: 1, userMessageId: messageId, delegatedTaskId: taskId },
       message: {
-        messageId,
+        id: messageId,
         senderThreadId: parentThreadId,
         createdBy: "agent",
         creationSource: "mcp",
@@ -53,8 +52,7 @@ it.effect("sends task assignment provenance separately from the Codex prompt", (
         forkedFrom: null,
         lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentThreadId },
       },
-      run: { ordinal: 1, userMessageId: messageId },
-      message: { messageId, createdBy: "user", creationSource: "web" },
+      message: { id: messageId, createdBy: "user", creationSource: "web" },
     });
     assert.isUndefined(pasted.additionalContext?.t3_code_delegated_task);
     assert.deepEqual(pasted.input, codexInput);
@@ -66,9 +64,10 @@ it.effect("sends task assignment provenance separately from the Codex prompt", (
     assert.notInclude(context?.value ?? "", brief);
     assert.deepEqual(assigned.input, codexInput);
 
+    const replacementMessageId = MessageId.make("message:restart-steer");
     const later = yield* build({
       ...delegation,
-      message: { ...delegation.message, messageId: MessageId.make("message:restart-steer") },
+      message: { ...delegation.message, id: replacementMessageId },
     });
     assert.equal(later.additionalContext?.t3_code_delegated_task?.kind, "application");
     assert.notInclude(

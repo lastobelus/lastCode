@@ -272,20 +272,32 @@ const randomId =
     );
 
 const DELEGATED_TASK_THREAD_PREFIX = joinId("thread", "delegated-task", "");
+const DELEGATED_TASK_NODE_PREFIX = joinId("node", "delegated-task", "");
+const DELEGATED_TASK_MESSAGE_PREFIX = joinId("message", "delegated-task", "");
 
 export const isDelegatedTaskThread = (threadId: ThreadId): boolean =>
   threadId.startsWith(DELEGATED_TASK_THREAD_PREFIX);
+
+export function originalDelegatedTaskIds(threadId: ThreadId) {
+  if (!isDelegatedTaskThread(threadId)) return undefined;
+  const command = threadId.slice(DELEGATED_TASK_THREAD_PREFIX.length);
+  return {
+    nodeId: NodeId.make(`${DELEGATED_TASK_NODE_PREFIX}${command}`),
+    messageId: MessageId.make(`${DELEGATED_TASK_MESSAGE_PREFIX}${command}`),
+  };
+}
 
 export const derive: IdAllocatorV2Derive = {
   providerSession: (input) =>
     ProviderSessionId.make(
       joinId("provider-session", "provider-instance", input.providerInstanceId, "shared"),
     ),
-  delegatedTaskNode: (input) => NodeId.make(joinId("node", "delegated-task", input.commandId)),
+  delegatedTaskNode: (input) =>
+    NodeId.make(`${DELEGATED_TASK_NODE_PREFIX}${encodePart(input.commandId)}`),
   delegatedTaskThread: (input) =>
     ThreadId.make(`${DELEGATED_TASK_THREAD_PREFIX}${encodePart(input.commandId)}`),
   delegatedTaskMessage: (input) =>
-    MessageId.make(joinId("message", "delegated-task", input.commandId)),
+    MessageId.make(`${DELEGATED_TASK_MESSAGE_PREFIX}${encodePart(input.commandId)}`),
   delegatedTaskTurnItem: (input) =>
     TurnItemId.make(joinId("turn-item", "delegated-task", input.commandId)),
   createdThreadTurnItem: (input) =>

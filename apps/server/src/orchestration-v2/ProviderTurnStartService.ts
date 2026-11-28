@@ -88,6 +88,7 @@ import {
   makeProviderFailure,
 } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
+import { appOwnedTaskPrompt } from "./LastCodeDelegatedTaskPrompt.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import {
@@ -2690,6 +2691,7 @@ export const layer: Layer.Layer<
       const deliverySession = carriesPendingContext
         ? makeDeliverySession(session, startWithHandoffs)
         : session;
+      const resume = manualResume && unsentResumeMessage === undefined;
       return runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         ...(input.onMessageDelivery === undefined
@@ -2721,7 +2723,11 @@ export const layer: Layer.Layer<
               .filter((turn) => turn.providerThreadId === providerThread.id)
               .map((turn) => turn.ordinal),
           ) + 1,
-        resume: manualResume && unsentResumeMessage === undefined,
+        resume,
+        appOwnedTaskPrompt: appOwnedTaskPrompt({
+          appThread: projection.thread,
+          message: resume ? undefined : providerMessage,
+        }),
         nativeThreadHasTurns:
           nativeInputRunIds.size > 0 ||
           (legacyInputRunIds.size > 0 &&

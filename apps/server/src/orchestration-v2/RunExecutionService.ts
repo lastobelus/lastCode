@@ -44,7 +44,6 @@ import * as Schedule from "effect/Schedule";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
-import { appOwnedTaskPrompt } from "./LastCodeDelegatedTaskPrompt.ts";
 import * as PreviewAgentActivity from "../preview/PreviewAgentActivity.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
@@ -686,6 +685,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
     nodeIds: ReadonlyArray<NodeId>,
   ) => Effect.Effect<UnsettledWork, ProjectionStoreV2Error>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
+  readonly appOwnedTaskPrompt?: ProviderAdapter.ProviderAdapterV2TurnInput["appOwnedTaskPrompt"];
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }
@@ -2992,7 +2992,6 @@ export const layer: Layer.Layer<
             mcpAppModelContext,
             input.run.threadId,
           );
-          const taskPrompt = appOwnedTaskPrompt(input);
           const turnInput = {
             appThread: input.appThread,
             threadId: input.run.threadId,
@@ -3013,7 +3012,9 @@ export const layer: Layer.Layer<
             message: input.message,
             modelSelection: input.modelSelection,
             runtimePolicy: input.runtimePolicy,
-            ...(taskPrompt === undefined ? {} : { appOwnedTaskPrompt: taskPrompt }),
+            ...(input.appOwnedTaskPrompt === undefined
+              ? {}
+              : { appOwnedTaskPrompt: input.appOwnedTaskPrompt }),
             ...(appContext.length === 0 ? {} : { appContext }),
           };
           // Check after the context read: ingestion can settle the run while
