@@ -2,9 +2,13 @@
 
 Replays small fake threads on Claude and Codex models and checks how they use T3's MCP tools: delegation, PR linking, previews, scheduling, and more. Each case reproduces a real mistake an agent made in T3 Code.
 
-The model sees what it sees in T3 Code. A trimmed capture of a real harness turn supplies the harness prompt and native tools. T3's instructions, tool descriptions, and schemas come from this checkout. A cheap model plays the shell, so nothing runs on your machine.
+Each request approximates what the model sees in T3 Code. A trimmed capture of a real harness turn, taken when its template was last refreshed, supplies the harness prompt and native tools. T3's instructions, tool descriptions, and schemas come from this checkout. Tool results come from each case's mocks, a few of T3's handlers, and a cheap model that simulates shell commands.
+
+That makes this eval a simulation. It compares text changes across models and samples, but it does not run an installed build, the live harness or tool runtime, a child that actually executes, or real compaction. Those questions need a real LastCode thread; see [Choose the evidence](../README.md#choose-the-evidence).
 
 ## Run
+
+Run the replay only when the task authorizes it. The examples below call models. Use `--dry-run` or `--context` for offline checks.
 
 ```sh
 cd evals
@@ -15,7 +19,7 @@ pnpm mcp-tool-use --model claude-opus-5-5 --out runs/opus
 - `ANTHROPIC_API_KEY` in the repo root `.env` pays for Claude models and the Haiku shell simulator. Without it, Claude models go through the eval proxy below, which must be signed in to Claude.
 - Codex models (`gpt-*` in `MODELS` in `run.ts`) go through a CLIProxyAPI server, set up as the Codex model provider: `model_provider` in `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) when it names a `[model_providers.<name>]` table, otherwise `[model_providers.vibeproxy]`. Set `T3CODE_EVAL_MODEL_PROVIDER=<name>` to use another table, such as `vibeproxy` when your everyday `model_provider` is a different custom provider. That table needs `base_url` (the proxy's OpenAI-compatible URL, such as `http://localhost:8317/v1`) and a key in `experimental_bearer_token` or the variable named by `env_key`. Set `LASTCODE_EVAL_PROXY_CONFIG` to a private JSON file with `url` and `headers` to use an authorized eval proxy without changing the Codex configuration. Keep credentials private and the proxy under about 12 samples in flight across all runs. Without one, see [When this machine can't pay for the run](../README.md#when-this-machine-cant-pay-for-the-run).
 - `--shell-model` picks the model that plays the shell: `claude-haiku-5-5` by default, or `gpt-6.1-terra` / `gpt-6-luna` through the same proxy, so Codex runs need no Anthropic key. Prefer Terra: Luna often contradicts the case's world (it calls named checkouts missing or files empty). Compare runs only when they used the same shell model.
-- Flags: `--case <ids>`, `--cases <file.ndjson>`, `--samples <n>` (default 2, and a 3rd when the first 2 disagree), `--concurrency <n>` (samples in flight, default 8), `--max-steps <n>`, `--effort <level>`, `--dry-run` (prints request bodies, no model calls), and `--context` (prints the size of T3's text and schemas, no key needed).
+- Flags: `--case <ids>`, `--cases <file.ndjson>`, `--samples <n>` (default 2, and a 3rd when the first 2 disagree), `--concurrency <n>` (samples in flight, default 8), `--max-steps <n>`, `--effort <level>`, `--dry-run` (builds each selected case's request from the template and prints its body without sending it; no model calls), and `--context` (prints the size of T3's text and tool schemas, then exits; needs no template or key).
 - Use `--codex-background-wait` to give Codex the instructions and tool list it receives when the LastCode background-wait setting is on.
 - `--baseline <results.jsonl> --stop-on-regression` stops as soon as a case that passed every baseline sample fails. Use it to test one copy change against a baseline run.
 - Cost: a full run of all cases at 3 samples cost $25 on Sonnet and $45 on Opus on 2026-11-10. The 16 device cases at 3 samples each cost about $5.70–5.90 on Opus and $2.90–3.40 on Sonnet (main's text–#25661), including the Haiku shell simulator; dry runs cost $0. Results record token costs for the agent and shell simulator. Codex models through the proxy use the subscription; an API-priced Claude shell simulator is charged separately when selected.
