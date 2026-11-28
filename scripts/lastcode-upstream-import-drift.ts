@@ -31,7 +31,7 @@ function checkImport(entry: UpstreamImport, api: Command): string {
     `${comments}?per_page=100`,
     "--paginate",
     "--jq",
-    `.[] | .body | select(startswith(${JSON.stringify(`${marker}\n`)})) | @json`,
+    `.[] | (.body // "") | select(startswith(${JSON.stringify(`${marker}\n`)})) | @json`,
   ])
     .split("\n")
     .at(-1);

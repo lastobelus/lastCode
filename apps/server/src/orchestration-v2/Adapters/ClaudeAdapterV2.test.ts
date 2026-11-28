@@ -13916,7 +13916,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 tools: { type: "preset", preset: "claude_code" },
                 permissionMode: "bypassPermissions",
                 allowDangerouslySkipPermissions: true,
-                settings: { showThinkingSummaries: true },
+                settings: {
+                  showThinkingSummaries: true,
+                  env: { LASTCODE_BACKGROUND_WAIT: "1", BASH_DEFAULT_TIMEOUT_MS: "7200000" },
+                },
                 sessionId: WAKE_NATIVE_SESSION,
               },
             },

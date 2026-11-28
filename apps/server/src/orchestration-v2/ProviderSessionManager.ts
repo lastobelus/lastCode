@@ -3,6 +3,7 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  DEFAULT_SERVER_SETTINGS,
   isOrchestrationV2WorkActive,
   ModelSelection,
   type OrchestrationV2AppThread,
@@ -1123,6 +1124,9 @@ export const layerWithOptions = (
                 taskIds: new Set(
                   (providerThread.pendingBackgroundTasks ?? []).map((task) => task.taskId),
                 ),
+                owedTaskIds: new Set(
+                  providerThread.owedBackgroundResults?.map((result) => result.taskId),
+                ),
                 lostTasks: noteLostWork ? (providerThread.pendingBackgroundTasks ?? []) : [],
                 lostItems: noteLostWork
                   ? openItems.filter(
@@ -1158,8 +1162,9 @@ export const layerWithOptions = (
         providerSessionId,
         providerThreadId,
         taskIds,
+        owedTaskIds,
       }: ReleasedProviderThread) {
-        if (taskIds.size === 0) return;
+        if (taskIds.size === 0 && owedTaskIds.size === 0) return;
         for (let attempt = 0; attempt < 3; attempt++) {
           const projection = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"]);
           const providerThread = projection.providerThreads.find(
@@ -1167,7 +1172,16 @@ export const layerWithOptions = (
           );
           const tasks = providerThread?.pendingBackgroundTasks ?? [];
           const remaining = tasks.filter((task) => !taskIds.has(task.taskId));
-          if (providerThread === undefined || remaining.length === tasks.length) return;
+          const owed = providerThread?.owedBackgroundResults ?? [];
+          const remainingOwed =
+            providerThread?.providerSessionId === providerSessionId
+              ? owed.filter((result) => !owedTaskIds.has(result.taskId))
+              : owed;
+          if (
+            providerThread === undefined ||
+            (remaining.length === tasks.length && remainingOwed.length === owed.length)
+          )
+            return;
           const now = yield* DateTime.now;
           const { committed } = yield* eventSink.writeIfProviderThreadUnchanged({
             expected: providerThread,
@@ -1182,6 +1196,9 @@ export const layerWithOptions = (
                 payload: {
                   ...providerThread,
                   pendingBackgroundTasks: remaining,
+                  ...(remainingOwed.length === owed.length
+                    ? {}
+                    : { owedBackgroundResults: remainingOwed }),
                   updatedAt: now,
                 },
               },
@@ -2083,7 +2100,8 @@ export const layerWithOptions = (
               const prepared = yield* prepareMcpSession(
                 input.threadId,
                 input.providerInstanceId,
-                owningSession?.projectActionLaunchDisabled ?? false,
+                owningSession?.projectActionLaunchDisabled ??
+                  DEFAULT_SERVER_SETTINGS.lastcodeBackgroundWaitEnabled,
                 codexBackgroundWaitForAttachedSession(attached),
               );
               preparedForCleanup = prepared;

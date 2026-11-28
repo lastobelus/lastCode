@@ -79,7 +79,7 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
 
       assert.equal(
         registry.features[0]?.readmeSummary,
-        "Agents can start a Project Action and then pause while it runs. LastCode wakes the thread when the Action finishes; in the meantime, you can inspect or cancel it. We added this because we were tired of paying the polling tax: wasting turns and tokens checking whether a command was done.",
+        "Run saved Project Actions from your project. Agents use background waits for long commands, and LastCode wakes the thread when the command finishes.",
       );
     }),
   );
@@ -101,7 +101,7 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
           id: "resumable-actions",
           title: "Resumable project actions",
           readmeSummary:
-            "Agents can start a Project Action and then pause while it runs. LastCode wakes the thread when the Action finishes; in the meantime, you can inspect or cancel it. We added this because we were tired of paying the polling tax: wasting turns and tokens checking whether a command was done.",
+            "Run saved Project Actions from your project. Agents use background waits for long commands, and LastCode wakes the thread when the command finishes.",
           pagePath: "/features/resumable-actions/",
           supportedClients: ["web", "desktop", "mobile"],
           captureRecipeIds: ["resumable-actions", "workspace-overview"],

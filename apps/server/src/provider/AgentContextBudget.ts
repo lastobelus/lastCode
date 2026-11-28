@@ -4,13 +4,18 @@ import { PreviewHosting } from "../preview/Hosting.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
+  PROJECT_ACTION_LAUNCH_DISABLED,
+} from "@t3tools/provider-core/server/lastcodeProjectActions";
 import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 // oxlint-disable-next-line t3code/no-raw-mcp-registration -- Measurement only reads the registered tool list; it never serves requests.
-import { McpServer } from "effect/ai";
+import { McpSchema, McpServer } from "effect/ai";
 
 import { AssetSigner } from "../assets/AssetSigner.ts";
 import { ActionResume } from "../actionResume/ActionResume.ts";
@@ -31,6 +36,7 @@ import { GitWorkflowService } from "../git/GitWorkflowService.ts";
 import { IssueService } from "../issue/IssueService.ts";
 import { ThreadIssueService } from "../orchestration-v2/ThreadIssueService.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { PreviewAutomationBroker } from "../mcp/PreviewAutomationBroker.ts";
 import {
   CLAUDE_PROVIDER,
@@ -136,6 +142,7 @@ const claudeSystemAppend = () => {
     resume: false,
     cwd: null,
     mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1/mcp" } },
+    projectActionLaunchDisabled: DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
   });
   return typeof systemPrompt === "object" && "append" in systemPrompt ? systemPrompt.append : "";
 };
@@ -144,7 +151,12 @@ const codexAdditionalContext = () =>
   Object.values(
     buildCodexAdditionalContext(
       { model: "gpt-6.1-sol", modelName: "GPT-6.1 Sol", reasoningEffort: "high" },
-      { browser: true, device: true },
+      {
+        browser: true,
+        device: true,
+        backgroundWait: DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
+        projectActionLaunchDisabled: DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
+      },
     ),
   )
     .map((entry) => entry.value)
@@ -157,6 +169,17 @@ export const layerAdvertisedTools = McpHttpServer.layerTools.pipe(
 
 export const measureAgentContextBudget = Effect.gen(function* () {
   const mcp = yield* McpServer.McpServer;
+  const visible = mcp.tools.filter(
+    ({ annotations }) =>
+      Context.getOrUndefined(
+        annotations,
+        McpSchema.EnabledWhen,
+      )?.({
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "t3-code", version: "0" },
+      }) ?? true,
+  );
   return {
     claudeSystemAppendBytes: utf8Bytes(claudeSystemAppend()),
     codexAdditionalContextBytes: utf8Bytes(codexAdditionalContext()),
@@ -164,7 +187,7 @@ export const measureAgentContextBudget = Effect.gen(function* () {
     mcpToolListJsonBytes: utf8Bytes(
       // @effect-diagnostics-next-line globalJsonInEffect:off -- Measure the exact tool-list JSON serialization agents receive.
       JSON.stringify(
-        mcp.tools.map(({ tool }) => ({
+        visible.map(({ tool }) => ({
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
@@ -172,4 +195,30 @@ export const measureAgentContextBudget = Effect.gen(function* () {
       ),
     ),
   };
-}).pipe(Effect.provide(layerAdvertisedTools));
+}).pipe(
+  Effect.provideService(McpInvocationContext.McpInvocationContext, {
+    environmentId: EnvironmentId.make("context-budget"),
+    thread: {
+      threadId: ThreadId.make("context-budget"),
+      providerSessionId: "context-budget",
+      providerInstanceId: ProviderInstanceId.make(CLAUDE_PROVIDER),
+    },
+    client: undefined,
+    issuedAt: 0,
+    requestNamespace: "context-budget",
+    capabilities: new Set<McpInvocationContext.McpCapability>([
+      "orchestration",
+      "preview",
+      "worktree",
+      "device",
+      "pull-requests",
+      "issues",
+      "action-resume",
+      "background-wait",
+      ...(DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED
+        ? ([PROJECT_ACTION_LAUNCH_DISABLED] as const)
+        : []),
+    ]),
+  }),
+  Effect.provide(layerAdvertisedTools),
+);

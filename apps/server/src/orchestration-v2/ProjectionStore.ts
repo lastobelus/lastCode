@@ -5607,6 +5607,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   WHERE status = 'active'
                     OR CASE WHEN json_valid(payload_json)
                       THEN json_array_length(payload_json, '$.pendingBackgroundTasks') > 0
+                        OR json_array_length(payload_json, '$.owedBackgroundResults') > 0
                       ELSE 0 END
                   UNION
                   SELECT thread_id FROM orchestration_v2_projection_turn_items
@@ -5628,6 +5629,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   WHERE status = 'active'
                     OR CASE WHEN json_valid(payload_json)
                       THEN json_array_length(payload_json, '$.pendingBackgroundTasks') > 0
+                        OR json_array_length(payload_json, '$.owedBackgroundResults') > 0
                       ELSE 0 END
                 )
                 SELECT thread_id FROM orchestration_v2_projection_threads
@@ -6088,6 +6090,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHERE roster.thread_id = ${threadId}
                       AND CASE WHEN json_valid(roster.payload_json)
                         THEN json_array_length(roster.payload_json, '$.pendingBackgroundTasks') > 0
+                          OR json_array_length(roster.payload_json, '$.owedBackgroundResults') > 0
                         ELSE 0 END
                   )
                   OR run.run_id IN (
@@ -6228,6 +6231,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   provider_thread.status = 'active'
                   OR CASE WHEN json_valid(provider_thread.payload_json)
                     THEN json_array_length(provider_thread.payload_json, '$.pendingBackgroundTasks') > 0
+                      OR json_array_length(provider_thread.payload_json, '$.owedBackgroundResults') > 0
                     ELSE 0 END
                   OR provider_thread.provider_thread_id IN (
                     SELECT run.provider_thread_id FROM orchestration_v2_projection_runs AS run

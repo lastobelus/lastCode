@@ -141,11 +141,12 @@ checkpoint triggers keep running.
 
 ## Resumable Project Actions in LastCode
 
-Threads with a running resumable Project Action keep a yellow waiting indicator beside any active
+Threads with an in-flight resumable Project Action keep a yellow waiting indicator beside any active
 **Working** status. When the agent becomes idle, the primary status changes to **Waiting**. Hover
 the indicator on web or desktop to see the Action name. See
 [Resumable Project Actions in LastCode](./resumable-project-actions.md) for the automatic follow-up
-behavior and the composer controls.
+behavior and the composer controls. Agents normally use
+[background waits for long commands](./resumable-project-actions-for-agents.md).
 
 ## Worktree cleanup in LastCode
 

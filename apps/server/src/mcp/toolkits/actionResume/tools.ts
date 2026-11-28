@@ -43,7 +43,7 @@ const ListProjectActionsTool = Tool.make("list_project_actions", {
 
 const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume", {
   description:
-    "Launch one opted-in Project Action in a terminal, arm one same-thread automated follow-up, and return immediately. It may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions. A delegated child launches only when its brief says its parent verified features.appOwnedActionContinuationVersion and installed acceptance, or authorized an isolated acceptance scenario; its task stays unfinished across the wait and continues in the follow-up. A delegated call without a verified execution source is refused before launch. Eligibility is independent of automatic-settlement settings.",
+    "Launch an eligible Action from list_project_actions and end your turn for the same-thread follow-up. The user can cancel the command. A delegated launch requires a verified execution source. If refused, end your turn and hand the Action request to your parent.",
   parameters: Schema.Struct({ actionId: Schema.String }),
   success: Schema.Struct({
     ...ActionResumeState.fields,
@@ -74,7 +74,7 @@ const InspectActionRunTool = Tool.make("inspect_action_run", {
 
 const ResumeInterruptedActionTool = Tool.make("resume_interrupted_action", {
   description:
-    "Recover this thread's interrupted Project Action continuation, like the composer's Resume agent button: queue the retained Action result and its follow-up in this thread. The command does not run again. Takes no arguments and acts only on the calling thread's own Action: a mediated Action belongs to the parent's thread, a child-owned one to the child's. Refused unless result delivery is available, and it cannot clear a follow-up that is already running or pending. After success, end your turn; the follow-up continues the work.",
+    "Queue the retained result of an interrupted Project Action this thread launched. The command does not run again. Requires a result available for delivery and leaves running or pending follow-ups alone. After success, end your turn for the follow-up.",
   parameters: Schema.Record(Schema.String, Schema.Never),
   success: Schema.Struct({ resumed: Schema.Literal(true) }),
   failure: ActionResumeToolError,
@@ -88,7 +88,7 @@ const ResumeInterruptedActionTool = Tool.make("resume_interrupted_action", {
 
 const DiscardInterruptedActionTool = Tool.make("discard_interrupted_action", {
   description:
-    "Abandon this thread's interrupted Project Action continuation, like the composer's Discard button: drop the retained follow-up so new Actions can launch. Discarding does not mean the command succeeded; use inspect_action_run or rerun the Action before relying on its result. Takes no arguments and acts only on the calling thread's own Action: a mediated Action belongs to the parent's thread, a child-owned one to the child's. Refused unless result delivery is available, and it cannot clear a follow-up that is already running or pending. Use resume_interrupted_action instead when you still need the result.",
+    "Drop the retained follow-up for an interrupted Project Action this thread launched. Requires a result available for delivery and leaves running or pending follow-ups alone. Use inspect_action_run to check the command's outcome or resume_interrupted_action to continue from the result.",
   parameters: Schema.Record(Schema.String, Schema.Never),
   success: Schema.Struct({ discarded: Schema.Literal(true) }),
   failure: ActionResumeToolError,

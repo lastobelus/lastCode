@@ -18,9 +18,12 @@ Follow [the wrapper's wait instructions](../../AGENTS.md#dev-servers-and-test-da
 for all `lc-run` commands. If a tool still reports missing package files, diagnose
 the affected installation before retrying or removing anything.
 
-To opt out of automatic background waits, set `lastcodeBackgroundWaitEnabled`
-to `false` in the LastCode server settings. In new sessions, use the same wrapper
-commands and collect their results through the shell.
+Automatic background waits are on by default. To opt out, set
+`lastcodeBackgroundWaitEnabled` to `false` in the server state directory's
+`settings.json`. The default location is `userdata/settings.json` under the
+LastCode data directory. New provider sessions pick up the change. Codex and OpenCode v2 threads
+that attach to a running shared session use that session's setting until it
+closes. In either mode, follow the wrapper's wait instructions above.
 
 ## Pull Request CI
 
@@ -84,16 +87,16 @@ managed specification; a locally diverged or removed declaration is retained
 and reported instead of being overwritten or deleted. A managed resume grant is
 revoked while an Action's executable fields are locally diverged.
 
-New Actions remain unavailable to agents until the environment grants trust.
+Where legacy agent launches are still enabled, the environment must grant trust
+before an agent can launch a new saved Action.
 Setup accepts repeated `--trusted-project-action <lc-id>` flags and saves that
 allowlist for subsequent checkpoint-supervisor refreshes. Managed checkout
 configuration uses `projectActions.trustedActionIds`. Removing a managed trust
 entry revokes only that managed grant; permissions enabled directly in Project
 Settings remain local user state.
 
-The action never pushes: after it resumes, the agent still decides whether and
-what to push. A changed head, changed base tracking ref, or dirty worktree makes
-the receipt unusable. Without a matching receipt, ordinary command-line pushes
+Quick CI leaves the push to the agent. A changed head, changed base tracking ref,
+or dirty worktree makes the receipt unusable. Without a matching receipt, ordinary command-line pushes
 follow the selected mode synchronously: run locally, defer when capacity is
 busy, or skip local checks. Only a local pass records a receipt for transport
 retries of the same commit. Keep the pre-push hook enabled in every mode.
@@ -505,7 +508,7 @@ that need a failed prerequisite are reported as blocked; cancellation and
 process-ownership failures stop the run. Any failed or blocked check prevents a
 passing CI stamp and packaging. Quick CI retains its fast failure behavior.
 
-The Action result links a retained JSON report and per-check output under the
+The command output links a retained JSON report and per-check output under the
 repository's common Git directory, in `lastcode-ci-diagnostics/`. The report
 records the candidate commit, validation-tool commit, runtime, commands and
 each check's result. Use that inventory to distinguish source failures from
@@ -589,7 +592,7 @@ run-registration timeout. It reports both the workflow-run URL and immutable
 release URL.
 
 The request is marked before dispatch so an interrupted or ambiguous transport
-result is never dispatched a second time. The Action waits for the unique token
+result is never dispatched a second time. The command waits for the unique token
 to appear and then records the matching run ID for later reattachment. If GitHub
 never registers it, select the tag again to create a deliberate new request.
 
@@ -600,7 +603,7 @@ outdated builds without a successful package for the selected or older tags,
 preserving newer targets, current-workflow builds, and packages being published. Before dispatching
 a replacement, the command waits for active same-tag runs to finish cancellation.
 
-The Action only builds and publishes. It never stages, installs, promotes,
+The command only builds and publishes. It never stages, installs, promotes,
 restarts, or updates an Intel artifact-consumer node. Those remain separate
 agent decisions.
 
@@ -629,7 +632,7 @@ deletes an exact-tag release. Recovery from a partial or conflicting publication
 therefore requires a maintainer decision rather than silently changing an
 immutable artifact.
 
-The agent-facing action remains explicitly selected. The hosted Intel dispatcher
+The agent command still requires an explicit selection. The hosted Intel dispatcher
 also runs when a checkpoint or revision tag is published, including publication
 outside the daily schedule. It verifies the exact event tag's advertised commit
 and builds that target even if a newer tag exists. The daily schedule continues
@@ -648,9 +651,8 @@ tag against the local artifact's commit and reuses an active exact-target
 dispatcher or requests one hosted run. It never waits for Intel packaging,
 installs, or restarts an app. Missing configuration or `enabled:false` disables
 the hook. Dispatch failure leaves the local package built and is reported in
-the build result's `intelTrigger` field, command output, and local-build Action
-evidence. Set `enabled:false` or remove the configuration to stop requesting
-Intel work after local builds.
+the build result's `intelTrigger` field and command output. Set `enabled:false`
+or remove the configuration to stop requesting Intel work after local builds.
 Installation remains a separate artifact-consumer decision.
 
 ### Intel artifact-consumer staging

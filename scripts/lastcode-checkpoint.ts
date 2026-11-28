@@ -2742,7 +2742,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           timeout: 30_000,
         }),
       log: (message) => console.log(`[lastcode:checkpoint] ${message}`),
-      warn: (message) => console.warn(`[lastcode:checkpoint] ${message}`),
+      warn: (message) =>
+        console.warn(
+          `[lastcode:checkpoint] WARNING: upstream import drift check incomplete: ${message}`,
+        ),
     });
   }
   const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, sourceCommit);

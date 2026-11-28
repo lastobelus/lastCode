@@ -51,6 +51,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { PROJECT_ACTION_LAUNCH_DISABLED } from "@t3tools/provider-core/server/lastcodeProjectActions";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
@@ -3281,6 +3282,7 @@ it.effect(
             "pull-requests",
             "issues",
             "action-resume",
+            PROJECT_ACTION_LAUNCH_DISABLED,
           ]),
         );
 

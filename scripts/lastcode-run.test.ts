@@ -49,7 +49,7 @@ it("prints background guidance before the first step only in opted-in sessions",
   expect(fast.stdout).toBe("Installing\n[lc-run] prepare: success (exit 0)\nInstalled\n");
   expect(hinted.status).toBe(0);
   expect(hinted.stdout).toBe(
-    "[lc-run] If you're this thread's main agent and the shell backgrounds a simple ./scripts/lc-run command, LastCode already registered the wake. End your turn without calling a tool. A literal cd <path> && prefix is fine without options or expansion. For other shell constructs or native subagents, collect the result.\n" +
+    "[lc-run] If you're this thread's main agent and the shell backgrounds a direct lc-run command, LastCode already registered the wake. End your turn without another tool call. Use ./scripts/lc-run or its literal absolute path, alone or last in a simple && or ; chain. For other shell forms, register the wait if available or collect the result.\n" +
       fast.stdout,
   );
 });
@@ -80,17 +80,24 @@ it("preserves an attention result and keeps the whole summary within the wake's 
   expect(Buffer.byteLength(tail)).toBeLessThan(1_000);
 });
 
-it("does not start CI after preparation fails", () => {
+it.each([
+  ["attention", 43, 43],
+  ["attention", 0, 1],
+  ["blocked", 0, 1],
+] as const)("stops after preparation reports %s with exit %i", (outcome, stepExit, wrapperExit) => {
   const { writeStep, run } = fixture();
   writeStep(
     "prepare-dependencies.ts",
     `
-    console.log('[lastcode-action] Result: {"version":1,"outcome":"attention","summary":"Install failed"}');
-    process.exitCode = process.argv[2] === "--for-ci" ? 43 : 99;
+    console.log('[lastcode-action] Result: {"version":1,"outcome":"${outcome}","summary":"Install failed"}');
+    process.exitCode = process.argv[2] === "--for-ci" ? ${stepExit} : 99;
   `,
   );
   writeStep("lastcode-local-ci.ts", "console.log('Unexpected CI');");
   const result = run(["ci", "--quick"], true);
-  expect(result.status).toBe(43);
-  expect(result.stdout).toMatch(/\[lc-run\] ci: attention \(exit 43\)\nInstall failed\n$/u);
+  expect(result.status).toBe(wrapperExit);
+  expect(result.stdout).not.toContain("Unexpected CI");
+  expect(
+    result.stdout.endsWith(`[lc-run] ci: ${outcome} (exit ${wrapperExit})\nInstall failed\n`),
+  ).toBe(true);
 });

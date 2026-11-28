@@ -1102,6 +1102,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
         const told = yield* Ref.make<{
           readonly agent: string;
           readonly orchestration: boolean;
+          readonly projectActionLaunchDisabled?: boolean | undefined;
           readonly device: boolean;
           readonly backgroundWait: boolean;
           readonly runtime: string | undefined;
@@ -2876,6 +2877,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           actionLaunchDisabled: boolean,
           delivered: {
             readonly orchestration: boolean;
+            readonly projectActionLaunchDisabled?: boolean | undefined;
             readonly device: boolean;
             readonly backgroundWait: boolean;
             readonly runtime: string | undefined;
@@ -2900,6 +2902,8 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             hasDeviceTools,
             orchestrationDelivered: delivered.orchestration,
             projectActionLaunchDisabled: actionLaunchDisabled,
+            projectActionLaunchInstructionsDelivered:
+              delivered.projectActionLaunchDisabled === actionLaunchDisabled,
             deviceInstructionsDelivered: delivered.device,
             providerInstructions: CURSOR_BACKGROUND_WAIT_INSTRUCTIONS,
             providerInstructionsDelivered: delivered.backgroundWait,
@@ -2988,14 +2992,13 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               mcpServers !== undefined && mcpSession?.capabilities?.has("device") === true;
             const actionLaunchDisabled = projectActionLaunchDisabled(mcpSession?.capabilities);
             const known = yield* Ref.get(told);
-            // A conversation this process has not sent to was told on its first run.
+            // A resumed conversation already has general guidance, but its Action setting may differ.
             const delivered =
               known?.agent === agent.nativeThreadId
                 ? known
                 : {
-                    orchestration:
-                      !actionLaunchDisabled &&
-                      (turnInput.nativeThreadHasTurns ?? turnInput.runOrdinal > 1),
+                    orchestration: turnInput.nativeThreadHasTurns ?? turnInput.runOrdinal > 1,
+                    projectActionLaunchDisabled: undefined,
                     device: false,
                     backgroundWait: false,
                     runtime: undefined,
@@ -3101,6 +3104,11 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               yield* Ref.set(told, {
                 agent: agent.nativeThreadId,
                 orchestration: !compacted && (delivered.orchestration || mcpServers !== undefined),
+                projectActionLaunchDisabled: compacted
+                  ? undefined
+                  : mcpServers !== undefined
+                    ? actionLaunchDisabled
+                    : delivered.projectActionLaunchDisabled,
                 device: !compacted && hasDeviceTools,
                 backgroundWait:
                   !compacted && (delivered.backgroundWait || mcpServers !== undefined),

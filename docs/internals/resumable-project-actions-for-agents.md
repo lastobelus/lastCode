@@ -1,11 +1,11 @@
-# Agent Implementation Guide to Resumable Project Actions
+# Maintain Legacy Agent-Launched Project Actions
 
 This guide describes legacy agent launches with `lastcodeBackgroundWaitEnabled`
 turned off. Agents working in LastCode checkouts use
 [`lc-run`](../../AGENTS.md#dev-servers-and-test-data) in either setting.
 
-Use a resumable Project Action when a workflow has reached a passive or uninterrupted command that
-may take long enough that keeping an agent turn open would be wasteful. The Action runs in a
+Keep new agent workflows on direct commands with background waits.
+An existing resumable Project Action runs in a
 dedicated terminal. When it exits, LastCode queues one automated follow-up in the same thread for
 the agent to handle after its current turn finishes.
 
@@ -19,10 +19,8 @@ thread twice and disagrees about timing. Put any readiness rules in a one-shot c
 runs on each wake, as LastCode does with
 `pnpm --config.verify-deps-before-run=false lastcode:pr-gates`.
 
-For a worked example, see `scripts/lastcode-wait-for-checkpoint.ts`, behind the **Wait for
-Checkpoint** Action: it binds to one service run, reports coarse progress, and returns one result,
-including an `attention` result for a replaced run or timeout. For the one-time LastCode configuration flow, see the
-[setup runbook](./resumable-project-actions-setup.md).
+For existing Actions that still need the fallback, see the
+[setup and recovery runbook](./resumable-project-actions-setup.md).
 
 ## The agent contract
 
@@ -150,30 +148,27 @@ project, so use the project's normal authenticated CLI or secret mechanism.
 
 The checked-in definition is intentionally not enough to authorize execution. Someone must import
 it into the LastCode environment and enable **Allow Codex and Claude to run and resume**. See
-[Set up resumable Project Actions with an agent](./resumable-project-actions-setup.md).
+[Runbook for maintaining resumable Project Actions](./resumable-project-actions-setup.md).
 
-## Make agents choose the Action without prompting
+## Document an existing fallback
 
-Update the repository's agent instructions or workflow skill at the same time as the Action. Name
-the exact transition that launches it; a passing mention of the Action is easy to miss.
+Put the direct command first in the workflow instructions. If an existing Action
+still serves sessions without a command-completion wake, name the eligible
+Action and the condition under which to use it.
 
 For example:
 
 ```markdown
-After starting a deployment:
+After starting a deployment, run the status command and register a background
+wait if it runs in the background. If you have no command-completion wake and
+legacy Action tools are available:
 
 1. Call `list_project_actions`.
 2. Launch the eligible `Wait for deployment` result with `run_project_action_and_resume`.
 3. End the turn immediately. Do not poll the deployment in the agent turn.
 4. On resume, check the reported deployment ID, then handle a failure or supersession. Relaunch the
    Action only for a new deployment. Promote only when the Action reports that deployment healthy.
-5. Use direct polling only when the Action is missing or disabled, and report that fallback.
 ```
-
-Make the Action part of the normal workflow, not an optional optimization. Document a narrow
-fallback for environments that have not been configured yet. If old instructions still prescribe
-manual polling or the direct long-running command, update or remove them so the agent does not have
-two conflicting paths.
 
 ## Handle the resumed result
 
@@ -194,32 +189,28 @@ delivery at startup; nobody needs to resume it. If LastCode restarted with the c
 unknown, the thread offers **Resume agent** to send a follow-up with what was saved from the run, or
 **Discard** to remove it. LastCode never reruns the command automatically.
 
-## Adapt an existing waiting workflow
+## Restore a saved Action fallback
 
-When asked to adapt a project's existing waiting workflow to resumable Actions, treat the task as an
-end-to-end workflow change rather than a wording-only skill edit:
+When asked to restore an existing fallback, verify the command, saved Action,
+and completion together:
 
 1. Read the existing skill, repository instructions, and any scripts it already calls.
 2. Preserve that project's actual acceptance gates. Do not copy LastCode-specific conventions unless
    the target project already uses them.
 3. Move only the passive observation into a focused wait command. Keep fixes, retries, publishing,
    and other decisions in the resumed agent turn.
-4. Add focused tests for the wait decisions and an importable `t3.json` Action.
-5. Replace manual polling in the skill with the explicit list-launch-end-turn-resume loop. Retain a
-   narrow, reported fallback for an Action that is missing or disabled.
+4. Verify the wait decisions and the saved Action's importable `t3.json` entry.
+5. Keep the direct command as the normal path. For sessions that need the
+   fallback, document the Action's launch and follow-up.
 6. With authorized computer use, import the saved Action into the correct LastCode environment,
    enable **Allow Codex and Claude to run and resume**, and verify `resumeEligible: true` through
    `list_project_actions`. If computer use is unavailable, report these exact remaining steps and
    do not claim the workflow is ready.
-7. Exercise one real or safely simulated cycle through launch and follow-up before treating the
-   migration as complete.
-
-The target result is that a future user can ask for the ordinary workflow without naming the Action
-or reminding the agent to stop polling.
+7. Exercise one real or safely simulated cycle through launch and follow-up.
 
 ## Review checklist
 
-Before relying on a new resumable Action, confirm:
+Before relying on an existing resumable Action fallback, confirm:
 
 - The command works from the project or thread worktree where LastCode will start it.
 - Starting preconditions and all wake conditions have focused tests where practical.

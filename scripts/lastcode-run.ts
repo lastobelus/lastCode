@@ -11,8 +11,8 @@ import {
   type LastCodeWrappedAction,
 } from "../packages/shared/src/lastcodeWrappedCommands.ts";
 
-const WAIT_INSTRUCTION =
-  "[lc-run] If you're this thread's main agent and the shell backgrounds a simple ./scripts/lc-run command, LastCode already registered the wake. End your turn without calling a tool. A literal cd <path> && prefix is fine without options or expansion. For other shell constructs or native subagents, collect the result.";
+export const WAIT_INSTRUCTION =
+  "[lc-run] If you're this thread's main agent and the shell backgrounds a direct lc-run command, LastCode already registered the wake. End your turn without another tool call. Use ./scripts/lc-run or its literal absolute path, alone or last in a simple && or ; chain. For other shell forms, register the wait if available or collect the result.";
 const USAGE =
   "Usage: ./scripts/lc-run prepare | prepare-checkpoint --upstream <commit> | ci --quick | ci --full | wait-checkpoint | package --tag <tag>";
 const REPORT_PREFIX = "[lastcode-action] Result: ";
@@ -147,11 +147,11 @@ if (import.meta.main) {
     let result: StepResult = { exitCode: 0 };
     for (const step of steps(action)) {
       result = await runStep(step, import.meta.dirname, environment);
-      if (
-        result.exitCode !== 0 ||
-        (result.report !== undefined && result.report.outcome !== "success")
-      )
+      if (result.exitCode !== 0) break;
+      if (result.report !== undefined && result.report.outcome !== "success") {
+        result = { ...result, exitCode: 1 };
         break;
+      }
     }
     process.stdout.write(formatResult(action.kind, result));
     process.exitCode = result.exitCode;

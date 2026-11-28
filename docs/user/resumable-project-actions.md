@@ -5,9 +5,10 @@ same agent thread when the command finishes. The Action keeps running independen
 another message to the agent. When the Action finishes, LastCode queues its automatic follow-up.
 The agent handles it after its current turn finishes.
 
-To design and operate these workflows with less prompting, see the
-[agent-assisted workflow](./resumable-project-actions-for-agents.md). Agents and maintainers can
-continue with the [implementation guide](../internals/resumable-project-actions-for-agents.md).
+Saved Project Actions are available for you to run from the project. In the default
+configuration, agents run long commands directly and LastCode wakes them when a
+registered background wait finishes. See [long-running agent commands](./resumable-project-actions-for-agents.md).
+This page covers Actions that already have an automatic follow-up.
 
 ## Recognize a waiting thread
 

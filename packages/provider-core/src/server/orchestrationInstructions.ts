@@ -1,7 +1,10 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 import type { McpToolExposureMode } from "./mcpSession.ts";
 
-import { projectActionLaunchInstructions } from "./lastcodeProjectActions.ts";
+import {
+  DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
+  projectActionLaunchInstructions,
+} from "./lastcodeProjectActions.ts";
 import { LASTCODE_THREAD_INSTRUCTIONS } from "./lastcodeThreadInstructions.ts";
 
 // Codex truncates entries over 4,000 bytes; keep each section self-contained and below that limit.
@@ -51,7 +54,7 @@ To mention another thread to the user, use the ready-to-paste \`link\` returned 
 
 export const t3CodeOrchestrationSections = ({
   nativeSubagents = true,
-  projectActionLaunchDisabled = false,
+  projectActionLaunchDisabled = DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
 }: {
   readonly nativeSubagents?: boolean | undefined;
   readonly projectActionLaunchDisabled?: boolean | undefined;
@@ -103,7 +106,10 @@ const T3_CODE_ACP_DEFERRED_PROXY_INSTRUCTIONS =
 // its tools, so they need the terminal transport other harnesses never use.
 const T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS = `ACP fallback: if the T3 tools are absent and \`T3_ACP_MCP_NODE\` is present, call them through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" \${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`T3_ACP_MCP_ENTRYPOINT\` is unset for a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. On Windows, run \`T3_ACP_MCP_CALL\` instead and pipe the JSON to stdin, as in PowerShell \`'{}' | & $env:T3_ACP_MCP_CALL orchestrator_capabilities -\`, writing non-ASCII characters as \`\\uXXXX\` escapes.`;
 
-export const t3CodeMcpInstructions = (actionLaunchDisabled = false, browser = true) =>
+export const t3CodeMcpInstructions = (
+  actionLaunchDisabled = DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
+  browser = true,
+) =>
   [
     ...(browser ? [T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim()] : []),
     ...t3CodeOrchestrationSections({ projectActionLaunchDisabled: actionLaunchDisabled }),
@@ -166,8 +172,14 @@ export function t3AcpPromptWithInstructions(input: {
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
 }
 
-const orchestrationInstructions = (hasDeviceTools: boolean, actionLaunchDisabled?: boolean) => {
-  const mcp = actionLaunchDisabled ? t3CodeMcpInstructions(true) : T3_CODE_MCP_INSTRUCTIONS;
+const orchestrationInstructions = (
+  hasDeviceTools: boolean,
+  actionLaunchDisabled = DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
+) => {
+  const mcp =
+    actionLaunchDisabled === DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED
+      ? T3_CODE_MCP_INSTRUCTIONS
+      : t3CodeMcpInstructions(actionLaunchDisabled);
   return hasDeviceTools ? `${mcp}\n\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS}\n` : mcp;
 };
 
@@ -182,6 +194,7 @@ export function t3OrchestrationPrompt(input: {
   readonly hasDeviceTools: boolean;
   readonly orchestrationDelivered: boolean;
   readonly projectActionLaunchDisabled?: boolean | undefined;
+  readonly projectActionLaunchInstructionsDelivered?: boolean;
   readonly deviceInstructionsDelivered: boolean;
   /** Guidance for this provider's own tools, sent until `providerInstructionsDelivered`. */
   readonly providerInstructions?: string;
@@ -194,6 +207,11 @@ export function t3OrchestrationPrompt(input: {
       : input.hasDeviceTools && !input.deviceInstructionsDelivered
         ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS
         : undefined,
+    input.orchestrationDelivered && input.projectActionLaunchInstructionsDelivered === false
+      ? projectActionLaunchInstructions(
+          input.projectActionLaunchDisabled ?? DEFAULT_PROJECT_ACTION_LAUNCH_DISABLED,
+        )
+      : undefined,
     input.providerInstructionsDelivered === true ? undefined : input.providerInstructions,
   ].flatMap((part) => (part === undefined ? [] : [part.trim()]));
   return instructions.length === 0
