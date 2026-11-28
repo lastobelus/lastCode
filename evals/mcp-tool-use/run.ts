@@ -94,6 +94,7 @@ import { type BackgroundWait, makeBackgroundWait } from "./backgroundWait.ts";
 import { localProjectRefusal } from "./localProjectRefusal.ts";
 import { DeviceExpect, gradeDevice } from "./device-grading.ts";
 import { FileLinksExpect, gradeFileLinks } from "./file-link-grading.ts";
+import { firstSentBrief, gradeThreadBriefs, ThreadBriefsExpect } from "./lastcodeLaunchBriefs.ts";
 import {
   AGENT_DEVICE_SHELL,
   deviceFailure,
@@ -255,6 +256,7 @@ const McpToolUseExpect = Schema.Struct({
    * `create_threads` entry. Each matches a different thread's request; no other thread is asked for.
    */
   newThreads: Schema.optional(Schema.Array(Schema.Unknown)),
+  threadBriefs: Schema.optional(ThreadBriefsExpect),
   /** The last step with tool calls includes this tool, then the turn ends. */
   endsTurnAfter: Schema.optional(Schema.String),
   /**
@@ -2544,10 +2546,16 @@ const matchesEach = (
 
 /** Each launch request that succeeded, including rows of a batch. */
 const newThreadRequests = (calls: ReadonlyArray<Call>) =>
-  calls.flatMap((call): ReadonlyArray<{ request: unknown; brief: unknown }> => {
+  calls.flatMap((call, at): ReadonlyArray<{ request: unknown; brief: unknown }> => {
     if (call.failed === true || !isRecord(call.input)) return [];
-    if (call.tool === "t3_thread_launch")
-      return [{ request: call.input, brief: call.input.message }];
+    if (call.tool === "t3_thread_launch") {
+      return [
+        {
+          request: call.input,
+          brief: firstSentBrief(call.input, call.output, calls.slice(at + 1)),
+        },
+      ];
+    }
     if (call.tool !== "create_threads" || !Array.isArray(call.input.threads)) return [];
     return call.input.threads.map((request: unknown) => ({
       request,
@@ -2710,6 +2718,12 @@ export const gradeSample = (
       requests.length === expect.newThreads.length && matchesDistinct(expect.newThreads, requests),
     );
   }
+  if (expect.threadBriefs !== undefined)
+    gradeThreadBriefs(
+      expect.threadBriefs,
+      newThreadRequests(calls).map(({ brief }) => brief),
+      add,
+    );
   if (expect.endsTurnAfter !== undefined) {
     const lastStep = Math.max(-1, ...calls.map((call) => call.step));
     const last = calls.filter((call) => call.step === lastStep).map((call) => call.tool);

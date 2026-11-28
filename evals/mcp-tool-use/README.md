@@ -143,6 +143,18 @@ pnpm mcp-tool-use --cases mcp-tool-use/cases/threads-vs-tasks.ndjson --samples 3
 
 These cases measure routing decisions with simulated tools, not delivered child work. The original PR's paid baseline found Sonnet starting a background native Agent for `tt-background-agent`; the routing fix is stacked separately in #27139. Historical model results and the unresolved top-level reviewer re-check wording are recorded in #27138.
 
+## Launch callback cases
+
+`cases/launch-callbacks.ndjson` scores callbacks in the briefs of launched threads. The launcher cases load the current callback rule from `AGENTS.md` through `contextFiles`. `expect.threadBriefs` checks case-sensitive patterns in each successful launch's brief, including a brief sent to a thread after it was launched idle.
+
+The fixtures cover owned release threads, a callback over a peer link, a worker with fewer permissions than its launcher, and threads the user will drive. A separate worker fixture checks the queued send after completing its assigned work.
+
+```sh
+pnpm mcp-tool-use --cases mcp-tool-use/cases/launch-callbacks.ndjson --dry-run
+```
+
+These fixtures simulate sends. Use two linked environments and real LastCode threads to verify that a send reaches its launcher and starts a new turn.
+
 ## Secrets cases
 
 `cases/secrets.ndjson` checks how agents get a secret only the user has: a login, PIN, pairing code, token or API key. Each case cites a finding of the October 2026 `request_secret` field review (`secret-field-2026-10`, root causes RC1–RC6) and describes its episode; prompts, worlds and secret values are authored Acme data, and every secret value is a fabricated fixture.
