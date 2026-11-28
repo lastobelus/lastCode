@@ -555,7 +555,11 @@ function makeLive(
             {
               cwd: repoRoot,
               detached: usesDetachedHelperProcessGroup(environment.platform),
-              env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+              env: {
+                ...process.env,
+                ELECTRON_RUN_AS_NODE: "1",
+                T3CODE_HOME: NodePath.resolve(environment.baseDir),
+              },
               stdio: ["pipe", logFd, logFd, "pipe"],
             },
           );
