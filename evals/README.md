@@ -13,6 +13,26 @@ Write or run an eval when a change affects what a model sees or does: agent inst
 | [test-signal](test-signal/)               | Whether a cheap model running the test-signal check flags low-signal tests.                          |
 | [workflow-authoring](workflow-authoring/) | Whether a model writes a working workflow file from the `t3-workflows` skill alone.                  |
 
+## Choose the evidence
+
+Pick the evidence by what the question measures.
+
+**Real LastCode threads** show the product as it runs. Use them first when the question is about:
+
+- the guidance an installed build actually gives an agent
+- the running harness: its prompt, native tools and behavior
+- the live MCP tool surface and what its tools return at runtime
+- a child thread or subagent actually carrying out its brief
+- real context compaction
+
+Run the scenario in a LastCode thread on the build, provider and model the question names, then read that thread's transcript and tool calls.
+
+If that build, provider, model or tool is not available, report the blocker: what is missing and which question needed it. Then carry on with the work that does not depend on it, and leave that question open. For these checks, skip credential requests, remote credential lookups, and replay as a fallback.
+
+**Scripted evals** in this directory show how models respond to T3's text: whether a copy change fixes its cases without breaking the controls, across models and repeated samples, compared with a baseline. [mcp-tool-use](mcp-tool-use/) replays simulated threads, so it is the route for simulating agent behavior. The other evals in the table call their models on the code under test directly. Scripted evals call paid models, so run one only when the task authorizes it; [Run an eval](#run-an-eval) covers setup and credentials.
+
+**Offline checks** make no model calls and measure no model behavior. In mcp-tool-use, `--dry-run` builds each selected case's request and prints it unsent, which shows that the case builds. `--context` reports how large T3's text and tool schemas are.
+
 ## Run an eval
 
 1. Run `vp i` at the repo root.
@@ -25,9 +45,11 @@ Evals call paid models, so CI does not run them. CI typechecks this package and 
 
 ### When this machine can't pay for the run
 
-Each eval's README names what it needs: an API key, a Codex login, or an eval proxy. If this machine has none, don't ask the user for a key, a file path or a proxy, and don't stop the rest of your work:
+Use the linked-environment steps below only for an authorized external [MCP replay](mcp-tool-use/). A question that needs a real LastCode thread follows [Choose the evidence](#choose-the-evidence).
 
-- If a linked environment has them, run the eval there: `delegate_task` with `target.environmentId`. Push your branch first, so the environment can fetch your head. Choose a destination where `orchestrator_capabilities` reports `features.remoteWorktreeIsolationVersion: 1`, and pass `isolation: "worktree"`. If the eval reads credentials from a gitignored `.env`, link or copy that environment's existing `.env` into the worktree root without printing or committing it, and do not ask the user for new credentials. Run `vp i` there, then run the eval. The eval fails at startup if that environment lacks the credentials too.
+The replay README names the credentials each model needs. If this machine lacks them, carry on with the rest of your work without asking for a key, a file path or a proxy.
+
+- If the task authorizes using existing credentials in a linked environment and the push needed to make your head fetchable, push the branch and run the replay there. Call `delegate_task` with `target.environmentId` and `isolation: "worktree"`, using a destination where `orchestrator_capabilities` reports `features.remoteWorktreeIsolationVersion: 1`. If the replay reads credentials from a gitignored `.env`, link or copy that environment's existing `.env` into the worktree root without printing or committing it. Run `vp i` there, then run the replay. The replay fails at startup if that environment lacks the credentials too.
 - Otherwise, report the eval as not run, with the exact command, and carry on.
 
 ## The shape of an eval
