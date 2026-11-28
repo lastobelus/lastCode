@@ -22,7 +22,9 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -3445,12 +3447,18 @@ it.effect("publishes edits made before the restored settings watch is registered
     const replaced = yield* Deferred.make<void>();
     const registering = yield* Deferred.make<void>();
     const allowRegistration = yield* Deferred.make<void>();
+    const debounceScheduled = yield* Deferred.make<void>();
+    const clock = yield* Clock.Clock;
+    const debounceDuration = Duration.millis(100);
+    const initialIdentity = yield* fs.stat(active);
     const settingsLayer = layerServerSettings().pipe(
       Layer.provide(
         Layer.succeed(
           FileSystem.FileSystem,
           FileSystem.FileSystem.of({
             ...fs,
+            // Drive replacement through the parent event alone, even if the probe runs.
+            stat: (entry) => (entry === active ? Effect.succeed(initialIdentity) : fs.stat(entry)),
             watch: (directory, options) =>
               Stream.unwrap(
                 Effect.gen(function* () {
@@ -3484,23 +3492,32 @@ it.effect("publishes edits made before the restored settings watch is registered
 
       yield* fs.rename(active, path.join(dotfiles, "previous"));
       yield* fs.rename(restored, active);
-      // Deliver the event on the test clock so it drains the watcher and any eager debounce.
-      yield* Deferred.succeed(replaced, undefined).pipe(
-        Effect.delay(1),
-        Effect.forkScoped({ startImmediately: true }),
-      );
-      yield* TestClock.adjust("1 second");
+      yield* Deferred.succeed(replaced, undefined);
       yield* Deferred.await(registering);
       yield* service.withSettingsSnapshot(() => Effect.void);
       yield* fs.writeFileString(target, `{ "responseStreamingMode": "paragraph" }`);
-      yield* Deferred.succeed(allowRegistration, undefined).pipe(
-        Effect.delay(1),
-        Effect.forkScoped({ startImmediately: true }),
-      );
-      yield* TestClock.adjust("1 second");
+      yield* Deferred.succeed(allowRegistration, undefined);
+      yield* Deferred.await(debounceScheduled);
+      yield* TestClock.adjust(debounceDuration);
 
       const published = yield* changes.pipe(Stream.runHead);
       assert.equal(Option.getOrThrow(published).responseStreamingMode, "paragraph");
-    }).pipe(Effect.provide(settingsLayer));
+    }).pipe(
+      Effect.provide(settingsLayer),
+      Effect.provideService(Clock.Clock, {
+        ...clock,
+        sleep: (duration) =>
+          Duration.toMillis(duration) === Duration.toMillis(debounceDuration)
+            ? Effect.gen(function* () {
+                // Confirm the timer is on the test clock before advancing it.
+                const timer = yield* Effect.forkChild(clock.sleep(duration), {
+                  startImmediately: true,
+                });
+                yield* Deferred.succeed(debounceScheduled, undefined);
+                yield* Fiber.join(timer);
+              })
+            : clock.sleep(duration),
+      }),
+    );
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
