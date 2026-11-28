@@ -15,6 +15,7 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { m } from "../i18n/messages.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+import { readLocalInstallOutcome } from "../updates/LastCodeLocalInstallOutcome.ts";
 import type { BackendStartupFailure } from "../backend/DesktopBackendManager.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
@@ -187,6 +188,7 @@ export const listen: Effect.Effect<
   const { primaryBackendStartup, quitting } = yield* DesktopState.DesktopState;
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const localInstall = yield* readLocalInstallOutcome(environment);
   const electronApp = yield* ElectronApp.ElectronApp;
   const electronShell = yield* ElectronShell.ElectronShell;
   const electronTheme = yield* ElectronTheme.ElectronTheme;
@@ -216,7 +218,7 @@ export const listen: Effect.Effect<
     Effect.map(([state, failure]) =>
       resolveStartupRecoveryOffer(
         state,
-        lastStartedVersion,
+        localInstall?.matchesReplacement ? null : lastStartedVersion,
         Option.exists(failure, ({ managedPolicy }) => managedPolicy),
       ),
     ),

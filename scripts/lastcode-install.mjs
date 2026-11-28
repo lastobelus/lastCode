@@ -10,6 +10,15 @@ import * as NodePerfHooks from "node:perf_hooks";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeURL from "node:url";
 
+import {
+  beginInstallOutcome,
+  bundleIdentity,
+  INSTALL_OUTCOME_MANAGED_MARKER,
+  markInstallFailure,
+  recoverRecordedSwap,
+  retainedBundlePath,
+  syncDirectory,
+} from "./lastcode-install-outcome.mjs";
 import { LOCK_MODULE_MANAGED_MARKER, acquirePortableLock } from "./lastcode-lock.mjs";
 
 const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
@@ -321,7 +330,9 @@ export async function launchApp(appPath, options = {}) {
         launchAttempts += 1;
         console.log(`Launching LastCode (attempt ${launchAttempts})…`);
         try {
-          runCommand("open", ["-n", "-a", appPath], { environment });
+          const args = ["-n", "-a", appPath];
+          if (options.t3Home !== undefined) args.push("--env", `T3CODE_HOME=${options.t3Home}`);
+          runCommand("open", args, { environment });
           lastLaunchError = undefined;
         } catch (error) {
           lastLaunchError = error;
@@ -387,27 +398,38 @@ function installerMayBeRunning(pid) {
 }
 
 /**
- * Temporary bundles are named for the installer process that made them. Once that process is gone
- * they are leftovers from an install that died mid-swap: restore a missing app from the newest
- * backup, then remove the rest. Bundles this account may not touch are left alone.
+ * The installer PID names each legacy backup and its staging directory. For a recorded install,
+ * recover only the identified bundle and leave other installers' copies available.
  */
-export function recoverInterruptedSwap(targetPath) {
+export function recoverInterruptedSwap(targetPath, expectedBackup) {
   try {
+    const targetMissing = !NodeFS.existsSync(targetPath);
+    const hasRecordedHistory = expectedBackup !== undefined;
+    if (hasRecordedHistory && (!targetMissing || expectedBackup === null)) return;
     const parent = NodePath.dirname(targetPath);
     const leftovers = NodeFS.readdirSync(parent).flatMap((name) => {
       const match = /^\.LastCode\.(previous|install)-(\d+)\.app$/.exec(name);
       if (!match || installerMayBeRunning(Number(match[2]))) return [];
-      return [{ path: NodePath.join(parent, name), backup: match[1] === "previous" }];
+      return [
+        { path: NodePath.join(parent, name), backup: match[1] === "previous", pid: match[2] },
+      ];
     });
-    const newestBackup = leftovers
-      .filter((leftover) => leftover.backup)
-      .map((leftover) => leftover.path)
-      .toSorted((left, right) => NodeFS.statSync(right).mtimeMs - NodeFS.statSync(left).mtimeMs)[0];
-    if (newestBackup !== undefined && !NodeFS.existsSync(targetPath)) {
-      NodeFS.renameSync(newestBackup, targetPath);
+    const backups = leftovers.filter((leftover) => leftover.backup);
+    const backup = hasRecordedHistory
+      ? backups.find(({ path }) => bundleIdentity(path) === expectedBackup)
+      : backups.toSorted(
+          (left, right) => NodeFS.statSync(right.path).mtimeMs - NodeFS.statSync(left.path).mtimeMs,
+        )[0];
+    if (hasRecordedHistory && !backup) return;
+    if (backup && targetMissing) {
+      NodeFS.renameSync(backup.path, targetPath);
+      syncDirectory(parent);
       console.log(`Restored ${targetPath} left aside by an interrupted install.`);
     }
-    for (const { path } of leftovers) NodeFS.rmSync(path, { force: true, recursive: true });
+    for (const { path, pid } of leftovers) {
+      if (!hasRecordedHistory || pid === backup?.pid)
+        NodeFS.rmSync(path, { force: true, recursive: true });
+    }
   } catch (error) {
     console.error(`Warning: could not clean up an interrupted install: ${error.message}`);
   }
@@ -684,12 +706,12 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
     throw new Error(`DMG not found: ${resolvedDmg}`);
   }
   const targetPath = options.targetPath ?? DEFAULT_APP_PATH;
-  const releaseInstallLock = acquireInstallLock(
-    options.lockDirectory ?? NodePath.join(NodeOS.homedir(), ".lastcode", "local-updates"),
-  );
+  const updateDirectory =
+    options.lockDirectory ?? NodePath.join(NodeOS.homedir(), ".lastcode", "local-updates");
+  const releaseInstallLock = acquireInstallLock(updateDirectory);
   let prepared;
   try {
-    recoverInterruptedSwap(targetPath);
+    recoverInterruptedSwap(targetPath, recoverRecordedSwap(updateDirectory, targetPath));
     const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-install-"));
     const { backup, staging } = temporaryAppPaths(targetPath);
     prepared = {
@@ -702,6 +724,13 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
       oldAppMoved: false,
       releaseInstallLock,
       released: false,
+      outcomeDirectory: options.trackOutcome ? updateDirectory : undefined,
+      t3Home: options.trackOutcome
+        ? NodePath.resolve(
+            options.t3Home ??
+              (process.env.T3CODE_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".lastcode")),
+          )
+        : undefined,
       mountPoint,
     };
     if (options.expectedSha256) {
@@ -748,11 +777,27 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
   }
 }
 
+function startTrackedSwap(prepared) {
+  if (prepared.outcomeDirectory === undefined) return;
+  prepared.outcome = beginInstallOutcome(prepared.outcomeDirectory, prepared);
+  prepared.backup = retainedBundlePath(prepared.targetPath, prepared.outcome.record.id);
+}
+
+function recordSwapFailure(prepared, error) {
+  if (!prepared.outcome) return;
+  try {
+    markInstallFailure(prepared.outcome, error, prepared.replacementPublished === true);
+  } catch (recordError) {
+    console.error(`Warning: could not record the install failure: ${recordError.message}`);
+  }
+}
+
 export async function replacePreparedApp(prepared, options = {}) {
   const launch =
     options.launch === false
       ? undefined
-      : (options.launchApp ?? ((appPath) => launchApp(appPath, options)));
+      : (options.launchApp ??
+        ((appPath) => launchApp(appPath, { ...options, t3Home: prepared.t3Home })));
   let replacementMoved = false;
   const needsPermissionReset =
     (prepared.targetPath === DEFAULT_APP_PATH || options.resetScreenRecordingPermission) &&
@@ -780,13 +825,22 @@ export async function replacePreparedApp(prepared, options = {}) {
       }
       NodeFS.renameSync(prepared.staging, prepared.targetPath);
       replacementMoved = true;
+      if (prepared.outcome) {
+        prepared.replacementPublished = true;
+        syncDirectory(NodePath.dirname(prepared.targetPath));
+      }
       await launch?.(prepared.targetPath);
     } catch (error) {
+      // Startup can write to the backend database before it reports readiness.
+      if (prepared.replacementPublished) throw error;
       if (needsPermissionReset) {
         if (previousMarker) NodeFS.writeFileSync(marker, previousMarker);
         else NodeFS.rmSync(marker, { force: true });
       }
-      if (replacementMoved) NodeFS.rmSync(prepared.targetPath, { force: true, recursive: true });
+      if (replacementMoved) {
+        replacementMoved = false;
+        NodeFS.rmSync(prepared.targetPath, { force: true, recursive: true });
+      }
       if (prepared.oldAppMoved) {
         NodeFS.renameSync(prepared.backup, prepared.targetPath);
         prepared.oldAppMoved = false;
@@ -799,20 +853,23 @@ export async function replacePreparedApp(prepared, options = {}) {
         }
       }
       throw error;
-    }
-    if (needsPermissionReset) {
-      try {
-        (options.resetScreenRecordingPermission ?? resetScreenRecordingPermission)();
-        console.log("LastCode Screen Recording permission was reset for the replacement app.");
-      } catch (error) {
-        console.error(
-          `Warning: could not reset LastCode Screen Recording permission: ${error.message}. Remove any existing LastCode entry in System Settings before adding this build.`,
-        );
+    } finally {
+      if (needsPermissionReset && replacementMoved) {
+        try {
+          (options.resetScreenRecordingPermission ?? resetScreenRecordingPermission)();
+          console.log("LastCode Screen Recording permission was reset for the replacement app.");
+        } catch (error) {
+          console.error(
+            `Warning: could not reset LastCode Screen Recording permission: ${error.message}. Remove any existing LastCode entry in System Settings before adding this build.`,
+          );
+        }
+        NodeFS.writeFileSync(marker, "ready\n", { mode: 0o600 });
       }
-      NodeFS.writeFileSync(marker, "ready\n", { mode: 0o600 });
     }
-    NodeFS.rmSync(prepared.backup, { force: true, recursive: true });
-    prepared.oldAppMoved = false;
+    if (!prepared.outcome) {
+      NodeFS.rmSync(prepared.backup, { force: true, recursive: true });
+      prepared.oldAppMoved = false;
+    }
     return true;
   } finally {
     releaseEligibility?.();
@@ -824,6 +881,7 @@ export function cleanupPreparedInstall(prepared, options = {}) {
   NodeFS.rmSync(prepared.staging, { force: true, recursive: true });
   if (
     prepared.oldAppMoved &&
+    !prepared.replacementPublished &&
     !NodeFS.existsSync(prepared.targetPath) &&
     NodeFS.existsSync(prepared.backup)
   ) {
@@ -845,19 +903,22 @@ export function cleanupPreparedInstall(prepared, options = {}) {
 }
 
 async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
-  const prepared = await prepareDmgInstall(dmgPath, { targetPath });
+  const prepared = await prepareDmgInstall(dmgPath, { targetPath, trackOutcome: true });
   try {
+    startTrackedSwap(prepared);
     await quitApp();
     await replacePreparedApp(prepared);
-    console.log(`Installed and launched LastCode ${prepared.version}`);
+    console.log(`Launched LastCode ${prepared.version}; awaiting backend confirmation.`);
+  } catch (error) {
+    recordSwapFailure(prepared, error);
+    throw error;
   } finally {
     cleanupPreparedInstall(prepared);
   }
 }
 
-// After COMMIT the parent is quitting for good, so a failed install must still
-// leave an app running: the old bundle stays at the target unless the swap ran.
-// Waits without signalling for a parent the helper could not stop; true once it has exited.
+// A failed handoff can relaunch the original only before publishing the replacement.
+// If the helper could not stop the parent, wait for it without sending another signal.
 async function waitUntilProcessGone(pid) {
   const deadline = NodePerfHooks.performance.now() + PARENT_ABANDON_WAIT_MS;
   while (processIsAlive(pid)) {
@@ -871,19 +932,23 @@ export async function finishCommittedInstall(prepared, parent, options = {}) {
   const waitForParent = options.waitForParentExit ?? waitForParentExit;
   const replace = options.replacePreparedApp ?? replacePreparedApp;
   const isRunning = options.isRunning ?? appIsRunning;
-  const launch = options.launchApp ?? ((appPath) => launchApp(appPath));
+  const launch =
+    options.launchApp ?? ((appPath) => launchApp(appPath, { ...options, t3Home: prepared.t3Home }));
   const waitUntilParentGone = options.waitUntilParentGone ?? waitUntilProcessGone;
   // Only an original bundle that was already at the target is safe to relaunch.
   const originalAtTarget = NodeFS.existsSync(prepared.targetPath);
   let parentGone = false;
   try {
+    startTrackedSwap(prepared);
     console.log(`Waiting for LastCode process ${parent.pid} to quit…`);
     await waitForParent(parent.pid, parent.identity, { targetPath: prepared.targetPath });
     parentGone = true;
-    await replace(prepared);
-    console.log(`Installed and launched LastCode ${prepared.version}`);
+    await replace(prepared, options);
+    console.log(`Launched LastCode ${prepared.version}; awaiting backend confirmation.`);
   } catch (error) {
-    console.error(`LastCode ${prepared.version} was not installed: ${error.message}`);
+    recordSwapFailure(prepared, error);
+    console.error(`LastCode ${prepared.version} install did not finish: ${error.message}`);
+    if (prepared.replacementPublished) throw error;
     // A parent still quitting would look like a running app; relaunch after it has gone.
     if (!parentGone && !(await waitUntilParentGone(parent.pid))) throw error;
     // Relaunch only the original bundle: restore it if a failed rollback left it aside.
@@ -919,7 +984,7 @@ async function handoffInstall(options) {
   // Captured while the parent is certainly alive: it spawned this helper and holds its pipes.
   const parentIdentity =
     process.ppid === options.parentPid ? processIdentity(options.parentPid) : "";
-  const prepared = await prepareDmgInstall(options.dmgPath, options);
+  const prepared = await prepareDmgInstall(options.dmgPath, { ...options, trackOutcome: true });
   try {
     NodeFS.writeSync(
       options.readyFd,
@@ -957,22 +1022,9 @@ function assertManagedSymlink(exposed, target) {
   }
 }
 
-function assertManagedInstallerFile(path) {
+function assertManagedInstallerFile(path, marker = INSTALL_MANAGED_MARKER) {
   const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
-  if (
-    existing &&
-    (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(INSTALL_MANAGED_MARKER))
-  ) {
-    throw new Error(`Refusing to modify ${path} because it is not a LastCode-managed file.`);
-  }
-}
-
-function assertManagedLockModule(path) {
-  const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
-  if (
-    existing &&
-    (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(LOCK_MODULE_MANAGED_MARKER))
-  ) {
+  if (existing && (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(marker))) {
     throw new Error(`Refusing to modify ${path} because it is not a LastCode-managed file.`);
   }
 }
@@ -980,12 +1032,14 @@ function assertManagedLockModule(path) {
 export function installCommand(home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
+  const outcomeModuleTarget = NodePath.join(binDirectory, "lastcode-install-outcome.mjs");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
   const target = NodePath.join(binDirectory, "lastcode-install");
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-install");
 
-  assertManagedLockModule(lockModuleTarget);
+  assertManagedInstallerFile(lockModuleTarget, LOCK_MODULE_MANAGED_MARKER);
+  assertManagedInstallerFile(outcomeModuleTarget, INSTALL_OUTCOME_MANAGED_MARKER);
   assertManagedInstallerFile(moduleTarget);
   assertManagedInstallerFile(target);
   assertManagedSymlink(exposed, target);
@@ -993,6 +1047,10 @@ export function installCommand(home) {
   NodeFS.mkdirSync(binDirectory, { recursive: true });
   NodeFS.mkdirSync(exposedDirectory, { recursive: true });
   NodeFS.copyFileSync(new NodeURL.URL("./lastcode-lock.mjs", import.meta.url), lockModuleTarget);
+  NodeFS.copyFileSync(
+    new NodeURL.URL("./lastcode-install-outcome.mjs", import.meta.url),
+    outcomeModuleTarget,
+  );
   NodeFS.copyFileSync(NodeURL.fileURLToPath(import.meta.url), moduleTarget);
   NodeFS.writeFileSync(target, renderLauncher(moduleTarget), { encoding: "utf8", mode: 0o755 });
   NodeFS.chmodSync(target, 0o755);
@@ -1004,6 +1062,7 @@ export function installCommand(home) {
 export function uninstallCommand(home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
+  const outcomeModuleTarget = NodePath.join(binDirectory, "lastcode-install-outcome.mjs");
   const buildModuleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
   const updateHelperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
@@ -1013,11 +1072,13 @@ export function uninstallCommand(home) {
   if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
     throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
   }
-  assertManagedLockModule(lockModuleTarget);
+  assertManagedInstallerFile(lockModuleTarget, LOCK_MODULE_MANAGED_MARKER);
+  assertManagedInstallerFile(outcomeModuleTarget, INSTALL_OUTCOME_MANAGED_MARKER);
   for (const path of [moduleTarget, target]) assertManagedInstallerFile(path);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
-  for (const path of [moduleTarget, target]) NodeFS.rmSync(path, { force: true });
+  for (const path of [moduleTarget, outcomeModuleTarget, target])
+    NodeFS.rmSync(path, { force: true });
   if (!NodeFS.existsSync(buildModuleTarget) && !NodeFS.existsSync(updateHelperTarget)) {
     NodeFS.rmSync(lockModuleTarget, { force: true });
   }

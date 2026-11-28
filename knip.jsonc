@@ -110,6 +110,7 @@
         "lastcode-packaged-server-supervisor.mjs!",
         "lastcode-run.ts",
         "lib/lastcode-ci-worker.mjs!",
+        "lastcode-install-outcome.d.mts",
         "lastcode-local-update.d.mts",
         "lastcode-checkpoint-effort.d.mts",
         "lastcode-lock.d.mts",

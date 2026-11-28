@@ -35,6 +35,11 @@ import {
   readHandoffCommand,
   waitForParentExit,
 } from "./lastcode-install.mjs";
+import {
+  readDesktopInstallOutcome,
+  recordReplacementBackend,
+  retainedBundlePath,
+} from "./lastcode-install-outcome.mjs";
 
 const temporaryDirectories = [];
 
@@ -425,6 +430,301 @@ describe("LastCode userland install command", () => {
       cleanupPreparedInstall(prepared, options);
     }
   });
+
+  it("retains the previous app even after the managed replacement launches", async () => {
+    const fixture = idleFixture();
+    const t3Home = NodePath.join(fixture.options.lockDirectory, "state");
+    const options = { ...fixture.options, trackOutcome: true, t3Home };
+    const prepared = await prepareDmgInstall(fixture.dmgPath, options);
+    const stateDir = NodePath.join(t3Home, "userdata");
+    const outcome = (path = fixture.targetPath, version = prepared.version, state = stateDir) =>
+      readDesktopInstallOutcome(options.lockDirectory, path, version, state);
+    const contents = (path) => NodeFS.readFileSync(NodePath.join(path, "version"), "utf8");
+    try {
+      await finishCommittedInstall(
+        prepared,
+        { pid: 42, identity: "fixture" },
+        {
+          waitForParentExit: async () => {
+            expect(contents(fixture.targetPath)).toBe("old");
+            expect(outcome()).toMatchObject({ status: "pending", matchesReplacement: false });
+          },
+          launchApp: async (target) => {
+            expect(contents(target)).toBe("new");
+            expect(contents(prepared.backup)).toBe("old");
+          },
+        },
+      );
+    } finally {
+      cleanupPreparedInstall(prepared, options);
+    }
+    expect(contents(prepared.backup)).toBe("old");
+    const another = NodePath.join(t3Home, "Other.app");
+    NodeFS.mkdirSync(t3Home);
+    NodeFS.cpSync(fixture.targetPath, another, { recursive: true });
+    expect(outcome(another)).toBeNull();
+    expect(outcome(fixture.targetPath, "9.9.9")).toBeNull();
+    expect(outcome(fixture.targetPath, prepared.version, "/different/userdata")).toBeNull();
+    expect(outcome()).toMatchObject({ status: "pending", matchesReplacement: true });
+
+    await recordReplacementBackend(outcome(), false);
+    expect(outcome()?.status).toBe("backend-failed");
+    expect(contents(prepared.backup)).toBe("old");
+    await recordReplacementBackend(outcome(), true);
+    expect(outcome()?.status).toBe("healthy");
+    expect(NodeFS.existsSync(prepared.backup)).toBe(false);
+    await recordReplacementBackend(outcome(), false);
+    expect(outcome()?.status).toBe("healthy");
+  });
+
+  it.each([
+    { scenario: "unconfirmed replacement", confirmed: false, sameBundle: true, otherMtime: 20 },
+    { scenario: "healthy replacement", confirmed: true, sameBundle: true, otherMtime: 10 },
+    {
+      scenario: "older copy across a failed retry",
+      confirmed: false,
+      sameBundle: false,
+      otherMtime: 20,
+    },
+  ])(
+    "recovers only the recorded app from a later legacy swap ($scenario)",
+    async ({ confirmed, sameBundle, otherMtime }) => {
+      const fixture = idleFixture();
+      const root = fixture.options.lockDirectory;
+      const options = { ...fixture.options, trackOutcome: true, t3Home: root };
+      const prepared = await prepareDmgInstall(fixture.dmgPath, options);
+      try {
+        await finishCommittedInstall(
+          prepared,
+          { pid: 42, identity: "fixture" },
+          {
+            waitForParentExit: async () => {},
+            launchApp: async () => {},
+          },
+        );
+      } finally {
+        cleanupPreparedInstall(prepared, options);
+      }
+      const outcome = readDesktopInstallOutcome(
+        root,
+        prepared.targetPath,
+        prepared.version,
+        NodePath.join(root, "userdata"),
+      );
+      if (confirmed) await recordReplacementBackend(outcome, true);
+      const exited = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]).pid;
+      const legacy = temporaryAppPaths(fixture.targetPath, exited);
+      const unrelatedPid = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]).pid;
+      const unrelated = temporaryAppPaths(fixture.targetPath, unrelatedPid);
+      NodeFS.mkdirSync(unrelated.backup);
+      NodeFS.utimesSync(unrelated.backup, otherMtime, otherMtime);
+      if (sameBundle) {
+        NodeFS.renameSync(fixture.targetPath, legacy.backup);
+      } else {
+        NodeFS.renameSync(fixture.targetPath, NodePath.join(root, "detached.app"));
+        NodeFS.cpSync(prepared.backup, legacy.backup, { recursive: true });
+      }
+      NodeFS.mkdirSync(legacy.staging);
+      NodeFS.utimesSync(legacy.backup, 15, 15);
+
+      const next = await prepareDmgInstall(fixture.dmgPath, options);
+      try {
+        expect(NodeFS.existsSync(fixture.targetPath)).toBe(sameBundle);
+        if (sameBundle)
+          expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe(
+            "new",
+          );
+        expect(NodeFS.existsSync(legacy.backup)).toBe(!sameBundle);
+        expect(NodeFS.existsSync(prepared.backup)).toBe(!confirmed);
+        expect(NodeFS.existsSync(unrelated.backup)).toBe(true);
+        if (!sameBundle) {
+          await expect(
+            finishCommittedInstall(
+              next,
+              { pid: 42, identity: "fixture" },
+              {
+                waitForParentExit: async () => {
+                  throw new Error("retry aborted");
+                },
+                waitUntilParentGone: async () => true,
+                isRunning: () => false,
+                launchApp: async () => {
+                  throw new Error("unexpected launch");
+                },
+              },
+            ),
+          ).rejects.toThrow("retry aborted");
+        }
+      } finally {
+        cleanupPreparedInstall(next, options);
+      }
+      const following = await prepareDmgInstall(fixture.dmgPath, options);
+      try {
+        expect(NodeFS.existsSync(fixture.targetPath)).toBe(sameBundle);
+        expect(NodeFS.existsSync(legacy.backup)).toBe(!sameBundle);
+        expect(NodeFS.existsSync(unrelated.backup)).toBe(true);
+        expect(NodeFS.existsSync(prepared.backup)).toBe(!confirmed);
+      } finally {
+        cleanupPreparedInstall(following, options);
+      }
+    },
+  );
+
+  it.each(["before the swap", "after the swap"])(
+    "records a failed handoff %s and only relaunches a known old app",
+    async (when) => {
+      const fixture = idleFixture();
+      const root = fixture.options.lockDirectory;
+      const options = { ...fixture.options, trackOutcome: true, t3Home: root };
+      const prepared = await prepareDmgInstall(fixture.dmgPath, options);
+      const launches = [];
+      const reset = vi.fn();
+      const marker = NodePath.join(root, ".lastcode", "local-updates", "screen-recording-reset");
+      const contents = (path) => NodeFS.readFileSync(NodePath.join(path, "version"), "utf8");
+      try {
+        await expect(
+          finishCommittedInstall(
+            prepared,
+            { pid: 42, identity: "fixture" },
+            {
+              waitForParentExit: async () => {
+                if (when === "before the swap") throw new Error("fixture wait failed");
+              },
+              waitUntilParentGone: async () => true,
+              isRunning: () => false,
+              reminderHome: root,
+              runCommand: (_command, args) => `# designated => cdhash H"${args.at(-1)}"`,
+              resetScreenRecordingPermission: reset,
+              launchApp: async (path) => {
+                launches.push(contents(path));
+                if (when === "after the swap") throw new Error("fixture launch failed");
+              },
+            },
+          ),
+        ).rejects.toThrow(
+          when === "before the swap" ? "fixture wait failed" : "fixture launch failed",
+        );
+      } finally {
+        cleanupPreparedInstall(prepared, options);
+      }
+      const result = readDesktopInstallOutcome(
+        root,
+        prepared.targetPath,
+        prepared.version,
+        NodePath.join(root, "userdata"),
+      );
+      if (when === "before the swap") {
+        expect(launches).toEqual(["old"]);
+        expect(result).toMatchObject({ status: "failed-before-swap", matchesReplacement: false });
+        expect(contents(prepared.targetPath)).toBe("old");
+        expect(reset).not.toHaveBeenCalled();
+        expect(NodeFS.existsSync(marker)).toBe(false);
+      } else {
+        expect(launches).toEqual(["new"]);
+        expect(result).toMatchObject({ status: "launch-failed", matchesReplacement: true });
+        expect(contents(prepared.targetPath)).toBe("new");
+        expect(contents(prepared.backup)).toBe("old");
+        expect(reset).toHaveBeenCalledTimes(1);
+        expect(NodeFS.readFileSync(marker, "utf8")).toBe("ready\n");
+
+        // The next attempt must keep the first copy even if it installs the same version.
+        const next = await prepareDmgInstall(fixture.dmgPath, options);
+        try {
+          await finishCommittedInstall(
+            next,
+            { pid: 42, identity: "fixture" },
+            {
+              waitForParentExit: async () => {},
+              launchApp: async () => {},
+            },
+          );
+          await recordReplacementBackend(result, true);
+          expect(contents(prepared.backup)).toBe("old");
+          expect(contents(next.backup)).toBe("new");
+          const replacement = readDesktopInstallOutcome(
+            root,
+            next.targetPath,
+            next.version,
+            NodePath.join(root, "userdata"),
+          );
+          expect(replacement?.record.id).not.toBe(result.record.id);
+          await recordReplacementBackend(replacement, true);
+          expect(NodeFS.existsSync(prepared.backup)).toBe(false);
+          expect(NodeFS.existsSync(next.backup)).toBe(false);
+        } finally {
+          cleanupPreparedInstall(next, options);
+        }
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "recovers across installer process exit (replacement published: %s)",
+    async (published) => {
+      const fixture = idleFixture();
+      const root = fixture.options.lockDirectory;
+      const version = fixture.options.expectedVersion;
+      const result = NodeChildProcess.spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `
+      import * as fs from "node:fs";
+      import { beginInstallOutcome, retainedBundlePath } from ${JSON.stringify(new URL("./lastcode-install-outcome.mjs", import.meta.url).href)};
+      import { temporaryAppPaths } from ${JSON.stringify(new URL("./lastcode-install.mjs", import.meta.url).href)};
+      const [targetPath, t3Home, version, published] = process.argv.slice(1);
+      const { staging } = temporaryAppPaths(targetPath);
+      fs.mkdirSync(staging);
+      const outcome = beginInstallOutcome(t3Home, { targetPath, t3Home, version, staging });
+      fs.renameSync(targetPath, retainedBundlePath(targetPath, outcome.record.id));
+      if (published === "true") fs.renameSync(staging, targetPath);
+      process.kill(process.pid, "SIGKILL");
+    `,
+          fixture.targetPath,
+          root,
+          version,
+          String(published),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.stderr).toBe("");
+      expect(result.signal).toBe("SIGKILL");
+      const otherPid = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]).pid;
+      const unrelated = temporaryAppPaths(fixture.targetPath, otherPid);
+      NodeFS.mkdirSync(unrelated.backup);
+      const next = await prepareDmgInstall(fixture.dmgPath, fixture.options);
+      try {
+        expect(NodeFS.existsSync(unrelated.backup)).toBe(true);
+        expect(NodeFS.existsSync(temporaryAppPaths(fixture.targetPath, result.pid).staging)).toBe(
+          false,
+        );
+        const outcome = readDesktopInstallOutcome(
+          root,
+          fixture.targetPath,
+          version,
+          NodePath.join(root, "userdata"),
+        );
+        expect(outcome).toMatchObject({
+          status: published ? "pending" : "failed-before-swap",
+          matchesReplacement: published,
+        });
+        const backup = retainedBundlePath(fixture.targetPath, outcome.record.id);
+        if (published) {
+          expect(NodeFS.readFileSync(NodePath.join(backup, "version"), "utf8")).toBe("old");
+          await recordReplacementBackend(outcome, true);
+          expect(NodeFS.existsSync(backup)).toBe(false);
+        } else {
+          expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe(
+            "old",
+          );
+          expect(NodeFS.existsSync(backup)).toBe(false);
+        }
+      } finally {
+        cleanupPreparedInstall(next, fixture.options);
+      }
+    },
+  );
 
   it("rolls back a failed staging rename without launching", async () => {
     const fixture = idleFixture();
@@ -1041,10 +1341,34 @@ describe("LastCode userland install command", () => {
     );
   });
 
-  it("installs the locking companion beside the standalone installer", () => {
+  it("refreshes a previously installed standalone installer and its companions", () => {
     const home = temporaryDirectory();
-    installCommand(home);
-    const modulePath = NodePath.join(home, ".lastcode", "bin", "lastcode-install.mjs");
+    const bin = NodePath.join(home, ".lastcode", "bin");
+    const exposed = NodePath.join(home, ".local", "bin", "lastcode-install");
+    const modulePath = NodePath.join(bin, "lastcode-install.mjs");
+    const launcher = NodePath.join(bin, "lastcode-install");
+    NodeFS.mkdirSync(bin, { recursive: true });
+    NodeFS.mkdirSync(NodePath.dirname(exposed), { recursive: true });
+    NodeFS.writeFileSync(
+      modulePath,
+      "// LastCode managed command: lastcode-install\n// Previous installer\n",
+    );
+    NodeFS.writeFileSync(launcher, renderLauncher(modulePath));
+    NodeFS.symlinkSync(launcher, exposed);
+    const refreshed = NodeChildProcess.spawnSync(
+      process.execPath,
+      [NodePath.join(import.meta.dirname, "lastcode-install.mjs"), "--install"],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+    expect(refreshed.stderr).toBe("");
+    expect(refreshed.status).toBe(0);
+    expect(NodeFS.readFileSync(modulePath, "utf8")).toContain("lastcode-install-outcome.mjs");
+    expect(NodeFS.readlinkSync(exposed)).toBe(launcher);
+
+    const outcomeModule = NodePath.join(bin, "lastcode-install-outcome.mjs");
+    expect(NodeFS.readFileSync(outcomeModule, "utf8")).toContain(
+      "LastCode managed companion: lastcode-install-outcome",
+    );
 
     expect(
       NodeFS.readFileSync(NodePath.join(home, ".lastcode", "bin", "lastcode-lock.mjs"), "utf8"),
@@ -1056,6 +1380,7 @@ describe("LastCode userland install command", () => {
     expect(result.stdout).toContain("Usage: lastcode-install");
 
     uninstallCommand(home);
+    expect(NodeFS.existsSync(outcomeModule)).toBe(false);
     expect(NodeFS.existsSync(NodePath.join(home, ".lastcode", "bin", "lastcode-lock.mjs"))).toBe(
       false,
     );

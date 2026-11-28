@@ -33,6 +33,10 @@ import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
+import {
+  readLocalInstallOutcome,
+  recordLocalInstallBackend,
+} from "../updates/LastCodeLocalInstallOutcome.ts";
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
 import * as BrowserProfileScope from "../preview/BrowserProfileScope.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
@@ -148,6 +152,7 @@ export const layer = Layer.effect(
   DesktopBackendPool,
   Effect.gen(function* () {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const localInstall = yield* readLocalInstallOutcome(environment);
     const fileSystem = yield* FileSystem.FileSystem;
     const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
@@ -300,7 +305,9 @@ export const layer = Layer.effect(
       }).pipe(Effect.orDie),
       // Absorb window errors so readiness can reset restartAttempt.
       onReady: (httpBaseUrl, pid) =>
-        FiberHandle.run(updateMarkerWait, releaseUpdateMarker(httpBaseUrl, pid)).pipe(
+        recordLocalInstallBackend(localInstall, true).pipe(
+          Effect.forkIn(layerScope, { startImmediately: true }),
+          Effect.andThen(FiberHandle.run(updateMarkerWait, releaseUpdateMarker(httpBaseUrl, pid))),
           Effect.andThen(reloadStaleMain),
           Effect.andThen(desktopWindow.handleBackendReady(httpBaseUrl)),
           // Only once the main window exists, so the recovery window never closes into nothing.
@@ -312,7 +319,11 @@ export const layer = Layer.effect(
           ),
         ),
       onStartupFailure: (failure) =>
-        SubscriptionRef.set(primaryBackendStartup, { _tag: "Failing", ...failure }),
+        recordLocalInstallBackend(localInstall, false).pipe(
+          Effect.andThen(
+            SubscriptionRef.set(primaryBackendStartup, { _tag: "Failing", ...failure }),
+          ),
+        ),
       onMigrationProgress: (progress) => Ref.set(databaseMigrationProgress, progress),
       onShutdown: () =>
         FiberHandle.clear(updateMarkerWait).pipe(
