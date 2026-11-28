@@ -38,7 +38,51 @@ function isProcessRunning(pid) {
   }
 }
 
-function acquireDirectoryLock(lockDirectory, lockName, activity) {
+// A record names one live process. It appears complete or not at all: it is linked from a
+// finished temporary file, and linking never replaces an existing record.
+function writeRecordExclusively(recordPath, record) {
+  const temporaryPath = `${recordPath}.${record.token}.tmp`;
+  NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  try {
+    NodeFS.linkSync(temporaryPath, recordPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST") return false;
+    throw error;
+  } finally {
+    NodeFS.rmSync(temporaryPath, { force: true });
+  }
+}
+
+function takeRecord(recordPath, record) {
+  if (writeRecordExclusively(recordPath, record)) return true;
+  const holder = readLockOwner(recordPath);
+  // A record that vanished was just released; an unreadable one is never treated as dead.
+  if (holder === undefined) {
+    return !NodeFS.existsSync(recordPath) && writeRecordExclusively(recordPath, record);
+  }
+  return !isProcessRunning(holder.pid) && replaceDeadRecord(recordPath, holder, record);
+}
+
+/**
+ * Replaces a dead holder's record. Only the contender holding that holder's own claim record may
+ * remove it, and a claim is itself a record, so a claimant that dies is replaced the same way while
+ * a merely suspended one keeps its claim.
+ */
+export function replaceDeadRecord(recordPath, deadHolder, record) {
+  const claimPath = `${recordPath}.${deadHolder.token ?? "untokened"}`;
+  if (!takeRecord(claimPath, record)) return false;
+  try {
+    if (readLockOwner(recordPath)?.token === deadHolder.token) {
+      NodeFS.rmSync(recordPath, { force: true });
+    }
+  } finally {
+    NodeFS.rmSync(claimPath, { force: true });
+  }
+  return writeRecordExclusively(recordPath, record);
+}
+
+export function acquireDirectoryLock(lockDirectory, lockName, activity) {
   const lockPath = NodePath.join(lockDirectory, `${lockName}.d`);
   const ownerPath = NodePath.join(lockPath, "owner.json");
   const owner = {
@@ -48,49 +92,21 @@ function acquireDirectoryLock(lockDirectory, lockName, activity) {
     startedAt: new Date().toISOString(),
   };
 
-  const tryAcquire = (mayRecoverStaleOwner) => {
-    try {
-      NodeFS.mkdirSync(lockPath);
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      const existingOwner = readLockOwner(ownerPath);
-      if (
-        mayRecoverStaleOwner &&
-        existingOwner !== undefined &&
-        !isProcessRunning(existingOwner.pid)
-      ) {
-        const stalePath = `${lockPath}.stale-${NodeProcess.pid}-${NodeCrypto.randomUUID()}`;
-        try {
-          NodeFS.renameSync(lockPath, stalePath);
-        } catch (renameError) {
-          if (renameError?.code === "ENOENT") return tryAcquire(false);
-          throw renameError;
-        }
-        NodeFS.rmSync(stalePath, { force: true, recursive: true });
-        return tryAcquire(false);
-      }
-      throw new PortableLockContentionError(
-        `Another LastCode ${activity} is already running (PID ${existingOwner?.pid ?? "unknown"}, started ${existingOwner?.startedAt ?? "at an unknown time"}).`,
-        { cause: error },
-      );
-    }
+  // The directory only holds records; releasing leaves it in place, so it never vanishes mid-acquire.
+  NodeFS.mkdirSync(lockPath, { recursive: true });
+  if (!takeRecord(ownerPath, owner)) {
+    const existingOwner = readLockOwner(ownerPath);
+    throw new PortableLockContentionError(
+      `Another LastCode ${activity} is already running (PID ${existingOwner?.pid ?? "unknown"}, started ${existingOwner?.startedAt ?? "at an unknown time"}).`,
+    );
+  }
 
-    try {
-      NodeFS.writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
-    } catch (error) {
-      NodeFS.rmSync(lockPath, { force: true, recursive: true });
-      throw error;
-    }
-  };
-
-  tryAcquire(true);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const currentOwner = readLockOwner(ownerPath);
-    if (currentOwner?.token !== owner.token) return;
-    NodeFS.rmSync(lockPath, { force: true, recursive: true });
+    if (readLockOwner(ownerPath)?.token !== owner.token) return;
+    NodeFS.rmSync(ownerPath, { force: true });
   };
 }
 

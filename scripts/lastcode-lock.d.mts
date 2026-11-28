@@ -8,3 +8,15 @@ export function acquirePortableLock(
   lockName: string,
   activity: string,
 ): () => void;
+
+export function acquireDirectoryLock(
+  lockDirectory: string,
+  lockName: string,
+  activity: string,
+): () => void;
+
+export function replaceDeadRecord(
+  recordPath: string,
+  deadHolder: { readonly token?: string },
+  record: { readonly pid: number; readonly token: string },
+): boolean;
